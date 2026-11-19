@@ -6,6 +6,7 @@
 //! carries an endpoint URL, port, credential or path.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -17,12 +18,16 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
 use ulid::Ulid;
+use zeroize::Zeroizing;
 
+use crate::engine::chat::endpoint::{
+    ChatEndpointResolver, LoopbackAuth, LoopbackHost, ResolvedEndpoint, VowpEndpointResolver,
+};
 use crate::engine::chat::model::{
     ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage, ChatMessageOrigin,
     ChatModelView, ChatRole, ChatSendReceipt, ChatSessionId, ChatSessionLocation, ChatSessionState,
     ChatSessionView, ChatStartInput, MAX_MESSAGE_CHARS, cap_text, normalize_text,
-    validate_user_text,
+    validate_project_name, validate_user_text,
 };
 use crate::engine::chat::pump::{
     ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper,
@@ -69,10 +74,55 @@ const SSE_CAPACITY: usize = 64;
 /// The title of the single local setup session.
 const SETUP_TITLE: &str = "StackSpirit setup";
 
-/// The only local chat is the v1 API of the bundled engine.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// A core-only v1 chat endpoint.
+///
+/// The setup assistant uses the bundled engine's private workspace header. A
+/// VOWP-reported `global`/`project` orchestrator supplies its own loopback credential and
+/// no workspace header. The struct has no unredacted `Debug`; the port, workspace and
+/// credential never appear in a serialized chat value.
+#[derive(Clone)]
 struct ChatEndpoint {
+    host: LoopbackHost,
     port: u16,
+    /// The setup workspace header; `None` for a VOWP orchestrator.
+    directory: Option<PathBuf>,
+    /// The loopback credential; `None` for the unauthenticated bundled engine.
+    auth: Option<Arc<LoopbackAuth>>,
+}
+
+impl ChatEndpoint {
+    fn engine(port: u16, workspace: &Path) -> Self {
+        Self {
+            host: LoopbackHost::V4,
+            port,
+            directory: Some(workspace.to_path_buf()),
+            auth: None,
+        }
+    }
+
+    fn orchestrator(endpoint: ResolvedEndpoint) -> Self {
+        Self {
+            host: endpoint.host,
+            port: endpoint.port,
+            directory: None,
+            auth: endpoint.auth.map(Arc::new),
+        }
+    }
+
+    fn socket_address(&self) -> SocketAddr {
+        self.host.socket_address(self.port)
+    }
+}
+
+impl fmt::Debug for ChatEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChatEndpoint")
+            .field("host", &"[redacted]")
+            .field("port", &"[redacted]")
+            .field("directory", &self.directory.as_ref().map(|_| "[redacted]"))
+            .field("auth", &self.auth)
+            .finish()
+    }
 }
 
 /// The engine boundary the chat transport needs.
@@ -138,21 +188,25 @@ pub struct LocalChatProvider {
 struct Inner {
     engine: Arc<dyn ChatEngine>,
     workspace: PathBuf,
+    resolver: Arc<dyn ChatEndpointResolver>,
     stream_support: StreamSupport,
     bus: ChatEventBus,
     state: Mutex<ProviderState>,
-    pump: std::sync::Mutex<PumpSlot>,
+    pumps: std::sync::Mutex<HashMap<u16, PumpSlot>>,
     clock: Arc<dyn Clock>,
 }
 
 #[derive(Default)]
 struct ProviderState {
-    endpoint: Option<ChatEndpoint>,
     sessions: HashMap<ChatSessionId, SessionRecord>,
 }
 
 struct SessionRecord {
     native_session_id: String,
+    /// The endpoint this session is attached to. Core-only.
+    endpoint: Option<ChatEndpoint>,
+    /// The VOWP home session reported with the endpoint. Core-only.
+    vowp_session_id: Option<String>,
     state: ChatSessionState,
     attached: bool,
     started_at: Option<Timestamp>,
@@ -168,6 +222,8 @@ impl SessionRecord {
     fn new(native_session_id: String) -> Self {
         Self {
             native_session_id,
+            endpoint: None,
+            vowp_session_id: None,
             state: ChatSessionState::Idle,
             attached: false,
             started_at: None,
@@ -183,22 +239,26 @@ impl SessionRecord {
 
 #[derive(Default)]
 struct PumpSlot {
-    port: Option<u16>,
+    /// True for the one bundled-engine endpoint. A restarted setup engine replaces its
+    /// old pump instead of leaving two setup streams alive.
+    setup: bool,
     cancel: Option<Arc<AtomicBool>>,
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        let mut slot = self
-            .pump
+        let mut pumps = self
+            .pumps
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(cancel) = slot.cancel.take() {
-            cancel.store(true, Ordering::SeqCst);
-        }
-        if let Some(handle) = slot.handle.take() {
-            handle.abort();
+        for (_, mut slot) in pumps.drain() {
+            if let Some(cancel) = slot.cancel.take() {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            if let Some(handle) = slot.handle.take() {
+                handle.abort();
+            }
         }
     }
 }
@@ -211,13 +271,26 @@ impl LocalChatProvider {
             inner: Arc::new(Inner {
                 engine,
                 workspace,
+                resolver: Arc::new(VowpEndpointResolver::new()),
                 stream_support: StreamSupport::default(),
                 bus: ChatEventBus::new(EVENT_CAPACITY),
                 state: Mutex::new(ProviderState::default()),
-                pump: std::sync::Mutex::new(PumpSlot::default()),
+                pumps: std::sync::Mutex::new(HashMap::new()),
                 clock: Arc::new(SystemClock),
             }),
         }
+    }
+
+    /// Replaces the VOWP endpoint resolver.
+    ///
+    /// Production uses the installed `vowp` CLI; tests inject a resolver pointed at a
+    /// fake `vowp` on `PATH`.
+    #[must_use]
+    pub fn with_endpoint_resolver(mut self, resolver: Arc<dyn ChatEndpointResolver>) -> Self {
+        let inner = Arc::get_mut(&mut self.inner)
+            .expect("the endpoint resolver must be configured before the provider is shared");
+        inner.resolver = resolver;
+        self
     }
 
     /// Replaces the clock. Tests use it; production uses the system clock.
@@ -263,7 +336,10 @@ impl LocalChatProvider {
     pub async fn native_sessions(&self) -> Result<Vec<NativeSession>, SpiritError> {
         let endpoint = {
             let state = self.inner.state.lock().await;
-            state.endpoint
+            state
+                .sessions
+                .get(&ChatSessionId::Setup)
+                .and_then(|record| record.endpoint.clone())
         }
         .ok_or_else(chat_not_started_error)?;
         let response = self
@@ -280,11 +356,25 @@ impl LocalChatProvider {
         Ok(parse_native_sessions(&response.body))
     }
 
-    /// Ensures the engine and creates or reuses the setup native session.
+    /// Ensures the right endpoint and attaches the native session.
+    ///
+    /// The setup assistant starts or reuses the bundled engine. A Local `global` or
+    /// `project` session resolves VOWP's local orchestrator endpoint and attaches to the
+    /// mirrored native session; it never creates one and never starts a second engine.
     pub async fn start(&self, input: &ChatStartInput) -> Result<ChatSessionView, SpiritError> {
         validate_start(input)?;
+        match &input.session {
+            ChatSessionId::Setup => self.start_setup(input).await,
+            ChatSessionId::Global | ChatSessionId::Project(_) => {
+                self.start_orchestrator(input).await
+            }
+        }
+    }
+
+    async fn start_setup(&self, input: &ChatStartInput) -> Result<ChatSessionView, SpiritError> {
         let port = self.inner.ensure_engine().await?;
         self.inner.check_health(port).await?;
+        let endpoint = ChatEndpoint::engine(port, &self.inner.workspace);
 
         let existing = {
             let state = self.inner.state.lock().await;
@@ -295,7 +385,7 @@ impl LocalChatProvider {
         };
         let native = if input.resumes() {
             if let Some(native) = existing {
-                match self.inner.get_native_session(port, &native).await {
+                match self.inner.get_native_session(&endpoint, &native).await {
                     Ok(()) => native,
                     Err(error) if error.code == SpiritErrorCode::NotFound => {
                         self.inner.remove_session(&input.session).await;
@@ -304,16 +394,15 @@ impl LocalChatProvider {
                     Err(error) => return Err(error),
                 }
             } else {
-                self.inner.create_native_session(port).await?
+                self.inner.create_native_session(&endpoint).await?
             }
         } else {
-            self.inner.create_native_session(port).await?
+            self.inner.create_native_session(&endpoint).await?
         };
-        let body = self.inner.read_log(port, &native).await?;
+        let body = self.inner.read_log(&endpoint, &native).await?;
         let now = self.inner.clock.now();
         let view = {
             let mut state = self.inner.state.lock().await;
-            state.endpoint = Some(ChatEndpoint { port });
             let record = state
                 .sessions
                 .entry(input.session.clone())
@@ -321,6 +410,8 @@ impl LocalChatProvider {
             let preserve_turn =
                 record.native_session_id == native && record.state == ChatSessionState::Streaming;
             record.native_session_id = native;
+            record.endpoint = Some(endpoint.clone());
+            record.vowp_session_id = None;
             if !preserve_turn {
                 record.state = ChatSessionState::Ready;
                 record.active_turn = None;
@@ -338,44 +429,64 @@ impl LocalChatProvider {
             self.inner.view_for(&input.session, record)
         };
         let view = self.inner.clone().emit_session(view).await;
-        ensure_pump(&self.inner, port);
+        ensure_pump(&self.inner, &endpoint);
         Ok(view)
     }
 
-    /// Reuses the stored native session. It never creates one.
-    pub async fn attach(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError> {
-        validate_local_session(session)?;
-        let native = {
+    async fn start_orchestrator(
+        &self,
+        input: &ChatStartInput,
+    ) -> Result<ChatSessionView, SpiritError> {
+        if !input.resumes() {
+            return Err(chat_gated_error(
+                "a new global/project conversation must be created in VOWP; StackSpirit only attaches to the mirrored session",
+            ));
+        }
+        let name = orchestrator_name(&input.session).ok_or_else(|| {
+            SpiritError::invalid_input("session", "the setup session does not use a VOWP endpoint")
+        })?;
+        let existing = {
             let state = self.inner.state.lock().await;
             state
                 .sessions
-                .get(session)
-                .map(|record| record.native_session_id.clone())
-        }
-        .ok_or_else(chat_not_started_error)?;
-        let port = self.inner.ensure_engine().await?;
-        self.inner.check_health(port).await?;
-        match self.inner.get_native_session(port, &native).await {
+                .get(&input.session)
+                .and_then(|record| record.vowp_session_id.clone())
+        };
+        let resolved = self
+            .inner
+            .resolve_local_endpoint(name, existing.as_deref())
+            .await?;
+        self.open_orchestrator(&input.session, resolved).await
+    }
+
+    async fn open_orchestrator(
+        &self,
+        session: &ChatSessionId,
+        resolved: ResolvedEndpoint,
+    ) -> Result<ChatSessionView, SpiritError> {
+        let native = resolved.native_session_id.clone();
+        let vowp_session_id = resolved.session_id.clone();
+        let endpoint = ChatEndpoint::orchestrator(resolved);
+        match self.inner.get_native_session(&endpoint, &native).await {
             Ok(()) => {}
             Err(error) if error.code == SpiritErrorCode::NotFound => {
-                self.inner.remove_session(session).await;
                 return Err(session_lost_error());
             }
             Err(error) => return Err(error),
         }
-        let body = self.inner.read_log(port, &native).await?;
+        let body = self.inner.read_log(&endpoint, &native).await?;
         let now = self.inner.clock.now();
         let view = {
             let mut state = self.inner.state.lock().await;
-            state.endpoint = Some(ChatEndpoint { port });
             let record = state
                 .sessions
-                .get_mut(session)
-                .ok_or_else(chat_not_started_error)?;
-            if record.native_session_id != native {
-                return Err(session_lost_error());
-            }
-            let preserve_turn = record.state == ChatSessionState::Streaming;
+                .entry(session.clone())
+                .or_insert_with(|| SessionRecord::new(native.clone()));
+            let preserve_turn =
+                record.native_session_id == native && record.state == ChatSessionState::Streaming;
+            record.native_session_id = native;
+            record.endpoint = Some(endpoint.clone());
+            record.vowp_session_id = Some(vowp_session_id);
             if !preserve_turn {
                 record.state = ChatSessionState::Ready;
                 record.active_turn = None;
@@ -393,8 +504,98 @@ impl LocalChatProvider {
             self.inner.view_for(session, record)
         };
         let view = self.inner.clone().emit_session(view).await;
-        ensure_pump(&self.inner, port);
+        ensure_pump(&self.inner, &endpoint);
         Ok(view)
+    }
+
+    /// Reuses the stored native session. It never creates one.
+    pub async fn attach(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError> {
+        validate_attach(session)?;
+        match session {
+            ChatSessionId::Setup => self.attach_setup(session).await,
+            ChatSessionId::Global | ChatSessionId::Project(_) => {
+                self.attach_orchestrator(session).await
+            }
+        }
+    }
+
+    async fn attach_setup(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError> {
+        let native = {
+            let state = self.inner.state.lock().await;
+            state
+                .sessions
+                .get(session)
+                .map(|record| record.native_session_id.clone())
+        }
+        .ok_or_else(chat_not_started_error)?;
+        let port = self.inner.ensure_engine().await?;
+        self.inner.check_health(port).await?;
+        let endpoint = ChatEndpoint::engine(port, &self.inner.workspace);
+        match self.inner.get_native_session(&endpoint, &native).await {
+            Ok(()) => {}
+            Err(error) if error.code == SpiritErrorCode::NotFound => {
+                self.inner.remove_session(session).await;
+                return Err(session_lost_error());
+            }
+            Err(error) => return Err(error),
+        }
+        let body = self.inner.read_log(&endpoint, &native).await?;
+        let now = self.inner.clock.now();
+        let view = {
+            let mut state = self.inner.state.lock().await;
+            let record = state
+                .sessions
+                .get_mut(session)
+                .ok_or_else(chat_not_started_error)?;
+            if record.native_session_id != native {
+                return Err(session_lost_error());
+            }
+            let preserve_turn = record.state == ChatSessionState::Streaming;
+            if !preserve_turn {
+                record.state = ChatSessionState::Ready;
+                record.active_turn = None;
+                record.turn_completed = false;
+            }
+            record.endpoint = Some(endpoint.clone());
+            record.attached = true;
+            record.started_at.get_or_insert(now);
+            record.last_event_at = Some(now);
+            record.error = None;
+            record
+                .applier
+                .replace_log(parse_log(&body, self.inner.clock.now()));
+            record.applier.observe_revision(self.inner.bus.revision());
+            record.mapper.reset_from_messages(record.applier.messages());
+            self.inner.view_for(session, record)
+        };
+        let view = self.inner.clone().emit_session(view).await;
+        ensure_pump(&self.inner, &endpoint);
+        Ok(view)
+    }
+
+    async fn attach_orchestrator(
+        &self,
+        session: &ChatSessionId,
+    ) -> Result<ChatSessionView, SpiritError> {
+        let name = orchestrator_name(session).ok_or_else(chat_not_started_error)?;
+        let existing = {
+            let state = self.inner.state.lock().await;
+            state
+                .sessions
+                .get(session)
+                .and_then(|record| record.vowp_session_id.clone())
+        };
+        let resolved = self
+            .inner
+            .resolve_local_endpoint(name, existing.as_deref())
+            .await?;
+        let result = self.open_orchestrator(session, resolved).await;
+        if let Err(error) = &result
+            && error.code == SpiritErrorCode::NotFound
+        {
+            self.inner.remove_session(session).await;
+        }
+        result
     }
 
     /// Accepts one user turn and returns immediately. Assistant text arrives as events.
@@ -404,7 +605,8 @@ impl LocalChatProvider {
         text: &str,
     ) -> Result<ChatSendReceipt, SpiritError> {
         let text = validate_user_text(text)?;
-        let (native, previous_port) = {
+        let setup = matches!(session, ChatSessionId::Setup);
+        let (native, stored_endpoint) = {
             let state = self.inner.state.lock().await;
             let record = state
                 .sessions
@@ -418,15 +620,33 @@ impl LocalChatProvider {
                 ChatSessionState::Ready => {}
                 _ => return Err(chat_not_started_error()),
             }
-            let endpoint = state
+            let endpoint = record
                 .endpoint
+                .clone()
                 .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
-            (record.native_session_id.clone(), endpoint.port)
+            (record.native_session_id.clone(), endpoint)
         };
-        let port = self.inner.ensure_engine().await?;
-        self.inner.check_health(port).await?;
-        if port != previous_port {
-            match self.inner.get_native_session(port, &native).await {
+        let endpoint = if setup {
+            let port = self.inner.ensure_engine().await?;
+            self.inner.check_health(port).await?;
+            let endpoint = ChatEndpoint::engine(port, &self.inner.workspace);
+            if endpoint.port != stored_endpoint.port {
+                match self.inner.get_native_session(&endpoint, &native).await {
+                    Ok(()) => {}
+                    Err(error) if error.code == SpiritErrorCode::NotFound => {
+                        self.inner.remove_session(session).await;
+                        return Err(session_lost_error());
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            endpoint
+        } else {
+            match self
+                .inner
+                .get_native_session(&stored_endpoint, &native)
+                .await
+            {
                 Ok(()) => {}
                 Err(error) if error.code == SpiritErrorCode::NotFound => {
                     self.inner.remove_session(session).await;
@@ -434,18 +654,26 @@ impl LocalChatProvider {
                 }
                 Err(error) => return Err(error),
             }
-        }
-        let model = self
-            .inner
-            .engine
-            .selected_model()
-            .ok_or_else(no_model_error)?;
+            stored_endpoint
+        };
+        // The setup assistant needs its verified bundled model. A VOWP orchestrator owns
+        // its own OpenCode config, so no model is invented or copied from the setup
+        // engine; the message omits `model` and lets the orchestrator choose.
+        let model = if setup {
+            Some(
+                self.inner
+                    .engine
+                    .selected_model()
+                    .ok_or_else(no_model_error)?,
+            )
+        } else {
+            None
+        };
 
         let now = self.inner.clock.now();
         let user = ChatMessage::user(format!("local:{}", Ulid::generate()), &text, now);
         let view = {
             let mut state = self.inner.state.lock().await;
-            state.endpoint = Some(ChatEndpoint { port });
             let record = state
                 .sessions
                 .get_mut(session)
@@ -455,6 +683,7 @@ impl LocalChatProvider {
                 ChatSessionState::Ready => {}
                 _ => return Err(chat_not_started_error()),
             }
+            record.endpoint = Some(endpoint.clone());
             record.state = ChatSessionState::Streaming;
             record.error = None;
             record.active_turn = Some(user.id.clone());
@@ -470,9 +699,9 @@ impl LocalChatProvider {
             .emit_with(move |events| events.message(session_for_event, user_event))
             .await;
 
-        let body = message_body(&model, &text, &user.id);
-        ensure_pump(&self.inner, port);
-        spawn_turn(self.inner.clone(), port, native, session.clone(), body);
+        let body = message_body(model.as_ref(), &text, &user.id);
+        ensure_pump(&self.inner, &endpoint);
+        spawn_turn(self.inner.clone(), endpoint, native, session.clone(), body);
         Ok(ChatSendReceipt {
             session: session.clone(),
             message: user,
@@ -483,15 +712,16 @@ impl LocalChatProvider {
     /// Aborts the current turn when supported and returns the stopped view.
     pub async fn stop(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError> {
         let now = self.inner.clock.now();
-        let (native, port, streaming) = {
+        let (native, endpoint, streaming) = {
             let mut state = self.inner.state.lock().await;
-            let endpoint = state
-                .endpoint
-                .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
             let record = state
                 .sessions
                 .get_mut(session)
                 .ok_or_else(chat_not_started_error)?;
+            let endpoint = record
+                .endpoint
+                .clone()
+                .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
             let streaming = record.state == ChatSessionState::Streaming;
             // Mark the session stopped before the abort request so a racing send cannot
             // start a second turn while the first abort is in flight.
@@ -501,10 +731,10 @@ impl LocalChatProvider {
             record.turn_completed = true;
             record.last_event_at = Some(now);
             record.error = None;
-            (record.native_session_id.clone(), endpoint.port, streaming)
+            (record.native_session_id.clone(), endpoint, streaming)
         };
         let confirmed = if streaming {
-            self.inner.abort(port, &native).await.unwrap_or(false)
+            self.inner.abort(&endpoint, &native).await.unwrap_or(false)
         } else {
             true
         };
@@ -535,18 +765,19 @@ impl LocalChatProvider {
         session: &ChatSessionId,
         query: &ChatLogQuery,
     ) -> Result<ChatLogPage, SpiritError> {
-        let (native, port) = {
+        let (native, endpoint) = {
             let state = self.inner.state.lock().await;
             let record = state
                 .sessions
                 .get(session)
                 .ok_or_else(chat_not_started_error)?;
-            let endpoint = state
+            let endpoint = record
                 .endpoint
+                .clone()
                 .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
-            (record.native_session_id.clone(), endpoint.port)
+            (record.native_session_id.clone(), endpoint)
         };
-        let body = match self.inner.read_log(port, &native).await {
+        let body = match self.inner.read_log(&endpoint, &native).await {
             Ok(body) => body,
             Err(error) if error.code == SpiritErrorCode::NotFound => {
                 self.inner.remove_session(session).await;
@@ -598,7 +829,14 @@ impl Inner {
             state: record.state,
             attached: record.attached,
             streaming_supported: self.stream_support.is_supported(),
-            model: self.engine.selected_model(),
+            // The setup assistant shows the bundled engine's selected model. A VOWP
+            // orchestrator owns its own config, so the core does not copy the setup
+            // model into its view.
+            model: if matches!(session, ChatSessionId::Setup) {
+                self.engine.selected_model()
+            } else {
+                None
+            },
             started_at: record.started_at,
             last_event_at: record.last_event_at,
             error: record.error.clone(),
@@ -612,11 +850,19 @@ impl Inner {
         self.engine.ensure_ready().await
     }
 
+    async fn resolve_local_endpoint(
+        &self,
+        name: &str,
+        expected_session_id: Option<&str>,
+    ) -> Result<ResolvedEndpoint, SpiritError> {
+        self.resolver.resolve(name, expected_session_id).await
+    }
+
     async fn check_health(&self, port: u16) -> Result<(), SpiritError> {
         let response = self
             .request(
                 "GET",
-                ChatEndpoint { port },
+                ChatEndpoint::engine(port, &self.workspace),
                 "/global/health".to_owned(),
                 None,
                 HEALTH_TIMEOUT,
@@ -647,16 +893,8 @@ impl Inner {
         body: Option<Vec<u8>>,
         read_timeout: Duration,
     ) -> Result<ChatResponse, SpiritError> {
-        let workspace = self.workspace.clone();
         tokio::task::spawn_blocking(move || {
-            http_request(
-                &workspace,
-                endpoint.port,
-                method,
-                &path,
-                body.as_deref(),
-                read_timeout,
-            )
+            http_request(&endpoint, method, &path, body.as_deref(), read_timeout)
         })
         .await
         .map_err(|_| {
@@ -667,7 +905,7 @@ impl Inner {
         })?
     }
 
-    async fn create_native_session(&self, port: u16) -> Result<String, SpiritError> {
+    async fn create_native_session(&self, endpoint: &ChatEndpoint) -> Result<String, SpiritError> {
         let body = serde_json::to_vec(&json!({ "title": SETUP_TITLE })).map_err(|_| {
             SpiritError::new(
                 SpiritErrorCode::Internal,
@@ -677,7 +915,7 @@ impl Inner {
         let response = self
             .request(
                 "POST",
-                ChatEndpoint { port },
+                endpoint.clone(),
                 "/session".to_owned(),
                 Some(body),
                 SESSION_TIMEOUT,
@@ -699,10 +937,14 @@ impl Inner {
             })
     }
 
-    async fn get_native_session(&self, port: u16, native: &str) -> Result<(), SpiritError> {
+    async fn get_native_session(
+        &self,
+        endpoint: &ChatEndpoint,
+        native: &str,
+    ) -> Result<(), SpiritError> {
         let path = format!("/session/{}", safe_native_id(native)?);
         let response = self
-            .request("GET", ChatEndpoint { port }, path, None, SESSION_TIMEOUT)
+            .request("GET", endpoint.clone(), path, None, SESSION_TIMEOUT)
             .await?;
         if response.status == 404 {
             return Err(session_lost_error());
@@ -710,10 +952,14 @@ impl Inner {
         ensure_success(&response)
     }
 
-    async fn read_log(&self, port: u16, native: &str) -> Result<Vec<u8>, SpiritError> {
+    async fn read_log(
+        &self,
+        endpoint: &ChatEndpoint,
+        native: &str,
+    ) -> Result<Vec<u8>, SpiritError> {
         let path = format!("/session/{}/message", safe_native_id(native)?);
         let response = self
-            .request("GET", ChatEndpoint { port }, path, None, SESSION_TIMEOUT)
+            .request("GET", endpoint.clone(), path, None, SESSION_TIMEOUT)
             .await?;
         if response.status == 404 {
             return Err(session_lost_error());
@@ -722,13 +968,13 @@ impl Inner {
         Ok(response.body)
     }
 
-    async fn abort(&self, port: u16, native: &str) -> Result<bool, SpiritError> {
+    async fn abort(&self, endpoint: &ChatEndpoint, native: &str) -> Result<bool, SpiritError> {
         let path = format!("/session/{}/abort", safe_native_id(native)?);
         for attempt in 0..2 {
             let result = self
                 .request(
                     "POST",
-                    ChatEndpoint { port },
+                    endpoint.clone(),
                     path.clone(),
                     Some(Vec::new()),
                     ABORT_TIMEOUT,
@@ -850,7 +1096,7 @@ impl Inner {
     }
 
     async fn reload_session(self: Arc<Self>, session: &ChatSessionId) {
-        let (port, native) = {
+        let (endpoint, native) = {
             let state = self.state.lock().await;
             let Some(record) = state.sessions.get(session) else {
                 return;
@@ -858,12 +1104,12 @@ impl Inner {
             if record.state == ChatSessionState::Stopped {
                 return;
             }
-            let Some(endpoint) = state.endpoint else {
+            let Some(endpoint) = record.endpoint.clone() else {
                 return;
             };
-            (endpoint.port, record.native_session_id.clone())
+            (endpoint, record.native_session_id.clone())
         };
-        let body = match self.read_log(port, &native).await {
+        let body = match self.read_log(&endpoint, &native).await {
             Ok(body) => body,
             Err(error) => {
                 self.fail_session(session, error).await;
@@ -890,7 +1136,7 @@ impl Inner {
         }
     }
 
-    async fn handle_frame(self: Arc<Self>, frame: SseFrame) {
+    async fn handle_frame(self: Arc<Self>, frame: SseFrame, port: u16, setup: bool) {
         let event = parse_engine_event(&frame);
         let Some(native) = event.session_id().map(str::to_owned) else {
             return;
@@ -901,7 +1147,17 @@ impl Inner {
             let Some(session) = state
                 .sessions
                 .iter()
-                .find(|(_, record)| record.native_session_id == native)
+                .find(|(session, record)| {
+                    record.native_session_id == native
+                        && if setup {
+                            matches!(session, ChatSessionId::Setup)
+                        } else {
+                            record
+                                .endpoint
+                                .as_ref()
+                                .is_some_and(|endpoint| endpoint.port == port)
+                        }
+                })
                 .map(|(session, _)| session.clone())
             else {
                 return;
@@ -945,17 +1201,17 @@ impl Inner {
     }
 
     async fn abort_best_effort(self: Arc<Self>, session: &ChatSessionId) {
-        let (port, native) = {
+        let (endpoint, native) = {
             let state = self.state.lock().await;
             let Some(record) = state.sessions.get(session) else {
                 return;
             };
-            let Some(endpoint) = state.endpoint else {
+            let Some(endpoint) = record.endpoint.clone() else {
                 return;
             };
-            (endpoint.port, record.native_session_id.clone())
+            (endpoint, record.native_session_id.clone())
         };
-        let _ = self.abort(port, &native).await;
+        let _ = self.abort(&endpoint, &native).await;
     }
 
     async fn handle_idle(
@@ -1001,13 +1257,30 @@ impl Inner {
         self.emit_session(view).await;
     }
 
-    async fn mark_reconnecting(self: Arc<Self>) {
+    fn pump_covers(
+        session: &ChatSessionId,
+        record: &SessionRecord,
+        port: u16,
+        setup: bool,
+    ) -> bool {
+        if setup {
+            matches!(session, ChatSessionId::Setup)
+        } else {
+            record
+                .endpoint
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.port == port)
+        }
+    }
+
+    async fn mark_reconnecting(self: Arc<Self>, port: u16, setup: bool) {
         let now = self.clock.now();
         let views = {
             let mut state = self.state.lock().await;
             let mut views = Vec::new();
             for (session, record) in &mut state.sessions {
                 if record.attached
+                    && Self::pump_covers(session, record, port, setup)
                     && matches!(
                         record.state,
                         ChatSessionState::Ready | ChatSessionState::Streaming
@@ -1025,11 +1298,23 @@ impl Inner {
         }
     }
 
-    async fn on_sse_connected(self: Arc<Self>, port: u16) {
-        let sessions = {
+    async fn on_sse_connected(self: Arc<Self>, port: u16, setup: bool) {
+        if setup {
+            // The bundled engine may have restarted on a new port. Keep the setup
+            // record's endpoint aligned with the live pump before matching frames.
             let mut state = self.state.lock().await;
-            state.endpoint = Some(ChatEndpoint { port });
-            state.sessions.keys().cloned().collect::<Vec<_>>()
+            if let Some(record) = state.sessions.get_mut(&ChatSessionId::Setup) {
+                record.endpoint = Some(ChatEndpoint::engine(port, &self.workspace));
+            }
+        }
+        let sessions = {
+            let state = self.state.lock().await;
+            state
+                .sessions
+                .iter()
+                .filter(|(session, record)| Self::pump_covers(session, record, port, setup))
+                .map(|(session, _)| session.clone())
+                .collect::<Vec<_>>()
         };
         for session in sessions {
             self.clone().reload_session(&session).await;
@@ -1040,6 +1325,7 @@ impl Inner {
             let mut views = Vec::new();
             for (session, record) in &mut state.sessions {
                 if record.attached
+                    && Self::pump_covers(session, record, port, setup)
                     && !matches!(
                         record.state,
                         ChatSessionState::Idle
@@ -1064,7 +1350,7 @@ impl Inner {
         }
     }
 
-    async fn stream_lost(self: Arc<Self>) {
+    async fn stream_lost(self: Arc<Self>, port: u16, setup: bool) {
         let error = stream_lost_error();
         let now = self.clock.now();
         let views = {
@@ -1072,6 +1358,7 @@ impl Inner {
             let mut views = Vec::new();
             for (session, record) in &mut state.sessions {
                 if record.attached
+                    && Self::pump_covers(session, record, port, setup)
                     && matches!(
                         record.state,
                         ChatSessionState::Connecting
@@ -1110,7 +1397,13 @@ fn schedule_reload(inner: &Arc<Inner>, session: ChatSessionId) {
     tokio::spawn(future);
 }
 
-fn spawn_turn(inner: Arc<Inner>, port: u16, native: String, session: ChatSessionId, body: Vec<u8>) {
+fn spawn_turn(
+    inner: Arc<Inner>,
+    endpoint: ChatEndpoint,
+    native: String,
+    session: ChatSessionId,
+    body: Vec<u8>,
+) {
     tokio::spawn(async move {
         let path = match safe_native_id(&native) {
             Ok(path) => format!("/session/{path}/message"),
@@ -1120,7 +1413,7 @@ fn spawn_turn(inner: Arc<Inner>, port: u16, native: String, session: ChatSession
             }
         };
         let result = inner
-            .request("POST", ChatEndpoint { port }, path, Some(body), TURN_CAP)
+            .request("POST", endpoint, path, Some(body), TURN_CAP)
             .await;
         inner.finish_turn(&session, &native, result).await;
     });
@@ -1235,37 +1528,68 @@ enum TurnEmit {
     Error(SpiritError),
 }
 
-fn ensure_pump(inner: &Arc<Inner>, port: u16) {
+fn ensure_pump(inner: &Arc<Inner>, endpoint: &ChatEndpoint) {
     if !inner.stream_support.is_supported() {
         return;
     }
-    let mut slot = inner
-        .pump
+    let port = endpoint.port;
+    let setup = endpoint.directory.is_some();
+    let mut pumps = inner
+        .pumps
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slot.port == Some(port)
-        && slot
-            .handle
-            .as_ref()
-            .is_some_and(|handle| !handle.is_finished())
+    if pumps
+        .get(&port)
+        .and_then(|slot| slot.handle.as_ref())
+        .is_some_and(|handle| !handle.is_finished())
     {
         return;
     }
-    if let Some(cancel) = slot.cancel.take() {
-        cancel.store(true, Ordering::SeqCst);
-    }
-    if let Some(handle) = slot.handle.take() {
-        handle.abort();
+    if setup {
+        // The bundled engine has one live endpoint. A restart on a new port replaces
+        // the old setup pump rather than leaving both streams alive.
+        let stale: Vec<u16> = pumps
+            .iter()
+            .filter(|(pump_port, slot)| slot.setup && **pump_port != port)
+            .map(|(pump_port, _)| *pump_port)
+            .collect();
+        for pump_port in stale {
+            stop_pump(&mut pumps, pump_port);
+        }
+    } else {
+        stop_pump(&mut pumps, port);
     }
     let cancel = Arc::new(AtomicBool::new(false));
     let weak = Arc::downgrade(inner);
-    let handle = tokio::spawn(run_pump(weak, port, Arc::clone(&cancel)));
-    slot.port = Some(port);
-    slot.cancel = Some(cancel);
-    slot.handle = Some(handle);
+    let handle = tokio::spawn(run_pump(weak, endpoint.clone(), setup, Arc::clone(&cancel)));
+    pumps.insert(
+        port,
+        PumpSlot {
+            setup,
+            cancel: Some(cancel),
+            handle: Some(handle),
+        },
+    );
 }
 
-async fn run_pump(inner: Weak<Inner>, port: u16, cancel: Arc<AtomicBool>) {
+fn stop_pump(pumps: &mut HashMap<u16, PumpSlot>, port: u16) {
+    if let Some(mut old) = pumps.remove(&port) {
+        if let Some(cancel) = old.cancel.take() {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        if let Some(handle) = old.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+async fn run_pump(
+    inner: Weak<Inner>,
+    endpoint: ChatEndpoint,
+    setup: bool,
+    cancel: Arc<AtomicBool>,
+) {
+    let port = endpoint.port;
     let mut attempts = 0_usize;
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -1275,21 +1599,23 @@ async fn run_pump(inner: Weak<Inner>, port: u16, cancel: Arc<AtomicBool>) {
             return;
         };
         if attempts > 0 {
-            provider.clone().mark_reconnecting().await;
+            provider.clone().mark_reconnecting(port, setup).await;
         }
         let (sender, mut receiver) = mpsc::channel(SSE_CAPACITY);
-        let workspace = provider.workspace.clone();
+        let reader_endpoint = endpoint.clone();
         let reader_cancel = Arc::clone(&cancel);
         let reader = tokio::task::spawn_blocking(move || {
-            read_sse(&workspace, port, sender, reader_cancel);
+            read_sse(&reader_endpoint, sender, reader_cancel);
         });
         while let Some(signal) = receiver.recv().await {
             match signal {
                 SseSignal::Connected => {
                     attempts = 0;
-                    provider.clone().on_sse_connected(port).await;
+                    provider.clone().on_sse_connected(port, setup).await;
                 }
-                SseSignal::Frame(frame) => provider.clone().handle_frame(frame).await,
+                SseSignal::Frame(frame) => {
+                    provider.clone().handle_frame(frame, port, setup).await;
+                }
                 SseSignal::Failed => {}
             }
         }
@@ -1299,7 +1625,7 @@ async fn run_pump(inner: Weak<Inner>, port: u16, cancel: Arc<AtomicBool>) {
         }
         attempts = attempts.saturating_add(1);
         if attempts > MAX_SSE_ATTEMPTS {
-            provider.stream_lost().await;
+            provider.stream_lost(port, setup).await;
             return;
         }
         let delay = SSE_BACKOFF[attempts.saturating_sub(1).min(SSE_BACKOFF.len() - 1)];
@@ -1313,8 +1639,8 @@ enum SseSignal {
     Failed,
 }
 
-fn read_sse(workspace: &Path, port: u16, sender: mpsc::Sender<SseSignal>, cancel: Arc<AtomicBool>) {
-    let Some(mut stream) = connect_sse(workspace, port) else {
+fn read_sse(endpoint: &ChatEndpoint, sender: mpsc::Sender<SseSignal>, cancel: Arc<AtomicBool>) {
+    let Some(mut stream) = connect_sse(endpoint) else {
         let _ = sender.blocking_send(SseSignal::Failed);
         return;
     };
@@ -1374,17 +1700,57 @@ fn read_sse(workspace: &Path, port: u16, sender: mpsc::Sender<SseSignal>, cancel
     }
 }
 
-fn connect_sse(workspace: &Path, port: u16) -> Option<TcpStream> {
-    let address = SocketAddr::from(([127, 0, 0, 1], port));
+/// Builds one request head.
+///
+/// The returned string can carry the loopback credential, so it is zeroized on drop.
+/// It is written straight to the socket and never logged.
+fn request_head(
+    endpoint: &ChatEndpoint,
+    method: &str,
+    path: &str,
+    accept: &str,
+    content_length: Option<usize>,
+) -> Zeroizing<String> {
+    let mut head = Zeroizing::new(String::with_capacity(256));
+    head.push_str(method);
+    head.push(' ');
+    head.push_str(path);
+    head.push_str(" HTTP/1.1\r\nHost: ");
+    head.push_str(endpoint.host.host_header());
+    head.push_str("\r\nAccept: ");
+    head.push_str(accept);
+    head.push_str("\r\n");
+    if accept == "application/json" {
+        head.push_str("Content-Type: application/json\r\n");
+    }
+    if let Some(auth) = &endpoint.auth {
+        head.push_str(&auth.header);
+        head.push_str(": ");
+        head.push_str(auth.value.as_str());
+        head.push_str("\r\n");
+    }
+    if let Some(directory) = &endpoint.directory {
+        head.push_str("x-opencode-directory: ");
+        head.push_str(&header_value(directory));
+        head.push_str("\r\n");
+    }
+    if let Some(length) = content_length {
+        head.push_str("Content-Length: ");
+        head.push_str(&length.to_string());
+        head.push_str("\r\n");
+    }
+    head.push_str("Connection: close\r\n\r\n");
+    head
+}
+
+fn connect_sse(endpoint: &ChatEndpoint) -> Option<TcpStream> {
+    let address = endpoint.socket_address();
     let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).ok()?;
     stream.set_read_timeout(Some(SSE_HEADER_TIMEOUT)).ok()?;
     stream
         .set_write_timeout(Some(Duration::from_secs(2)))
         .ok()?;
-    let workspace = header_value(workspace);
-    let request = format!(
-        "GET /event HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\nx-opencode-directory: {workspace}\r\nConnection: close\r\n\r\n"
-    );
+    let request = request_head(endpoint, "GET", "/event", "text/event-stream", None);
     stream.write_all(request.as_bytes()).ok()?;
     Some(stream)
 }
@@ -1431,8 +1797,7 @@ struct ChatResponse {
 }
 
 fn http_request(
-    workspace: &Path,
-    port: u16,
+    endpoint: &ChatEndpoint,
     method: &str,
     path: &str,
     body: Option<&[u8]>,
@@ -1444,7 +1809,7 @@ fn http_request(
             "the local chat path is invalid",
         ));
     }
-    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let address = endpoint.socket_address();
     let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
         .map_err(|_| engine_unavailable_error())?;
     stream
@@ -1454,11 +1819,7 @@ fn http_request(
         .set_write_timeout(Some(Duration::from_secs(2)))
         .map_err(|_| engine_request_error("the local engine write timeout could not be set"))?;
     let body = body.unwrap_or_default();
-    let workspace = header_value(workspace);
-    let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: application/json\r\nContent-Type: application/json\r\nx-opencode-directory: {workspace}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
+    let request = request_head(endpoint, method, path, "application/json", Some(body.len()));
     stream
         .write_all(request.as_bytes())
         .map_err(|error| request_io_error(&error))?;
@@ -1581,23 +1942,25 @@ fn ensure_success(response: &ChatResponse) -> Result<(), SpiritError> {
     }
 }
 
-fn message_body(model: &ChatModelView, text: &str, message_id: &str) -> Vec<u8> {
-    let (provider, model_id) = model
-        .id
-        .split_once('/')
-        .unwrap_or(("opencode", model.id.as_str()));
-    serde_json::to_vec(&json!({
+fn message_body(model: Option<&ChatModelView>, text: &str, message_id: &str) -> Vec<u8> {
+    let mut body = json!({
         "messageID": message_id,
-        "model": {
-            "providerID": provider,
-            "modelID": model_id,
-        },
         "parts": [{
             "type": "text",
             "text": text,
         }],
-    }))
-    .unwrap_or_default()
+    });
+    if let Some(model) = model {
+        let (provider, model_id) = model
+            .id
+            .split_once('/')
+            .unwrap_or(("opencode", model.id.as_str()));
+        body["model"] = json!({
+            "providerID": provider,
+            "modelID": model_id,
+        });
+    }
+    serde_json::to_vec(&body).unwrap_or_default()
 }
 
 fn parse_log(body: &[u8], now: Timestamp) -> Vec<ChatMessage> {
@@ -1791,6 +2154,14 @@ fn changed_messages(old: &[ChatMessage], new: &[ChatMessage]) -> Vec<ChatMessage
         .collect()
 }
 
+fn orchestrator_name(session: &ChatSessionId) -> Option<&str> {
+    match session {
+        ChatSessionId::Global => Some("global"),
+        ChatSessionId::Project(name) => Some(name),
+        ChatSessionId::Setup => None,
+    }
+}
+
 fn validate_start(input: &ChatStartInput) -> Result<(), SpiritError> {
     match (&input.session, input.location) {
         (ChatSessionId::Setup, ChatSessionLocation::Local) => {
@@ -1805,19 +2176,39 @@ fn validate_start(input: &ChatStartInput) -> Result<(), SpiritError> {
         (ChatSessionId::Setup, ChatSessionLocation::Server) => Err(chat_gated_error(
             "the setup assistant uses the bundled StackSpirit Engine on this Mac",
         )),
-        (ChatSessionId::Global | ChatSessionId::Project(_), _) => Err(chat_gated_error(
-            "local global/project chat needs VOWP 0.5's orchestrator endpoint; this transport only serves the setup assistant",
-        )),
+        (ChatSessionId::Global, ChatSessionLocation::Local) => {
+            if input.project.is_some() {
+                return Err(SpiritError::invalid_input(
+                    "project",
+                    "the global session does not take a project",
+                ));
+            }
+            Ok(())
+        }
+        (ChatSessionId::Project(name), ChatSessionLocation::Local) => {
+            validate_project_name(name)?;
+            if let Some(project) = &input.project
+                && project != name
+            {
+                return Err(SpiritError::invalid_input(
+                    "project",
+                    "the project name does not match the session",
+                ));
+            }
+            Ok(())
+        }
+        (ChatSessionId::Global | ChatSessionId::Project(_), ChatSessionLocation::Server) => {
+            Err(chat_gated_error(
+                "server global/project chat needs VOWP 0.5's orchestrator endpoint; this transport does not open SSH",
+            ))
+        }
     }
 }
 
-fn validate_local_session(session: &ChatSessionId) -> Result<(), SpiritError> {
-    if matches!(session, ChatSessionId::Setup) {
-        Ok(())
-    } else {
-        Err(chat_gated_error(
-            "local global/project chat needs VOWP 0.5's orchestrator endpoint; this transport only serves the setup assistant",
-        ))
+fn validate_attach(session: &ChatSessionId) -> Result<(), SpiritError> {
+    match session {
+        ChatSessionId::Setup | ChatSessionId::Global => Ok(()),
+        ChatSessionId::Project(name) => validate_project_name(name),
     }
 }
 

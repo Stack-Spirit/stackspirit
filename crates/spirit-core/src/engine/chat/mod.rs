@@ -5,11 +5,13 @@
 //! §6 error map. It never spawns an engine, never reads a provider key and never exposes
 //! an endpoint URL, port, workspace or native session id to a serialized chat value.
 
+pub mod endpoint;
 pub mod local;
 pub mod model;
 pub mod pump;
 pub mod sse;
 
+pub use endpoint::{ChatEndpointResolver, ResolvedEndpoint, VowpEndpointResolver};
 pub use local::{
     ChatEngine, ChatTransport, LocalChatProvider, NativeSession, map_http_status,
     map_provider_error,

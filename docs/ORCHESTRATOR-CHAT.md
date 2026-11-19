@@ -1,7 +1,8 @@
 # Orchestrator chat contract: bundled OpenCode server and the VOWP 0.5 endpoint
 
-Status: implementation contract, 2026-11-18; live-probe facts applied 2026-11-18. This job
-changes no production code.
+Status: implementation contract, 2026-11-18; live-probe facts applied 2026-11-18; the
+Local `global`/`project` endpoint resolver landed 2026-11-19 (ss-61) behind the VOWP 0.5
+command gate. Server chat remains gated.
 Audience: the follow-up chat jobs named in §8, the VOWP owner, and the desktop reviewer.
 
 This document specifies how the Meadow shell's orchestrator chat moves from the preview store
@@ -34,7 +35,7 @@ questions; §11 references.
 |---|---|
 | Setup assistant on the bundled engine | Contract complete; the live probe pinned the v1 surface; core/view jobs can land; no VOWP dependency |
 | `global`/`project` on the home | **Gated** on VOWP `0.5` `orchestrator endpoint`; the app-owned forward (§3.3) is not approved |
-| `global`/`project` on this Mac | **Gated** on VOWP's local endpoint and mirroring; the bundled engine is not silently used |
+| `global`/`project` on this Mac | Attaches when the installed VOWP provides `vowp agent orchestrator endpoint` (0.5); otherwise `chat_not_configured`. The bundled engine is not silently used. Hermetic proof only until an owner Mac has VOWP 0.5 |
 | Local/Server switch | Out of scope; `vowp orchestrator move` (VOWP `0.5`, HANDOFF §5 step 6) |
 | Preview chat in `MockBridge` | Stays, explicitly `origin: "preview"` |
 
@@ -391,9 +392,10 @@ The implementation rule:
    an endpoint rejects it, fall back to the documented `directory` query rather than
    guessing.
 3. The setup assistant still uses a single private workspace (the setup directory).
-   Project/global local sessions remain gated by §3 and §7 on the VOWP endpoint and
-   mirroring, not by directory selection. Do not ship a project session that silently
-   writes to the app's inherited working directory.
+   A Local `global`/`project` session attaches to VOWP's reported orchestrator endpoint
+   (§4.3, ss-61); it does not send the setup workspace header and does not select a
+   workspace from the renderer. Directory selection is not the gate. Do not ship a
+   project session that silently writes to the app's inherited working directory.
 
 The session response's `directory` field is core-only. The core must drop it before any
 `ChatSessionView` is serialized. It is a raw local path, and the renderer must never see
@@ -708,9 +710,10 @@ contract and must not be turned into claims in code or UI.
 > **Gate:** the Server path is **not enabled** until VOWP `0.5`'s
 > `vowp orchestrator endpoint` ships. The owner declined the app-owned SSH forward in
 > §3.3 (decision A, 2026-11-19), so it is not a gate option. Until the endpoint ships the
-> UI shows a typed `chat_gated` error and never a fake reply. The
-> same gate applies to a Local `global`/`project` session, which needs VOWP's local
-> endpoint and mirroring.
+> UI shows a typed `chat_gated` error and never a fake reply. A Local `global`/`project`
+> session uses the Mac-side `vowp agent orchestrator endpoint` instead (§4.3): it
+> attaches when the installed VOWP provides the command and reports a mirrored session,
+> and otherwise returns `chat_not_configured`/`chat_gated`/`chat_not_mirrored`.
 
 ### 3.1 The VOWP 0.5 endpoint (preferred)
 
@@ -926,7 +929,7 @@ not guess:
 | Setup assistant on the bundled engine | Can land now | The live probe §2.5 pins the v1 API details; no VOWP dependency |
 | `global`/`project` on the server, VOWP endpoint | Blocked | VOWP `0.5` `orchestrator endpoint` (not shipped) |
 | `global`/`project` on the server, app-owned forward | Not approved | Owner decision A (2026-11-19): designed but declined; Server chat waits for VOWP `0.5` `orchestrator endpoint` |
-| `global`/`project` Local on a VOWP local orchestrator | Blocked | `vowp agent orchestrator endpoint` (0.5) and a VOWP way to use the StackSpirit Engine as the app binary; `vowp 0.4.0` has no `agent surface` command and `orchestrator new` has no app-path flag |
+| `global`/`project` Local on a VOWP local orchestrator | Implemented behind the VOWP 0.5 command gate; fake-`vowp` tests only here | `vowp agent orchestrator endpoint` (0.5). The installed `vowp 0.4.0` binary has no such subcommand, so the typed result there is `chat_not_configured`; the app attaches to the reported endpoint and never uses the bundled engine for this session |
 | Real Local/Server switch | Blocked | `vowp orchestrator move` (0.5) and HANDOFF §5 step 6 |
 | Live chat through the bundled engine for setup | Ready for the core job | §2 |
 
@@ -1183,6 +1186,21 @@ Semantics:
   session, the error is `chat_not_mirrored`; if the mapping is stale, `session_lost`.
   `resume: false` on a `global`/`project` session is a gate ("create a new orchestrator
   session in VOWP"), not a new unmirrored local session.
+- **Local `global`/`project` endpoint source (ss-61).** For `location: "local"`,
+  `start`/`attach` run `vowp agent orchestrator endpoint <ORCHESTRATOR_NAME> --json` —
+  `global` for `ChatSessionId::Global`, the project name for
+  `ChatSessionId::Project(name)` — with argv only, a bounded 10 s budget and a minimal
+  child environment (`PATH`, `HOME`, `VOWP_AGENT_HOME` only; no inherited provider key
+  or `OPENCODE_AUTH_CONTENT`). They attach to the reported loopback `url` and
+  `native_session_id`; they never call `ensure_engine`, create a native session or copy
+  the setup model into the orchestrator turn. This path is conditional on the installed
+  VOWP providing the subcommand: VOWP `0.5` ships it and `0.4.0` does not, so a missing
+  or failed command is `chat_not_configured`, a null `url`, a non-`running`/`degraded`
+  `state` or a non-`opencode` `app` is `chat_gated`, and a missing native session or a
+  different `session_id` than the attached log is `chat_not_mirrored`. The endpoint
+  URL/host/port, auth value, VOWP `session_id` and `native_session_id` stay core-only;
+  no chat DTO, error, log or report carries them. This bullet opens only the Local
+  endpoint. Server remains gated pending the owner's transport decision (A).
 - `attach` never creates. A missing/stale mapping is `chat_not_started` or
   `session_lost`, not a silent new session.
 - `send` rejects while `streaming` (`chat_busy`). There is no queue. The composer is
@@ -1626,11 +1644,11 @@ The UI shows `errorTitle(error)` plus the message and hint; it never shows a raw
 
 | State / code | Trigger | UI | Retry |
 |---|---|---|---|
-| `gate` — `chat_gated` | Server path has no VOWP 0.5 endpoint (the app-owned forward is not approved); local orchestrator has no VOWP endpoint; VOWP `0.5` missing | Gate banner naming the exact missing piece; composer disabled | After VOWP 0.5 |
+| `gate` — `chat_gated` | Server path has no VOWP 0.5 endpoint (the app-owned forward is not approved); a Local endpoint reports a null `url`, a non-`running`/`degraded` `state` or a non-`opencode` `app` | Gate banner naming the exact missing piece; composer disabled | After the gate clears |
 | `gate` — `chat_unavailable` | `bridge.chat` is absent (Web) or the bridge cannot run chat | "Chat is not available in this client." | No |
-| `gate` — `chat_unsupported_app` | The orchestrator's `app` is `claude-code` or `chat`, not `opencode` | "This orchestrator uses <app>; the OpenCode chat contract does not apply." | No (different app) |
-| `gate` — `chat_not_configured` | No orchestrator card for the global/project session | "Create the orchestrator in VOWP first." | Refresh after creation |
-| `gate` — `chat_not_mirrored` | The endpoint has no `native_session_id` | "This orchestrator has no mirrored OpenCode session yet." | After VOWP attaches/mirrors |
+| `gate` — `chat_gated` (unsupported app) | The orchestrator's `app` is `claude-code` or `chat`, not `opencode` | "This orchestrator uses <app>; the OpenCode chat contract does not apply." | No (different app) |
+| `gate` — `chat_not_configured` | No local endpoint: the installed VOWP has no `agent orchestrator endpoint`, the local agent is not enrolled/paired, or no orchestrator card exists | "Create the orchestrator in VOWP first." | After enrolling with VOWP or creating the orchestrator |
+| `gate` — `chat_not_mirrored` | The endpoint has no usable `native_session_id`, or reports a different `session_id` than the attached home log | "This orchestrator has no mirrored OpenCode session yet." | After VOWP attaches/mirrors |
 | `gate` — `path_unmapped` | The project has no local path map for a local session | "Map the project path in Engine → Local orchestrator paths." | After adding the path |
 | `gate` — `local_agent_not_connected` | The Mac agent is not enrolled/connected for a local endpoint | "Connect the local agent in Engine → Local orchestrator." | After the agent connects |
 | `engine` — `engine_not_ready` | The engine is starting/stopped/degraded after the wait | "StackSpirit Engine is not ready." with the redacted reason | Retry after Restart |
@@ -1690,14 +1708,19 @@ error object.
 
 ### 7.2 Blocked on VOWP 0.5
 
-The transport code for these paths can be built and fake-tested behind the `chat_gated`
-switch; what is blocked is enabling the live path and claiming it works.
+The Server transport code can be built and fake-tested behind the `chat_gated` switch;
+what is blocked is enabling the live path and claiming it works.
 
-- Server `global`/`project` chat through the VOWP endpoint.
-- Local `global`/`project` chat through a VOWP local orchestrator endpoint.
-- A VOWP-supported way to use the bundled StackSpirit Engine as the local orchestrator app
-  (`vowp orchestrator new --node ... --app opencode` resolves `opencode` from the agent's
-  `PATH`; the bundled sidecar is not on it, and there is no app-path flag in 0.4.0).
+- Server `global`/`project` chat through the VOWP endpoint and the owner's transport
+  decision (A).
+- Live verification of Local `global`/`project` chat. The attach code landed (ss-61) and
+  is fake-tested against `vowp agent orchestrator endpoint`, but the installed
+  `vowp 0.4.0` on this host has no such subcommand. A missing command is
+  `chat_not_configured`; an owner Mac with VOWP `0.5` must run §9 before anyone claims
+  the live path works.
+- The bundled StackSpirit Engine is **not** the VOWP orchestrator app. VOWP runs its own
+  `opencode serve` and reports that endpoint; the setup assistant keeps the bundled
+  engine.
 - `vowp orchestrator move` and the real Local/Server switch (HANDOFF §5 step 6).
 - `vowp project add --git/--init/--orchestrator` for the `＋ Add project` dialog (not chat,
   but it shares the `ProjectRequest` type moved here).
