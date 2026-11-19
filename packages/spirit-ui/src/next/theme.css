@@ -363,6 +363,11 @@
 .nx-menu__item:focus-visible,
 .nx-choice:focus-visible,
 .nx-send:focus-visible,
+.nx-composer__setup:focus-visible,
+.nx-composer__connect:focus-visible,
+.nx-composer__start:focus-visible,
+.nx-model-picker__trigger:focus-visible,
+.nx-context-meter:focus-visible,
 .nx-segment button:focus-visible,
 .nx-tabs button:focus-visible,
 .nx-suggest button:focus-visible,
@@ -1170,9 +1175,45 @@ button.nx-node:focus-visible {
 }
 
 .nx-chat {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* The empty session: a calm, vertically centred hero, never a password wall. */
+.nx-chat--hero {
+  align-items: center;
+  overflow-y: auto;
+  padding: 24px 0;
+}
+
+/* Auto margins centre the hero when it fits and still let a short viewport
+   scroll to the top instead of clipping it. */
+.nx-chat--hero .nx-hero {
+  margin-block: auto;
+}
+
+.nx-chat__scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+
+/* The scroll area stays mounted (hidden) in hero mode; see ChatView. */
+.nx-chat--hero .nx-chat__scroll {
+  display: none;
+}
+
+/* Keyboard users can focus and scroll the transcript (WCAG 2.1.1). */
+.nx-chat__scroll:focus-visible {
+  outline: 2px solid var(--nx-green);
+  outline-offset: -2px;
+}
+
+.nx-saved-server-slot {
+  flex: none;
 }
 
 .nx-chat__inner {
@@ -1240,7 +1281,7 @@ button.nx-node:focus-visible {
   flex-wrap: wrap;
   justify-content: center;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 0;
 }
 
 .nx-suggest button {
@@ -1258,10 +1299,67 @@ button.nx-node:focus-visible {
   border-color: var(--nx-green);
 }
 
+/* Empty-session hero: mark + 26/32 title, the composer, then prompt chips. */
+.nx-hero {
+  display: grid;
+  align-content: center;
+  gap: 12px;
+  width: min(760px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 4px 0 12px;
+}
+
+.nx-hero--docked {
+  flex: none;
+  gap: 0;
+  padding: 0 0 10px;
+}
+
+.nx-hero__head {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  text-align: center;
+}
+
+.nx-hero__headline {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.nx-hero__title {
+  margin: 0;
+  font-size: 26px;
+  line-height: 32px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.nx-hero__lede {
+  max-width: 520px;
+  margin: 0;
+  color: var(--nx-muted);
+  font-size: 14px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.nx-hero > .nx-saved-server {
+  width: 100%;
+  margin: 0;
+}
+
+/* Elevated composer card (DeepSeek Harness InputBar geometry, Meadow brand). */
+.nx-composer-shell {
+  display: grid;
+}
+
 .nx-composer {
   flex: none;
-  width: min(760px, calc(100% - 40px));
-  margin: 8px auto 18px;
+  width: 100%;
+  margin: 0;
   border: 1px solid var(--nx-line-strong);
   border-radius: var(--nx-radius-lg);
   background: var(--nx-panel);
@@ -1275,14 +1373,15 @@ button.nx-node:focus-visible {
 .nx-composer textarea {
   display: block;
   width: 100%;
-  min-height: 52px;
+  min-height: 24px;
   max-height: 200px;
-  padding: 14px 16px 4px;
+  padding: 8px 14px 0;
   border: 0;
   background: transparent;
   color: var(--nx-text);
-  font-size: 15px;
-  line-height: 1.5;
+  font: inherit;
+  font-size: 14px;
+  line-height: 24px;
   resize: none;
   outline: none;
 }
@@ -1291,33 +1390,296 @@ button.nx-node:focus-visible {
   color: var(--nx-faint);
 }
 
-.nx-composer__bar {
+.nx-composer__controls {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px 8px 12px;
+  min-height: 40px;
+  margin-top: 12px;
+  padding: 0 8px 8px;
 }
 
-.nx-composer__spacer {
+.nx-composer__left {
+  display: flex;
   flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.nx-composer__right {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.nx-composer__model-static,
+.nx-composer__setup,
+.nx-composer__connect,
+.nx-composer__start {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--nx-muted);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.nx-composer__model-static {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+button.nx-composer__setup,
+button.nx-composer__connect,
+button.nx-composer__start {
+  cursor: pointer;
+}
+
+button.nx-composer__setup:hover,
+button.nx-composer__connect:hover,
+button.nx-composer__start:hover {
+  background: var(--nx-hover);
+  color: var(--nx-text);
+}
+
+.nx-composer__setup {
+  color: var(--nx-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.nx-model-picker {
+  max-width: 62%;
+  min-width: 0;
+}
+
+.nx-model-picker__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--nx-muted);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.nx-model-picker__trigger:hover:not(:disabled),
+.nx-model-picker__trigger[aria-expanded="true"] {
+  background: var(--nx-hover);
+  color: var(--nx-text);
+}
+
+.nx-model-picker__trigger:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.nx-model-picker__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nx-model-picker__chevron {
+  flex: none;
+  color: var(--nx-faint);
+}
+
+.nx-model-menu {
+  min-width: 272px;
+  max-width: 380px;
+}
+
+.nx-model-menu__item[aria-checked="true"] {
+  background: var(--nx-raised);
 }
 
 .nx-send {
   display: grid;
+  flex: none;
   place-items: center;
   width: 32px;
   height: 32px;
+  padding: 0;
   border: 0;
   border-radius: 50%;
   background: var(--nx-btn-bg);
   color: var(--nx-btn-ink);
-  font-size: 16px;
   cursor: pointer;
+}
+
+.nx-send:hover:not(:disabled) {
+  filter: brightness(1.05);
 }
 
 .nx-send:disabled {
   background: var(--nx-line-strong);
+  color: var(--nx-faint);
   cursor: not-allowed;
+  filter: none;
+}
+
+.nx-send__stop {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.nx-send__spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, var(--nx-btn-ink) 35%, transparent);
+  border-top-color: var(--nx-btn-ink);
+  border-radius: 50%;
+  animation: nx-spin 0.8s linear infinite;
+}
+
+@keyframes nx-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nx-send__spinner {
+    animation-duration: 2.4s;
+  }
+}
+
+/* Dock row under the card; always 22 px so live metrics never shift the layout. */
+.nx-composer-dock {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 22px;
+  padding: 2px 8px 0;
+}
+
+.nx-context {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.nx-context-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--nx-muted);
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.nx-context-meter:hover,
+.nx-context-meter[aria-expanded="true"] {
+  background: var(--nx-hover);
+  color: var(--nx-text);
+}
+
+.nx-context-meter__track {
+  stroke: var(--nx-line-strong);
+}
+
+.nx-context-meter__value {
+  stroke: var(--nx-green);
+}
+
+.nx-context__pop {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  min-width: 250px;
+  padding: 10px 12px;
+  border: 1px solid var(--nx-line);
+  border-radius: 12px;
+  background: var(--nx-panel);
+  box-shadow: var(--nx-shadow-pop);
+}
+
+.nx-context__title {
+  margin-bottom: 6px;
+  color: var(--nx-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.nx-context__rows {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.nx-context__rows > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 12px;
+}
+
+.nx-context__rows dt {
+  color: var(--nx-muted);
+}
+
+.nx-context__rows dd {
+  margin: 0;
+  color: var(--nx-text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.nx-usage-pills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.nx-usage-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--nx-raised);
+  color: var(--nx-muted);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 /* Chat state machine, gate and error states. */
@@ -1354,19 +1716,6 @@ button.nx-node:focus-visible {
   color: var(--nx-danger);
 }
 
-.nx-empty-chat--compact {
-  gap: 6px;
-  padding-top: 24px;
-}
-
-.nx-empty-chat--compact h2 {
-  font-size: 18px;
-}
-
-.nx-empty-chat--compact .nx-suggest {
-  margin-top: 2px;
-}
-
 .nx-suggest button:disabled {
   border-color: var(--nx-line);
   cursor: not-allowed;
@@ -1387,28 +1736,6 @@ button.nx-node:focus-visible {
 
 .nx-composer--disabled textarea::placeholder {
   color: var(--nx-muted);
-}
-
-.nx-composer__model {
-  max-width: 55%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.nx-stop {
-  height: 28px;
-  padding: 0 10px;
-  border: 1px solid var(--nx-danger);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--nx-danger);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.nx-stop:hover {
-  background: var(--nx-danger-soft);
 }
 
 .nx-msg__preview {

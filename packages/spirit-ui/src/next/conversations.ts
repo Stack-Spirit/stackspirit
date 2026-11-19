@@ -103,6 +103,8 @@ interface ConversationState {
   send: (session: SessionId, text: string) => Promise<void>;
   /** Abort the current turn through `bridge.chat`; never stops an engine or host. */
   stop: (session: SessionId) => Promise<void>;
+  /** Switch the setup assistant's model inline; an orchestrator-owned session rejects. */
+  setModel: (session: SessionId, modelId: string) => Promise<void>;
   /** Page older messages into the transcript using the opaque cursor. */
   loadEarlier: (session: SessionId) => Promise<void>;
   /** Preview-only project creation demo; a real bridge shows the VOWP gate. */
@@ -488,23 +490,8 @@ function applyChatEvent(bridge: SpiritBridge, event: ChatEvent): void {
   if (gap) void backfill(bridge, session);
 }
 
-async function onboardingIncomplete(bridge: SpiritBridge): Promise<boolean> {
-  const onboarding = bridge.onboarding;
-  if (!onboarding?.installedHosts) return true;
-  try {
-    return (await onboarding.installedHosts()).length === 0;
-  } catch {
-    // The secure card is app-owned; if the read fails, still offer it.
-    return true;
-  }
-}
-
 function hasSecureServerForm(messages: ChatMessageView[] | undefined): boolean {
   return (messages ?? []).some((message) => message.card?.kind === "secure-server");
-}
-
-function hasSecureReceipt(messages: ChatMessageView[] | undefined): boolean {
-  return (messages ?? []).some((message) => message.card?.kind === "secure-received");
 }
 
 function secureServerMessage(): ChatMessageView {
@@ -535,37 +522,12 @@ function removeSecureServerForm(): void {
 }
 
 /**
- * Seeds the app-owned secure-server card for setup when no server profile is saved
- * and onboarding has not completed. It is not a model reply and carries no secret.
- * Once a profile is saved the owner must ask to add a server explicitly.
+ * A saved profile never shows the new-server password card unasked. The card is
+ * seeded only by `requestSecureServerCard` when the owner chooses Connect server,
+ * so an empty setup chat opens as a calm hero instead of a password wall.
  */
-async function ensureSetupCard(bridge: SpiritBridge): Promise<void> {
-  const session: SessionId = "setup";
-  if (useFleetStore.getState().hosts.length > 0) {
-    removeSecureServerForm();
-    return;
-  }
-  if (hasSecureServerForm(useConversations.getState().messages[session])) return;
-  if (hasSecureReceipt(useConversations.getState().messages[session])) return;
-  if (!(await onboardingIncomplete(bridge))) return;
-  // A profile may have been saved while the onboarding read was pending.
-  if (useFleetStore.getState().hosts.length > 0) {
-    removeSecureServerForm();
-    return;
-  }
-  if (hasSecureServerForm(useConversations.getState().messages[session])) return;
-
-  const card = secureServerMessage();
-  useConversations.setState((state) => {
-    if (useFleetStore.getState().hosts.length > 0) return {};
-    if (hasSecureServerForm(state.messages[session])) return {};
-    return {
-      messages: {
-        ...state.messages,
-        [session]: [card, ...(state.messages[session] ?? [])],
-      },
-    };
-  });
+function pruneSetupCardWhenSaved(): void {
+  if (useFleetStore.getState().hosts.length > 0) removeSecureServerForm();
 }
 
 async function doOpen(
@@ -588,7 +550,7 @@ async function doOpen(
       error: chatUnavailableError(),
       last_event_at: nowIso(),
     });
-    if (session === "setup") await ensureSetupCard(bridge);
+    if (session === "setup") pruneSetupCardWhenSaved();
     return null;
   }
 
@@ -620,7 +582,7 @@ async function doOpen(
       const after = useConversations.getState().views[session] ?? view;
       setView(session, { ...after, state: "error", error, attached: false });
     }
-    if (session === "setup") await ensureSetupCard(bridge);
+    if (session === "setup") pruneSetupCardWhenSaved();
     return view;
   } catch (caught) {
     patchView(session, {
@@ -629,7 +591,7 @@ async function doOpen(
       error: toSpiritError(caught),
       last_event_at: nowIso(),
     });
-    if (session === "setup") await ensureSetupCard(bridge);
+    if (session === "setup") pruneSetupCardWhenSaved();
     return null;
   }
 }
@@ -732,6 +694,22 @@ export const useConversations = create<ConversationState>((set, get) => ({
     try {
       const view = await chat.stop(session);
       setView(session, { ...view });
+    } catch (caught) {
+      patchView(session, {
+        state: "error",
+        error: toSpiritError(caught),
+        last_event_at: nowIso(),
+      });
+    }
+  },
+
+  setModel: async (session, modelId) => {
+    const bridge = currentBridge();
+    const chat = bridge?.chat;
+    if (!chat?.setModel) return;
+    try {
+      const view = await chat.setModel(session, modelId);
+      setView(session, { ...view, error: null });
     } catch (caught) {
       patchView(session, {
         state: "error",

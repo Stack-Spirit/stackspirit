@@ -12,6 +12,8 @@ sessions, what is real versus preview, and what to do next. `AGENTS.md` still ap
 | Desktop shell | `packages/spirit-ui/src/next/NextShell.tsx` is the only shell; the classic frame and its classic-shell switch were retired (`ss-52`, `aba207d`) |
 | Theme tokens and all shell CSS | `packages/spirit-ui/src/next/theme.css` |
 | Shell unit tests | `packages/spirit-ui/src/test/next/nextShell.test.tsx` |
+| Composer, hero and context meter | `packages/spirit-ui/src/next/{ComposerBar,EmptyHero,ContextMeter}.tsx` |
+| Composer unit tests | `packages/spirit-ui/src/test/next/composer.test.tsx` |
 | Shell e2e + axe | `apps/spirit-desktop/e2e/next-shell.spec.ts` |
 | Brand sheet, logo sources, icon builders | `design/brand/` (see its `README.md`) |
 | App icons | `apps/spirit-desktop/src-tauri/icons/` (built by `design/brand/tools/app_icon.py`) |
@@ -199,6 +201,36 @@ with no profile keeps the welcome page and its secure card unchanged. If the eng
 not ready, the chat shows the existing typed `engine_not_ready` error and its
 Settings → Engine hint, and never invents a reply.
 
+**Meadow composer and free-model default (`ss-73`).** Every chat now uses one
+elevated `ComposerBar` (`packages/spirit-ui/src/next/ComposerBar.tsx`). An empty
+session — setup, global or a project — opens as a centred `EmptyHero` with the
+deadpan `SpiritMark`, a 26/32 calm title (`StackSpirit` for setup), the saved-server
+card when one applies, the same composer card, and prompt chips. The composer stays
+mounted when the first turn arrives, so it moves to the bottom-docked layout without
+losing focus. **An empty setup chat no longer injects the "Secure server details"
+password card:** the app-owned card appears only after the owner chooses the compact
+**＋ Connect server** action in the composer (or **Add another server** on a saved
+server card). The card itself is unchanged: one-time password, fingerprint
+confirmation, verified key-only install, and no secret in the transcript.
+
+The composer's left control row has an inline model picker. The setup assistant
+auto-selects the first verified included OpenCode runtime model (`ss-72`), labelled
+honestly as `OpenCode free · <label>`; a BYOK choice is `BYOK · <label>` and an
+orchestrator-owned session shows its own choice. The picker lists only
+`view.available_models` and switches through `bridge.chat.setModel`; no Settings trip
+is needed. A compact **Set up a model** link appears only when the engine genuinely
+reports zero usable models (an empty array), and Send stays disabled in that state.
+The right side is the single 32×32 circular primary button: the arrow in
+`--nx-btn-ink` (white on the light theme's darker green) when ready, a square Stop
+while streaming, and a spinner while a turn is being accepted.
+
+Below the card, `.nx-composer-dock` always reserves 22 px. `ContextMeter.tsx` draws a
+14 px ring (r=5.5, 2 px stroke) with a percentage and opens a popover with
+`used / limit` plus the reported input, output, cache-read and turn counts. Compact
+stats pills beside it show turns, token totals and cache reads. Every value comes from
+`view.usage`; the ring renders nothing unless both used tokens and a context limit are
+reported, and an absent counter is omitted rather than shown as zero.
+
 Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 - Assistant replies in the `MockBridge` preview scenarios, and the agent opening the
   details panel. Every preview assistant message starts with `Preview reply.` and carries
@@ -372,14 +404,23 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
 5. **Owner style advice** to be turned into a UI job when supplied.
 6. **Live owner smoke test** stays an owner step: the real endpoint lives on the owner's Mac, so a
    server-side worker cannot exercise it.
+7. **Meadow composer and free-model default — landed (`ss-73`).** Empty sessions open on a
+   centred hero instead of a password wall; the secure server card is one explicit **＋ Connect
+   server** action away. The inline model picker shows `OpenCode free · <label>` for an included
+   runtime model, switches through `bridge.chat.setModel`, and only falls back to a Settings →
+   Engine link when the engine reports zero usable models. The context ring, exact usage popover
+   and stats pills read `view.usage` and stay hidden until the engine reports both used tokens
+   and a limit. Component tests cover all five cases and the Meadow e2e specs remain axe WCAG 2.2
+   AA green in light and dark.
 
 ## 6. Known gaps and cautions
 
-- e2e status (updated 2026-11-19): the Meadow desktop suite passed 18/18 on two
-  consecutive runs (`ss-56`, `a80775e`; 2.6 m and 1.9 m, zero failed, skipped or flaky,
-  no waivers and no spec or config change). The specs are `next-shell`, `meadow-flows`,
-  `meadow-bridge-flows`, `sessions-asif`, `local-orchestrator-gated` and
-  `local-orchestrator-ready`.
+- e2e status (updated 2026-11-19): the Meadow desktop suite passed **23/23** in the
+  `ss-73` run (2.3 m, zero failed, skipped or flaky, no waivers). That includes the new
+  empty-hero/inline-model/context-meter axe case in both light and dark. The specs are
+  `next-shell`, `meadow-flows`, `meadow-bridge-flows`, `meadow-cluster`, `sessions-asif`,
+  `local-orchestrator-gated` and `local-orchestrator-ready`. The earlier `ss-56`
+  (`a80775e`) run recorded 18/18 before the composer work and before the cluster spec.
 - **Cluster product gaps.** `ClusterHealth` carries no last-backup timestamp, so freshness
   is shown as the backup policy's maximum age at promotion, not an observed backup time.
   Promotion requires the old Home to answer `vowp down --drain`, so it cannot rescue an

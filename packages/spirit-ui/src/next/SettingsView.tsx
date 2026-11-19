@@ -12,6 +12,8 @@ export interface SettingsViewProps {
   theme: ThemePreference;
   onTheme: (theme: ThemePreference) => void;
   onOpenRaw?: () => void;
+  /** Open the Engine card on mount (the composer's "Set up a model" link). */
+  initialAdvanced?: boolean;
 }
 
 /**
@@ -19,12 +21,17 @@ export interface SettingsViewProps {
  * Advanced reuses the existing Engine view (models, keys, harness, capability gates)
  * and the host manager, so their logic is unchanged.
  */
-export function SettingsView({ theme, onTheme, onOpenRaw }: SettingsViewProps) {
+export function SettingsView({
+  theme,
+  onTheme,
+  onOpenRaw,
+  initialAdvanced = false,
+}: SettingsViewProps) {
   const engine = useEngine();
   const openSessions = useFleetStore((state) => state.openSessions);
   const sessionsAvailable = useFleetStore((state) => Boolean(state.bridge?.sessions));
   const connected = useConnection().state === "connected";
-  const [advanced, setAdvanced] = useState(false);
+  const [advanced, setAdvanced] = useState(initialAdvanced);
   const model = engine?.selected_model?.label ?? engine?.selected_model?.id ?? "No model selected";
 
   return (

@@ -71,14 +71,17 @@ describe("NextShell", () => {
     expect(document.documentElement.dataset.ui).toBe("next");
   });
 
-  it("sends setup chat through bridge.chat and labels the preview reply", async () => {
+  it("opens a calm empty hero and sends setup chat through bridge.chat", async () => {
     const user = userEvent.setup();
     const { bridge } = await renderNext("empty");
     await user.click(screen.getByRole("button", { name: /Set up with AI/ }));
 
     expect(screen.getByTestId("session-location")).toHaveTextContent("Local");
-    const form = await screen.findByRole("form", { name: "Secure server details" });
-    expect(form).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "StackSpirit", level: 2 })).toBeInTheDocument();
+    // No password wall: the secure card waits for an explicit Connect server.
+    expect(screen.queryByRole("form", { name: "Secure server details" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("One-time password from your provider")).not.toBeInTheDocument();
+
     const send = vi.spyOn(bridge.chat!, "send");
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "I have a new VPS" })).toBeEnabled(),
@@ -91,7 +94,11 @@ describe("NextShell", () => {
     expect(await screen.findByText(/Preview reply\./)).toBeInTheDocument();
     expect(screen.getByTestId("preview-tag")).toHaveTextContent("Preview");
 
-    // The secure card is app-owned, not a model reply, and no profile is shown.
+    // The secure card is still app-owned, not a model reply, and only appears on ask.
+    await user.click(screen.getByRole("button", { name: /Connect server/ }));
+    expect(
+      await screen.findByRole("form", { name: "Secure server details" }),
+    ).toBeInTheDocument();
     const setupMessages = useConversations.getState().messages.setup ?? [];
     expect(setupMessages[0]?.card).toEqual({ kind: "secure-server" });
     expect(setupMessages[0]?.origin).toBe("app");
@@ -187,7 +194,9 @@ describe("NextShell", () => {
     await renderNext("empty");
     await user.click(screen.getByRole("button", { name: /Set up with AI/ }));
     expect(screen.getByTestId("session-location")).toHaveTextContent("Local");
+    expect(screen.queryByRole("form", { name: "Secure server details" })).not.toBeInTheDocument();
 
+    await user.click(screen.getByTestId("composer-connect-server"));
     const form = await screen.findByRole("form", { name: "Secure server details" });
     await user.type(within(form).getByLabelText("Server address"), "203.0.113.50");
     await user.type(within(form).getByLabelText("One-time password from your provider"), "hunter2-secret");
@@ -287,7 +296,7 @@ describe("NextShell", () => {
 
     await waitFor(() => expect(screen.getByTestId("session-state")).toHaveTextContent("Replying…"));
     expect(composer).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
 
     const stop = vi.spyOn(bridge.chat!, "stop");
     await user.click(screen.getByRole("button", { name: "Stop" }));

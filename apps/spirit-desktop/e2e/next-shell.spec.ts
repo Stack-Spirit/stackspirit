@@ -39,23 +39,58 @@ test("welcome with no saved server meets WCAG 2.2 AA in light and dark", async (
   }
 });
 
-test("setup assistant sends through chat and keeps the password out", async ({ page }) => {
+test("setup assistant opens a calm hero, then sends without a password wall", async ({
+  page,
+}) => {
   await page.goto(url("empty"));
   await page.getByRole("button", { name: /Set up with AI/ }).click();
   await expect(page.getByTestId("session-location")).toContainText("Local");
+  await expect(page.getByRole("heading", { name: "StackSpirit", level: 2 })).toBeVisible();
+  await expect(page.getByTestId("composer-model")).toContainText("OpenCode free ·");
+  // The secure card appears only when the owner asks to connect a new server.
+  await expect(page.getByRole("form", { name: "Secure server details" })).toHaveCount(0);
   await expect(page.getByRole("textbox", { name: "Message" })).toBeEnabled();
 
   await page.getByRole("button", { name: "I have a new VPS" }).click();
   await expect(page.getByText(/Preview reply\./)).toBeVisible();
   await expect(page.getByTestId("preview-tag")).toBeVisible();
 
+  await page.getByTestId("composer-connect-server").click();
   const form = page.getByRole("form", { name: "Secure server details" });
+  await expect(form).toBeVisible();
   await form.getByLabel("Server address").fill("203.0.113.50");
   await form.getByLabel("One-time password from your provider").fill("not-a-real-secret");
   await expectNoWcagViolations(page);
   await form.getByRole("button", { name: "Connect securely" }).click();
   await expect(page.getByText(/Server details received for 203.0.113.50/)).toBeVisible();
   await expect(page.getByText("not-a-real-secret")).toHaveCount(0);
+});
+
+test("empty hero, inline model picker and context meter meet WCAG 2.2 AA", async ({
+  page,
+}) => {
+  for (const theme of ["light", "dark"] as const) {
+    await page.goto(url("empty", theme));
+    await page.getByRole("button", { name: /Set up with AI/ }).click();
+    await expect(page.getByRole("heading", { name: "StackSpirit", level: 2 })).toBeVisible();
+    await expect(page.getByRole("form", { name: "Secure server details" })).toHaveCount(0);
+    await expect(page.getByTestId("context-meter")).toContainText("18%");
+    await expect(page.getByTestId("usage-pill-turns")).toContainText("3 turns");
+    await expectNoWcagViolations(page);
+
+    await page.getByTestId("composer-model").click();
+    const models = page.getByRole("menu", { name: "Choose a model" });
+    await expect(models).toBeVisible();
+    await expect(models).toContainText("OpenCode free · DeepSeek V4.1 Flash Free");
+    await expectNoWcagViolations(page);
+    await page.keyboard.press("Escape");
+
+    await page.getByTestId("context-meter").click();
+    const usage = page.getByRole("group", { name: "Context usage" });
+    await expect(usage).toContainText("23,600 / 128,000 tokens");
+    await expectNoWcagViolations(page);
+    await page.keyboard.press("Escape");
+  }
 });
 
 test("server chat shows the honest VOWP gate, not a fake reply", async ({ page }) => {

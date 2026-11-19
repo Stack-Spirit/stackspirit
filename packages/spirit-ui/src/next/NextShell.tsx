@@ -77,6 +77,13 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const [view, setView] = useState<NextView>({ kind: "session", session: "global" });
   const [setupChosen, setSetupChosen] = useState(false);
   const [adding, setAdding] = useState(false);
+  // "Set up a model" in the composer opens Settings with the Engine card visible;
+  // opening Settings normally keeps it folded.
+  const [settingsEngine, setSettingsEngine] = useState(false);
+  const navigate = (next: NextView) => {
+    if (next.kind === "settings") setSettingsEngine(false);
+    setView(next);
+  };
 
   useEffect(() => {
     let disposed = false;
@@ -157,7 +164,14 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
 
   let main;
   if (view.kind === "settings") {
-    main = <SettingsView theme={theme} onTheme={setTheme} onOpenRaw={() => setRawOpen(true)} />;
+    main = (
+      <SettingsView
+        theme={theme}
+        onTheme={setTheme}
+        onOpenRaw={() => setRawOpen(true)}
+        initialAdvanced={settingsEngine}
+      />
+    );
   } else if (view.kind === "server" && serverLabel) {
     main = (
       <ServerPage
@@ -180,6 +194,10 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
         serverLabel={serverLabel}
         savedServer={setupServer}
         onOpenWorkers={openWorkers}
+        onOpenEngineSettings={() => {
+          setSettingsEngine(true);
+          setView({ kind: "settings" });
+        }}
       />
     );
   } else if (activeHost) {
@@ -205,7 +223,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
     >
       <Sidebar
         view={view}
-        onNavigate={setView}
+        onNavigate={navigate}
         onAddServer={() => setAdding(true)}
         onAddProject={() => setAddingProject(true)}
         onFormCluster={() => setClusterFormOpen(true)}

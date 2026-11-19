@@ -1,19 +1,23 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 
 import { errorTitle, toSpiritError, type SpiritError } from "../bridge/errors";
 import type {
+  ChatModelView,
   ChatSessionState,
+  FleetView,
   HostDraft,
   HostKeyPin,
   HostKeyScan,
   HostProfile,
 } from "../bridge/wire";
 import { useFleet, useFleetStore } from "../state/fleetStore";
+import { ComposerBar } from "./ComposerBar";
 import {
   useConversations,
   type ChatMessageView,
   type SessionId,
 } from "./conversations";
+import { EmptyHero } from "./EmptyHero";
 import { PageHeader } from "./PageHeader";
 import { SpiritMark } from "./SpiritMark";
 import { openInbox, projectSummaries } from "./summary";
@@ -25,6 +29,8 @@ export interface ChatViewProps {
   /** A saved profile that may be shown read-only in the setup chat without connecting. */
   savedServer?: HostProfile | null;
   onOpenWorkers?: (project: string) => void;
+  /** Opens Settings → Engine for the honest zero-model state. */
+  onOpenEngineSettings?: () => void;
 }
 
 function sessionTitle(session: SessionId): string {
@@ -91,11 +97,13 @@ export function ChatView({
   serverLabel,
   savedServer = null,
   onOpenWorkers,
+  onOpenEngineSettings,
 }: ChatViewProps) {
   const messages = useConversations((state) => state.messages[session]) ?? [];
   const view = useConversations((state) => state.views[session]) ?? null;
   const send = useConversations((state) => state.send);
   const stop = useConversations((state) => state.stop);
+  const setModel = useConversations((state) => state.setModel);
   const open = useConversations((state) => state.open);
   const restart = useConversations((state) => state.restart);
   const loadEarlier = useConversations((state) => state.loadEarlier);
@@ -104,6 +112,7 @@ export function ChatView({
   const loadingEarlier = useConversations((state) => state.loadingEarlier[session] ?? false);
   const truncated = useConversations((state) => state.truncated[session] ?? false);
   const endRef = useRef<HTMLDivElement>(null);
+  const fleet = useFleet();
   const [newServerRequested, setNewServerRequested] = useState(false);
   const project = session.startsWith("project:") ? session.slice("project:".length) : null;
   const state = view?.state ?? "idle";
@@ -117,6 +126,12 @@ export function ChatView({
   }, [messages.length]);
 
   const isSetup = session === "setup";
+  const models: ChatModelView[] | undefined = view?.available_models;
+  // The model link is honest: it appears only when the engine reports zero usable
+  // models, not when an older bridge simply cannot list them.
+  const noModelsReported = isSetup && models !== undefined && models.length === 0;
+  // A ready setup session without a model cannot send. The old bridge case still
+  // disables send even though there is no list to prove why.
   const missingModel = isSetup && state === "ready" && !view?.model;
   const canChat = state === "ready" && !missingModel;
   // A saved profile never shows the new-server password form unless the owner asks
@@ -134,6 +149,12 @@ export function ChatView({
   const hasReply = visibleMessages.some(
     (message) => message.origin === "model" || message.origin === "preview",
   );
+  const hero = !hasConversation && visibleMessages.length === 0;
+  const secureCardOpen = visibleMessages.some(
+    (message) => message.card?.kind === "secure-server",
+  );
+  const copy = heroCopy(session, savedServer, fleet);
+  const heroTitle = isSetup ? "StackSpirit" : sessionTitle(session);
   const error = view?.error ?? null;
   const gate = isGateError(error?.code, error?.message);
   const canRetry = Boolean(error?.retryable);
@@ -180,9 +201,6 @@ export function ChatView({
           : view?.state === "connecting"
             ? "Connecting…"
             : "Not connected";
-  const modelLabel =
-    view?.model?.label ??
-    (isSetup ? "Choose a model in Settings → Engine" : "Orchestrator default");
   const chipTitle =
     chipLocation === "local"
       ? isSetup
@@ -229,68 +247,107 @@ export function ChatView({
         ) : null}
       </PageHeader>
 
-      {isSetup && savedServer ? (
-        <SavedServerCard
-          host={savedServer}
-          onAddServer={() => {
-            setNewServerRequested(true);
-            requestSecureServerCard();
-          }}
-        />
-      ) : null}
-
-      <div className="nx-chat">
-        {hasEarlier || truncated ? (
-          <div className="nx-chat__earlier">
-            {hasEarlier ? (
-              <button
-                type="button"
-                className="nx-btn nx-btn--quiet nx-btn--sm"
-                onClick={() => void loadEarlier(session)}
-                disabled={loadingEarlier}
-              >
-                {loadingEarlier ? "Loading earlier messages…" : "Load earlier messages"}
-              </button>
-            ) : null}
-            {truncated ? (
-              <span className="nx-chat__note">Older messages may be missing from this transcript.</span>
-            ) : null}
-          </div>
-        ) : null}
-        {!hasConversation ? (
-          <EmptySession
-            session={session}
-            savedServer={savedServer}
-            onPick={(text) => void send(session, text)}
-            disabled={!canChat}
-            compact={visibleMessages.length > 0}
+      {/* A stable slot keeps the chat (and the composer inside it) mounted when the
+          saved-server card appears after the first turn. */}
+      <div className="nx-saved-server-slot">
+        {isSetup && savedServer && !hero ? (
+          <SavedServerCard
+            host={savedServer}
+            onAddServer={() => {
+              setNewServerRequested(true);
+              requestSecureServerCard();
+            }}
           />
         ) : null}
-        {visibleMessages.length > 0 ? (
-          <div className="nx-chat__inner">
-            {visibleMessages.map((message) => (
-              <Message key={message.id} session={session} message={message} />
-            ))}
-            <div ref={endRef} />
-          </div>
-        ) : (
-          <div ref={endRef} />
-        )}
       </div>
 
-      <Composer
-        placeholder={composerPlaceholder(session, state, missingModel)}
-        model={modelLabel}
-        modelMissing={missingModel}
-        disabled={!canChat}
-        streaming={state === "streaming"}
-        stopped={state === "stopped" || state === "idle"}
-        onSend={(text) => void send(session, text)}
-        onStop={() => void stop(session)}
-        onStart={() =>
-          void open(session, project, "local")
-        }
-      />
+      <div className={`nx-chat${hero ? " nx-chat--hero" : ""}`}>
+        {/* Kept in the tree (hidden in hero mode) so inserting the transcript never
+            remounts the composer that follows it. */}
+        <div
+          className="nx-chat__scroll"
+          role="group"
+          aria-label="Conversation"
+          tabIndex={0}
+        >
+          {hasEarlier || truncated ? (
+            <div className="nx-chat__earlier">
+              {hasEarlier ? (
+                <button
+                  type="button"
+                  className="nx-btn nx-btn--quiet nx-btn--sm"
+                  onClick={() => void loadEarlier(session)}
+                  disabled={loadingEarlier}
+                >
+                  {loadingEarlier ? "Loading earlier messages…" : "Load earlier messages"}
+                </button>
+              ) : null}
+              {truncated ? (
+                <span className="nx-chat__note">
+                  Older messages may be missing from this transcript.
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+          {visibleMessages.length > 0 ? (
+            <div className="nx-chat__inner">
+              {visibleMessages.map((message) => (
+                <Message key={message.id} session={session} message={message} />
+              ))}
+              <div ref={endRef} />
+            </div>
+          ) : (
+            <div ref={endRef} />
+          )}
+        </div>
+
+        <EmptyHero
+          active={hero}
+          title={heroTitle}
+          lede={copy.lede}
+          suggestions={copy.suggestions}
+          disabled={!canChat}
+          onPick={(text) => void send(session, text)}
+          above={
+            isSetup && savedServer ? (
+              <SavedServerCard
+                host={savedServer}
+                onAddServer={() => {
+                  setNewServerRequested(true);
+                  requestSecureServerCard();
+                }}
+              />
+            ) : null
+          }
+        >
+          <ComposerBar
+            session={session}
+            placeholder={composerPlaceholder(session, state, missingModel)}
+            model={view?.model ?? null}
+            models={models}
+            modelMissing={noModelsReported}
+            disabled={!canChat}
+            streaming={state === "streaming"}
+            sending={state === "connecting"}
+            stopped={state === "stopped" || state === "idle"}
+            usage={view?.usage}
+            onSend={(text) => send(session, text)}
+            onStop={() => void stop(session)}
+            onStart={() => void open(session, project, "local")}
+            onSelectModel={
+              view?.available_models !== undefined
+                ? (modelId) => void setModel(session, modelId)
+                : undefined
+            }
+            onConnectServer={() => {
+              setNewServerRequested(true);
+              requestSecureServerCard();
+            }}
+            showConnectServer={isSetup && !secureCardOpen}
+            onOpenEngineSettings={onOpenEngineSettings}
+          />
+        </EmptyHero>
+      </div>
 
       {error ? (
         <div
@@ -387,75 +444,58 @@ function SavedServerCard({ host, onAddServer }: { host: HostProfile; onAddServer
   );
 }
 
-function EmptySession({
-  session,
-  savedServer,
-  onPick,
-  disabled,
-  compact,
-}: {
-  session: SessionId;
-  savedServer: HostProfile | null;
-  onPick: (text: string) => void;
-  disabled: boolean;
-  compact: boolean;
-}) {
-  const fleet = useFleet();
-  let title: string;
-  let body: string;
-  let suggestions: string[];
-
+/**
+ * The short hero line and prompt chips. The setup copy never asks for a password:
+ * the secure card appears only after an explicit Connect server action.
+ */
+function heroCopy(
+  session: SessionId,
+  savedServer: HostProfile | null,
+  fleet: FleetView | null,
+): { lede: string; suggestions: string[] } {
   if (session === "setup") {
     if (savedServer) {
-      title = "Ask me anything about your setup";
-      body =
-        "Your saved server is above. Chatting runs here on this Mac with the bundled engine's free models; you don't need to connect to the server first.";
-      suggestions = [
-        "What can I do with my server?",
-        "How do I add another server?",
-        "What is an always-on server?",
-      ];
-    } else {
-      title = "Let's connect your always-on server";
-      body =
-        "A VPS from a provider, or a computer at home you can reach over SSH. I'll ask for what I need; anything secret goes into a secure box I can't read.";
-      suggestions = ["I have a new VPS", "I want to use a computer at home", "What is an always-on server?"];
+      return {
+        lede:
+          "Chat here on this Mac with the bundled engine's free models; your saved server stays read-only until you connect.",
+        suggestions: [
+          "What can I do with my server?",
+          "How do I add another server?",
+          "What is an always-on server?",
+        ],
+      };
     }
-  } else if (session === "global") {
+    return {
+      lede:
+        "Type what you want to do. When you are ready, connect a new server — nothing secret is asked for up front.",
+      suggestions: [
+        "I have a new VPS",
+        "I want to use a computer at home",
+        "What is an always-on server?",
+      ],
+    };
+  }
+  if (session === "global") {
     const projects = fleet?.projects.length ?? 0;
     const running = fleet?.running.length ?? 0;
     const inbox = openInbox(fleet).length;
-    title = "Global orchestrator";
-    body = `${running} worker${running === 1 ? "" : "s"} running across ${projects} project${
-      projects === 1 ? "" : "s"
-    }${inbox ? ` · ${inbox} waiting in your inbox` : ""}.`;
-    suggestions = ["What needs my attention?", "Start a new project", "How busy is the server?"];
-  } else {
-    const name = session.slice("project:".length);
-    const summary = projectSummaries(fleet).find((item) => item.name === name);
-    title = name;
-    body = summary
+    return {
+      lede: `${running} worker${running === 1 ? "" : "s"} running across ${projects} project${
+        projects === 1 ? "" : "s"
+      }${inbox ? ` · ${inbox} waiting in your inbox` : ""}.`,
+      suggestions: ["What needs my attention?", "Start a new project", "How busy is the server?"],
+    };
+  }
+  const name = session.slice("project:".length);
+  const summary = projectSummaries(fleet).find((item) => item.name === name);
+  return {
+    lede: summary
       ? `${summary.running} running · ${summary.ready} ready · ${summary.review} in review${
           summary.inbox ? ` · ${summary.inbox} in inbox` : ""
         }.`
-      : "This project's orchestrator.";
-    suggestions = ["What's running right now?", "Plan the next job", "Show what's blocked"];
-  }
-
-  return (
-    <div className={`nx-empty-chat${compact ? " nx-empty-chat--compact" : ""}`}>
-      <SpiritMark size={compact ? 40 : 64} />
-      <h2>{title}</h2>
-      <p>{body}</p>
-      <div className="nx-suggest">
-        {suggestions.map((text) => (
-          <button key={text} type="button" disabled={disabled} onClick={() => onPick(text)}>
-            {text}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
+      : "This project's orchestrator.",
+    suggestions: ["What's running right now?", "Plan the next job", "Show what's blocked"],
+  };
 }
 
 function Message({ session, message }: { session: SessionId; message: ChatMessageView }) {
@@ -911,100 +951,6 @@ function SecureServerCard({ session, messageId }: { session: SessionId; messageI
             {stage === "scanning" ? "Scanning…" : stage === "installing" ? "Installing…" : "Connect securely"}
           </button>
         )}
-      </div>
-    </form>
-  );
-}
-
-function Composer({
-  placeholder,
-  model,
-  modelMissing,
-  disabled,
-  streaming,
-  stopped,
-  onSend,
-  onStop,
-  onStart,
-}: {
-  placeholder: string;
-  model: string;
-  modelMissing: boolean;
-  disabled: boolean;
-  streaming: boolean;
-  stopped: boolean;
-  onSend: (text: string) => void;
-  onStop: () => void;
-  onStart: () => void;
-}) {
-  const [text, setText] = useState("");
-  const id = useId();
-
-  function submit() {
-    if (disabled) return;
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    onSend(trimmed);
-    setText("");
-  }
-
-  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-      event.preventDefault();
-      submit();
-    }
-  }
-
-  return (
-    <form
-      className={`nx-composer${disabled ? " nx-composer--disabled" : ""}`}
-      onSubmit={(event) => {
-        event.preventDefault();
-        submit();
-      }}
-    >
-      <label htmlFor={id} className="nx-sr">
-        Message
-      </label>
-      <textarea
-        id={id}
-        rows={1}
-        value={text}
-        placeholder={placeholder}
-        disabled={disabled}
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={onKeyDown}
-      />
-      <div className="nx-composer__bar">
-        <span
-          className={`nx-chip nx-composer__model${modelMissing ? " nx-chip--warn" : ""}`}
-          title={
-            modelMissing
-              ? "No local model is selected for the setup assistant"
-              : "The model the chat session reports"
-          }
-        >
-          ◇ {model}
-        </span>
-        <span className="nx-composer__spacer" />
-        {stopped ? (
-          <button type="button" className="nx-btn nx-btn--quiet nx-btn--sm" onClick={onStart}>
-            Start
-          </button>
-        ) : null}
-        {streaming ? (
-          <button type="button" className="nx-stop" onClick={onStop}>
-            Stop
-          </button>
-        ) : null}
-        <button
-          type="submit"
-          className="nx-send"
-          aria-label="Send"
-          disabled={disabled || !text.trim()}
-        >
-          ↑
-        </button>
       </div>
     </form>
   );
