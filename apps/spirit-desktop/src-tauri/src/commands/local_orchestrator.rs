@@ -87,7 +87,7 @@ pub struct SurfacePairInput {
 }
 
 impl SurfacePairInput {
-    fn to_request(self) -> SurfacePairRequest {
+    fn into_request(self) -> SurfacePairRequest {
         SurfacePairRequest {
             session: self.session,
             node: self.node,
@@ -116,7 +116,7 @@ pub struct SurfaceRotateInput {
 }
 
 impl SurfaceRotateInput {
-    fn to_request(self) -> SurfaceRotateRequest {
+    fn into_request(self) -> SurfaceRotateRequest {
         SurfaceRotateRequest {
             surface: self.surface,
             node: self.node,
@@ -146,7 +146,7 @@ pub struct OrchestratorNewInput {
 }
 
 impl OrchestratorNewInput {
-    fn to_request(self) -> OrchestratorNewRequest {
+    fn into_request(self) -> OrchestratorNewRequest {
         OrchestratorNewRequest {
             node: self.node,
             app: self.app,
@@ -184,7 +184,7 @@ impl std::fmt::Debug for AgentPairInput {
 }
 
 impl AgentPairInput {
-    fn to_request(self) -> AgentPairRequest {
+    fn into_request(self) -> AgentPairRequest {
         AgentPairRequest::new(
             spirit_core::engine::SecretString::new(self.code),
             self.surface,
@@ -225,7 +225,7 @@ impl std::fmt::Debug for AgentPathAddInput {
 }
 
 impl AgentPathAddInput {
-    fn to_request(self) -> AgentPathAddRequest {
+    fn into_request(self) -> AgentPathAddRequest {
         AgentPathAddRequest {
             project_root: self.project_root,
             name: Some(self.name),
@@ -351,7 +351,7 @@ pub async fn local_orchestrator_overview(
 pub async fn local_agent_status(state: State<'_, AppState>) -> CommandResult<LocalAgentView> {
     let local = state.local_agent();
     let core = state.core().await;
-    Ok(core.agent_status(local.as_ref()).await?)
+    core.agent_status(local.as_ref()).await
 }
 
 /// Redeems a home surface pairing code on the Mac.
@@ -364,7 +364,7 @@ pub async fn local_agent_pair(
     let local = state.local_agent();
     let core = state.core().await;
     core.set_gates(gates);
-    Ok(core.agent_pair(local.as_ref(), input.to_request()).await?)
+    core.agent_pair(local.as_ref(), input.into_request()).await
 }
 
 /// Reads the Mac path map and records its validity for the action guard.
@@ -372,7 +372,7 @@ pub async fn local_agent_pair(
 pub async fn local_agent_paths(state: State<'_, AppState>) -> CommandResult<Vec<AgentPathView>> {
     let local = state.local_agent();
     let core = state.core().await;
-    Ok(core.agent_paths(local.as_ref()).await?)
+    core.agent_paths(local.as_ref()).await
 }
 
 /// Adds or updates one Mac path-map row.
@@ -383,9 +383,8 @@ pub async fn local_agent_path_add(
 ) -> CommandResult<AgentPathView> {
     let local = state.local_agent();
     let core = state.core().await;
-    Ok(core
-        .agent_path_add(local.as_ref(), input.to_request())
-        .await?)
+    core.agent_path_add(local.as_ref(), input.into_request())
+        .await
 }
 
 /// Removes one Mac path-map row.
@@ -396,7 +395,7 @@ pub async fn local_agent_path_remove(
 ) -> CommandResult<()> {
     let local = state.local_agent();
     let core = state.core().await;
-    Ok(core.agent_path_remove(local.as_ref(), &project).await?)
+    core.agent_path_remove(local.as_ref(), &project).await
 }
 
 /// Creates a pending home surface with a one-time pairing code.
@@ -410,7 +409,7 @@ pub async fn local_surface_pair(
     let core = state.core().await;
     core.set_gates(gates);
     let pairing = core
-        .surface_pair(client.as_ref(), input.to_request())
+        .surface_pair(client.as_ref(), input.into_request())
         .await?;
     Ok(SurfacePairResult {
         pairing: pairing.view(),
@@ -428,7 +427,7 @@ pub async fn local_surface_list(
     let client = state.client()?;
     let core = state.core().await;
     core.set_gates(gates);
-    Ok(core.surface_list(client.as_ref(), node.as_deref()).await?)
+    core.surface_list(client.as_ref(), node.as_deref()).await
 }
 
 /// Rotates one surface token. The old token is only valid for VOWP's overlap.
@@ -441,9 +440,8 @@ pub async fn local_surface_rotate(
     let client = state.client()?;
     let core = state.core().await;
     core.set_gates(gates);
-    Ok(core
-        .surface_rotate(client.as_ref(), input.to_request())
-        .await?)
+    core.surface_rotate(client.as_ref(), input.into_request())
+        .await
 }
 
 /// Revokes one surface and every token it holds. This explicit cleanup remains
@@ -457,7 +455,7 @@ pub async fn local_surface_revoke(
     let client = state.client()?;
     let core = state.core().await;
     core.set_gates(gates);
-    Ok(core.surface_revoke(client.as_ref(), &surface).await?)
+    core.surface_revoke(client.as_ref(), &surface).await
 }
 
 /// Creates a local app host through `vowp orchestrator new --node ...`.
@@ -470,9 +468,8 @@ pub async fn local_orchestrator_new(
     let client = state.client()?;
     let core = state.core().await;
     core.set_gates(gates);
-    Ok(core
-        .orchestrator_new(client.as_ref(), input.to_request())
-        .await?)
+    core.orchestrator_new(client.as_ref(), input.into_request())
+        .await
 }
 
 /// Lists orchestrators. The read stays available while the gate is `Waiting`.
@@ -484,7 +481,7 @@ pub async fn local_orchestrator_list(
     let client = state.client()?;
     let core = state.core().await;
     core.set_gates(gates);
-    Ok(core.orchestrator_list(client.as_ref()).await?)
+    core.orchestrator_list(client.as_ref()).await
 }
 
 /// Stops a local app host. This explicit cleanup remains available while the gate is
@@ -498,7 +495,7 @@ pub async fn local_orchestrator_stop(
     let client = state.client()?;
     let core = state.core().await;
     core.set_gates(gates);
-    Ok(core.orchestrator_stop(client.as_ref(), &name).await?)
+    core.orchestrator_stop(client.as_ref(), &name).await
 }
 
 /// Resumes a local app host after re-checking every D6 prerequisite.
@@ -513,7 +510,6 @@ pub async fn local_orchestrator_resume(
     let client = state.client()?;
     let core = state.core().await;
     core.set_gates(gates);
-    Ok(core
-        .orchestrator_resume(client.as_ref(), &name, project.as_deref(), node.as_deref())
-        .await?)
+    core.orchestrator_resume(client.as_ref(), &name, project.as_deref(), node.as_deref())
+        .await
 }
