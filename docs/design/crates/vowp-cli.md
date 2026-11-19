@@ -27,8 +27,11 @@ crates/vowp-cli/
   src/cmd/session_asif.rs  (ASIF export/import facade: flags, temp files, remote stream)
   src/cmd/promote.rs  (`promote`, `rollback`, `releases`)
   src/cmd/capacity.rs  (`capacity show|report|set|reload|history`; the report adds effective
-                       provider caps and reload pending, `reload` asks the supervisor or checks
-                       locally, and `history` reads the bounded rollups read-only)
+                       provider caps, reload pending and the additive cluster card, `reload` asks
+                       the supervisor or checks locally, and `history` reads the bounded rollups
+                       read-only)
+  src/cmd/secret.rs    (`secret set|ls|rm|upgrade|request` and the hidden vault helpers; `set
+                       --stdin` reads stdin, `upgrade --encrypted` selects the age mode)
   src/cmd/agent.rs    (`agent enroll|paths|pair|run|status|service|doctor` plus hidden `agent gateway`; no store or project context for the Mac commands)
   src/agent_exec.rs   (`CoreRunHandler`: the Mac assignment executor used by `agent run`, including bundle chunking)
   src/cmd/surface.rs  (`surface pair|ls|rotate|revoke`; home-only global-store surface pairing)
@@ -50,6 +53,15 @@ so the bootstrap creates the same card and detached keeper as `orchestrator new`
 runs node-scoped (`project::run_node`), registers before it touches the orchestrator, and prints
 one `{"project","path","initialized","orchestrator"}` summary; see
 [`../v0.5/project-bootstrap.md`](../v0.5/project-bootstrap.md).
+
+`cmd/orchestrator.rs` serves `orchestrator move` through `Orchestrator::move_to_node`. The parsed
+global `--node` is the target node, not an SSH redirect, and `cli.rs` rewrites a bare `--home`
+after the subcommand to the hidden `--move-home` switch so the global `--home <DIR>` flag keeps
+its meaning before the command. `cmd/secret.rs` keeps `set --stdin` stdin-only (one trailing
+newline stripped, empty refused) and routes `upgrade --encrypted` to the core age-keyfile
+upgrade; the two flags are hidden from `--help`, so the generated CLI reference does not list
+them, while [`../cli.md`](../cli.md) §6.6 and [`../v0.5/vault-encrypted.md`](../v0.5/vault-encrypted.md)
+document the contract.
 
 ## 2. Shared API (frozen)
 
@@ -496,6 +508,27 @@ or home directory is touched. The endpoint slice adds
 `agent_orchestrator_endpoint_json_returns_local_auth_and_ls_stays_clean` in `tests/agent.rs`;
 they use a temporary home or `VOWP_AGENT_HOME`, a private live `host.json`/`service.json` and
 the test process id, and never open a socket, SSH or a real app.
+
+The move slice adds `orchestrator_move_requires_exactly_one_target_and_never_ssh_redirects`,
+`orchestrator_move_preserves_the_session_between_home_and_an_agent` and
+`orchestrator_move_to_a_revoked_node_keeps_the_home_host_running` in `tests/orchestrator.rs`.
+The bootstrap slice adds `project_add_without_new_flags_keeps_the_legacy_json` in `tests/up.rs`
+and `project_add_git_clones_initializes_registers_and_returns_one_summary`,
+`project_add_git_refuses_an_existing_target_and_a_url_with_credentials`,
+`project_add_init_is_skipped_when_vowp_toml_exists`,
+`project_add_git_failure_leaves_no_partial_checkout_or_registry_row`,
+`project_add_orchestrator_reuses_a_matching_existing_card_and_refuses_a_conflict`,
+`project_add_orchestrator_failure_keeps_the_project_and_names_the_retry` and
+`project_add_bootstrap_summary_never_contains_the_url_or_a_secret` in `tests/init.rs`; the
+clone-argv, credential and basename unit tests live in `src/cmd/project.rs`. The vault slice
+adds `secret_set_stdin_and_ls_json_report_the_mode_without_values`,
+`secret_ls_json_is_an_object_and_rm_keeps_its_shape` and
+`secret_set_stdin_refuses_an_empty_value` in `tests/maint.rs`, plus
+`secret_set_stdin_routes_without_a_tty_and_keeps_the_tty_form` in `tests/control.rs`. The
+cluster slice adds `capacity_report_and_fleet_status_show_cluster_totals` in
+`tests/capacity.rs`, run through the registered `vowp-core` `capacity_admit` target. All use
+temporary homes, fake harnesses or host commands and a private tmux environment; no real home,
+network, SSH or app is touched.
 
 The phase-4 CLI slice adds `agent_service_install_print_writes_nothing_and_names_the_manager`,
 `agent_service_install_without_home_exits_two`, `agent_service_unsupported_platform_is_exit_five`,

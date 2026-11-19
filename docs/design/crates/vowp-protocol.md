@@ -155,6 +155,9 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     The v0.4 offload set adds `"AssignmentPayload"`, `"NodeFallback"`, `"Placement"`,
     `"RemoteRunState"`, `"RunRejectReason"`, `"RunResume"`, `"RunResumeResult"`,
     `"SurfaceResume"`, `"SurfaceResumeResult"`, `"WaitingReason"`.
+    The v0.5 set adds `"ClusterCapacity"`, `"OrchestratorLocation"`, `"OrchestratorAuth"` and
+    `"OrchestratorEndpoint"`. `VaultMode` is a protocol enum but is not in `all_schemas()`;
+    `SecretInfo` and `SecretRequest` remain the exported vault documents.
     Output is deterministic (BTreeMap, stable ordering).
 13. **No panics**: all constructors/parsers return `Result`; regex literals inside use `// invariant:` comments.
 14. **v0.4 agent protocol.** `PathRef` serialises as one string (`project:vowp`,
@@ -224,6 +227,20 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     newtype variants `OrchestratorCommand` and `OrchestratorResult`; the inner tagged maps are
     flattened under the outer `type` tag. Neither frame carries a port, password, pair link,
     absolute local path or secret value.
+
+18. **v0.5 cluster and endpoint documents.** `ClusterCapacity` is additive and
+    `serde(default)` on `CapacityReport` and `CapacitySnapshot`: `online_worker_nodes` counts
+    online, active agent nodes (the home is not counted), `target_workers` and `busy_workers`
+    are the home totals plus each online node's `max_slots` and `busy_slots`, and the CPU,
+    memory and free-disk values are saturating sums. A document from before the field reads as
+    an all-zero card. `OrchestratorLocation` is `home|node`; `OrchestratorAuth` carries
+    `header`, `scheme`, `username` and `password`; `OrchestratorEndpoint` carries `name`, `app`,
+    `session_id`, `location`, `node`, `state`, `url`, `native_session_id` and `auth`. Every
+    field is always present and an unavailable value is `null`. `OrchestratorAuth`'s custom
+    `Debug` prints `[REDACTED]` for the password, and no card, snapshot, log or error carries
+    the value. The URL is loopback-only. `VaultMode` adds `encrypted` as the wire value for the
+    age-keyfile mode; `SecretInfo` still carries only the name, last four characters and
+    timestamps.
 
 ## 5. Error enum
 

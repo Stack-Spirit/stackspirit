@@ -103,7 +103,8 @@ mode, so the no-sudo path writes no marker. `vowp secret upgrade` prints the one
 creates the vault user and moves the files; without sudo, VOWP stays in basic mode.
 `vowp secret upgrade --encrypted` encrypts every basic value before it removes any plaintext copy
 and writes the mode file last. It refuses vault-user mode and is idempotent when already encrypted;
-`SecretInfo` metadata (`last4`, timestamps) is preserved.
+`SecretInfo` metadata (`last4`, timestamps) is preserved. The encrypted backend is the age keyfile
+only; `systemd-creds` is not implemented in this tree.
 
 **Basic mode does not separate the value from the agent's user.** The secret file is mode 0600 but
 owned by the runtime user (`vowp` or the SSH user), and the harness is spawned as that same user, so

@@ -118,6 +118,12 @@ The report shows the host sample, the current target and advice, running usage, 
 per-project estimates and waiting jobs. A job that is ready but not running shows its reason on the
 board and in `fleet queue`; a provider limit and a capacity brake are different causes.
 
+When an agent worker node is online, `capacity show`, `capacity report` and `fleet status` add a
+`cluster:` line: online worker nodes, pooled busy/target workers, summed CPU, available/total RAM
+and free disk. The home target still governs runs on the home; an eligible offloaded run is
+admitted against the chosen worker node's slots and headroom. The full rule is in
+[Capacity](../concepts/capacity.md#cluster-capacity).
+
 The AI keeper proposes a target every 30 minutes and on events, as a `decision` inbox item. It never
 changes the target itself. The owner answers, and the orchestrator applies it with
 `vowp capacity set`. If a run is OOM-killed, the supervisor records it, parks that job with a notice
@@ -276,21 +282,30 @@ full-log replay after compaction.
 
 ```sh
 vowp secret set <NAME>
+vowp secret set <NAME> --stdin
 vowp secret ls
 vowp secret request <NAME>
 vowp secret rm <NAME> --yes
 vowp secret upgrade
+vowp secret upgrade --encrypted
 ```
 
 `set` reads a hidden prompt (there is no argument for the value), writes atomically with mode 0600
-and records only the last four characters in the index. `request` starts a one-time page bound to
-`127.0.0.1` with a random token and a ten-minute expiry; through a control-machine tunnel the owner's
-browser sees a local URL. The AI sees `NAME saved, ends in …last4`, never the value.
+and records only the last four characters in the index. `set --stdin` reads the value from the
+process stdin instead, so a script or an SSH pipe needs no TTY; it strips one trailing newline and
+refuses an empty value. `request` starts a one-time page bound to `127.0.0.1` with a random token
+and a ten-minute expiry; through a control-machine tunnel the owner's browser sees a local URL. The
+AI sees `NAME saved, ends in …last4`, never the value.
 
 `upgrade` prints the exact sudo command that creates the vault user and moves the files. Without
-sudo, VOWP continues in basic mode with the same injection and redaction. The honest limits, the
-injection path and the redaction coverage are in the [security model](../security.md#secrets) and
-[Running a home on a VPS](vps.md#secrets).
+sudo, VOWP continues in basic mode with the same injection and redaction. `upgrade --encrypted`
+instead stores basic-mode values as age ciphertext under `~/.vowp/secrets/encrypted/` with a
+mode-0600 `~/.vowp/secrets/age.key`; it encrypts before deleting plaintext, writes the mode file
+last, refuses vault mode and does not use `systemd-creds`. `secret ls --json` reports the active
+`mode` (`basic`, `vault_user` or `encrypted`) with no values.
+
+The honest limits, the injection path and the redaction coverage are in the
+[security model](../security.md#secrets) and [Running a home on a VPS](vps.md#secrets).
 
 ## Orchestrators
 

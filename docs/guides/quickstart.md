@@ -76,6 +76,12 @@ the chat orchestrator is reachable through its printed `join.chat` command. Use
 `--orchestrator opencode` or `--orchestrator claude-code` to start a hosted app and its keeper
 instead of `chat`.
 
+To move that orchestrator to an enrolled agent node later, use
+`vowp orchestrator move <your-project> --node <node>`; `--home` moves it back. The move keeps the
+same session id and the one home log. `vowp orchestrator endpoint <your-project> --json` returns
+the local UI connection document when you need one; see
+[Operating a home](operating.md#orchestrators).
+
 ## 3. Point the profiles at real executors
 
 Edit `vowp.toml` on the project branch. At minimum, every role needs a ladder rung your home can
@@ -118,6 +124,9 @@ vowp fleet queue
 for every non-archived project (including paused ones), then detaches the supervisor. Run it from the
 home, or from a checkout to register that checkout on the way. `vowp up --foreground` is what the systemd unit runs; `--once` runs one tick
 for a smoke test.
+
+When an enrolled agent node is online, `vowp fleet status` adds a `cluster:` line with the pooled
+workers and summed RAM, CPU and free disk. A single home reports only its own capacity.
 
 `vowp up` also starts the loopback web window as a separate `vowp-daemon` child, prints
 `web window: http://127.0.0.1:<port>/`, and prints the control-machine command for that actual

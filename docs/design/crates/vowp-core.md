@@ -21,7 +21,7 @@ crates/vowp-core/src/
                   l4_planner.rs l5_keeper.rs l6_failover.rs l7_inbox.rs l8_watchdog.rs digest.rs prompts.rs
   promote/        mod.rs guards.rs bank.rs promoter.rs releases_log.rs
   agent/          mod.rs code.rs enroll.rs auth.rs gateway.rs pair.rs spool.rs dispatch.rs result.rs
-  capacity/       mod.rs sampler.rs history.rs admit.rs advisor.rs brakes.rs estimates.rs fair.rs scope.rs targets.rs usage.rs
+  capacity/       mod.rs sampler.rs history.rs admit.rs advisor.rs brakes.rs cluster.rs estimates.rs fair.rs scope.rs targets.rs usage.rs
   surface/        mod.rs lease.rs native.rs orchestrator.rs mirror.rs opencode_host.rs claude_remote.rs
                   takeover.rs follow.rs
   vault/          mod.rs request.rs
@@ -961,9 +961,9 @@ them together is a phase-exit activity, not part of this suite.
 ### 9.4 Orchestrators on a local node (`surface/orchestrator.rs`)
 
 The v0.2 manager still owns the home-hosted orchestrator: a project-local directory, an app
-config, one surface lease, an optional host and the lease keeper. The v0.4 slice adds the node
-record and the home state machine; the agent-side materialization and app start are the next
-slice (3g).
+config, one surface lease, an optional host and the lease keeper. The v0.4 slice added the node
+record and the home state machine; the agent-side materialization and app start landed with the
+v0.4 Phase 3 and v0.5 move jobs, and the agent crate is documented separately.
 
 ```rust
 pub trait OrchestratorTransport: Send + Sync {
@@ -976,6 +976,7 @@ pub const COMMAND_RESULT_TIMEOUT: Duration;                        // 5 seconds
 pub fn create(&self, req: &NewOrchestrator) -> Result<OrchestratorInfo, CoreError>;               // home
 pub fn create_on_node(&self, req: &NewOrchestrator, node: Option<NodeName>)
     -> Result<OrchestratorInfo, CoreError>;
+pub fn move_to_node(&self, name: &str, target: Option<NodeName>) -> Result<OrchestratorInfo, CoreError>;
 pub fn endpoint(&self, name: &str) -> Result<OrchestratorEndpoint, CoreError>;
 pub fn resume(&self, name: &str) -> Result<OrchestratorInfo, CoreError>;
 pub fn stop(&self, name: &str) -> Result<(), CoreError>;
@@ -1013,6 +1014,17 @@ home path.
   `AgentFrame::OrchestratorResult` calls `apply_result` before publishing the result.
 - `stop` on a node orchestrator sends `Stop` (the agent maps it to `SurfaceDetach`), releases
   any home lease, writes `stopped` and stops no local host and no agent process.
+- `move_to_node` is the v0.5 move. The target is validated before anything stops: an unknown,
+  pending, revoked or offline node is refused, and a project-bound orchestrator needs a path map
+  for its project on the target. The current host is then stopped and its lease released, a
+  handoff capsule is written when the session has content beyond its creation and placement
+  notes (a capsule failure is logged and does not abort), and the record is re-materialized on
+  the target with the **same `session_id`**. A home target resumes the local host; an agent
+  target sends the landed `Start` and the agent binds the existing paired surface. After the old
+  host stops, `Store::set_session_location` updates only `sessions.node`, `sessions.cwd` and
+  `updated_at`; `last_seq`, `log_bytes`, the log and every event are unchanged. Moving to the
+  current placement is idempotent (a live host is returned unchanged, a stopped one is resumed),
+  and a no-op writes no row.
 - `CommandSpool` is the default transport. It writes the frame under
   `agent-commands/<node>/<request_id>.json` and waits up to `COMMAND_RESULT_TIMEOUT` for
   `agent-results/<node>/<request_id>.json`; a result that arrives later is applied by
@@ -1046,6 +1058,22 @@ Named tests (in `crates/vowp-cli/tests/orchestrator.rs`): `orchestrator_new_with
 `orchestrator_apply_result_correlates_the_late_node_result` and
 `orchestrator_card_contains_no_path_or_secret`. All use a temporary home, a fake app host or
 a fake command transport, and no real tmux, app, network or home directory.
+
+The v0.5 move tests live in `crates/vowp-core/tests/orchestrator_move.rs`:
+`move_preserves_the_session_and_keeps_one_log_across_home_and_agent`,
+`orchestrator_move_updates_the_session_location_to_the_target_node`,
+`orchestrator_move_home_restores_the_session_location`,
+`orchestrator_move_to_an_unmapped_or_offline_node_leaves_the_session_row_unchanged`,
+`orchestrator_move_does_not_clobber_last_seq_or_log_bytes`,
+`moving_between_agent_nodes_releases_the_old_node_lease`,
+`move_refuses_unknown_pending_and_revoked_nodes_before_stopping_the_host`,
+`move_to_the_current_placement_is_idempotent_and_resumes_a_stopped_record`,
+`move_refuses_a_project_that_the_target_node_has_not_mapped`,
+`move_writes_no_capsule_for_a_session_with_only_its_creation_event` and
+`move_continues_when_the_handoff_capsule_fails`. The store tests
+`set_session_location_updates_only_node_and_cwd` and
+`set_session_location_refuses_an_unknown_session` live in
+`crates/vowp-store/tests/sessions_index.rs`. They use temporary homes and git repositories.
 
 The endpoint tests live in `crates/vowp-core/tests/orchestrator_endpoint.rs`:
 `orchestrator_endpoint_home_is_metadata_only_for_a_node`,
@@ -1108,6 +1136,44 @@ and `capacity_history_is_read_only` in `crates/vowp-cli/tests/capacity.rs`;
 `capacity_history_json_matches_the_exported_schema` in
 `crates/vowp-protocol/tests/schema.rs`; the schema migration test is
 `capacity_rollups_migrates_v6_to_v7_with_a_backup` in `crates/vowp-store/tests/migrate.rs`.
+
+### 10.1 Cluster totals (`capacity/cluster.rs`)
+
+Spec: `docs/design/v0.5/scope.md` §6. The module is read-only and additive; it never replaces the
+per-home cards.
+
+```rust
+pub fn build(deps: &Deps, store: &Store, now: Timestamp) -> Result<ClusterCapacity, CoreError>;
+pub(crate) fn online_workers(store: &Store, now: Timestamp) -> Result<Vec<NodeCard>, CoreError>;
+pub(crate) fn is_online_worker(card: &NodeCard) -> bool;
+pub(crate) fn home_running(store: &Store, home: &NodeName) -> Result<u32, CoreError>;
+```
+
+- A worker counts only when its card is `NodeKind::Agent`, `NodeStatus::Active` and
+  `NodePresence::Online` (an under-30-second heartbeat). A legacy SSH node and the home row are
+  never counted here.
+- `target_workers` starts at the home target and adds each counted node's `max_slots`;
+  `busy_workers` starts at the home's open runs and adds each node's `busy_slots`. CPU, total and
+  available memory and free work-disk are saturating sums; a missing sample contributes nothing.
+  A single-machine home reports `online_worker_nodes = 0`, and its numeric totals come from the
+  latest home sample (or are zero before one exists).
+- `capacity::admit::report` and `fleet::build` call `build`, so `CapacityReport.cluster`,
+  `CapacitySnapshot.cluster` and the snapshot's capacity card carry the same document. Both
+  fields are `serde(default)`, so a document written before the field existed still parses.
+- The per-host admission split is documented in
+  [`docs/concepts/capacity.md`](../../concepts/capacity.md#cluster-capacity): a home run is
+  admitted against the home target and headroom; an eligible offloaded run is admitted against
+  the chosen online worker node's slots and headroom, while provider limits stay global.
+
+Named tests: `four_worker_home_plus_four_worker_node_admits_eight_runs`,
+`offline_node_falls_back_to_the_home_target`,
+`report_and_snapshot_carry_combined_cluster_totals` and
+`a_single_home_reports_no_worker_nodes_and_its_own_totals` in
+`crates/vowp-core/tests/cluster_capacity.rs`; and
+`capacity_report_and_fleet_status_show_cluster_totals` in
+`crates/vowp-cli/tests/capacity.rs` (the CLI module compiled through the
+`capacity_admit` target). They use temporary homes and stored node cards; no network, SSH or real
+node is touched.
 
 ## 11. `offload` — pure offload eligibility (v0.4 Phase 2)
 

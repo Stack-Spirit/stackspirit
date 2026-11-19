@@ -173,7 +173,11 @@ characters. A worker gets the value injected by **name** through its harness's `
 model sees `NAME saved, ends in …4f2a`. Basic mode keeps mode-0600 files; `vowp secret upgrade
 --encrypted` can encrypt them at rest with a local age key; `vowp secret ls --json` reports the
 active `mode` without values. Values are redacted from the snapshot, session events, capsules and
-reports, blocked by the `secret_scan` gate and the merge queue, and never backed up. The honest
+reports, blocked by the `secret_scan` gate and the merge queue, and never backed up. An
+orchestrator app's local password is returned only by the explicit
+`vowp orchestrator endpoint <name> --json` command on the home (or
+`vowp agent orchestrator endpoint <name> --json` on the machine that runs the app); it never
+appears in a card, `snapshot.json`, `fleet status`, `orchestrator ls` or a log. The honest
 limit is stated [below](#secrets-honestly).
 
 ### 9 · One merge queue and guarded Work → Production
@@ -328,10 +332,11 @@ name, URL and expiry. The AI sees `NAME saved, ends in …last4`, never the valu
   backed up.
 - Injection is by name through a harness's `env_pass` list. The promoter does not add a secret
   environment to deploy commands in this build.
-- Exact-value redaction covers session-service and remote-ingest events, the snapshot, capsules and
-  the finished report and run mirror. It does **not** cover the supervisor log, gate command evidence,
-  ledger rows, the switch turn path or the `session watch` importer in this build, so a command that
-  prints a secret can still persist it there.
+- Exact-value redaction covers session-service, remote-ingest, switch-turn and `session watch`
+  events, the snapshot, capsules, the supervisor log, command-gate evidence, ledger summary and
+  detail strings, and the finished report and run mirror. It does **not** catch a transformed or
+  encoded copy, so avoid commands that print secret values; the report and run mirror stay raw
+  until their turn ends.
 - **The honest limit:** any agent that can run arbitrary code inside a process that holds a secret can
   print it. Vault mode keeps the files out of the runtime user's direct readable tree, but the helper
   that reads them is a broad trust boundary. Basic and vault-user mode do not encrypt the store at

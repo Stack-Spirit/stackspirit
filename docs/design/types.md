@@ -1,6 +1,6 @@
 # types.md — protocol types (crate `vowp-protocol`)
 
-Status: current for v0.2.
+Status: current for v0.5.
 
 Every type here lives in `vowp-protocol` and is the **only** definition: other crates import it, never redefine it.
 All types derive `Debug, Clone, PartialEq, Serialize, Deserialize` (and `Eq`/`Hash`/`Copy` where noted as "plain
@@ -15,11 +15,11 @@ Module → file map:
 | `ids`, `time`, `error`, `cost`, `limit`, `executor` | foundations |
 | `event`, `capsule` | event log + capsule |
 | `job`, `gate`, `report`, `run`, `session`, `inbox`, `loops`, `release` | domain rows |
-| `capacity` | v0.2 host samples, run usage, estimates, admission, brakes, targets, advice (§16.1) |
-| `surface` | v0.2 surfaces, leases, remote-exec lines, orchestrator cards (§16.2) |
+| `capacity` | v0.2 host samples, run usage, estimates, admission, brakes, targets, advice, and the v0.5 additive cluster card (§16.1) |
+| `surface` | v0.2 surfaces, leases, remote-exec lines, orchestrator cards and the v0.5 endpoint document (§16.2, §16.14) |
 | `snapshot` | v0.2 `snapshot.json` and the project registry view (§16.3) |
 | `catalog` | v0.2 lifecycle classes, catalog rows, GC and backup reports (§16.4) |
-| `vault` | v0.2 secret names, metadata, modes and the one-time request (§16.5) |
+| `vault` | v0.2 secret names, metadata, modes (including v0.5 `encrypted`) and the one-time request (§16.5) |
 | `agent` | v0.4 local-node path refs, capabilities, capacity, frames, redacted cards and app-surface frames (§16.7, §16.12) |
 | `offload` | v0.4 placement, waiting reasons, assignment payload and resume records (§16.8) |
 | `asif` | v0.4 adapter-free ASIF report summaries and import response (§16.11) |

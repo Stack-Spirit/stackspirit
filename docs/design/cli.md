@@ -358,6 +358,11 @@ requires SSH and `--cached` never opens a connection. The JSON wrapper is
 include `waiting_reason`; `inbox --json` prints `[InboxItem]` with the full body (the snapshot's own
 inbox cards omit it); `capacity` is an alias of `capacity show`.
 
+`fleet status` adds one `cluster:` line when at least one online agent worker node is present:
+the online worker count, pooled busy and target workers, available and total RAM, CPU cores and
+free disk. The same additive card is `capacity.cluster` in the snapshot and
+`CapacityReport.cluster`; the per-home fields are unchanged.
+
 ### 6.3 `vowp capacity`
 
 ```
@@ -371,8 +376,13 @@ vowp capacity history [--since <dur|date>] [--bucket 5m|1h|1d]
 `show`/`report` return `CapacityReport`: the latest host sample (or none), the owner target and
 advice, running run count and p90 estimates, brakes, reserves, estimates and waiting jobs. `show`
 and `report` also print the effective provider caps and whether a config reload is pending; their
-`--json` document carries the extra `provider_caps` object and `reload_pending` boolean. `set`
-writes one `capacity_targets` history row. A target above the advised value needs `--override`
+`--json` document carries the extra `provider_caps` object and `reload_pending` boolean. When at
+least one online agent worker node exists, both print the additive `cluster:` line and the JSON
+document carries `cluster` (`online_worker_nodes`, `target_workers`, `busy_workers`, `cpu_cores`,
+`mem_total_bytes`, `mem_available_bytes`, `disk_free_bytes`). Admission uses the home target and
+headroom for home runs and the chosen worker node's slots and headroom for an eligible offloaded
+run; a single-machine home reports zero worker nodes. `set` writes one `capacity_targets` history
+row. A target above the advised value needs `--override`
 (exit 5 otherwise); the brakes still apply and `capacity show` prints
 `owner override: 8 (advised 5)`. The board does not carry capacity data. The AI advisor only
 proposes: it opens a `capacity` inbox item and never changes the target itself.
@@ -429,21 +439,35 @@ JSON: `MigrationReport {from_version,to_version,backup,projects,tables,verified,
 ### 6.6 `vowp secret`
 
 ```
-vowp secret set <NAME>
+vowp secret set <NAME> [--stdin]
 vowp secret ls
 vowp secret rm <NAME> [--yes]
-vowp secret upgrade
+vowp secret upgrade [--encrypted]
 vowp secret request <NAME>
 ```
 
 Values are never accepted as arguments. `set` reads from a hidden prompt (requires a TTY; exit 5
-without one); `ls` prints names and the last four characters; `rm` deletes; `upgrade` prints the one
-sudo command that moves basic-mode files to the vault user; `request` starts a one-time paste page
-bound to `127.0.0.1` with a 10-minute expiry and returns `{name,url,expires_at,single_use}`. Basic
-mode stores `~/.vowp/secrets/<NAME>` (0600, same user); vault mode stores under
-`/home/vowp-vault/secrets/<NAME>` through the `vowp __vault-exec`/`__vault-admin` helpers. Injected
-values are redacted from events, capsules, report artifacts, raw run mirrors and the snapshot; no
-secret is included in a backup. Honest limit: code that is given a value can print it.
+without one). With `--stdin` it reads the value from the process stdin instead: exactly one
+trailing `\n` or `\r\n` is stripped, an empty value is refused (exit 2), and no TTY is required.
+`ls` prints names, the last four characters and a `storage: <mode>` line; `ls --json` is one
+object `{"mode":"…","secrets":[…]}` (`basic`, `vault_user` or `encrypted`). `rm` deletes; `upgrade`
+prints the one sudo command that moves basic-mode files to the vault user; `upgrade --encrypted`
+encrypts every basic value before removing any plaintext copy, writes the mode file last, refuses
+vault-user mode and is idempotent when already encrypted. `request` starts a one-time paste page
+bound to `127.0.0.1` with a 10-minute expiry and returns `{name,url,expires_at,single_use}`.
+
+Basic mode stores `~/.vowp/secrets/<NAME>` (0600, same user); vault mode stores under
+`/home/vowp-vault/secrets/<NAME>` through the `vowp __vault-exec`/`__vault-admin` helpers;
+encrypted mode stores age ciphertext under `~/.vowp/secrets/encrypted/<NAME>` (0600) with an age
+identity at `~/.vowp/secrets/age.key` (0600). The encrypted key is not a passphrase, is not
+rotated or backed up, and code running as the same user can read it; the mode protects an offline
+copy without the key, not the runtime user. `systemd-creds` is not implemented. On a control
+machine, `set/ls/rm/upgrade` route to the home over SSH; the hidden-prompt `set` uses `ssh -t` and
+`set --stdin` uses plain `ssh` with the caller's stdin. Injected values are redacted from events,
+capsules, report artifacts, raw run mirrors, the snapshot, the supervisor log, command-gate
+evidence and ledger summary/detail strings; no secret is included in a backup. Honest limit: code
+that is given a value can print it. The full contract is
+[`v0.5/vault-encrypted.md`](v0.5/vault-encrypted.md).
 
 ### 6.7 `vowp gc`
 
@@ -568,8 +592,8 @@ reads still work in follow mode. `tunnel_open`/`tunnel_close` refuse on the home
 | `vowp reindex [--session <id>]` | rebuilds `sessions`, `session_events`, `session_natives`, `capsules` rows from `sessions/*/log.jsonl`; prints counts. Safe while the supervisor runs. |
 | `vowp backup …` | see §6.8. |
 | `vowp schema [<type>]` | with no arg lists the JSON-Schema type names; with a name prints that schema (types.md §14). `snapshot` is the v0.2 snapshot schema. Still needs an initialised home in this build. |
-| `vowp --version` | prints `vowp 0.3.0` (the binary version only). |
-| `vowp version` | prints `vowp 0.3.0 (<git sha>) schema 1`. |
+| `vowp --version` | prints `vowp 0.4.0` (the binary version only). |
+| `vowp version` | prints `vowp 0.4.0 (<git sha>) schema 1`. |
 | `vowp __window <board\|capacity\|supervisor\|planner\|keeper\|inbox\|job> [<id>]` | hidden; what tmux windows run (renders the board or capacity screen, tails `supervisor.log`, tails the planner/keeper session, lists the inbox, tails a job session). Read-only. |
 | `vowp __exec --grant <file> [--spool-dir <dir>]` | hidden remote-executor client (sessions.md §9). |
 | `vowp __vault-exec --env <NAME> -- <cmd…>` · `vowp __vault-admin probe` · `vowp __vault-admin set\|rm <NAME>` | hidden vault-user helper; `probe` takes no name and checks the helper context and vault directory, `set` reads the value from stdin, never argv. In basic mode `__vault-exec` is a plain exec. |

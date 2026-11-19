@@ -1,10 +1,15 @@
 # v0.5 — scope and accepted StackSpirit foundation plan
 
-Status: **accepted scope (2026-11-18).** v0.4 shipped as **0.4.0** on 2026-11-18; v0.5 active
-development is approved for the five slices in [Accepted v0.5 scope](#accepted-v05-scope) below.
-No public tag or date is promised until every slice and its gates pass.
+Status: **implemented in the tree on 2026-11-19; not released.** All six slices in
+[Accepted v0.5 scope](#accepted-v05-scope) below are implemented and gated. No public tag, version
+or release date is promised; the latest release remains **0.4.0** (2026-11-18).
 
 ## Status
+
+The six v0.5 slices are **implemented in the tree and gated** as of **2026-11-19**. Each slice
+below names its landed job id and design note; every slice job is `done` and its final verify job
+returned `pass`. This is not a release: no tag has been cut, no version has been bumped and no
+public date is promised.
 
 v0.4 is shipped in **0.4.0** and its evidence is recorded: phase 4 is implemented, the security
 review checklist, the owner live Mac smoke test and the rollback drill are in
@@ -26,9 +31,11 @@ Execute these six slices in clean, disjoint-ownership jobs:
   `/api/v1/jobs` and `/api/v1/jobs/{id}` following the board-stream heartbeat pattern (with
   service-worker `/stream` bypass and 5-second polling fallback), and refresh the `/jobs` and
   `/jobs/{id}` pages automatically after keeper actions.
+  **Implemented in:** job `v5-1a-jobs-sse`; design note [`live-streams.md`](live-streams.md).
 - **1b. Live updates for Cost, Inbox and Nodes pages:** apply the same snapshot-stream pattern and
   polling fallback to `/cost`, `/inbox` and `/nodes` so no window page relies solely on 5-second
   polling.
+  **Implemented in:** job `v5-1b-live-pages`; design note [`live-streams.md`](live-streams.md).
 
 ### 2. Moving an orchestrator between home and an agent node while keeping its session
 
@@ -49,6 +56,11 @@ Execute these six slices in clean, disjoint-ownership jobs:
      appropriate and updating the orchestrator card's `node` and `state`.
   5. Export any updated protocol/schema types and regenerate `docs/reference/`.
 
+**Implemented in:** jobs `v5-2-orchestrator-move`, `v5-2b-agent-orchestrator-move` and
+`v5-2c-session-location`; design note
+[`../v0.4/local-orchestrator.md`](../v0.4/local-orchestrator.md) §5.7. The slice added no separate
+v0.5 move note; the command contract is in [`../cli.md`](../cli.md) §6.10.
+
 ### 3. Official orchestrator endpoint discovery for UI clients
 
 - Desktop clients connect their chat UI directly to the orchestrator's paired `opencode serve`
@@ -64,6 +76,9 @@ Execute these six slices in clean, disjoint-ownership jobs:
   logs or error strings; any local auth material is returned only by the explicit local owner
   command reading the mode-`0600` host file on that machine.
 
+**Implemented in:** jobs `v5-3-orchestrator-endpoint` and `v5-3b-endpoint-exit-class`; design note
+[`orchestrator-endpoint.md`](orchestrator-endpoint.md).
+
 ### 4. One-step project bootstrap for UI `Add project` flows
 
 - Today adding a repository from a UI takes four separate steps (`git clone`, `vowp init`,
@@ -77,6 +92,9 @@ Execute these six slices in clean, disjoint-ownership jobs:
     project orchestrator and return a single machine-readable JSON summary (`project`, `path`,
     `initialized`, `orchestrator`).
 
+**Implemented in:** job `v5-4-project-bootstrap`; design note
+[`project-bootstrap.md`](project-bootstrap.md).
+
 ### 5. Encrypted-at-rest option for the `vowp secret` vault
 
 - VOWP already provides `vowp secret set`, `vowp secret ls`, `vowp secret rm`, `vowp secret
@@ -89,6 +107,10 @@ Execute these six slices in clean, disjoint-ownership jobs:
   to end over SSH pipes without a TTY) and expose the storage mode (`basic`, `vault_user`,
   `encrypted`) in `vowp secret ls --json` so UI clients can display honest security status without
   ever seeing a secret value.
+
+**Implemented in:** job `v5-5a-vault-encrypted`; design note
+[`vault-encrypted.md`](vault-encrypted.md). The shipped backend is the age keyfile; `systemd-creds`
+was not implemented and is not claimed.
 
 ### 6. Pooled cluster capacity across Home and online worker nodes
 
@@ -112,6 +134,11 @@ Execute these six slices in clean, disjoint-ownership jobs:
      `busy_slots`, plus combined total/available RAM, CPU cores and free disk across Home and
      online worker nodes) alongside the existing per-Home fields so UI clients can display both
      combined cluster capacity/load and per-machine health. Regenerate `docs/reference/` schemas.
+
+**Implemented in:** job `v5-6b-cluster-capacity` (which replaced the cancelled
+`v5-6-cluster-capacity`); the design is in this section and
+[`../../concepts/capacity.md`](../../concepts/capacity.md#cluster-capacity). The shipped count
+field is `cluster.online_worker_nodes`; the other `cluster` fields match this scope.
 
 ---
 

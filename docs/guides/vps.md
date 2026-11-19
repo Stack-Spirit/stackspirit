@@ -131,6 +131,17 @@ vowp project ls
 and does not start a supervisor; the next `up` picks it up. The registry commands work from any
 directory on the home. `_node` is reserved and cannot be a user project.
 
+One command can clone, initialise, register and create the orchestrator:
+
+```sh
+vowp project add --git <your-url> --init --orchestrator chat --json
+```
+
+The clone lands in `<home-parent>/<name>` (or an explicit target path), the URL must carry no
+credentials, and `--init` leaves an existing `vowp.toml` byte-identical. The summary has exactly
+`project`, `path`, `initialized` and `orchestrator`. See
+[`design/v0.5/project-bootstrap.md`](../design/v0.5/project-bootstrap.md).
+
 Manage the fleet:
 
 ```sh
@@ -350,6 +361,9 @@ vowp capacity set --mode auto
 - A queued job shows its reason, such as `waiting: RAM 1.2 GB short` or `waiting: provider deepseek
   429`.
 - `[node].max_workers` and `max_verifiers` are per-machine preferences, not a product-imposed cap.
+- When a worker node is online, the report and `fleet status` add a `cluster:` line with pooled
+  workers and summed RAM, CPU and free disk; a home run stays on the home target and an eligible
+  offloaded run uses the worker node's own slots and headroom.
 
 The full model is in [Operating a home](operating.md#capacity) and the
 [capacity specification](../design/v0.2/home-and-surfaces.md#6-capacity-measured-admitted-braked-advised).
@@ -407,13 +421,13 @@ last and preserves the `last4`/timestamp metadata. It refuses vault-user mode an
 already encrypted. The v0.5 slice does not implement `systemd-creds`; see
 [`vault-encrypted.md`](../design/v0.5/vault-encrypted.md).
 
-Redaction is partial and timed. Event payloads and `raw` appended by the session service or the
-remote ingest path are redacted before writing, as is the snapshot; a capsule is redacted after the
-writer returns; the job report and latest run mirror are redacted after each turn finishes.
-Supervisor logs, gate command evidence, ledger detail rows, the switch turn path and the
-`session watch` importer are written unredacted today, and a report or run mirror is still raw while
-the turn is running. Treat the home and its databases as sensitive; avoid commands that print secret
-values.
+Redaction is exact-value and timed. Event payloads and `raw` appended by the session service, the
+remote ingest path, a switch turn or the `session watch` importer are redacted before writing, as
+are the snapshot, the supervisor log, command-gate evidence and ledger summary/detail strings; a
+capsule is redacted after the writer returns; the job report and latest run mirror are redacted
+after each turn finishes. A report or run mirror is still raw while its turn is running, and a
+transformed or encoded copy is not caught. Treat the home and its databases as sensitive; avoid
+commands that print secret values.
 
 The honest limit: any agent that can run arbitrary code in a process that holds a secret can print
 it. **Basic mode does not separate the value from the agent's user**: `~/.vowp/secrets/<NAME>` is mode
@@ -426,8 +440,8 @@ boundary; `env_pass` is not an allow-list for it. **Encrypted mode** protects an
 home without `age.key`, but the key is a mode-0600 file owned by the same runtime user, so code
 running as that user can decrypt every value; there is no key rotation or recovery path. Basic and
 vault-user mode do not encrypt the file at rest. VOWP keeps values out of configuration and git, and
-redacts exact injected values on the event paths above, but it does not keep them out of every
-database row or every log and cannot make a secret unreadable to code that is given it. Harness
+redacts exact injected values on every path above, but it does not catch a transformed or encoded
+copy and cannot make a secret unreadable to code that is given it. Harness
 logins stay under the harness's own control. The full statement is in the
 [security model](../security.md#secrets).
 
