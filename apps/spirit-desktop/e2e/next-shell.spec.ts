@@ -21,10 +21,9 @@ async function expectNoWcagViolations(page: Page) {
   ).toEqual([]);
 }
 
-// The Meadow shell is the app default; the web server for this suite builds the
-// classic shell for the older specs, so these pages opt back in with ?ui=next.
+// Meadow is the only shell; the query only selects the mock scenario and theme.
 const url = (scenario: string, theme: "light" | "dark" = "light") =>
-  `/?ui=next&scenario=${scenario}&theme=${theme}`;
+  `/?scenario=${scenario}&theme=${theme}`;
 
 async function connect(page: Page) {
   await page.getByTestId("sidebar-connect").click();

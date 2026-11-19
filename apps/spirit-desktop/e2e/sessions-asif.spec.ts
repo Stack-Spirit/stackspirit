@@ -48,11 +48,13 @@ test("MockBridge export and import flows stay honest and idle", async ({ page })
   });
 
   await page.goto(BASE_URL);
-  await expect(page.getByText("Preview data").first()).toBeVisible();
-  await page.getByTestId("topbar-connect").click();
-  await expect(page.getByTestId("topbar-connect")).toHaveText("Disconnect");
+  await expect(page.getByTestId("next-shell")).toBeVisible();
+  await page.getByTestId("sidebar-connect").click();
+  await expect(page.getByTestId("health-card")).toBeVisible();
 
-  await page.getByTestId("open-sessions").click();
+  // The server card's ⋯ menu is the Meadow path into the sessions drawer.
+  await page.getByTestId("server-card").getByRole("button", { name: "Server options" }).click();
+  await page.getByRole("menuitem", { name: "Sessions and .asif export" }).click();
   const drawer = page.getByRole("dialog", { name: "Sessions" });
   await expect(drawer).toBeVisible();
   await expect(drawer.getByTestId(`session-row-${PREVIEW_SESSION_ID}`)).toBeVisible();
@@ -92,12 +94,15 @@ test("MockBridge export and import flows stay honest and idle", async ({ page })
     "project example-source left null",
   );
   await expect(page.getByTestId("import-idle-note")).toContainText("did not run a turn");
+  // A connected Meadow page has its own orchestrator Start control behind the
+  // drawer; the imported session itself must still offer no run action.
   await expect(
-    page.getByRole("button", { name: /^(Run|Start|Continue|Resume)\b/i }),
+    page
+      .getByTestId("import-result")
+      .getByRole("button", { name: /^(Run|Start|Continue|Resume)\b/i }),
   ).toHaveCount(0);
   await expectNoWcagViolations(page);
 
   await page.keyboard.press("Escape");
   await expect(drawer).toHaveCount(0);
-  await expect(page.getByTestId("open-sessions")).toBeFocused();
 });

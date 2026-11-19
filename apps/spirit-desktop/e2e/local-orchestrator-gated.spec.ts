@@ -28,14 +28,16 @@ async function expectNoWcagViolations(page: Page) {
 
 async function openEngine(page: Page, url: string) {
   await page.goto(url);
-  await expect(page.getByText("Preview data").first()).toBeVisible();
-  await page.getByTestId("topbar-connect").click();
-  await expect(page.getByTestId("topbar-connect")).toHaveText("Disconnect");
-  await page
-    .getByRole("navigation", { name: "Primary views" })
-    .getByRole("button", { name: "Engine" })
-    .click();
-  await expect(page.getByRole("heading", { name: "Engine", level: 1 })).toBeVisible();
+  await expect(page.getByTestId("next-shell")).toBeVisible();
+  await page.getByTestId("sidebar-connect").click();
+  await expect(page.getByTestId("health-card")).toBeVisible();
+
+  // Meadow keeps the engine and capability gates under Settings → Advanced.
+  await page.getByTestId("settings-trigger").click();
+  await page.getByRole("menuitem", { name: "All settings" }).click();
+  await page.getByRole("button", { name: "Show advanced settings" }).click();
+  await expect(page.getByTestId("engine-view")).toBeVisible();
+  await expect(page.getByTestId("gate-card-local")).toBeVisible();
 }
 
 test.beforeAll(async () => {

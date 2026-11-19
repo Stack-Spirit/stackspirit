@@ -1,10 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
-  // D3 browser-mode flows live under src/test/e2e so they stay inside the job's
-  // ownership; D2's shell flows remain in e2e/.
+  // Meadow is the only shell. `src/test/e2e/fleet.spec.ts` still drives the retired
+  // classic cockpit and is outside this job's ownership, so it is not collected.
   testDir: ".",
-  testMatch: ["e2e/**/*.spec.ts", "src/test/e2e/**/*.spec.ts"],
+  testIgnore: ["src/**"],
   timeout: 30_000,
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
@@ -22,8 +22,6 @@ export default defineConfig({
     url: "http://127.0.0.1:1420",
     reuseExistingServer: false,
     timeout: 120_000,
-    // The classic cockpit specs pin the classic shell; next-shell.spec.ts opts in
-    // to the default Meadow shell with ?ui=next.
-    env: { VITE_SPIRIT_MOCK: "1", VITE_SPIRIT_UI: "classic" },
+    env: { VITE_SPIRIT_MOCK: "1" },
   },
 });

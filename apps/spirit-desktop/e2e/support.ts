@@ -45,8 +45,6 @@ export async function startViteServer(
         ...process.env,
         VITE_SPIRIT_MOCK: "1",
         VITE_SPIRIT_MOCK_SCENARIO: scenario,
-        // These specs drive the classic cockpit; the Meadow shell has its own spec.
-        VITE_SPIRIT_UI: "classic",
       },
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",

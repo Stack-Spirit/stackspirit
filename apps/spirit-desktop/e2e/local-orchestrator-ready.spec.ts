@@ -34,15 +34,16 @@ test("Ready local orchestrator flow stays honest and gated by the connected agen
   page,
 }) => {
   await page.goto(READY_URL);
-  await expect(page.getByText("Preview data").first()).toBeVisible();
-  await page.getByTestId("topbar-connect").click();
-  await expect(page.getByTestId("topbar-connect")).toHaveText("Disconnect");
+  await expect(page.getByTestId("next-shell")).toBeVisible();
+  await page.getByTestId("sidebar-connect").click();
+  await expect(page.getByTestId("health-card")).toBeVisible();
 
-  await page
-    .getByRole("navigation", { name: "Primary views" })
-    .getByRole("button", { name: "Engine" })
-    .click();
-  await expect(page.getByRole("heading", { name: "Engine", level: 1 })).toBeVisible();
+  // Meadow keeps the engine and capability gates under Settings → Advanced.
+  await page.getByTestId("settings-trigger").click();
+  await page.getByRole("menuitem", { name: "All settings" }).click();
+  await page.getByRole("button", { name: "Show advanced settings" }).click();
+  await expect(page.getByTestId("engine-view")).toBeVisible();
+  await expect(page.getByTestId("gate-card-local")).toBeVisible();
 
   const gateCard = page.getByTestId("gate-card-local");
   await expect(gateCard.getByText("Ready", { exact: true })).toBeVisible();
