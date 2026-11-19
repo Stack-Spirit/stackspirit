@@ -74,3 +74,4 @@ ipv4|scripts/audit/allowlist.txt|192.0.2.10|Text of an allowlist entry; TEST-NET
 # documentation. It is part of the public tree, not an accidental large file;
 # the entry names its exact path and leaves the 1 MiB default threshold alone.
 large_blob|docs/media/vowp-explainer.mp4|docs/media/vowp-explainer.mp4|Intentional checked-in explainer video that belongs to the documentation and public tree, not an accidental large file.
+large_blob|docs/media/vowp-harness-switch.mp4|docs/media/vowp-harness-switch.mp4|Intentional checked-in harness-switch explainer clip used by the documentation and the X post, not an accidental large file.
