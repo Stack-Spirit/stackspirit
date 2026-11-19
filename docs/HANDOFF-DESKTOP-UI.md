@@ -304,6 +304,26 @@ a read-only chip derived from the transport; there is no live switch. Moving a s
    change. Step 6 (Local/Server switch, live Server chat, Add project) remains pending and
    is not claimed here; step 7 landed as `ss-54`/`ss-55` above.
 
+### 5.1 Plan after the first live run (2026-11-19)
+
+Running the app against the real Mac orchestrator found problems that fake-backed tests missed
+(the shell still asked for a **Server** location although only **Local** chat is live). Next, in
+order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md`:
+
+1. **Set up with AI respects an existing profile.** With a saved server, the setup assistant opens
+   directly as a normal chat on the bundled engine's free models, without requiring Connect and
+   without the new-server password form. A saved server may be shown as an info card.
+2. **Server chat transport options** (document only): what a home-hosted orchestrator's endpoint
+   allows, versus an app-owned SSH forward, versus keeping Server chat gated. The owner decides.
+3. **Session ownership in the UI** (after VOWP v0.5.1 slice 3): show which surface holds the
+   session (OpenCode, StackSpirit, CLI), take over explicitly, and make the previous writer
+   read-only. Until then do not type into the same orchestrator from two windows.
+4. **Use the VOWP-reported native session id** (after VOWP v0.5.1 slice 2) and drop the
+   "newest host session" heuristic.
+5. **Owner style advice** to be turned into a UI job when supplied.
+6. **Live owner smoke test** stays an owner step: the real endpoint lives on the owner's Mac, so a
+   server-side worker cannot exercise it.
+
 ## 6. Known gaps and cautions
 
 - e2e status (updated 2026-11-19): the Meadow desktop suite passed 18/18 on two
