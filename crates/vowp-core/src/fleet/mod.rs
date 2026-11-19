@@ -128,6 +128,7 @@ fn build_snapshot_with_redactor(
         brake: crate::capacity::brakes::evaluate_with_config(deps, store, now)?,
         reserve_ram_bytes: GIB,
         min_disk_bytes: 5 * GIB,
+        cluster: crate::capacity::cluster::build(deps, store, now)?,
     };
 
     Ok(Snapshot {

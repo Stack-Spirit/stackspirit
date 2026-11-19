@@ -65,6 +65,7 @@ const LISTED_TYPES: &[&str] = &[
     "CapacityTarget",
     "CapacityAdvice",
     "CapacityReport",
+    "ClusterCapacity",
     "RunningCapacity",
     "WaitingJob",
     "CapacitySnapshot",

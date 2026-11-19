@@ -46,6 +46,7 @@ python3 docs/reference/check-reference.py
 | `Capsule` | [capsule.md](capsule.md) |
 | `CapsuleDraft` | [capsule-draft.md](capsule-draft.md) |
 | `CatalogEntry` | [catalog-entry.md](catalog-entry.md) |
+| `ClusterCapacity` | [cluster-capacity.md](cluster-capacity.md) |
 | `Cost` | [cost.md](cost.md) |
 | `CostReport` | [cost-report.md](cost-report.md) |
 | `CostRow` | [cost-row.md](cost-row.md) |

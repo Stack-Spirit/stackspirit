@@ -23,8 +23,8 @@ use crate::api::{
 };
 use crate::asif::{AsifCounts, AsifImportResponse, AsifLoss, AsifReport};
 use crate::capacity::{
-    BrakeState, CapacityAdvice, CapacityHistory, CapacityReport, CapacitySnapshot, CapacityTarget, HostSample,
-    RunUsage, RunningCapacity, UsageEstimate, WaitReason, WaitingJob,
+    BrakeState, CapacityAdvice, CapacityHistory, CapacityReport, CapacitySnapshot, CapacityTarget, ClusterCapacity,
+    HostSample, RunUsage, RunningCapacity, UsageEstimate, WaitReason, WaitingJob,
 };
 use crate::capsule::{Capsule, CapsuleDraft};
 use crate::catalog::{BackupFile, BackupReport, CatalogEntry, GcClassReport, GcReport};
@@ -102,6 +102,7 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("CapacityTarget", schema_value::<CapacityTarget>());
     schemas.insert("CapacityAdvice", schema_value::<CapacityAdvice>());
     schemas.insert("CapacityReport", schema_value::<CapacityReport>());
+    schemas.insert("ClusterCapacity", schema_value::<ClusterCapacity>());
     schemas.insert("RunningCapacity", schema_value::<RunningCapacity>());
     schemas.insert("WaitingJob", schema_value::<WaitingJob>());
     schemas.insert("CapacitySnapshot", schema_value::<CapacitySnapshot>());

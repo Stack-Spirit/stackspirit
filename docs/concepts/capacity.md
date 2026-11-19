@@ -111,6 +111,26 @@ Admission is **machine-wide**. The manager opens each active project database in
 and their estimated CPU, and compares the total with the machine target. A project handle never decides
 the machine's capacity from its own runs alone.
 
+### Cluster capacity
+
+Home and worker nodes are admitted separately. A run that executes on Home counts against Home's
+`target_workers`, Home RAM/CPU headroom, Home disk and Home brake. A run assigned to a remote agent
+node does not consume those Home limits; an active `repo_offload` assignment is remote capacity, not a
+Home run.
+
+A ready job is eligible to offload when its placement is `node:<name>` (or `any` with
+`[offload] enabled = true`), an online active agent node has the project mapped, and that node has a
+free slot, enough free RAM for the run's p90 plus the node's reserve, and disk above
+`[offload] min_disk_bytes`. Admission then checks that worker's slot count instead of blocking on
+Home's target. Provider limits stay global: a limited provider still waits everywhere. A node that is
+offline, revoked, degraded or not mapped is not a candidate, so admission falls back to Home's limits.
+
+`capacity report` and `fleet status` also carry an additive `cluster` card. It reports
+`online_worker_nodes`, `target_workers` (Home target plus online nodes' `max_slots`), `busy_workers`
+(Home running plus nodes' `busy_slots`), and summed CPU cores, total/available memory and free disk.
+The existing per-Home fields are unchanged, and both commands print the cluster line only when at
+least one worker node is online.
+
 ### Fairness
 
 Every active project gets one L1 tick per machine tick. The supervisor orders projects by **fairness

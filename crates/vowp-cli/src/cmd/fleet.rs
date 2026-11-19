@@ -141,6 +141,13 @@ fn print_status(io: &mut dyn IoStreams, status: &FleetStatus) -> Result<(), CliE
         snapshot.capacity.target.target_workers,
         target_mode_name(snapshot.capacity.target.mode)
     )?;
+    if snapshot.capacity.cluster.online_worker_nodes > 0 {
+        writeln!(
+            io.out(),
+            "{}",
+            crate::cmd::capacity::cluster_line(&snapshot.capacity.cluster)
+        )?;
+    }
     if snapshot.limits.is_empty() {
         writeln!(io.out(), "limits: none")?;
     } else {

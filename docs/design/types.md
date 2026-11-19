@@ -1364,15 +1364,24 @@ pub struct RunningCapacity { pub runs: u32, pub ram_p90_bytes: u64, pub cpu_p90_
 pub struct WaitingJob { pub project: ProjectName, pub job: JobId, pub reason: WaitReason, pub since: Timestamp }
 
 #[derive(Default)]
+pub struct ClusterCapacity {
+    pub online_worker_nodes: u32,
+    pub target_workers: u32, pub busy_workers: u32, pub cpu_cores: u32,
+    pub mem_total_bytes: u64, pub mem_available_bytes: u64, pub disk_free_bytes: u64,
+}
+
+#[derive(Default)]
 pub struct CapacitySnapshot {
     pub measured: Option<HostSample>, pub running: RunningCapacity, pub target: CapacityTarget,
     pub advised_target: Option<u32>, pub brake: BrakeState,
     pub reserve_ram_bytes: u64, pub min_disk_bytes: u64,
+    pub cluster: ClusterCapacity,
 }
 pub struct CapacityReport {
     pub generated_at: Timestamp, pub host: Option<HostSample>, pub target: CapacityTarget,
     pub running: RunningCapacity, pub brakes: BrakeState,
     pub reserve_ram_bytes: u64, pub min_disk_bytes: u64,
+    pub cluster: ClusterCapacity,
     pub estimates: Vec<UsageEstimate>, pub waiting: Vec<WaitingJob>, pub limits: Vec<Limit>,
 }
 
@@ -1394,6 +1403,14 @@ point is one 5-minute stored rollup, or one read-time `1h`/`1d` aggregation weig
 an empty range is an empty `points` array, never a fabricated zero. A `fallback` source means the
 memory and load values are not a measurement. Raw `host_samples` are kept 48 hours and the
 rollups 30 days.
+
+`CapacitySnapshot.cluster` and `CapacityReport.cluster` are additive and `serde(default)`: a
+document written before the field existed still parses and reads as an all-zero card, and the
+existing Home fields keep their meaning. `online_worker_nodes` counts enrolled opaque agent nodes
+that are `active` with an under-30-second heartbeat; `target_workers` is Home's target plus each
+online node's reported `max_slots`; `busy_workers` is Home's running runs plus each online node's
+`busy_slots`; `cpu_cores`, `mem_total_bytes`, `mem_available_bytes` and `disk_free_bytes` are
+saturating sums across Home and those nodes. A single-machine home reports zero worker nodes.
 
 ### 16.2 Surfaces, leases, remote execution and orchestrators (`surface`)
 
