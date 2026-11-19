@@ -21,6 +21,7 @@ import { ClusterSection } from "../../next/ClusterSection";
 import { FormClusterDialog } from "../../next/FormClusterDialog";
 import { PromoteBackupDialog } from "../../next/PromoteBackupDialog";
 import { Sidebar } from "../../next/Sidebar";
+import { resetClusterStore, useClusterStore } from "../../next/clusterStore";
 import { resetFleetStore, useFleetStore } from "../../state/fleetStore";
 
 const AT = "2026-11-18T11:00:00.000Z";
@@ -166,6 +167,7 @@ function fakeBridge(overrides: ClusterOverrides = {}): SpiritBridge {
 
 function seed(cluster: ClusterStateView | null, bridge: SpiritBridge = fakeBridge()) {
   resetFleetStore();
+  resetClusterStore();
   useFleetStore.setState({
     bridge,
     status: "ready",
@@ -181,6 +183,8 @@ function seed(cluster: ClusterStateView | null, bridge: SpiritBridge = fakeBridg
     hosts: HOSTS,
     hostsLoaded: true,
     selectedHostId: HOSTS[0]!.id,
+  });
+  useClusterStore.setState({
     cluster,
     clusterStatus: cluster ? "ready" : "idle",
     clusterError: null,
@@ -216,6 +220,7 @@ async function fillRequiredForm(user: ReturnType<typeof userEvent.setup>) {
 
 afterEach(() => {
   resetFleetStore();
+  resetClusterStore();
 });
 
 const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"];

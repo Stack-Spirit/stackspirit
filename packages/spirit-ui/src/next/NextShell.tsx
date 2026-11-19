@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 
 import type { SpiritBridge } from "../bridge";
-import { useCluster, useConnection, useFleet, useFleetStore, useHosts, useSelectedHostId } from "../state/fleetStore";
+import { useConnection, useFleet, useFleetStore, useHosts, useSelectedHostId } from "../state/fleetStore";
 import { RawDocumentDrawer } from "../views/capacity/RawDocumentDrawer";
 import { AddHostWizard } from "../views/hosts/AddHostWizard";
 import { InboxDrawer } from "../views/inbox/InboxDrawer";
@@ -9,6 +9,7 @@ import { SessionsDrawer } from "../views/sessions/SessionsDrawer";
 import { AddProjectDialog } from "./AddProjectDialog";
 import { ErrorNotice } from "./ErrorNotice";
 import { ChatView } from "./ChatView";
+import { useCluster, useClusterStore } from "./clusterStore";
 import { initializeConversations, useConversations } from "./conversations";
 import { ContextPanel } from "./ContextPanel";
 import { FormClusterDialog } from "./FormClusterDialog";
@@ -48,6 +49,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const requestProject = useConversations((state) => state.requestProject);
   const fleet = useFleet();
   const cluster = useCluster();
+  const loadCluster = useClusterStore((state) => state.loadCluster);
   const [theme, setTheme] = useNextTheme();
   const side = useResizable({ storageKey: "stackspirit.sidebarWidth", initial: 272, min: 220, max: 420, grows: "right" });
   const drawer = useResizable({ storageKey: "stackspirit.panelWidth", initial: 400, min: 320, max: 640, grows: "left" });
@@ -63,6 +65,12 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const closeSessions = useFleetStore((state) => state.closeSessions);
 
   const connected = connection.state === "connected" || connection.state === "stale";
+  // A saved cluster belongs to the saved servers, not to the active connection. Read it
+  // once the bridge is initialized and again whenever the active server changes; the
+  // store skips preview, and the background read never delays the shell.
+  useEffect(() => {
+    if (hostsLoaded) void loadCluster();
+  }, [bridge, hostsLoaded, connection.host_id, connection.state, loadCluster]);
   // "global" shows the Connect prompt until a saved server is connected; the setup
   // assistant is opened explicitly from the welcome page or the sidebar.
   const [view, setView] = useState<NextView>({ kind: "session", session: "global" });

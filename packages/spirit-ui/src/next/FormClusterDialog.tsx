@@ -7,8 +7,9 @@ import type {
 } from "../bridge/wire";
 import { toSpiritError, type SpiritError } from "../bridge/errors";
 import { Modal } from "../components";
-import { useCapacity, useCluster, useConnection, useFleet, useFleetStore } from "../state/fleetStore";
+import { useCapacity, useConnection, useFleet } from "../state/fleetStore";
 import { ClusterErrorAlert } from "./ClusterError";
+import { useCluster, useClusterStore } from "./clusterStore";
 import {
   clusterDraftReady,
   formatInterval,
@@ -39,7 +40,7 @@ const DAY = 86_400;
  * fix one worker without retyping the form.
  */
 export function FormClusterDialog({ hosts, initial, onClose }: FormClusterDialogProps) {
-  const formCluster = useFleetStore((state) => state.formCluster);
+  const formCluster = useClusterStore((state) => state.formCluster);
   const fleet = useFleet();
   const connection = useConnection();
   const capacity = useCapacity();

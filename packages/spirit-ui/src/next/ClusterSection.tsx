@@ -2,14 +2,9 @@ import { useState } from "react";
 
 import type { ClusterHostHealthView } from "../bridge/wire";
 import { toSpiritError, type SpiritError } from "../bridge/errors";
-import {
-  useCluster,
-  useClusterError,
-  useClusterStatus,
-  useFleetStore,
-  useHosts,
-} from "../state/fleetStore";
+import { useFleetStore, useHosts } from "../state/fleetStore";
 import { ClusterErrorAlert } from "./ClusterError";
+import { useCluster, useClusterError, useClusterStatus, useClusterStore } from "./clusterStore";
 import {
   agentStateLabel,
   clusterPooled,
@@ -39,8 +34,8 @@ export function ClusterSection({ onFormCluster, onPromote }: ClusterSectionProps
   const clusterAvailable = useFleetStore((state) => Boolean(state.bridge?.cluster));
   const status = useClusterStatus();
   const commandError = useClusterError();
-  const loadCluster = useFleetStore((state) => state.loadCluster);
-  const removeWorker = useFleetStore((state) => state.removeClusterWorker);
+  const loadCluster = useClusterStore((state) => state.loadCluster);
+  const removeWorker = useClusterStore((state) => state.removeClusterWorker);
   const [removing, setRemoving] = useState<string | null>(null);
   const [removingBusy, setRemovingBusy] = useState(false);
   const [removeError, setRemoveError] = useState<SpiritError | null>(null);

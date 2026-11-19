@@ -3,7 +3,6 @@ import { useId, useState, type FormEvent } from "react";
 import type { ClusterPromoteOutcome, HostProfile } from "../bridge/wire";
 import { toSpiritError, type SpiritError } from "../bridge/errors";
 import { Modal } from "../components";
-import { useCluster, useFleetStore } from "../state/fleetStore";
 import { ClusterErrorAlert } from "./ClusterError";
 import {
   PROMOTE_CONFIRMATION,
@@ -12,6 +11,7 @@ import {
   hostLabel,
   isAbsoluteRemotePath,
 } from "./cluster";
+import { useCluster, useClusterStore } from "./clusterStore";
 
 export interface PromoteBackupDialogProps {
   hosts: HostProfile[];
@@ -37,7 +37,7 @@ export function PromoteBackupDialog({
   onConnect,
 }: PromoteBackupDialogProps) {
   const cluster = useCluster();
-  const promote = useFleetStore((state) => state.promoteClusterBackup);
+  const promote = useClusterStore((state) => state.promoteClusterBackup);
   const workers = cluster?.config?.workers ?? [];
   const preferred =
     (initialTarget && workers.some((worker) => worker.host === initialTarget)

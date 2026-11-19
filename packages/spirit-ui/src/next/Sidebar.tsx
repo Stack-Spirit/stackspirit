@@ -1,7 +1,8 @@
 import { useState, type HTMLAttributes, type ReactNode } from "react";
 
-import { useCluster, useConnection, useFleet, useFleetStore, useHosts, usePreview } from "../state/fleetStore";
+import { useConnection, useFleet, useFleetStore, useHosts, usePreview } from "../state/fleetStore";
 import { clusterPooled } from "./cluster";
+import { useCluster } from "./clusterStore";
 import type { SessionId } from "./conversations";
 import { useServerHealth } from "./health";
 import { Menu, MenuItem } from "./Menu";
