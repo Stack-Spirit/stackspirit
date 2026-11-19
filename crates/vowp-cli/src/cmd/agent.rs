@@ -131,11 +131,12 @@ fn print_agent_endpoint(io: &mut dyn IoStreams, endpoint: &OrchestratorEndpoint)
 
 /// Maps a typed local endpoint failure onto the CLI exit classes.
 ///
-/// A missing local record and a corrupt, too-wide or unreadable private file are both
-/// local-record failures (`cli.md` §6.10): they exit 3 and keep the typed message.
+/// Only a missing local record (`not_found`) exits 3. A corrupt, too-wide or unreadable
+/// private file is invalid input and exits 2, the same class as the home command's invalid
+/// error for that corruption; the agent library keeps its typed `config_invalid` code.
 fn map_host_error(error: OrchestratorError) -> CliError {
     match error.code.as_str() {
-        "not_found" | "config_invalid" => CliError::NotFound(error.message),
+        "not_found" => CliError::NotFound(error.message),
         _ => CliError::Invalid(error.message),
     }
 }

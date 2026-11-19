@@ -329,8 +329,9 @@ node that runs the app:
 `AgentConfig::default_state_dir()`, and prints the same document with `location: "node"`.
 It reads only local files: the private `config.json`, the recorded `host.json` and, for a live
 opencode host, the 0600 `service.json`. An unknown name is `not_found` (exit 3); a corrupt or
-too-wide file is `config_invalid` (exit 3) with no path or secret in the message. The password
-is only in `--json`.
+too-wide file keeps the agent's typed `config_invalid` code but is invalid input at the CLI
+(exit 2), the same class as the home command's invalid error, with no path or secret in the
+message. The password is only in `--json`.
 
 ### Local chat (`chat --agent`)
 

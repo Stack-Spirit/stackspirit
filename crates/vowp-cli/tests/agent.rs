@@ -4808,7 +4808,7 @@ fn agent_orchestrator_endpoint_json_returns_local_auth_and_ls_stays_clean() {
 }
 
 #[test]
-fn agent_orchestrator_endpoint_corrupt_private_file_exits_three_and_names_it() {
+fn agent_orchestrator_endpoint_corrupt_private_file_exits_two_and_names_it() {
     let home = TempDir::new().expect("agent home");
     let state_dir = home.path().join(".vowp-agent");
     ls_create_private_dir(&state_dir);
@@ -4845,19 +4845,40 @@ fn agent_orchestrator_endpoint_corrupt_private_file_exits_three_and_names_it() {
     let corrupt = format!("{{\"url\":\"http://127.0.0.1:46333\",\"password\":\"{password}\",");
     write_private_file(&service_path, corrupt.as_bytes());
 
-    let envs = [("VOWP_AGENT_HOME", state_dir.display().to_string())];
-    let (code, stdout, stderr) = run_binary_with(home.path(), &["agent", "orchestrator", "endpoint", name], &envs);
-    let text = format!("{stdout}\n{stderr}");
-    assert_eq!(code, 3, "a corrupt private file is config_invalid (exit 3): {text}");
-    assert!(text.contains(name), "the error names the orchestrator: {text}");
-    for forbidden in [
+    let forbidden = [
         state_dir.display().to_string(),
         service_path.display().to_string(),
         password,
         "127.0.0.1".to_owned(),
         "46333".to_owned(),
-    ] {
-        assert!(!text.contains(&forbidden), "the error leaked a forbidden value: {text}");
+    ];
+    let envs = [("VOWP_AGENT_HOME", state_dir.display().to_string())];
+    let (code, stdout, stderr) = run_binary_with(home.path(), &["agent", "orchestrator", "endpoint", name], &envs);
+    let text = format!("{stdout}\n{stderr}");
+    assert_eq!(
+        code, 2,
+        "a corrupt private file is invalid input, matching the home command (exit 2): {text}"
+    );
+    assert!(text.contains(name), "the error names the orchestrator: {text}");
+    for forbidden in &forbidden {
+        assert!(!text.contains(forbidden), "the error leaked a forbidden value: {text}");
+    }
+
+    let (code, stdout, stderr) = run_binary_with(
+        home.path(),
+        &["--json", "agent", "orchestrator", "endpoint", name],
+        &envs,
+    );
+    let text = format!("{stdout}\n{stderr}");
+    assert_eq!(code, 2, "the JSON error keeps the invalid-input class: {text}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("endpoint error JSON");
+    assert_eq!(value["error"]["kind"], "invalid_input", "{text}");
+    assert!(text.contains(name), "the JSON error names the orchestrator: {text}");
+    for forbidden in &forbidden {
+        assert!(
+            !text.contains(forbidden),
+            "the JSON error leaked a forbidden value: {text}"
+        );
     }
 }
 
@@ -4887,8 +4908,8 @@ fn agent_orchestrator_endpoint_without_a_session_names_the_orchestrator() {
     let (code, stdout, stderr) = run_binary_with(home.path(), &["agent", "orchestrator", "endpoint", name], &envs);
     let text = format!("{stdout}\n{stderr}");
     assert_eq!(
-        code, 3,
-        "a config with no paired session is a local-record failure: {text}"
+        code, 2,
+        "a config with no paired session is invalid input, like the home command: {text}"
     );
     assert!(text.contains(name), "the error names the orchestrator: {text}");
     assert!(
@@ -4906,7 +4927,7 @@ fn agent_orchestrator_endpoint_without_a_session_names_the_orchestrator() {
         &envs,
     );
     let text = format!("{stdout}\n{stderr}");
-    assert_eq!(code, 3, "the JSON error keeps the exit class: {text}");
+    assert_eq!(code, 2, "the JSON error keeps the exit class: {text}");
     assert!(text.contains(name), "the JSON error names the orchestrator: {text}");
 }
 

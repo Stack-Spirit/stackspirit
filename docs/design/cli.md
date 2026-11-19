@@ -826,9 +826,11 @@ Remote Control, chat and a stopped host leave `url`, `native_session_id` and `au
 command never contacts the home and never opens a socket.
 
 An unknown name is a typed `not_found` (exit 3). A corrupt, too-wide or unreadable private file
-is `config_invalid` (exit 3), and the message never echoes a path, port, password, token or pair
-link. The password appears only in `--json` for a live local host; the human key/value block
-prints the auth scheme and username and says the password is in `--json`.
+still carries the agent library's typed `config_invalid` code, but the CLI class is invalid input
+(exit 2), matching the home command's invalid error for the same corruption, and the message never
+echoes a path, port, password, token or pair link. The password appears only in `--json` for a live
+local host; the human key/value block prints the auth scheme and username and says the password is
+in `--json`.
 
 ### `vowp agent service install [--print] [--force] [--now]` · `uninstall [--yes]` · `status`
 
