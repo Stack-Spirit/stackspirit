@@ -10,7 +10,10 @@ use vowp_protocol::agent::surface::{
 };
 use vowp_protocol::event::{AssistantMessage, EventBody};
 use vowp_protocol::ids::{NodeName, SessionId};
-use vowp_protocol::surface::{JoinInstructions, OrchestratorApp, OrchestratorCard, OrchestratorNodeState, SurfaceId};
+use vowp_protocol::surface::{
+    JoinInstructions, OrchestratorApp, OrchestratorAuth, OrchestratorCard, OrchestratorEndpoint, OrchestratorLocation,
+    OrchestratorNodeState, SurfaceId,
+};
 use vowp_protocol::time::Timestamp;
 
 /// A fixed timestamp for frame fixtures.
@@ -235,6 +238,145 @@ fn orchestrator_card_decodes_a_v0_2_row_without_a_node() {
     let card: OrchestratorCard = serde_json::from_value(value).expect("v0.2 card back");
     assert_eq!(card.state, OrchestratorNodeState::Running);
     assert_eq!(card.node, None);
+}
+
+#[test]
+fn orchestrator_endpoint_round_trips_home_and_node_documents() {
+    // Assemble the marker at runtime so no secret-shaped literal is committed.
+    let password = format!("vowp-endpoint-{}", "R".repeat(24));
+    let session = SessionId::new();
+    let home = OrchestratorEndpoint {
+        name: "home-main".to_owned(),
+        app: OrchestratorApp::Opencode,
+        session_id: session.clone(),
+        location: OrchestratorLocation::Home,
+        node: None,
+        state: OrchestratorNodeState::Running,
+        url: Some("http://127.0.0.1:54321".to_owned()),
+        native_session_id: Some("ses_native_1".to_owned()),
+        auth: Some(OrchestratorAuth {
+            header: "Authorization".to_owned(),
+            scheme: "Basic".to_owned(),
+            username: "opencode".to_owned(),
+            password: password.clone(),
+        }),
+    };
+    let node = OrchestratorEndpoint {
+        name: "mac-main".to_owned(),
+        app: OrchestratorApp::Opencode,
+        session_id: session,
+        location: OrchestratorLocation::Node,
+        node: Some(NodeName::parse("mac-studio").expect("node name")),
+        state: OrchestratorNodeState::Running,
+        url: None,
+        native_session_id: None,
+        auth: None,
+    };
+
+    for (endpoint, location) in [(&home, "home"), (&node, "node")] {
+        let value = serde_json::to_value(endpoint).expect("orchestrator endpoint JSON");
+        assert_eq!(value["name"], endpoint.name, "name for {location}");
+        assert_eq!(value["location"], location, "location wire name");
+        assert_eq!(
+            value["session_id"],
+            serde_json::to_value(&endpoint.session_id).expect("session id JSON")
+        );
+        let decoded: OrchestratorEndpoint = serde_json::from_value(value).expect("orchestrator endpoint back");
+        assert_eq!(&decoded, endpoint, "round trip for {location}");
+    }
+
+    let home_value = serde_json::to_value(&home).expect("home endpoint JSON");
+    assert_eq!(home_value["url"], "http://127.0.0.1:54321");
+    assert_eq!(home_value["auth"]["header"], "Authorization");
+    assert_eq!(home_value["auth"]["scheme"], "Basic");
+    assert_eq!(home_value["auth"]["username"], "opencode");
+    assert_eq!(home_value["auth"]["password"], password);
+
+    let node_value = serde_json::to_value(&node).expect("node endpoint JSON");
+    assert_eq!(node_value["node"], "mac-studio");
+    assert!(node_value["url"].is_null(), "a node document has no url: {node_value}");
+    assert!(
+        node_value["native_session_id"].is_null(),
+        "a node document has no native id: {node_value}"
+    );
+    assert!(
+        node_value["auth"].is_null(),
+        "a node document has no auth: {node_value}"
+    );
+}
+
+#[test]
+fn orchestrator_endpoint_schema_is_exported_and_auth_debug_redacts_the_password() {
+    use vowp_protocol::schema::schema_for_name;
+
+    let password = format!("vowp-endpoint-{}", "S".repeat(24));
+    let auth = OrchestratorAuth {
+        header: "Authorization".to_owned(),
+        scheme: "Basic".to_owned(),
+        username: "opencode".to_owned(),
+        password: password.clone(),
+    };
+    let debug = format!("{auth:?}");
+    assert!(debug.contains("[REDACTED]"), "debug redacts the password: {debug}");
+    assert!(!debug.contains(&password), "debug never carries the password");
+    assert!(debug.contains("Authorization") && debug.contains("opencode"), "{debug}");
+
+    let endpoint = OrchestratorEndpoint {
+        name: "main".to_owned(),
+        app: OrchestratorApp::Opencode,
+        session_id: SessionId::new(),
+        location: OrchestratorLocation::Home,
+        node: None,
+        state: OrchestratorNodeState::Running,
+        url: Some("http://127.0.0.1:1234".to_owned()),
+        native_session_id: None,
+        auth: Some(auth),
+    };
+    let debug = format!("{endpoint:?}");
+    assert!(!debug.contains(&password), "endpoint debug never carries the password");
+
+    for name in ["OrchestratorLocation", "OrchestratorAuth", "OrchestratorEndpoint"] {
+        let schema = schema_for_name(name).unwrap_or_else(|| panic!("{name} is exported"));
+        assert_eq!(schema["title"], name, "{name} schema title");
+    }
+    let auth_schema = schema_for_name("OrchestratorAuth").expect("auth schema");
+    let required: Vec<&str> = auth_schema["required"]
+        .as_array()
+        .expect("required is an array")
+        .iter()
+        .map(|name| name.as_str().expect("required names are strings"))
+        .collect();
+    for field in ["header", "scheme", "username", "password"] {
+        assert!(required.contains(&field), "the auth schema must require {field}");
+    }
+    let endpoint_schema = schema_for_name("OrchestratorEndpoint").expect("endpoint schema");
+    let properties = endpoint_schema["properties"]
+        .as_object()
+        .expect("endpoint schema properties");
+    for field in [
+        "name",
+        "app",
+        "session_id",
+        "location",
+        "node",
+        "state",
+        "url",
+        "native_session_id",
+        "auth",
+    ] {
+        assert!(
+            properties.contains_key(field),
+            "the endpoint schema must define {field}"
+        );
+    }
+    let location_schema = schema_for_name("OrchestratorLocation").expect("location schema");
+    let variants = location_schema["oneOf"]
+        .as_array()
+        .expect("location oneOf values")
+        .iter()
+        .filter_map(|value| value["const"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(variants, vec!["home", "node"]);
 }
 
 #[test]

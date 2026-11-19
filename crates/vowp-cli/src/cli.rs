@@ -1313,6 +1313,8 @@ pub enum AgentCommand {
     Doctor(AgentDoctorArgs),
     /// Confirm a changed system-mode WSS leaf fingerprint after verifying it out of band.
     Trust(AgentTrustArgs),
+    /// Inspect one local orchestrator on this agent machine.
+    Orchestrator(AgentOrchestratorArgs),
     /// Hidden: serve the home side of one agent stdio or WebSocket connection.
     #[command(hide = true)]
     Gateway(AgentGatewayArgs),
@@ -1426,6 +1428,28 @@ pub struct AgentRunArgs {
 /// Arguments for `vowp agent status`.
 #[derive(Debug, Clone, Default, Args)]
 pub struct AgentStatusArgs {}
+
+/// Arguments for `vowp agent orchestrator`.
+#[derive(Debug, Clone, Args)]
+pub struct AgentOrchestratorArgs {
+    /// The local orchestrator inspection subcommand.
+    #[command(subcommand)]
+    pub command: AgentOrchestratorCommand,
+}
+
+/// `vowp agent orchestrator` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum AgentOrchestratorCommand {
+    /// Show the local endpoint document for one orchestrator.
+    Endpoint(AgentOrchestratorEndpointArgs),
+}
+
+/// Arguments for `vowp agent orchestrator endpoint`.
+#[derive(Debug, Clone, Args)]
+pub struct AgentOrchestratorEndpointArgs {
+    /// Orchestrator name.
+    pub name: String,
+}
 
 /// Arguments for the hidden `vowp agent gateway`.
 #[derive(Debug, Clone, Default, Args)]

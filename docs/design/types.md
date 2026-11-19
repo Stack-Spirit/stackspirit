@@ -2115,3 +2115,41 @@ typed `OrchestratorError` (`code`, `message`, `retryable`) or a redacted `detail
 `OrchestratorNodeState` values are `starting|running|stopped|degraded|node_offline|failed`.
 Neither frame carries a port, password, pair link, absolute local path or secret value. The
 home runs the same redaction over a result before it writes `orchestrator.json`.
+
+### 16.14 Orchestrator endpoint discovery (`surface`)
+
+These are the v0.5 discovery documents for a UI client that connects directly to an
+orchestrator's paired app process. The home and the agent return the same shape; the
+`location` says which machine runs the app. The design note is
+[`v0.5/orchestrator-endpoint.md`](v0.5/orchestrator-endpoint.md).
+
+```rust
+#[serde(rename_all = "snake_case")]
+pub enum OrchestratorLocation { Home, Node }
+
+pub struct OrchestratorAuth {
+    pub header: String,   // e.g. "Authorization"
+    pub scheme: String,   // e.g. "Basic"
+    pub username: String, // e.g. "opencode"
+    pub password: String, // secret; explicit local endpoint command only
+}
+
+pub struct OrchestratorEndpoint {
+    pub name: String,
+    pub app: OrchestratorApp,
+    pub session_id: SessionId,
+    pub location: OrchestratorLocation,
+    pub node: Option<NodeName>,
+    pub state: OrchestratorNodeState,
+    pub url: Option<String>,             // loopback http://127.0.0.1:<port> only
+    pub native_session_id: Option<String>,
+    pub auth: Option<OrchestratorAuth>,
+}
+```
+
+`OrchestratorAuth` has a custom `Debug` that prints `password: [REDACTED]`. The password is
+present only in the explicit local endpoint document; a node-hosted or stopped orchestrator
+has `url`, `native_session_id` and `auth` all `null`. The URL must be
+`http://127.0.0.1:<port>` or `http://localhost:<port>`; anything else is refused. Errors
+name the orchestrator and the failure class, never a path, port, password, token or pair
+link.

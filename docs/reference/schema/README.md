@@ -92,9 +92,12 @@ python3 docs/reference/check-reference.py
 | `NodePage` | [node-page.md](node-page.md) |
 | `NodePresence` | [node-presence.md](node-presence.md) |
 | `NodeStatus` | [node-status.md](node-status.md) |
+| `OrchestratorAuth` | [orchestrator-auth.md](orchestrator-auth.md) |
 | `OrchestratorCard` | [orchestrator-card.md](orchestrator-card.md) |
 | `OrchestratorCommand` | [orchestrator-command.md](orchestrator-command.md) |
+| `OrchestratorEndpoint` | [orchestrator-endpoint.md](orchestrator-endpoint.md) |
 | `OrchestratorError` | [orchestrator-error.md](orchestrator-error.md) |
+| `OrchestratorLocation` | [orchestrator-location.md](orchestrator-location.md) |
 | `OrchestratorNodeState` | [orchestrator-node-state.md](orchestrator-node-state.md) |
 | `OrchestratorResult` | [orchestrator-result.md](orchestrator-result.md) |
 | `Page` | [page.md](page.md) |

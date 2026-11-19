@@ -313,8 +313,24 @@ node that runs the app:
 - `orchestrator ls` adds a `NODE` column (`home` for a v0.2 orchestrator) and the JSON card
   carries `node` and the typed `state`. `stop`/`resume <name>` read the node from
   `orchestrator.json`; `resume` on an offline node prints `node_offline` and exits 7.
+- `orchestrator endpoint <name> [--json]` calls `Orchestrator::endpoint` and prints the
+  `OrchestratorEndpoint` document. It is home-side inspection, so the global `--node` is
+  consumed and never becomes an SSH redirect (`take_orchestrator_node` returns `None` for
+  it). A node-hosted record returns `location: "node"` with null endpoint values and the
+  human output names `vowp agent orchestrator endpoint <name> --json`. A live home-hosted
+  opencode host returns the loopback URL, native id and Basic auth; a stopped host, Claude or
+  chat leaves them null. The human key/value block prints the auth scheme and username and
+  points at `--json` for the password, which is never printed on the terminal.
 - The output is the `OrchestratorCard`; a node card carries no directory, port, token, pair
   link or secret. Human output prints the orchestrator directory and the card's join text only.
+
+`vowp agent orchestrator endpoint <name> [--json]` lives in `cmd/agent.rs`. It runs before
+`Ctx::build` with the other agent commands, builds an `OrchestratorHost` over
+`AgentConfig::default_state_dir()`, and prints the same document with `location: "node"`.
+It reads only local files: the private `config.json`, the recorded `host.json` and, for a live
+opencode host, the 0600 `service.json`. An unknown name is `not_found` (exit 3); a corrupt or
+too-wide file is `config_invalid` (exit 3) with no path or secret in the message. The password
+is only in `--json`.
 
 ### Local chat (`chat --agent`)
 
@@ -472,7 +488,13 @@ home with no database and a fake mode-0600 Unix socket. The local-orchestrator s
 `orchestrator_apply_result_correlates_the_late_node_result` and
 `orchestrator_card_contains_no_path_or_secret` in `tests/orchestrator.rs`. They use a
 temporary home, a fake app host and a fake agent command stream; no real app, tmux, network
-or home directory is touched.
+or home directory is touched. The endpoint slice adds
+`orchestrator_endpoint_json_reports_home_and_node_locations`,
+`orchestrator_endpoint_remote_never_returns_auth` and
+`orchestrator_endpoint_redacts_a_corrupt_private_file_error` in `tests/orchestrator.rs`, plus
+`agent_orchestrator_endpoint_json_returns_local_auth_and_ls_stays_clean` in `tests/agent.rs`;
+they use a temporary home or `VOWP_AGENT_HOME`, a private live `host.json`/`service.json` and
+the test process id, and never open a socket, SSH or a real app.
 
 The phase-4 CLI slice adds `agent_service_install_print_writes_nothing_and_names_the_manager`,
 `agent_service_install_without_home_exits_two`, `agent_service_unsupported_platform_is_exit_five`,

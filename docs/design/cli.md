@@ -495,6 +495,7 @@ vowp orchestrator ls
 vowp orchestrator move <name> (--node <n> | --home)
 vowp orchestrator stop <name>
 vowp orchestrator resume <name>
+vowp orchestrator endpoint <name> [--json]
 ```
 
 Creates an ordinary session with role `orchestrator` (fleet-wide or project-bound), a project-local
@@ -533,6 +534,19 @@ starts no process. The default `chat` app is started as `vowp chat --agent <sess
 `degraded` or `node_offline` record, is `null` for `starting`, `running` and `stopped`, and is
 cleared by a clean `resume` or `stop`. It never contains a port, password, secret value or absolute
 local path.
+
+`orchestrator endpoint <name>` returns the `OrchestratorEndpoint` discovery document for a UI
+client. It is a home-side inspection: the global `--node` is consumed and is not an SSH redirect,
+and the command never opens SSH, a socket or a node's files. For a home-hosted orchestrator with a
+live host it reads the private 0600 service state and fills `url`, `native_session_id` and `auth`;
+a stopped host, or an app without a loopback endpoint (Claude Remote Control or chat), leaves all
+three `null`. For a node-hosted orchestrator it returns the metadata-only document (`location:
+node`, the same `session_id`, `url`/`native_session_id`/`auth` null) and the human output tells the
+owner to run `vowp agent orchestrator endpoint <name> --json` on that machine. The `--json`
+document carries `auth.password` only for a live home-hosted endpoint; the human key/value block
+prints the auth scheme and username and says the password is in `--json`. No other command returns
+that password; it never appears in a card, `snapshot.json`, `fleet status`, `orchestrator ls`, a
+log or an error.
 
 ### 6.11 `vowp mcp`
 
@@ -798,6 +812,23 @@ seven days prints one warning to stderr. `--json` prints:
 `connection` is one of `unknown`, `connecting`, `connected`, `reconnecting`, `revoked`,
 `superseded` or `stopped`. `AgentStatus` is a CLI-local document, not an exported protocol
 schema.
+
+### `vowp agent orchestrator endpoint <name> [--json]`
+
+Reads only this machine's agent state directory (`$VOWP_AGENT_HOME`, else `~/.vowp-agent`):
+`orchestrators/<name>/config.json`, the recorded `host.json` and, while the host's pid is alive,
+the 0600 app `service.json` named by `service_json`. It prints the same `OrchestratorEndpoint`
+document as the home command with `location: "node"` and the home session id from the paired
+binding. A live opencode host fills the loopback `url` and Basic `auth` (header `Authorization`,
+scheme `Basic`, username `opencode`, the service password); `native_session_id` is `null` unless
+the app's service file names one, because the desktop client creates that app session. Claude
+Remote Control, chat and a stopped host leave `url`, `native_session_id` and `auth` null. The
+command never contacts the home and never opens a socket.
+
+An unknown name is a typed `not_found` (exit 3). A corrupt, too-wide or unreadable private file
+is `config_invalid` (exit 3), and the message never echoes a path, port, password, token or pair
+link. The password appears only in `--json` for a live local host; the human key/value block
+prints the auth scheme and username and says the password is in `--json`.
 
 ### `vowp agent service install [--print] [--force] [--now]` · `uninstall [--yes]` · `status`
 

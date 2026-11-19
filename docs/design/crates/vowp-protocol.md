@@ -315,6 +315,8 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `orchestrator_node_state_wire_names_are_stable` | all six `OrchestratorNodeState` values serialise to their documented names, display identically and reject an unknown value |
 | `orchestrator_card_carries_its_node_and_typed_state` | a card carries `node` and a typed state, round-trips, and its JSON has no path, token or password |
 | `orchestrator_card_decodes_a_v0_2_row_without_a_node` | a v0.2 card without `node` decodes to `node: None` and its old `running` state |
+| `orchestrator_endpoint_round_trips_home_and_node_documents` | home and node `OrchestratorEndpoint` documents round-trip; `location` is `home`/`node`, the home document carries `url`/`native_session_id`/Basic `auth`, and the node document has all three null |
+| `orchestrator_endpoint_schema_is_exported_and_auth_debug_redacts_the_password` | `OrchestratorLocation`, `OrchestratorAuth` and `OrchestratorEndpoint` have schemas; `OrchestratorAuth` requires `header`/`scheme`/`username`/`password`; its `Debug` and the endpoint's `Debug` print `[REDACTED]` and never the password |
 
 ## 7. Out of scope / v0.2
 

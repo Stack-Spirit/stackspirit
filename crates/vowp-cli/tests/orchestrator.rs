@@ -2122,3 +2122,193 @@ fn orchestrator_session_is_visible_to_fleet_snapshot() {
     assert_eq!(snapshot.orchestrators[0].name, "snap");
     assert_eq!(snapshot.orchestrators[0].app, OrchestratorApp::Chat);
 }
+
+/// A runtime-assembled marker password; no secret-shaped literal is committed.
+fn endpoint_password(label: &str) -> String {
+    format!("vowp-test-{label}-{}", "E".repeat(20))
+}
+
+/// Writes one private `orchestrator.json` for an endpoint test.
+fn write_endpoint_state(env: &TestEnv, name: &str, node: Option<NodeName>) -> (PathBuf, SessionId) {
+    let dir = env.orchestrator_dir(name);
+    std::fs::create_dir_all(&dir).expect("orchestrator dir");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("orchestrator mode");
+    let session = SessionId::new();
+    let value = serde_json::json!({
+        "name": name,
+        "app": "opencode",
+        "session_id": session,
+        "project": null,
+        "executor": null,
+        "state": "running",
+        "created_at": Timestamp::now(),
+        "join": {
+            "desktop": format!("vowp orchestrator resume {name}"),
+            "phone": format!("vowp chat {session}"),
+            "chat": format!("vowp chat --agent --session {session}"),
+        },
+        "surface_id": null,
+        "node": node,
+        "last_request_id": null,
+    });
+    std::fs::write(state_path(&dir), serde_json::to_vec(&value).expect("state JSON")).expect("orchestrator.json");
+    std::fs::set_permissions(state_path(&dir), std::fs::Permissions::from_mode(0o600)).expect("state mode");
+    (dir, session)
+}
+
+/// Writes one live `host.json` shaped like the opencode host's own file.
+fn write_endpoint_host(dir: &Path, port: u16) {
+    let value = serde_json::json!({
+        "kind": "opencode",
+        "name": "endpoint",
+        "pid": std::process::id(),
+        "port": port,
+        "url": format!("http://127.0.0.1:{port}"),
+        "started_at": Timestamp::now(),
+        "workdir": dir.display().to_string(),
+        "service_json": dir.join(".opencode/state/opencode/service.json").display().to_string(),
+        "native_session_id": "ses_cli_endpoint",
+        "vowp_session": SessionId::new(),
+    });
+    std::fs::write(dir.join("host.json"), serde_json::to_vec(&value).expect("host JSON")).expect("host.json");
+    std::fs::set_permissions(dir.join("host.json"), std::fs::Permissions::from_mode(0o600)).expect("host mode");
+}
+
+/// Writes the private opencode `service.json` below `dir`.
+fn write_endpoint_service(dir: &Path, url: &str, port: u16, password: &str) {
+    let path = dir.join(".opencode/state/opencode/service.json");
+    let parent = path.parent().expect("service parent");
+    std::fs::create_dir_all(parent).expect("service dir");
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).expect("service dir mode");
+    let value = serde_json::json!({
+        "version": "2.0.28",
+        "url": url,
+        "port": port,
+        "pid": std::process::id(),
+        "password": password,
+    });
+    std::fs::write(&path, serde_json::to_vec(&value).expect("service JSON")).expect("service.json");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("service mode");
+}
+
+#[test]
+fn orchestrator_endpoint_json_reports_home_and_node_locations() {
+    let env = TestEnv::new();
+    let (home_dir, home_session) = write_endpoint_state(&env, "home-main", None);
+    let password = endpoint_password("home");
+    write_endpoint_host(&home_dir, 45111);
+    write_endpoint_service(&home_dir, "http://127.0.0.1:45111", 45111, &password);
+    let node = env.agent_node("mac-studio");
+    write_endpoint_state(&env, "mac-main", Some(node));
+
+    let (code, value, stderr) = env.run_json(&["orchestrator", "endpoint", "home-main"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["name"], "home-main");
+    assert_eq!(value["location"], "home");
+    assert!(value["node"].is_null(), "{value}");
+    assert_eq!(value["session_id"], home_session.as_str());
+    assert_eq!(value["state"], "running");
+    assert_eq!(value["url"], "http://127.0.0.1:45111");
+    assert_eq!(value["native_session_id"], "ses_cli_endpoint");
+    assert_eq!(value["auth"]["header"], "Authorization");
+    assert_eq!(value["auth"]["scheme"], "Basic");
+    assert_eq!(value["auth"]["username"], "opencode");
+    assert_eq!(value["auth"]["password"], password);
+
+    let (code, node_value, stderr) = env.run_json(&["orchestrator", "endpoint", "mac-main"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(node_value["name"], "mac-main");
+    assert_eq!(node_value["location"], "node");
+    assert_eq!(node_value["node"], "mac-studio");
+    assert_eq!(node_value["state"], "running");
+    assert!(node_value["url"].is_null(), "{node_value}");
+    assert!(node_value["native_session_id"].is_null(), "{node_value}");
+    assert!(node_value["auth"].is_null(), "{node_value}");
+
+    // The global `--node` is not an SSH redirect for this inspection command: it is
+    // consumed locally and the home record is still read from this home.
+    let (code, value, stderr) = env.run_json(&["--node", "mac-studio", "orchestrator", "endpoint", "home-main"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["location"], "home");
+    assert_eq!(value["url"], "http://127.0.0.1:45111");
+
+    let (code, stdout, stderr) = env.run(&["orchestrator", "endpoint", "mac-main"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("vowp agent orchestrator endpoint mac-main --json"),
+        "the human output points at the agent machine: {stdout}"
+    );
+    assert!(
+        !stdout.contains(&password),
+        "the human output carries no password: {stdout}"
+    );
+}
+
+#[test]
+fn orchestrator_endpoint_remote_never_returns_auth() {
+    let env = TestEnv::new();
+    let node = env.agent_node("mac-studio");
+    let (dir, _session) = write_endpoint_state(&env, "mac-main", Some(node));
+    // Bait: a node record's home directory has no local host, and even a stray service
+    // file must not become credentials in the metadata-only document.
+    let password = endpoint_password("remote");
+    write_endpoint_host(&dir, 45112);
+    write_endpoint_service(&dir, "http://127.0.0.1:45112", 45112, &password);
+
+    let (code, value, stderr) = env.run_json(&["orchestrator", "endpoint", "mac-main"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["location"], "node");
+    assert!(value["auth"].is_null(), "a remote endpoint has no auth: {value}");
+    assert!(value["url"].is_null(), "a remote endpoint has no url: {value}");
+    assert!(value["native_session_id"].is_null(), "{value}");
+    let text = value.to_string();
+    assert!(!text.contains(&password), "the remote document carries no password");
+    assert!(!text.contains("45112"), "the remote document carries no port");
+
+    let (code, text, stderr) = env.run(&["orchestrator", "endpoint", "mac-main"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        text.contains("vowp agent orchestrator endpoint mac-main --json"),
+        "the owner is told where to run the local command: {text}"
+    );
+    assert!(!text.contains(&password), "the human output carries no password");
+
+    let (code, _stdout, stderr) = env.run(&["orchestrator", "endpoint", "missing"]);
+    assert_eq!(code, 3, "an unknown orchestrator is not found: {stderr}");
+}
+
+#[test]
+fn orchestrator_endpoint_redacts_a_corrupt_private_file_error() {
+    let env = TestEnv::new();
+    let (dir, _session) = write_endpoint_state(&env, "corrupt-main", None);
+    write_endpoint_host(&dir, 45113);
+    let password = endpoint_password("corrupt");
+    let service = dir.join(".opencode/state/opencode/service.json");
+    let parent = service.parent().expect("service parent");
+    std::fs::create_dir_all(parent).expect("service dir");
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).expect("service dir mode");
+    std::fs::write(
+        &service,
+        format!("{{\"url\":\"http://127.0.0.1:45113\",\"password\":\"{password}\","),
+    )
+    .expect("corrupt service");
+    std::fs::set_permissions(&service, std::fs::Permissions::from_mode(0o600)).expect("service mode");
+
+    let (code, stdout, stderr) = env.run(&["--json", "orchestrator", "endpoint", "corrupt-main"]);
+    assert_ne!(code, 0, "a corrupt service file is an error; stdout: {stdout}");
+    let text = format!("{stdout}\n{stderr}");
+    assert!(
+        text.contains("corrupt-main"),
+        "the error names the orchestrator: {text}"
+    );
+    for forbidden in [
+        password.as_str(),
+        service.to_str().expect("service path"),
+        dir.to_str().expect("orchestrator dir"),
+        "45113",
+        "127.0.0.1",
+        "service.json",
+    ] {
+        assert!(!text.contains(forbidden), "the error leaked a forbidden value: {text}");
+    }
+}

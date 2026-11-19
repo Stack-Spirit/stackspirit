@@ -71,7 +71,7 @@ Trust boundaries:
 | **The home is authoritative** | A control machine and the apps and MCP instance on it never write a VOWP DB file; their commands route to the home. On the home, the `vowp mcp` server reads and writes the home database directly, and every write tool checks the session lease. A control machine keeps only a snapshot cache, a spool and local surface/tunnel state. |
 | **No public listener** | The supervisor opens no public HTTP, SSE or API port. The opencode app host and the one-time secret paste page listen on loopback only, and a control machine reaches both through an SSH tunnel; the secret vector is one-time. Claude Remote Control opens no local port: it connects outbound to claude.ai from the home. The optional WSS ingress is a loopback WebSocket listener; only the owner's TLS reverse proxy is public. |
 | **Two daemon writes** | The loopback daemon serves every read without a token. `POST /api/v1/inbox/{id}/answer` and the local `POST /api/v1/sessions/{id}/switch` require `Authorization: Bearer <VOWP_API_TOKEN>`; a daemon started without the variable answers `503` and writes nothing. The token is read at startup, compared in constant time, never logged, echoed or put in a URL, and rotation is a daemon restart. |
-| **No credentials in configuration** | `vowp.toml` holds no token values; `env_pass` contains environment-variable **names**; `HarnessConfig` has no value fields. VOWP stores the values it manages in the secret store, and a listed `env_pass` name may also be forwarded from the process environment (see [Secrets](#secrets)). `vowp doctor` reports presence by name and never calls the network. This covers configuration and argv, not every stored byte: exact-value redaction covers every session event path (including a switch turn and the `session watch` importer), the snapshot, the supervisor log, command-gate evidence and ledger rows. A transformed or encoded copy is not caught (see [Redaction](#redaction)). |
+| **No credentials in configuration** | `vowp.toml` holds no token values; `env_pass` contains environment-variable **names**; `HarnessConfig` has no value fields. VOWP stores the values it manages in the secret store, and a listed `env_pass` name may also be forwarded from the process environment (see [Secrets](#secrets)). `vowp doctor` reports presence by name and never calls the network. This covers configuration and argv, not every stored byte: exact-value redaction covers every session event path (including a switch turn and the `session watch` importer), the snapshot, the supervisor log, command-gate evidence and ledger rows. A transformed or encoded copy is not caught (see [Redaction](#redaction)). The app service password is read only by the explicit local endpoint command (see [Endpoint discovery](#endpoint-discovery)); it never enters a card, `snapshot.json`, `fleet status`, `orchestrator ls`, a log or an error. |
 | **Stock binaries only** | Adapters spawn `claude`, `opencode` or a configured CLI exactly as a user would. No client spoofing, no "sign in with Claude" inside VOWP, no token forwarding. The optional `session watch` importer reads transcript JSONL read-only; it does not read auth files. |
 | **cwd allow-list** | Before a run, the session layer checks that the working directory is inside the job worktree, the project path, the worktree root, `[node].cwd_allow` or the VOWP-owned orchestrator root `<VOWP_HOME>/orchestrators/<name>/`. Anything else, including paths elsewhere under `VOWP_HOME`, is refused. |
 | **Worktree isolation** | One worktree per job on branch `job/<id>`. The `owns_respected` gate checks the diff and uncommitted files against the job's globs; dispatch-time locks prevent overlapping owners from running together. |
@@ -154,6 +154,18 @@ vowp secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
   the **local** URL, so the browser never needs the home's port.
 - The setup contract never asks for a value. A hand-off names the secret; the owner enters it with the
   hidden prompt or the one-time page.
+
+### Endpoint discovery
+
+`vowp orchestrator endpoint <name> --json` and `vowp agent orchestrator endpoint <name> --json`
+return `OrchestratorEndpoint`. The app's service password is returned only by these explicit
+local commands, and only when the app host is live on that machine; the home command never reads
+a node's files and a node-hosted document has `auth: null`. The password appears in no card,
+`snapshot.json`, `fleet status`, `orchestrator ls`, supervisor log, daemon API response or error
+string, and `OrchestratorAuth`'s `Debug` prints `[REDACTED]`. The URL is loopback-only
+(`http://127.0.0.1:<port>` or `http://localhost:<port>`); a non-loopback address is refused. An
+error names the orchestrator and the failure class, never a path, port, password, token or pair
+link. The commands open no SSH connection, listener, tunnel or browser.
 
 ### Injection
 

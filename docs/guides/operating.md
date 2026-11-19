@@ -327,6 +327,19 @@ after the command, `--home` is the target switch.
 The join instructions use generic `<home-ssh-target>` and `<session>` placeholders; the control
 machine supplies the concrete target. The fallback is always `vowp chat <session-id>`.
 
+To connect a local UI client to the orchestrator's app process, ask for the endpoint document:
+
+```sh
+vowp orchestrator endpoint main --json            # on the home: location home or node
+vowp agent orchestrator endpoint main --json      # on the agent machine that runs the app
+```
+
+A home-hosted live opencode host returns a loopback `url`, the native app session id and Basic
+`auth`; the password is in that explicit `--json` document only. A stopped host, Claude Remote
+Control and `chat` return null endpoint values. A node-hosted record on the home is metadata only;
+run the agent command on that machine to get its local auth. These commands never open SSH, a
+tunnel, a browser or the node's files.
+
 ## Migration and upgrades
 
 A v0.1 home has one `vowp.db` with project tables. v0.2 splits it into `vowp.db` plus

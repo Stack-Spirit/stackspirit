@@ -368,6 +368,8 @@ impl OrchestratorHost {
     pub fn host_path(state_dir: &Path, name: &str) -> Result<PathBuf, OrchestratorError>;
     pub fn config(&self, name: &str) -> Result<Option<OrchestratorConfig>, OrchestratorError>;
     pub fn state(&self, name: &str) -> Result<Option<OrchestratorHostState>, OrchestratorError>;
+    pub fn live_state(&self, name: &str) -> Result<Option<OrchestratorHostState>, OrchestratorError>;
+    pub fn endpoint(&self, name: &str) -> Result<OrchestratorEndpoint, OrchestratorError>;
     pub fn prepare_start(&self, command: &OrchestratorCommand, project_root: Option<&Path>)
         -> PrepareOutcome;
     pub fn finish_start(&self, outcome: PrepareOutcome, link: &mut dyn SurfaceAttachment)
@@ -923,6 +925,19 @@ the live host and its surface attached. Named tests in
 is removed and the config stays for a later `Resume`. The agent and every other orchestrator
 are untouched.
 
+`OrchestratorHost::endpoint(name)` is the local discovery read used by
+`vowp agent orchestrator endpoint`. It reads `config.json`, the recorded `host.json` and, only
+while the host's pid is alive, the app's 0600 `service.json` named by `service_json`. The base
+document carries the name, app, paired home session id and `location: "node"`; the live
+opencode values add the canonical `http://127.0.0.1:<port>` URL and Basic auth (header
+`Authorization`, scheme `Basic`, username `opencode`, the service password). A stopped host,
+Claude or chat, or a missing service file leaves `url`, `native_session_id` and `auth` `None`.
+The agent does not learn the desktop app's native session id, so `native_session_id` is `None`
+unless the app's own service file carries one. An unknown name is `not_found`; a corrupt,
+too-wide or unreadable private file is `config_invalid`, and no message carries a path, port,
+password, token or pair link. The password appears only in the explicit `--json` document,
+never in the human block, a log or an error.
+
 A lost home connection keeps the app process and marks `host.json` `degraded`; a reconnect
 re-attaches every live host and marks it `running` without spawning a duplicate. A lost or
 revoked surface lease marks the host degraded; a matching `SurfaceRevoked` stops that host. A
@@ -1209,7 +1224,10 @@ macOS host slice adds `orchestrator_macos_stdout_readiness_materializes_0600_ser
 `orchestrator_app_exits_before_ready_is_typed`, `orchestrator_service_timeout_is_typed`,
 `orchestrator_missing_default_binary_is_capability_missing`,
 `orchestrator_chat_default_command_carries_the_session_and_holds_stdin` and
-`orchestrator_claude_holds_stdin_and_reports_an_early_exit`; the transport adds
+`orchestrator_claude_holds_stdin_and_reports_an_early_exit`; the endpoint slice adds
+`agent_orchestrator_endpoint_reads_a_live_0600_service_file`,
+`agent_orchestrator_endpoint_stopped_and_unknown_are_metadata_only` and
+`agent_orchestrator_endpoint_errors_never_echo_a_path_or_password`; the transport adds
 `agent_reconnects_after_a_ping_precedes_an_old_home_path_map_refusal` and
 `agent_reconnects_after_any_non_retryable_home_error`.
 

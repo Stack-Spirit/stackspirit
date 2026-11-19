@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use vowp_protocol::{
-    NodeName, OrchestratorApp, OrchestratorCommand, OrchestratorError, OrchestratorNodeState, OrchestratorResult,
-    ProjectName, SessionId, SurfaceId, Timestamp,
+    NodeName, OrchestratorApp, OrchestratorAuth, OrchestratorCommand, OrchestratorEndpoint, OrchestratorError,
+    OrchestratorLocation, OrchestratorNodeState, OrchestratorResult, ProjectName, SessionId, SurfaceId, Timestamp,
 };
 
 use crate::client::validate_surface_id;
@@ -392,6 +392,60 @@ impl OrchestratorHost {
     /// idempotent duplicate and a move never treats it as a live host.
     pub fn live_state(&self, name: &str) -> Result<Option<OrchestratorHostState>, OrchestratorError> {
         Ok(self.state(name)?.filter(|state| state.pid.is_some_and(process_alive)))
+    }
+
+    /// Returns the local discovery document for one orchestrator.
+    ///
+    /// The base fields come from `config.json` and the recorded host state. The live
+    /// loopback `url` and `auth` come from the 0600 app service file named by
+    /// `service_json`; a stopped host, an app without a loopback endpoint (Claude or chat),
+    /// or a missing service file leaves them `None` rather than guessing. An unknown name
+    /// is a typed `not_found`; every error names the failure class and never a path, port,
+    /// password, token or pair link.
+    pub fn endpoint(&self, name: &str) -> Result<OrchestratorEndpoint, OrchestratorError> {
+        validate_name(name)?;
+        let config = self.config(name)?.ok_or_else(|| {
+            OrchestratorError::new(
+                "not_found",
+                format!("there is no local record for orchestrator {name}"),
+                false,
+            )
+        })?;
+        let recorded = self.state(name)?;
+        let live = recorded.as_ref().filter(|state| state.pid.is_some_and(process_alive));
+        let state = match (live, recorded.as_ref()) {
+            (Some(live), _) => live.state,
+            (None, Some(recorded)) if recorded.state == OrchestratorNodeState::Failed => OrchestratorNodeState::Failed,
+            _ => OrchestratorNodeState::Stopped,
+        };
+        let session = live
+            .and_then(|live| live.session.clone())
+            .or_else(|| config.session.clone())
+            .ok_or_else(|| config_error("the local orchestrator has no paired session"))?;
+        let mut endpoint = OrchestratorEndpoint {
+            name: name.to_owned(),
+            app: config.app,
+            session_id: session,
+            location: OrchestratorLocation::Node,
+            node: self.node_name(),
+            state,
+            url: None,
+            native_session_id: None,
+            auth: None,
+        };
+        if live.is_none() || config.app != OrchestratorApp::Opencode {
+            return Ok(endpoint);
+        }
+        let Some(service_json) = config.service_json.as_deref() else {
+            return Ok(endpoint);
+        };
+        let Some(service) = read_service_endpoint(Path::new(service_json))? else {
+            return Ok(endpoint);
+        };
+        endpoint.url = Some(service.url);
+        endpoint.native_session_id = service.native_session_id;
+        endpoint.auth = Some(service.auth);
+        Ok(endpoint)
     }
 
     /// Returns the binding the next start or resume would use, without changing the config.
@@ -1608,6 +1662,59 @@ struct ServiceState {
     url: Option<String>,
     #[serde(default)]
     password: String,
+    /// App-side session id, when the app's own service file carries one.
+    #[serde(default)]
+    native_session_id: Option<String>,
+}
+
+/// The private endpoint values read from an app's service file.
+struct ServiceEndpoint {
+    url: String,
+    native_session_id: Option<String>,
+    auth: OrchestratorAuth,
+}
+
+/// Reads the live loopback endpoint from the 0600 app service file.
+///
+/// A missing file is `Ok(None)`: a stopped host has no endpoint. Every failure is typed
+/// and path-free; the service path, port and password never appear in the message.
+fn read_service_endpoint(path: &Path) -> Result<Option<ServiceEndpoint>, OrchestratorError> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(config_error("the app service.json could not be read")),
+    };
+    if !metadata.is_file() {
+        return Err(config_error("the app service.json is not a regular file"));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(config_error("the app service.json is wider than 0600"));
+    }
+    let bytes = fs::read(path).map_err(|_| config_error("the app service.json could not be read"))?;
+    let state: ServiceState =
+        serde_json::from_slice(&bytes).map_err(|_| config_error("the app service.json is not valid JSON"))?;
+    if state.password.is_empty() {
+        return Err(config_error("the app service.json has no service password"));
+    }
+    let url = state.url.as_deref().unwrap_or_default();
+    let port = state
+        .port
+        .filter(|port| *port != 0)
+        .or_else(|| url_port(url))
+        .ok_or_else(|| config_error("the app service.json has no usable loopback port"))?;
+    if !url.is_empty() && !(url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:")) {
+        return Err(config_error("the app service.json does not name a loopback URL"));
+    }
+    Ok(Some(ServiceEndpoint {
+        url: format!("http://127.0.0.1:{port}"),
+        native_session_id: state.native_session_id,
+        auth: OrchestratorAuth {
+            header: "Authorization".to_owned(),
+            scheme: "Basic".to_owned(),
+            username: "opencode".to_owned(),
+            password: state.password,
+        },
+    }))
 }
 
 fn read_service(path: &Path) -> Result<(), OrchestratorError> {

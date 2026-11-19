@@ -15,7 +15,7 @@ use vowp_agent::{
 };
 use vowp_protocol::{
     AGENT_PROTOCOL, AgentFrame, AgentRole, NodeName, OrchestratorApp, OrchestratorCommand, OrchestratorError,
-    OrchestratorNodeState, ProjectName, SessionId, SurfaceId, Timestamp,
+    OrchestratorLocation, OrchestratorNodeState, ProjectName, SessionId, SurfaceId, Timestamp,
 };
 
 const SESSION: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -2066,4 +2066,173 @@ fn agent_orchestrator_move_requires_a_paired_surface() {
         !snapshot_has(&home.snapshots()[0], "move-ambiguous/host.json"),
         "a refused start leaves no host state"
     );
+}
+
+/// Writes one 0600 app service file at `path`.
+fn write_service_file(path: &Path, url: &str, port: u16, password: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("service dir");
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).expect("service dir mode");
+    }
+    let value = serde_json::json!({
+        "version": "2.0.28",
+        "url": url,
+        "port": port,
+        "pid": std::process::id(),
+        "password": password,
+    });
+    fs::write(path, serde_json::to_vec(&value).expect("service json")).expect("service file");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("service mode");
+}
+
+#[test]
+fn agent_orchestrator_endpoint_reads_a_live_0600_service_file() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "endpoint-live", &password);
+    let host = host_with_app(&state, &script, &count, &password);
+    let mut link = RecordingLink::default();
+    let started = host.start(
+        &start_command("endpoint-live", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(started.accepted, "{started:?}");
+
+    let endpoint = host.endpoint("endpoint-live").expect("live endpoint");
+    assert_eq!(endpoint.name, "endpoint-live");
+    assert_eq!(endpoint.app, OrchestratorApp::Opencode);
+    assert_eq!(endpoint.session_id, session(SESSION));
+    assert_eq!(endpoint.location, OrchestratorLocation::Node);
+    assert!(
+        endpoint.node.is_none(),
+        "an unenrolled agent records no node name: {endpoint:?}"
+    );
+    assert_eq!(endpoint.state, OrchestratorNodeState::Running);
+    assert_eq!(endpoint.url.as_deref(), Some("http://127.0.0.1:54321"));
+    assert!(
+        endpoint.native_session_id.is_none(),
+        "the agent does not learn the desktop app's native session id"
+    );
+    let auth = endpoint.auth.as_ref().expect("live local auth");
+    assert_eq!(auth.header, "Authorization");
+    assert_eq!(auth.scheme, "Basic");
+    assert_eq!(auth.username, "opencode");
+    assert_eq!(auth.password, password);
+    assert!(
+        serde_json::to_string(&endpoint)
+            .expect("endpoint JSON")
+            .contains(&password),
+        "the explicit endpoint document carries the password"
+    );
+    assert!(
+        !format!("{endpoint:?}").contains(&password),
+        "Debug redacts the password"
+    );
+
+    let stopped = host.stop(&stop_command("endpoint-live"), &mut link);
+    assert!(stopped.accepted, "{stopped:?}");
+    let endpoint = host.endpoint("endpoint-live").expect("stopped endpoint");
+    assert_eq!(endpoint.state, OrchestratorNodeState::Stopped);
+    assert!(endpoint.url.is_none(), "a stopped host has no url");
+    assert!(endpoint.auth.is_none(), "a stopped host has no auth");
+}
+
+#[test]
+fn agent_orchestrator_endpoint_stopped_and_unknown_are_metadata_only() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let dir = OrchestratorHost::dir(&state, "stopped").expect("dir");
+    let service_json = dir.join(".opencode/state/opencode/service.json");
+    write_config(
+        &state,
+        &OrchestratorConfig {
+            name: "stopped".to_owned(),
+            app: OrchestratorApp::Opencode,
+            project: None,
+            session: Some(session(SESSION)),
+            surface: Some(surface(SURFACE)),
+            command: None,
+            args: Vec::new(),
+            working_dir: Some(dir.display().to_string()),
+            service_json: Some(service_json.display().to_string()),
+        },
+    );
+    // A stale service file from an earlier run must not become an endpoint.
+    let stale = service_password();
+    write_service_file(&service_json, "http://127.0.0.1:47777", 47777, &stale);
+    let host = OrchestratorHost::new(&state);
+
+    let endpoint = host.endpoint("stopped").expect("stopped endpoint");
+    assert_eq!(endpoint.session_id, session(SESSION));
+    assert_eq!(endpoint.location, OrchestratorLocation::Node);
+    assert_eq!(endpoint.state, OrchestratorNodeState::Stopped);
+    assert!(endpoint.url.is_none(), "a stopped host has no url");
+    assert!(endpoint.native_session_id.is_none());
+    assert!(endpoint.auth.is_none(), "a stopped host has no auth");
+    assert!(!serde_json::to_string(&endpoint).expect("stopped JSON").contains(&stale));
+
+    let unknown = host.endpoint("ghost").expect_err("an unknown name is typed");
+    assert_eq!(unknown.code, "not_found");
+    assert!(!unknown.message.contains(&state.display().to_string()));
+}
+
+#[test]
+fn agent_orchestrator_endpoint_errors_never_echo_a_path_or_password() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "endpoint-broken", &password);
+    let host = host_with_app(&state, &script, &count, &password);
+    let mut link = RecordingLink::default();
+    let started = host.start(
+        &start_command("endpoint-broken", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(started.accepted, "{started:?}");
+    let service_json = OrchestratorHost::dir(&state, "endpoint-broken")
+        .expect("dir")
+        .join(".opencode/state/opencode/service.json");
+    let marker = service_password();
+    fs::write(
+        &service_json,
+        format!("{{\"url\":\"http://127.0.0.1:48888\",\"password\":\"{marker}\","),
+    )
+    .expect("corrupt service");
+    fs::set_permissions(&service_json, fs::Permissions::from_mode(0o600)).expect("service mode");
+
+    let error = host
+        .endpoint("endpoint-broken")
+        .expect_err("a corrupt service file is typed");
+    assert_eq!(error.code, "config_invalid");
+    let text = format!("{}: {}", error.code, error.message);
+    for forbidden in [
+        state.display().to_string(),
+        service_json.display().to_string(),
+        password,
+        marker,
+        "127.0.0.1".to_owned(),
+        "48888".to_owned(),
+    ] {
+        assert!(!text.contains(&forbidden), "the error leaked a forbidden value: {text}");
+    }
+
+    // A service file wider than 0600 is refused for the same reason and just as quietly.
+    write_service_file(&service_json, "http://127.0.0.1:48888", 48888, &service_password());
+    fs::set_permissions(&service_json, fs::Permissions::from_mode(0o644)).expect("wide service mode");
+    let error = host
+        .endpoint("endpoint-broken")
+        .expect_err("a wide service file is typed");
+    let text = format!("{}: {}", error.code, error.message);
+    assert!(text.contains("0600"), "the error names the permission class: {text}");
+    assert!(!text.contains(&service_json.display().to_string()), "{text}");
+
+    let stopped = host.stop(&stop_command("endpoint-broken"), &mut link);
+    assert!(stopped.accepted, "{stopped:?}");
 }

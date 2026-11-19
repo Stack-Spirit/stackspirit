@@ -141,6 +141,7 @@ python3 docs/reference/check-reference.py
 | [`vowp orchestrator move`](#vowp-orchestrator-move) | Move an orchestrator between the home and an agent node, keeping its session |
 | [`vowp orchestrator stop`](#vowp-orchestrator-stop) | Stop an orchestrator's host and release its lease |
 | [`vowp orchestrator resume`](#vowp-orchestrator-resume) | Start an orchestrator's host again |
+| [`vowp orchestrator endpoint`](#vowp-orchestrator-endpoint) | Show the typed discovery document a local UI client uses to connect |
 | [`vowp orchestrator __keepalive`](#vowp-orchestrator-__keepalive) | Hidden: keep one orchestrator's lease alive after the CLI exits |
 | [`vowp migrate`](#vowp-migrate) | Migrate a v0.1 home to the v0.2 layout |
 | [`vowp mcp`](#vowp-mcp) | Run the stdio MCP server or the Mac-side proxy |
@@ -159,6 +160,8 @@ python3 docs/reference/check-reference.py
 | [`vowp agent service status`](#vowp-agent-service-status) | Show the unit path and the manager's reported state |
 | [`vowp agent doctor`](#vowp-agent-doctor) | Report local agent warnings without failing on them |
 | [`vowp agent trust`](#vowp-agent-trust) | Confirm a changed system-mode WSS leaf fingerprint after verifying it out of band |
+| [`vowp agent orchestrator`](#vowp-agent-orchestrator) | Inspect one local orchestrator on this agent machine |
+| [`vowp agent orchestrator endpoint`](#vowp-agent-orchestrator-endpoint) | Show the local endpoint document for one orchestrator |
 | [`vowp surface`](#vowp-surface) | Create, list or revoke a paired local surface; `--node` names the surface's node |
 | [`vowp surface pair`](#vowp-surface-pair) | Create a pending surface and print its one-time pairing code |
 | [`vowp surface ls`](#vowp-surface-ls) | List surfaces, their scopes and token expiry |
@@ -2826,11 +2829,12 @@ Create and manage orchestrator sessions
 Usage: vowp orchestrator [OPTIONS] <COMMAND>
 
 Commands:
-  new     Create and start an orchestrator
-  ls      List orchestrators
-  move    Move an orchestrator between the home and an agent node, keeping its session
-  stop    Stop an orchestrator's host and release its lease
-  resume  Start an orchestrator's host again
+  new       Create and start an orchestrator
+  ls        List orchestrators
+  move      Move an orchestrator between the home and an agent node, keeping its session
+  stop      Stop an orchestrator's host and release its lease
+  resume    Start an orchestrator's host again
+  endpoint  Show the typed discovery document a local UI client uses to connect
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
@@ -2950,6 +2954,29 @@ Options:
   -h, --help                 Print help
 ```
 
+#### `vowp orchestrator endpoint`
+
+```text
+Show the typed discovery document a local UI client uses to connect
+
+Usage: vowp orchestrator endpoint [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Orchestrator name
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+
+For `orchestrator endpoint`, --node is not an SSH redirect: the command inspects this home and never opens SSH or a node's files.
+```
+
 #### `vowp orchestrator __keepalive`
 
 ```text
@@ -3022,14 +3049,15 @@ Enroll, run or inspect the Mac-side agent
 Usage: vowp agent [OPTIONS] <COMMAND>
 
 Commands:
-  enroll   Enroll this Mac with a one-time code
-  paths    Add, remove or list the local project path map
-  pair     Redeem a home surface pairing code and store the token
-  run      Run the agent client until revoked or superseded
-  status   Show the last local agent status
-  service  Install, remove or inspect the launchd or systemd-user service
-  doctor   Report local agent warnings without failing on them
-  trust    Confirm a changed system-mode WSS leaf fingerprint after verifying it out of band
+  enroll        Enroll this Mac with a one-time code
+  paths         Add, remove or list the local project path map
+  pair          Redeem a home surface pairing code and store the token
+  run           Run the agent client until revoked or superseded
+  status        Show the last local agent status
+  service       Install, remove or inspect the launchd or systemd-user service
+  doctor        Report local agent warnings without failing on them
+  trust         Confirm a changed system-mode WSS leaf fingerprint after verifying it out of band
+  orchestrator  Inspect one local orchestrator on this agent machine
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
@@ -3325,6 +3353,48 @@ Options:
   -q, --quiet                     Suppress non-essential human output
   -v, --verbose...                Increase log verbosity (`-v`, `-vv`)
   -h, --help                      Print help
+```
+
+#### `vowp agent orchestrator`
+
+```text
+Inspect one local orchestrator on this agent machine
+
+Usage: vowp agent orchestrator [OPTIONS] <COMMAND>
+
+Commands:
+  endpoint  Show the local endpoint document for one orchestrator
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+##### `vowp agent orchestrator endpoint`
+
+```text
+Show the local endpoint document for one orchestrator
+
+Usage: vowp agent orchestrator endpoint [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Orchestrator name
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
 ```
 
 ### `vowp surface`

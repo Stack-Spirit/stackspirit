@@ -21,9 +21,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use tempfile::TempDir;
 use vowp_agent::{
     AgentClient, AgentClock, AgentConfig, AgentError, AgentStatus, Cache, ConnectionState, FrameRead, FrameStream,
-    NodeKey, PushStatus, RunHandler, RunOptions, RunOutcome as AgentRunOutcome, RunSink, RunSinkError, RunSummary,
-    ServiceError, SshTransport, SurfacePairRequest, SystemAgentClock, Transport, TransportConfig, WssTlsMode,
-    pending_spool_bytes,
+    NodeKey, OrchestratorConfig, OrchestratorHost, PushStatus, RunHandler, RunOptions, RunOutcome as AgentRunOutcome,
+    RunSink, RunSinkError, RunSummary, ServiceError, SshTransport, SurfacePairRequest, SystemAgentClock, Transport,
+    TransportConfig, WssTlsMode, pending_spool_bytes,
 };
 use vowp_cli::agent_exec::CoreRunHandler;
 use vowp_cli::cli::{AgentCommand, Cli, Command};
@@ -4670,4 +4670,145 @@ fn real_gateway_agent_pair_ignores_a_superseded_orchestrator_command() {
     );
 
     stop_agent(&home, &live_node, handle);
+}
+
+/// Writes one private test file (mode 0600), creating its parent directory.
+fn write_private_file(path: &Path, bytes: &[u8]) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("private dir");
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).expect("private dir mode");
+    }
+    std::fs::write(path, bytes).expect("private file");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("private file mode");
+}
+
+#[test]
+fn agent_orchestrator_endpoint_json_returns_local_auth_and_ls_stays_clean() {
+    let home = TempDir::new().expect("agent home");
+    let state_dir = home.path().join(".vowp-agent");
+    ls_create_private_dir(&state_dir);
+    let session = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("session");
+    let surface = SurfaceId("01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned());
+    let name = "live";
+    let dir = OrchestratorHost::dir(&state_dir, name).expect("orchestrator dir");
+    ls_create_private_dir(&dir);
+    let service_path = dir.join(".opencode/state/opencode/service.json");
+    // Assemble the marker at runtime so no secret-shaped literal is committed.
+    let password = format!("vowp-test-agent-{}", "F".repeat(20));
+    let config = OrchestratorConfig {
+        name: name.to_owned(),
+        app: OrchestratorApp::Opencode,
+        project: None,
+        session: Some(session.clone()),
+        surface: Some(surface.clone()),
+        command: Some("opencode".to_owned()),
+        args: vec!["serve".to_owned()],
+        working_dir: Some(home.path().display().to_string()),
+        service_json: Some(service_path.display().to_string()),
+    };
+    let config_path = OrchestratorHost::config_path(&state_dir, name).expect("config path");
+    write_private_file(&config_path, &serde_json::to_vec(&config).expect("config JSON"));
+    let host_path = OrchestratorHost::host_path(&state_dir, name).expect("host path");
+    let host_state = serde_json::json!({
+        "name": name,
+        "app": "opencode",
+        "project": null,
+        "surface": surface,
+        "session": session,
+        "pid": std::process::id(),
+        "state": "running",
+        "started_at": Timestamp::now(),
+    });
+    write_private_file(&host_path, &serde_json::to_vec(&host_state).expect("host JSON"));
+    let service = serde_json::json!({
+        "version": "2.0.28",
+        "url": "http://127.0.0.1:46222",
+        "port": 46222,
+        "pid": std::process::id(),
+        "password": password,
+    });
+    write_private_file(&service_path, &serde_json::to_vec(&service).expect("service JSON"));
+
+    let envs = [("VOWP_AGENT_HOME", state_dir.display().to_string())];
+    let (code, stdout, stderr) = run_binary_with(
+        home.path(),
+        &["--json", "agent", "orchestrator", "endpoint", name],
+        &envs,
+    );
+    assert_eq!(code, 0, "the local endpoint failed: {stdout} {stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("endpoint JSON");
+    assert_eq!(value["name"], name);
+    assert_eq!(value["app"], "opencode");
+    assert_eq!(value["session_id"], session.as_str());
+    assert_eq!(value["location"], "node");
+    assert_eq!(value["state"], "running");
+    assert_eq!(value["url"], "http://127.0.0.1:46222");
+    assert!(value["native_session_id"].is_null(), "{value}");
+    assert_eq!(value["auth"]["header"], "Authorization");
+    assert_eq!(value["auth"]["scheme"], "Basic");
+    assert_eq!(value["auth"]["username"], "opencode");
+    assert_eq!(value["auth"]["password"], password);
+
+    let (code, _stdout, stderr) = run_binary_with(home.path(), &["agent", "orchestrator", "endpoint", "ghost"], &envs);
+    assert_eq!(code, 3, "an unknown local name is not found: {stderr}");
+    assert!(stderr.contains("ghost"), "the error names the orchestrator: {stderr}");
+
+    // The home `orchestrator ls` card stays clean even when the same home has a live
+    // private service file with the password: only the explicit endpoint command reads it.
+    let env = TestEnv::new();
+    let card_dir = env.home_path().join("orchestrators").join(name);
+    ls_create_private_dir(&card_dir);
+    let card = serde_json::json!({
+        "name": name,
+        "app": "opencode",
+        "session_id": session,
+        "project": null,
+        "executor": null,
+        "state": "running",
+        "created_at": Timestamp::now(),
+        "join": {
+            "desktop": format!("vowp orchestrator resume {name}"),
+            "phone": format!("vowp chat {session}"),
+            "chat": format!("vowp chat --agent --session {session}"),
+        },
+        "surface_id": null,
+        "node": null,
+        "last_request_id": null,
+    });
+    write_private_file(
+        &card_dir.join("orchestrator.json"),
+        &serde_json::to_vec(&card).expect("card JSON"),
+    );
+    let home_host = serde_json::json!({
+        "kind": "opencode",
+        "name": name,
+        "pid": std::process::id(),
+        "port": 46222,
+        "url": "http://127.0.0.1:46222",
+        "started_at": Timestamp::now(),
+        "workdir": card_dir.display().to_string(),
+        "service_json": service_path.display().to_string(),
+        "native_session_id": "ses_agent_cli",
+        "vowp_session": session,
+    });
+    write_private_file(
+        &card_dir.join("host.json"),
+        &serde_json::to_vec(&home_host).expect("host JSON"),
+    );
+    write_private_file(
+        &card_dir.join(".opencode/state/opencode/service.json"),
+        &serde_json::to_vec(&service).expect("service JSON"),
+    );
+    let (code, value, stderr) = env.run_json(&["orchestrator", "ls"]);
+    assert_eq!(code, 0, "orchestrator ls failed: {stderr}");
+    assert!(
+        !value.to_string().contains(&password),
+        "orchestrator ls never carries the password"
+    );
+}
+
+/// Creates one 0700 directory, ignoring an existing one.
+fn ls_create_private_dir(dir: &Path) {
+    std::fs::create_dir_all(dir).expect("private dir");
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("private dir mode");
 }

@@ -976,6 +976,7 @@ pub const COMMAND_RESULT_TIMEOUT: Duration;                        // 5 seconds
 pub fn create(&self, req: &NewOrchestrator) -> Result<OrchestratorInfo, CoreError>;               // home
 pub fn create_on_node(&self, req: &NewOrchestrator, node: Option<NodeName>)
     -> Result<OrchestratorInfo, CoreError>;
+pub fn endpoint(&self, name: &str) -> Result<OrchestratorEndpoint, CoreError>;
 pub fn resume(&self, name: &str) -> Result<OrchestratorInfo, CoreError>;
 pub fn stop(&self, name: &str) -> Result<(), CoreError>;
 pub fn resume_all(&self) -> Result<Vec<OrchestratorInfo>, CoreError>;
@@ -1023,6 +1024,17 @@ home path.
 - `redact_text` replaces absolute paths with `<path>` and obvious `key=value` secrets with
   `<redacted>`, and caps the text at 512 characters. Every result detail and error message
   passes through it before `orchestrator.json` or a log sees it.
+- `endpoint(name)` returns the `OrchestratorEndpoint` discovery document. The base fields
+  come from the record/card. A node-hosted orchestrator is metadata only: no SSH, socket or
+  node file is opened, and `url`, `native_session_id` and `auth` are `None`. A home-hosted
+  orchestrator with a live host reads the app's private 0600 state through the new defaulted
+  `AppHost::endpoint` method. `OpencodeHost` returns the canonical
+  `http://127.0.0.1:<port>` URL, the native app session id from `host.json` and Basic auth
+  (header `Authorization`, scheme `Basic`, username `opencode`, the service password).
+  `ClaudeRemoteHost` and `chat` keep the default `None` because they expose no loopback
+  endpoint. A stopped host, an absent service file, a stale service pid or a zero port leaves
+  the three endpoint values `None`. A non-loopback URL, a corrupt file or a too-wide file is
+  a typed error whose message names only the orchestrator and the failure class.
 
 Named tests (in `crates/vowp-cli/tests/orchestrator.rs`): `orchestrator_new_with_a_node_creates_a_card_and_sends_start`,
 `orchestrator_new_refuses_an_unknown_or_revoked_node`,
@@ -1033,6 +1045,14 @@ Named tests (in `crates/vowp-cli/tests/orchestrator.rs`): `orchestrator_new_with
 `orchestrator_apply_result_correlates_the_late_node_result` and
 `orchestrator_card_contains_no_path_or_secret`. All use a temporary home, a fake app host or
 a fake command transport, and no real tmux, app, network or home directory.
+
+The endpoint tests live in `crates/vowp-core/tests/orchestrator_endpoint.rs`:
+`orchestrator_endpoint_home_is_metadata_only_for_a_node`,
+`orchestrator_endpoint_home_reads_the_live_local_service_file`,
+`orchestrator_endpoint_stopped_or_unknown_has_no_credentials` and
+`orchestrator_card_snapshot_and_ls_never_contain_the_endpoint_password`. They use a
+temporary home, a private live `host.json`/`service.json` and the test process id; no app,
+socket, SSH or real home is opened. Spec: `docs/design/v0.5/orchestrator-endpoint.md`.
 
 ## 10. Capacity history (v0.4 Phase 4)
 

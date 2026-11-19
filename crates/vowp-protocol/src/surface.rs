@@ -431,6 +431,74 @@ pub struct OrchestratorCard {
     pub join: JoinInstructions,
 }
 
+/// Where an orchestrator's app host runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestratorLocation {
+    /// The app host runs on this home.
+    Home,
+    /// The app host runs on an enrolled agent node.
+    Node,
+}
+
+/// The local auth material a UI client needs to call an app's loopback endpoint.
+///
+/// The password is a secret. Only the explicit local endpoint command returns it; the
+/// custom [`fmt::Debug`] redacts it, and no card, snapshot, log or error carries it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OrchestratorAuth {
+    /// HTTP header carrying the credential, for example `Authorization`.
+    pub header: String,
+    /// Authentication scheme, for example `Basic`.
+    pub scheme: String,
+    /// Authentication username, for example `opencode`.
+    pub username: String,
+    /// Secret password; only the explicit local endpoint document carries it.
+    pub password: String,
+}
+
+impl fmt::Debug for OrchestratorAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OrchestratorAuth")
+            .field("header", &self.header)
+            .field("scheme", &self.scheme)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Discovery document for a UI client connecting to one orchestrator.
+///
+/// The base fields always come from the orchestrator record. `url`, `native_session_id` and
+/// `auth` are filled only when the app host runs locally and its private loopback state is
+/// readable; a node-hosted or stopped orchestrator carries `null` for all three.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OrchestratorEndpoint {
+    /// Orchestrator name.
+    pub name: String,
+    /// App the orchestrator runs.
+    pub app: OrchestratorApp,
+    /// Home session id the orchestrator mirrors.
+    pub session_id: SessionId,
+    /// Where the app host runs.
+    pub location: OrchestratorLocation,
+    /// Node that runs the app, when known.
+    #[serde(default)]
+    pub node: Option<NodeName>,
+    /// Lifecycle state at the time of the request.
+    pub state: OrchestratorNodeState,
+    /// Loopback URL (`http://127.0.0.1:<port>`), only for a live local endpoint.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// App-side session id, when the local app host knows one.
+    #[serde(default)]
+    pub native_session_id: Option<String>,
+    /// Local auth material, only for a live local endpoint.
+    #[serde(default)]
+    pub auth: Option<OrchestratorAuth>,
+}
+
 /// One home -> agent orchestrator command.
 ///
 /// The home correlates the agent's [`OrchestratorResult`] by `request_id`; the agent

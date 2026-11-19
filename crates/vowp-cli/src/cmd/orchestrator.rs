@@ -16,7 +16,10 @@ use clap::{Args, Subcommand};
 use vowp_adapters::proc::{Signal, process_alive, signal_group};
 use vowp_core::CoreError;
 use vowp_core::surface::orchestrator::{KEEPER_PID_FILE, NewOrchestrator, Orchestrator, OrchestratorInfo};
-use vowp_protocol::{Executor, ExecutorRef, OrchestratorApp, OrchestratorCard, ProjectName, VowpConfig};
+use vowp_protocol::{
+    Executor, ExecutorRef, OrchestratorApp, OrchestratorCard, OrchestratorEndpoint, OrchestratorLocation, ProjectName,
+    VowpConfig,
+};
 use vowp_store::NodePaths;
 
 use crate::output::print_json;
@@ -53,6 +56,11 @@ pub enum OrchestratorCommand {
     Stop(OrchestratorNameArgs),
     /// Start an orchestrator's host again.
     Resume(OrchestratorNameArgs),
+    /// Show the typed discovery document a local UI client uses to connect.
+    #[command(
+        after_help = "For `orchestrator endpoint`, --node is not an SSH redirect: the command inspects this home and never opens SSH or a node's files."
+    )]
+    Endpoint(OrchestratorNameArgs),
     /// Hidden: keep one orchestrator's lease alive after the CLI exits.
     #[command(name = "__keepalive", hide = true)]
     KeepAlive(OrchestratorNameArgs),
@@ -102,9 +110,10 @@ impl OrchestratorArgs {
     /// Moves the global `--node` value into `orchestrator new` or `orchestrator move`,
     /// where it names the orchestrator's node instead of an SSH redirect.
     ///
-    /// Every other `vowp orchestrator` subcommand keeps the global meaning. `cli.rs`
-    /// calls this immediately after parsing and returns the value only when the command
-    /// takes a target node.
+    /// Every other `vowp orchestrator` subcommand keeps the global meaning except
+    /// `endpoint`: it is a home-side inspection command, so the value is consumed and the
+    /// command never opens SSH. `cli.rs` calls this immediately after parsing and returns
+    /// the value only when the command takes a target node.
     pub fn take_orchestrator_node(&mut self, node: Option<String>) -> Option<String> {
         match &mut self.command {
             OrchestratorCommand::New(args) => {
@@ -115,6 +124,7 @@ impl OrchestratorArgs {
                 args.node = node;
                 None
             }
+            OrchestratorCommand::Endpoint(_) => None,
             _ => node,
         }
     }
@@ -136,6 +146,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &OrchestratorArgs) -> Result
         OrchestratorCommand::Move(args) => move_orchestrator(ctx, io, &orchestrator, args),
         OrchestratorCommand::Stop(args) => stop(ctx, io, &orchestrator, &args.name),
         OrchestratorCommand::Resume(args) => resume(ctx, io, &orchestrator, &args.name),
+        OrchestratorCommand::Endpoint(args) => endpoint(ctx, io, &orchestrator, &args.name),
         OrchestratorCommand::KeepAlive(args) => {
             orchestrator.keep_alive(&args.name)?;
             Ok(0)
@@ -269,6 +280,68 @@ fn resume(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator, name: 
     let info = orchestrator.resume(name).map_err(map_orchestrator_error)?;
     ensure_keeper(ctx, orchestrator, &info)?;
     print_info(ctx, io, &info)
+}
+
+/// Runs `orchestrator endpoint`.
+///
+/// This command is a home-side inspection: an `Orchestrator::endpoint` call never opens
+/// SSH, a socket or a node's files. A node-hosted card is metadata only, and the human
+/// output points the owner at the agent machine's own command. JSON carries the local auth
+/// material only when the home itself hosts a live endpoint.
+fn endpoint(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator, name: &str) -> Result<i32, CliError> {
+    let endpoint = orchestrator.endpoint(name).map_err(map_orchestrator_error)?;
+    if ctx.json() {
+        print_json(io, &endpoint)?;
+        return Ok(0);
+    }
+    print_endpoint(io, &endpoint)?;
+    Ok(0)
+}
+
+/// Prints one endpoint as a compact key/value block without its password.
+fn print_endpoint(io: &mut dyn IoStreams, endpoint: &OrchestratorEndpoint) -> Result<(), CliError> {
+    let node = endpoint
+        .node
+        .as_ref()
+        .map(|node| node.as_str().to_owned())
+        .unwrap_or_else(|| "-".to_owned());
+    writeln!(io.out(), "name: {}", endpoint.name)?;
+    writeln!(io.out(), "app: {}", app_name(endpoint.app))?;
+    writeln!(io.out(), "session: {}", endpoint.session_id)?;
+    writeln!(
+        io.out(),
+        "location: {}",
+        match endpoint.location {
+            OrchestratorLocation::Home => "home",
+            OrchestratorLocation::Node => "node",
+        }
+    )?;
+    writeln!(io.out(), "node: {node}")?;
+    writeln!(io.out(), "state: {}", endpoint.state)?;
+    writeln!(io.out(), "url: {}", endpoint.url.as_deref().unwrap_or("-"))?;
+    writeln!(
+        io.out(),
+        "native session: {}",
+        endpoint.native_session_id.as_deref().unwrap_or("-")
+    )?;
+    match &endpoint.auth {
+        Some(auth) => writeln!(
+            io.out(),
+            "auth: {} {} via {} (password in --json)",
+            auth.scheme,
+            auth.username,
+            auth.header
+        )?,
+        None => writeln!(io.out(), "auth: -")?,
+    }
+    if endpoint.location == OrchestratorLocation::Node {
+        writeln!(
+            io.out(),
+            "run on that machine: vowp agent orchestrator endpoint {} --json",
+            endpoint.name
+        )?;
+    }
+    Ok(())
 }
 
 /// Starts a detached lease keeper unless one is already running.

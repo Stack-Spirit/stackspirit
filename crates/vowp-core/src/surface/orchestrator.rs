@@ -23,9 +23,9 @@ use serde::{Deserialize, Serialize};
 use vowp_adapters::proc::{Signal, signal_group};
 use vowp_protocol::{
     AgentFrame, CapsuleTrigger, EventType, ExecutorRef, JoinInstructions, Lease, Level, NewSession, NodeName,
-    NodePresence, NodeStatus, OrchestratorApp, OrchestratorCard, OrchestratorCommand, OrchestratorError,
-    OrchestratorNodeState, OrchestratorResult, Project, ProjectName, SessionId, SessionRole, Surface, SurfaceId,
-    SurfaceKind, Timestamp,
+    NodePresence, NodeStatus, OrchestratorApp, OrchestratorCard, OrchestratorCommand, OrchestratorEndpoint,
+    OrchestratorError, OrchestratorLocation, OrchestratorNodeState, OrchestratorResult, Project, ProjectName,
+    SessionId, SessionRole, Surface, SurfaceId, SurfaceKind, Timestamp,
 };
 use vowp_store::session_log::SessionLog;
 use vowp_store::{Store, StoreError, hash_lease_token};
@@ -955,6 +955,57 @@ impl Orchestrator {
         let dir = self.dir(name);
         let state = read_state(&dir)?.ok_or_else(|| CoreError::NotFound(format!("orchestrator {name}")))?;
         Ok(self.info_from_dir(state, dir))
+    }
+
+    /// Returns the discovery document a local UI client uses to reach one orchestrator.
+    ///
+    /// The base fields always come from the home record. A node-hosted orchestrator is
+    /// metadata only: this method never opens SSH, a socket or the node's files. A
+    /// home-hosted orchestrator fills `url`, `native_session_id` and `auth` from the live
+    /// app host's private 0600 state; a stopped host, or one with no loopback endpoint,
+    /// leaves them `None` rather than guessing. Every failure names the orchestrator and
+    /// the failure class, never a path, port, password, token or pair link.
+    pub fn endpoint(&self, name: &str) -> Result<OrchestratorEndpoint, CoreError> {
+        validate_name(name)?;
+        let dir = self.dir(name);
+        let state = read_state(&dir)?.ok_or_else(|| CoreError::NotFound(format!("orchestrator {name}")))?;
+        let remote = self.state_is_remote(&state)?;
+        let info = self.info_from_dir(state, dir);
+        let location = if remote {
+            OrchestratorLocation::Node
+        } else {
+            OrchestratorLocation::Home
+        };
+        let mut endpoint = OrchestratorEndpoint {
+            name: info.card.name.clone(),
+            app: info.card.app,
+            session_id: info.card.session_id.clone(),
+            location,
+            node: info.card.node.clone(),
+            state: info.card.state,
+            url: None,
+            native_session_id: None,
+            auth: None,
+        };
+        if remote {
+            return Ok(endpoint);
+        }
+        let Some(handle) = info.host.as_ref() else {
+            return Ok(endpoint);
+        };
+        let Some(host) = self.host_for(info.card.app)? else {
+            return Ok(endpoint);
+        };
+        let Some(parts) = host
+            .endpoint(handle)
+            .map_err(|_| CoreError::Invalid(format!("orchestrator {name}: the app endpoint state is not readable")))?
+        else {
+            return Ok(endpoint);
+        };
+        endpoint.url = Some(parts.url);
+        endpoint.native_session_id = parts.native_session_id;
+        endpoint.auth = parts.auth;
+        Ok(endpoint)
     }
 
     /// Stops one orchestrator's host and releases its lease. The session stays.
