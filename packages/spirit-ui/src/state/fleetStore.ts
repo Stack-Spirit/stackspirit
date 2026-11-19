@@ -7,6 +7,12 @@ import type { SessionsIntent } from "../domain/session";
 import type {
   CapacityTargetView,
   CapacityView,
+  ClusterConfigView,
+  ClusterFormInput,
+  ClusterFormedView,
+  ClusterPromoteInput,
+  ClusterPromoteOutcome,
+  ClusterStateView,
   ConnectionSnapshot,
   EngineStatus,
   FleetView,
@@ -46,6 +52,9 @@ interface FleetState {
   engine: EngineStatus | null;
   gates: GateSnapshot | null;
   rawDocument: RawDocument | null;
+  cluster: ClusterStateView | null;
+  clusterStatus: StoreStatus;
+  clusterError: SpiritError | null;
   hosts: HostProfile[];
   hostsLoaded: boolean;
   selectedHostId: string | null;
@@ -75,6 +84,10 @@ interface FleetState {
   removeHost(id: string): Promise<void>;
   trustFingerprint(id: string, pin: HostKeyPin): Promise<HostProfile>;
   setTarget(input: SetTargetInput): Promise<CapacityTargetView>;
+  loadCluster(): Promise<void>;
+  formCluster(input: ClusterFormInput): Promise<ClusterFormedView>;
+  promoteClusterBackup(input: ClusterPromoteInput): Promise<ClusterPromoteOutcome>;
+  removeClusterWorker(hostId: string): Promise<ClusterConfigView>;
   refreshEngine(): Promise<void>;
   probeGates(): Promise<void>;
   openSessions(intent?: SessionsIntent): void;
@@ -115,6 +128,9 @@ export function createInitialFleetState(): Pick<
   | "engine"
   | "gates"
   | "rawDocument"
+  | "cluster"
+  | "clusterStatus"
+  | "clusterError"
   | "hosts"
   | "hostsLoaded"
   | "selectedHostId"
@@ -136,6 +152,9 @@ export function createInitialFleetState(): Pick<
     engine: null,
     gates: null,
     rawDocument: null,
+    cluster: null,
+    clusterStatus: "idle",
+    clusterError: null,
     hosts: [],
     hostsLoaded: false,
     selectedHostId: null,
@@ -209,6 +228,10 @@ export const useFleetStore = create<FleetState>((set, get) => ({
       status: errors.length > 0 ? "error" : "ready",
       lastError: errors[0] ?? get().lastError,
     });
+    // A saved cluster belongs to the saved servers, not to the active connection.
+    // Read it in the background so a slow Home never delays the shell; preview mode
+    // has no host and is skipped.
+    if (bridge.cluster && !bridge.preview) void get().loadCluster();
     return () => {
       unsubscribe();
       if (activeUnsubscribe === unsubscribe) activeUnsubscribe = null;
@@ -339,6 +362,7 @@ export const useFleetStore = create<FleetState>((set, get) => ({
       if (fleet) get().acceptFleet(fleet);
       await get().loadRawDocument();
       set({ status: "ready", lastError: null });
+      if (bridge.cluster) void get().loadCluster();
     } catch (error) {
       const spiritError = toSpiritError(error);
       set({ lastError: spiritError });
@@ -371,6 +395,7 @@ export const useFleetStore = create<FleetState>((set, get) => ({
       get().acceptFleet(fleet);
       await get().loadRawDocument();
       set({ lastError: null, nextRetryAt: null });
+      if (bridge.cluster) void get().loadCluster();
     } catch (error) {
       set({ lastError: toSpiritError(error) });
       try {
@@ -431,6 +456,83 @@ export const useFleetStore = create<FleetState>((set, get) => ({
     return target;
   },
 
+  loadCluster: async () => {
+    const bridge = get().bridge;
+    if (!bridge?.cluster) {
+      set({ cluster: null, clusterStatus: "idle", clusterError: null });
+      return;
+    }
+    set({ clusterStatus: "loading" });
+    try {
+      const cluster = await bridge.cluster.health();
+      set({ cluster, clusterStatus: "ready", clusterError: null });
+    } catch (error) {
+      // A failed cluster read stays local to the cluster section; the connected
+      // server's fleet view is still valid and must not be dimmed by it. Drop the
+      // last health so the sidebar cannot show a stale pooled total.
+      const current = get().cluster;
+      set({
+        cluster: current ? { ...current, health: null, health_error: null } : null,
+        clusterStatus: "error",
+        clusterError: toSpiritError(error),
+      });
+    }
+  },
+
+  formCluster: async (input) => {
+    const bridge = get().bridge;
+    if (!bridge?.cluster) throw toSpiritError("bridge is not initialized");
+    const formed = await bridge.cluster.form(input);
+    set({
+      cluster: {
+        configured: true,
+        config: formed.config,
+        health: null,
+        health_error: null,
+        // A re-formed cluster starts a new promotion history.
+        promotion: null,
+      },
+      clusterStatus: "ready",
+      clusterError: null,
+    });
+    // The pooled numbers come from Home's VOWP read, never from the form input.
+    void get().loadCluster();
+    return formed;
+  },
+
+  promoteClusterBackup: async (input) => {
+    const bridge = get().bridge;
+    if (!bridge?.cluster) throw toSpiritError("bridge is not initialized");
+    const outcome = await bridge.cluster.promote(input);
+    const current = get().cluster;
+    if (current) {
+      set({
+        cluster: {
+          ...current,
+          health: null,
+          health_error: null,
+          promotion: outcome,
+        },
+      });
+    }
+    return outcome;
+  },
+
+  removeClusterWorker: async (hostId) => {
+    const bridge = get().bridge;
+    if (!bridge?.cluster) throw toSpiritError("bridge is not initialized");
+    const config = await bridge.cluster.removeWorker(hostId);
+    const current = get().cluster;
+    if (current) {
+      set({
+        cluster: { ...current, config, health: null, health_error: null },
+        clusterStatus: "ready",
+      });
+    }
+    void get().loadCluster();
+    return config;
+  },
+
   refreshEngine: async () => {
     const bridge = get().bridge;
     if (!bridge) return;
@@ -476,6 +578,9 @@ export const selectPreview = (state: FleetState): boolean => state.preview;
 export const selectLastError = (state: FleetState): SpiritError | null => state.lastError;
 export const selectNextRetryAt = (state: FleetState): number | null => state.nextRetryAt;
 export const selectRawDocument = (state: FleetState): RawDocument | null => state.rawDocument;
+export const selectCluster = (state: FleetState): ClusterStateView | null => state.cluster;
+export const selectClusterStatus = (state: FleetState): StoreStatus => state.clusterStatus;
+export const selectClusterError = (state: FleetState): SpiritError | null => state.clusterError;
 export const selectSelectedHostId = (state: FleetState): string | null => state.selectedHostId;
 export const selectProjectFilter = (state: FleetState): string | null => state.projectFilter;
 const NO_SESSIONS: SessionCardView[] = [];
@@ -535,6 +640,15 @@ export function useNextRetryAt(): number | null {
 }
 export function useRawDocument(): RawDocument | null {
   return useFleetStore(selectRawDocument);
+}
+export function useCluster(): ClusterStateView | null {
+  return useFleetStore(selectCluster);
+}
+export function useClusterStatus(): StoreStatus {
+  return useFleetStore(selectClusterStatus);
+}
+export function useClusterError(): SpiritError | null {
+  return useFleetStore(selectClusterError);
 }
 export function useProjectFilter(): string | null {
   return useFleetStore(selectProjectFilter);

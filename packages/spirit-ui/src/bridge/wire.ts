@@ -878,6 +878,188 @@ export interface CapacityView {
   reload_pending: boolean;
 }
 
+/* ---------------------------------------------------------------------------
+ * Pooled-compute and failover clusters (`crates/spirit-core/src/cluster`).
+ *
+ * These are safe mirrors: no SSH target, absolute path, backup destination,
+ * pairing code or token is ever part of a cluster view. The core's
+ * `ClusterService` owns every remote command; these shapes only describe the
+ * saved configuration and the read-only health card.
+ * ------------------------------------------------------------------------- */
+
+/** The role of one worker server. */
+export type ClusterWorkerRole = "worker" | "backup";
+
+/** Last-known enrollment state of one worker. */
+export type ClusterAgentState =
+  | "enrolled"
+  | "pending"
+  | "offline"
+  | "revoked"
+  | "missing"
+  | "unknown";
+
+/** Which host a health row describes. */
+export type ClusterHostRole = "home" | "worker" | "backup";
+
+/** Which source produced the pooled totals. */
+export type ClusterTotalsSource = "vowp_cluster" | "computed";
+
+/** A backup interval and the owner's retention expectation. */
+export interface BackupPolicyInput {
+  /** Interval between backup runs; VOWP's schedule minimum is 60 seconds. */
+  every_secs: number;
+  keep: number;
+}
+
+/** A saved backup policy plus VOWP's schedule specification. */
+export interface BackupPolicyView extends BackupPolicyInput {
+  /** For example `every 1d`, as `BackupPolicy::schedule_spec` renders it. */
+  schedule: string;
+}
+
+/** One requested worker server. */
+export interface ClusterWorkerInput {
+  /** Saved host profile id. */
+  host: string;
+  /** VOWP node name; a lowercase slug unique inside the cluster. */
+  node_name: string;
+  role: ClusterWorkerRole;
+}
+
+/** One configured worker server. */
+export interface ClusterWorkerView extends ClusterWorkerInput {
+  agent_state: ClusterAgentState;
+}
+
+/** The Home project whose `vowp.toml` receives the `[offload]` settings. */
+export interface ClusterProjectInput {
+  /** Project slug; it is the `--project` selector for the backup schedule. */
+  name: string;
+  /** Absolute checkout path on Home. It stays in the request and is never stored. */
+  root: string;
+}
+
+/** One optional worker path map added with `vowp agent paths add`. */
+export interface ClusterWorkerProjectInput {
+  /** Worker host profile the mapping belongs to. */
+  worker: string;
+  /** Project slug; the form reuses the Home project's name. */
+  project: string;
+  /** Absolute checkout on the worker. Never stored after the form. */
+  root: string;
+  /** Optional absolute worktree root on the worker. */
+  worktree_root: string | null;
+  /** Allowed relative paths below the root. */
+  allow: string[];
+}
+
+/** Everything the renderer sends to form a cluster. */
+export interface ClusterFormInput {
+  /** Exactly one Home host profile. */
+  home: string;
+  /** One or more worker profiles; none may be Home. */
+  workers: ClusterWorkerInput[];
+  backup: BackupPolicyInput;
+  home_project: ClusterProjectInput;
+  /** Optional path maps; an empty list leaves VOWP's existing mappings alone. */
+  worker_projects: ClusterWorkerProjectInput[];
+  /** Path or rsync target for `vowp backup --to`; never a secret. */
+  backup_target: string;
+  /** The owner's explicit yes. The host refuses an unconfirmed request. */
+  confirmed: boolean;
+}
+
+/** The saved cluster shape. It contains no paths or credentials. */
+export interface ClusterConfigView {
+  home: string;
+  workers: ClusterWorkerView[];
+  backup: BackupPolicyView;
+}
+
+/** The result of forming a cluster, with the safe parts of `ClusterFormed`. */
+export interface ClusterFormedView {
+  config: ClusterConfigView;
+  backup_schedule: string;
+  offload_config_changed: boolean;
+  formed_at: Timestamp;
+}
+
+/** One safe per-host health row. */
+export interface ClusterHostHealthView {
+  host: string;
+  label: string;
+  role: ClusterHostRole;
+  node_name: string | null;
+  agent_state: ClusterAgentState;
+  status: string;
+  presence: string;
+  registered: boolean;
+  slots_busy: number;
+  slots_max: number;
+  mapped_projects: string[];
+  last_seen_at: Timestamp | null;
+  last_error: string | null;
+}
+
+/** The combined cluster read model. */
+export interface ClusterHealthView {
+  home_node: string;
+  /** Active, online worker nodes; Home is not counted. */
+  online_workers: number;
+  home_target_workers: number;
+  /** Maximum slots contributed by the online workers only. */
+  worker_slots: number;
+  /** Home target plus online worker slots, or VOWP 0.5's cluster total. */
+  pooled_target_workers: number;
+  /** Home running runs plus online worker busy slots. */
+  busy_workers: number;
+  cluster_totals_present: boolean;
+  totals_source: ClusterTotalsSource;
+  hosts: ClusterHostHealthView[];
+  warnings: string[];
+  checked_at: Timestamp;
+}
+
+/** One recorded promotion. It names the restored Home but no directory. */
+export interface ClusterPromotionView {
+  new_home: string;
+  node_name: string;
+  backup_at: Timestamp;
+  promoted_at: Timestamp;
+}
+
+/** The saved cluster plus its latest read. */
+export interface ClusterStateView {
+  configured: boolean;
+  config: ClusterConfigView | null;
+  health: ClusterHealthView | null;
+  /** A failed health read; the saved config is still shown. */
+  health_error: SpiritErrorDto | null;
+  /** The latest promotion, if one was recorded on this machine. */
+  promotion: ClusterPromotionView | null;
+}
+
+/** A request to promote one worker's backup to a new Home. */
+export interface ClusterPromoteInput {
+  /** One configured worker that holds the backup. */
+  target: string;
+  /** Absolute backup directory on the target. Never stored. */
+  backup_dir: string;
+  /** Fresh home directory on the target; null uses the profile's VOWP home. */
+  new_home: string | null;
+  /** Must equal `promote-backup-to-home`. */
+  confirmation: string;
+}
+
+/** The restored Home identity; the target's home directory is not returned. */
+export interface ClusterPromoteOutcome {
+  new_home: string;
+  node_name: string;
+  backup_at: Timestamp;
+  promoted_at: Timestamp;
+}
+
 export interface JobCardView {
   job_id: string;
   project: string;

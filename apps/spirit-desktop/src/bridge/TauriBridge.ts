@@ -14,6 +14,7 @@ import type {
   AsifExportResult,
   AsifImportOptions,
   AsifImportResult,
+  BackupPolicyView,
   CapacityTargetView,
   CapacityView,
   ChatEvent,
@@ -23,6 +24,12 @@ import type {
   ChatSendReceipt,
   ChatSessionView,
   ChatStartInput,
+  ClusterConfigView,
+  ClusterFormInput,
+  ClusterFormedView,
+  ClusterPromoteInput,
+  ClusterPromoteOutcome,
+  ClusterStateView,
   ConnectionSnapshot,
   EngineStatus,
   ExternalHarness,
@@ -150,6 +157,17 @@ export class TauriBridge implements SpiritBridge {
       }
       return call("secrets_remove", { name });
     },
+  };
+
+  cluster = {
+    form: (input: ClusterFormInput): Promise<ClusterFormedView> =>
+      call("cluster_form", { input }),
+    health: (): Promise<ClusterStateView> => call("cluster_health"),
+    promote: (input: ClusterPromoteInput): Promise<ClusterPromoteOutcome> =>
+      call("cluster_promote", { input }),
+    backupPolicy: (): Promise<BackupPolicyView | null> => call("cluster_backup_policy"),
+    removeWorker: (hostId: string): Promise<ClusterConfigView> =>
+      call("cluster_remove_worker", { hostId }),
   };
 
   connection = {

@@ -2,6 +2,7 @@
 
 pub mod asif;
 pub mod chat;
+pub mod cluster;
 pub mod connection;
 pub mod engine;
 pub mod fleet;

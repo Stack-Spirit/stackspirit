@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 
 import type { SpiritBridge } from "../bridge";
-import { useConnection, useFleet, useFleetStore, useHosts, useSelectedHostId } from "../state/fleetStore";
+import { useCluster, useConnection, useFleet, useFleetStore, useHosts, useSelectedHostId } from "../state/fleetStore";
 import { RawDocumentDrawer } from "../views/capacity/RawDocumentDrawer";
 import { AddHostWizard } from "../views/hosts/AddHostWizard";
 import { InboxDrawer } from "../views/inbox/InboxDrawer";
@@ -11,6 +11,8 @@ import { ErrorNotice } from "./ErrorNotice";
 import { ChatView } from "./ChatView";
 import { initializeConversations, useConversations } from "./conversations";
 import { ContextPanel } from "./ContextPanel";
+import { FormClusterDialog } from "./FormClusterDialog";
+import { PromoteBackupDialog } from "./PromoteBackupDialog";
 import { ServerPage } from "./ServerPage";
 import { SettingsView } from "./SettingsView";
 import { useShellUi, type NextView } from "./shellUi";
@@ -45,10 +47,14 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const panelOpen = useShellUi((state) => state.panel !== null);
   const requestProject = useConversations((state) => state.requestProject);
   const fleet = useFleet();
+  const cluster = useCluster();
   const [theme, setTheme] = useNextTheme();
   const side = useResizable({ storageKey: "stackspirit.sidebarWidth", initial: 272, min: 220, max: 420, grows: "right" });
   const drawer = useResizable({ storageKey: "stackspirit.panelWidth", initial: 400, min: 320, max: 640, grows: "left" });
   const [addingProject, setAddingProject] = useState(false);
+  const [clusterFormOpen, setClusterFormOpen] = useState(false);
+  const [promoteOpen, setPromoteOpen] = useState(false);
+  const [promoteTarget, setPromoteTarget] = useState<string | null>(null);
   // Classic drawers, reused unchanged: inbox answers, .asif sessions, raw document.
   const [inboxOpen, setInboxOpen] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
@@ -140,7 +146,17 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   if (view.kind === "settings") {
     main = <SettingsView theme={theme} onTheme={setTheme} onOpenRaw={() => setRawOpen(true)} />;
   } else if (view.kind === "server" && serverLabel) {
-    main = <ServerPage serverLabel={serverLabel} onOpenProject={openWorkers} />;
+    main = (
+      <ServerPage
+        serverLabel={serverLabel}
+        onOpenProject={openWorkers}
+        onFormCluster={() => setClusterFormOpen(true)}
+        onPromote={(target) => {
+          setPromoteTarget(target);
+          setPromoteOpen(true);
+        }}
+      />
+    );
   } else if (view.kind === "workers" && serverLabel) {
     main = <WorkersPage key={`workers:${view.project}`} project={view.project} onOpenSession={() => openSession(view.project)} />;
   } else if (view.kind === "session" && (connected || view.session === "setup")) {
@@ -173,6 +189,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
         onNavigate={setView}
         onAddServer={() => setAdding(true)}
         onAddProject={() => setAddingProject(true)}
+        onFormCluster={() => setClusterFormOpen(true)}
         theme={theme}
         onTheme={setTheme}
         resizeHandle={side.handleProps}
@@ -196,6 +213,24 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
         ) : null}
       </div>
       {addServerDialog}
+      {clusterFormOpen ? (
+        <FormClusterDialog
+          hosts={hosts}
+          initial={cluster?.config ?? null}
+          onClose={() => setClusterFormOpen(false)}
+        />
+      ) : null}
+      {promoteOpen ? (
+        <PromoteBackupDialog
+          hosts={hosts}
+          initialTarget={promoteTarget}
+          onClose={() => setPromoteOpen(false)}
+          onConnect={(hostId) => {
+            void connect(hostId);
+            setView({ kind: "server" });
+          }}
+        />
+      ) : null}
       <InboxDrawer key={inboxOpen ? "inbox-open" : "inbox-closed"} open={inboxOpen} onClose={() => setInboxOpen(false)} />
       <RawDocumentDrawer open={rawOpen} onClose={() => setRawOpen(false)} />
       <SessionsDrawer

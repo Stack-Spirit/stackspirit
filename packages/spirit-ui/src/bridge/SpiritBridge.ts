@@ -9,6 +9,7 @@ import type {
   AsifExportResult,
   AsifImportOptions,
   AsifImportResult,
+  BackupPolicyView,
   BridgeCapabilities,
   CapacityTargetView,
   CapacityView,
@@ -19,6 +20,12 @@ import type {
   ChatSendReceipt,
   ChatSessionView,
   ChatStartInput,
+  ClusterConfigView,
+  ClusterFormInput,
+  ClusterFormedView,
+  ClusterPromoteInput,
+  ClusterPromoteOutcome,
+  ClusterStateView,
   ConnectionSnapshot,
   DaemonHealth,
   EngineStatus,
@@ -250,6 +257,34 @@ export interface SpiritBridge {
    * the gate and preview-honesty rules.
    */
   chat?: ChatBridgeSurface;
+
+  /**
+   * Optional pooled-compute and failover cluster surface. Present on the desktop host
+   * and on the preview bridge, which reports a typed `preview_unavailable` error
+   * instead of inventing a cluster.
+   *
+   * `form` and `promote` mutate real servers over verified SSH and are gated by an
+   * explicit owner confirmation; the host re-checks it. `health` reads the saved
+   * cluster; a failed read comes back as `health_error` with the saved config still
+   * present. No value returned here carries an SSH target, absolute path, backup
+   * destination, pairing code or token; form inputs use remote paths only once and the
+   * host never stores them.
+   */
+  cluster?: {
+    /** Enrolls every worker, enables pooled compute and registers Home backups. */
+    form(input: ClusterFormInput): Promise<ClusterFormedView>;
+    /** Reads the saved cluster and its pooled health; never forms anything. */
+    health(): Promise<ClusterStateView>;
+    /** Promotes one worker's backup to Home after the exact confirmation token. */
+    promote(input: ClusterPromoteInput): Promise<ClusterPromoteOutcome>;
+    /** Reads the saved backup policy, or null when no cluster is configured. */
+    backupPolicy(): Promise<BackupPolicyView | null>;
+    /**
+     * Removes one worker from the local cluster record. This never revokes that
+     * worker's VOWP agent credentials and never touches Home's backup schedule.
+     */
+    removeWorker(hostId: string): Promise<ClusterConfigView>;
+  };
 
   /**
    * Optional read/action surface for VOWP sessions. Present on the desktop and preview

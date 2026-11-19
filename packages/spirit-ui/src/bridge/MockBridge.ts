@@ -12,6 +12,7 @@ import type {
   AsifImportOptions,
   AsifImportResult,
   AsifLoss,
+  BackupPolicyView,
   BrakeView,
   CapacityTargetView,
   CapacityView,
@@ -24,6 +25,12 @@ import type {
   ChatSendReceipt,
   ChatSessionView,
   ChatStartInput,
+  ClusterConfigView,
+  ClusterFormInput,
+  ClusterFormedView,
+  ClusterPromoteInput,
+  ClusterPromoteOutcome,
+  ClusterStateView,
   ConnectionSnapshot,
   DiskView,
   EngineStatus,
@@ -172,6 +179,18 @@ function previewSecretsUnavailable(): SpiritErrorDto {
     "preview_unavailable",
     "The server secret vault needs the desktop host; preview mode has no host and does not store keys.",
     "Run the desktop app without VITE_SPIRIT_MOCK to manage server secrets.",
+  );
+}
+
+/**
+ * Preview mode has no SSH connection and no saved cluster, so every cluster action
+ * must fail honestly instead of inventing a topology, a pooled total or a promotion.
+ */
+function previewClusterUnavailable(): SpiritErrorDto {
+  return errorDto(
+    "preview_unavailable",
+    "Clusters need the desktop host; preview mode has no SSH connection and does not form, read or promote one.",
+    "Run the desktop app without VITE_SPIRIT_MOCK to work with clusters.",
   );
 }
 
@@ -524,6 +543,29 @@ export class MockBridge implements SpiritBridge {
     remove: async (name: string): Promise<SecretRemoveOutcome> => {
       void name;
       throw previewSecretsUnavailable();
+    },
+  };
+
+  clusterApi = {
+    form: async (input: ClusterFormInput): Promise<ClusterFormedView> => {
+      // Preview mode has no host, so it never reads the confirmation or forms anything.
+      void input;
+      throw previewClusterUnavailable();
+    },
+    health: async (): Promise<ClusterStateView> => {
+      throw previewClusterUnavailable();
+    },
+    promote: async (input: ClusterPromoteInput): Promise<ClusterPromoteOutcome> => {
+      // The confirmation phrase never unlocks a fake promotion.
+      void input;
+      throw previewClusterUnavailable();
+    },
+    backupPolicy: async (): Promise<BackupPolicyView | null> => {
+      throw previewClusterUnavailable();
+    },
+    removeWorker: async (hostId: string): Promise<ClusterConfigView> => {
+      void hostId;
+      throw previewClusterUnavailable();
     },
   };
 
@@ -1384,6 +1426,7 @@ export class MockBridge implements SpiritBridge {
   hosts = this.hostsApi;
   onboarding = this.onboardingApi;
   secrets = this.secretsApi;
+  cluster = this.clusterApi;
   connection = this.connectionApi;
   fleet = this.fleetApi;
   engine = this.engineApi;

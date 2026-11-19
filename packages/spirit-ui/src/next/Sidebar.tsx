@@ -1,6 +1,7 @@
 import { useState, type HTMLAttributes, type ReactNode } from "react";
 
-import { useConnection, useFleet, useFleetStore, useHosts, usePreview } from "../state/fleetStore";
+import { useCluster, useConnection, useFleet, useFleetStore, useHosts, usePreview } from "../state/fleetStore";
+import { clusterPooled } from "./cluster";
 import type { SessionId } from "./conversations";
 import { useServerHealth } from "./health";
 import { Menu, MenuItem } from "./Menu";
@@ -16,6 +17,8 @@ export interface SidebarProps {
   onNavigate: (view: NextView) => void;
   onAddServer: () => void;
   onAddProject: () => void;
+  /** Opens the cluster form when at least two servers are saved. */
+  onFormCluster: () => void;
   theme: ThemePreference;
   onTheme: (theme: ThemePreference) => void;
   resizeHandle: HTMLAttributes<HTMLDivElement>;
@@ -35,6 +38,7 @@ export function Sidebar({
   onNavigate,
   onAddServer,
   onAddProject,
+  onFormCluster,
   theme,
   onTheme,
   resizeHandle,
@@ -62,7 +66,7 @@ export function Sidebar({
       </div>
 
       <div className="nx-side__scroll">
-        <ServerCard view={view} onNavigate={onNavigate} onAddServer={onAddServer} onOpenRaw={onOpenRaw} />
+        <ServerCard view={view} onNavigate={onNavigate} onAddServer={onAddServer} onOpenRaw={onOpenRaw} onFormCluster={onFormCluster} />
 
         <nav className="nx-side__nav" aria-label="Sessions">
           {connected ? (
@@ -196,13 +200,16 @@ function ServerCard({
   onNavigate,
   onAddServer,
   onOpenRaw,
+  onFormCluster,
 }: {
   view: NextView;
   onNavigate: (view: NextView) => void;
   onAddServer: () => void;
   onOpenRaw: () => void;
+  onFormCluster: () => void;
 }) {
   const hosts = useHosts();
+  const clusterAvailable = useFleetStore((state) => Boolean(state.bridge?.cluster));
   const openSessions = useFleetStore((state) => state.openSessions);
   const sessionsAvailable = useFleetStore((state) => Boolean(state.bridge?.sessions));
   const connection = useConnection();
@@ -210,6 +217,7 @@ function ServerCard({
   const connect = useFleetStore((state) => state.connect);
   const disconnect = useFleetStore((state) => state.disconnect);
   const health = useServerHealth();
+  const cluster = useCluster();
 
   const host =
     hosts.find((item) => item.id === connection.host_id) ??
@@ -235,6 +243,25 @@ function ServerCard({
   const others = hosts.filter((item) => item.id !== host.id);
   const loadPct = health.load ? Math.round(health.load.ratio * 100) : null;
   const loadTone = loadPct == null ? "" : loadPct >= 90 ? " nx-meter__fill--danger" : loadPct >= 75 ? " nx-meter__fill--warn" : "";
+  const clusterHealth = cluster?.health ?? null;
+  // The brief's badge appears only when at least one worker is actually online; an
+  // all-offline cluster keeps the single-server card and never shows a pooled total.
+  const pooled =
+    clusterHealth && clusterHealth.online_workers > 0 ? clusterPooled(clusterHealth) : null;
+  const clusterLoadPct =
+    pooled && pooled.pooled > 0
+      ? Math.min(100, Math.round((pooled.busy / pooled.pooled) * 100))
+      : pooled
+        ? 0
+        : null;
+  const clusterTone =
+    clusterLoadPct == null
+      ? ""
+      : clusterLoadPct >= 90
+        ? " nx-meter__fill--danger"
+        : clusterLoadPct >= 75
+          ? " nx-meter__fill--warn"
+          : "";
 
   const menu = (
     <Menu
@@ -248,6 +275,17 @@ function ServerCard({
     >
       {(close) => (
         <>
+          {hosts.length >= 2 && clusterAvailable ? (
+            <MenuItem
+              icon={<ClusterIcon />}
+              onSelect={() => {
+                close();
+                onFormCluster();
+              }}
+            >
+              Form a cluster
+            </MenuItem>
+          ) : null}
           {live ? (
             <>
               <MenuItem
@@ -337,6 +375,48 @@ function ServerCard({
         >
           {busy ? "Cancel" : "Connect"}
         </button>
+      </div>
+    );
+  }
+
+  if (pooled) {
+    return (
+      <div className="nx-server" data-testid="server-card" data-cluster="true">
+        <button
+          type="button"
+          className="nx-server__main"
+          aria-current={view.kind === "server" ? "page" : undefined}
+          aria-label={`${host.label}: cluster ${pooled.busy} of ${pooled.pooled} workers busy, ${pooled.onlineWorkers} workers online, ${health.diskShort}. Open server page`}
+          onClick={() => onNavigate({ kind: "server" })}
+          data-testid="health-card"
+        >
+          <span className="nx-server__head">
+            <span className={`nx-dot ${health.stale ? "nx-dot--warn" : "nx-dot--ok"}`} aria-hidden="true" />
+            <span className="nx-server__name">{host.label}</span>
+            <span className="nx-chip nx-chip--cluster nx-chip--tiny" data-testid="cluster-badge">
+              cluster
+            </span>
+          </span>
+          <span className="nx-server__load">
+            <span className="nx-server__load-label">Load</span>
+            <span className="nx-meter__track">
+              <span
+                className={`nx-meter__fill${clusterTone}`}
+                style={{ width: `${clusterLoadPct ?? 0}%` }}
+              />
+            </span>
+            <span className="nx-server__load-value">
+              {clusterLoadPct ?? 0}%<small>cluster</small>
+            </span>
+          </span>
+          <span className="nx-server__facts">
+            <span title="Busy / pooled target workers">
+              <strong>{pooled.busy}</strong>/{pooled.pooled} workers busy
+            </span>
+            <span>{health.diskShort}</span>
+          </span>
+        </button>
+        {menu}
       </div>
     );
   }
@@ -521,6 +601,17 @@ function OrchestratorIcon() {
   return (
     <Icon>
       <path d="M3 3.5h10c.6 0 1 .4 1 1v6c0 .6-.4 1-1 1H8.5L5.5 14v-2.5H3c-.6 0-1-.4-1-1v-6c0-.6.4-1 1-1Z" />
+    </Icon>
+  );
+}
+
+function ClusterIcon() {
+  return (
+    <Icon>
+      <circle cx="8" cy="5" r="2.2" />
+      <circle cx="3.6" cy="11.4" r="1.8" />
+      <circle cx="12.4" cy="11.4" r="1.8" />
+      <path d="M6.2 6.6 4.4 9.8M9.8 6.6l1.8 3.2M5.4 11.4h5.2" />
     </Icon>
   );
 }

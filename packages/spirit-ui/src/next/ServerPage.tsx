@@ -1,6 +1,7 @@
 import { latencyLabel } from "../domain/format";
 import { useConnection, useFleet, useFleetStore } from "../state/fleetStore";
 import { CapacityRail } from "../views/capacity/CapacityRail";
+import { ClusterSection } from "./ClusterSection";
 import { Meter, Slots, useServerHealth } from "./health";
 import { NodeMap, type MapBranch } from "./NodeMap";
 import { PageHeader } from "./PageHeader";
@@ -13,7 +14,7 @@ const LEAVES_PER_PROJECT = 4;
  * Full-page server view: health in detail, then a node map of every project and
  * what its workers are doing, then the projects as rows.
  */
-export function ServerPage({ serverLabel, onOpenProject }: { serverLabel: string; onOpenProject: (project: string) => void }) {
+export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromote }: { serverLabel: string; onOpenProject: (project: string) => void; onFormCluster: () => void; onPromote: (target: string | null) => void }) {
   const fleet = useFleet();
   const connection = useConnection();
   const refresh = useFleetStore((state) => state.refresh);
@@ -104,6 +105,8 @@ export function ServerPage({ serverLabel, onOpenProject }: { serverLabel: string
               <Meter label="Load" ratio={health.cpuRatio} value={health.cpuText} />
             </div>
           </div>
+
+          <ClusterSection onFormCluster={onFormCluster} onPromote={onPromote} />
 
           <div className="nx-block">
             <div className="nx-block__head">
