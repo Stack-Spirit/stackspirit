@@ -325,6 +325,10 @@ pub struct OpencodeBridge {
     surface: SurfaceId,
     session: SessionId,
     native_session: Option<String>,
+    /// App-side session id last reported by the event stream.
+    observed_native_session: Option<String>,
+    /// Private hint path; when set, a first sight or change is persisted atomically.
+    native_session_state: Option<PathBuf>,
     endpoint: Endpoint,
     bridge_dir: PathBuf,
     mirror_path: PathBuf,
@@ -405,6 +409,8 @@ impl OpencodeBridge {
             surface,
             session,
             native_session: None,
+            observed_native_session: None,
+            native_session_state: None,
             endpoint,
             bridge_dir,
             mirror_path,
@@ -430,6 +436,20 @@ impl OpencodeBridge {
     pub fn with_native_session(mut self, native_session: impl Into<String>) -> Self {
         self.native_session = Some(native_session.into());
         self
+    }
+
+    /// Persists the latest app-side session id at `path` on first sight and on change.
+    ///
+    /// The file is written through the orchestrator host's atomic 0600 helper and holds
+    /// only the id. A bridge without a path still observes the id in memory.
+    pub fn with_native_session_state(mut self, path: impl Into<PathBuf>) -> Self {
+        self.native_session_state = Some(path.into());
+        self
+    }
+
+    /// Returns the app-side session id last reported by the event stream, when any.
+    pub fn observed_native_session(&self) -> Option<&str> {
+        self.observed_native_session.as_deref()
     }
 
     /// Replaces the root map used before spooling.
@@ -725,6 +745,11 @@ impl OpencodeBridge {
             return Ok(());
         };
         let data = event.get("data").unwrap_or(&Value::Null);
+        if let Some(actual) = session_of(&event) {
+            // Record the app-side session before any filter: a re-created app session must
+            // replace the old hint even when the bridge mirrors only the old one.
+            self.record_native_session(actual);
+        }
         if let (Some(expected), Some(actual)) = (&self.native_session, session_of(&event)) {
             if expected != actual {
                 return Ok(());
@@ -1069,6 +1094,23 @@ impl OpencodeBridge {
             self.flush_one(&id, out)?;
         }
         Ok(())
+    }
+
+    /// Keeps the latest app-side session id and persists it when it changed.
+    ///
+    /// A hint write failure is not fatal: the mirrored frames are already spooled and the
+    /// home remains the authority, so the id is retried on the next event.
+    fn record_native_session(&mut self, native_session: &str) {
+        let id = native_session.trim();
+        if id.is_empty() || self.observed_native_session.as_deref() == Some(id) {
+            return;
+        }
+        if let Some(path) = self.native_session_state.as_deref()
+            && crate::orchestrator::write_native_session_file(path, id).is_err()
+        {
+            return;
+        }
+        self.observed_native_session = Some(id.to_owned());
     }
 
     fn remember_raw(&mut self, key: String) {

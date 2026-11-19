@@ -2069,20 +2069,32 @@ fn agent_orchestrator_move_requires_a_paired_surface() {
 }
 
 /// Writes one 0600 app service file at `path`.
-fn write_service_file(path: &Path, url: &str, port: u16, password: &str) {
+fn write_service_file(path: &Path, url: &str, port: u16, password: &str, native_session_id: Option<&str>) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("service dir");
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).expect("service dir mode");
     }
-    let value = serde_json::json!({
+    let mut value = serde_json::json!({
         "version": "2.0.28",
         "url": url,
         "port": port,
         "pid": std::process::id(),
         "password": password,
     });
+    if let Some(native_session_id) = native_session_id {
+        value["native_session_id"] = serde_json::Value::String(native_session_id.to_owned());
+    }
     fs::write(path, serde_json::to_vec(&value).expect("service json")).expect("service file");
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("service mode");
+}
+
+/// Writes the private hint the bridge leaves beside `host.json`.
+fn write_native_session_hint(state: &Path, name: &str, native_session_id: &str) -> PathBuf {
+    let path = OrchestratorHost::native_session_path(state, name).expect("native session path");
+    let value = serde_json::json!({ "native_session_id": native_session_id });
+    fs::write(&path, serde_json::to_vec(&value).expect("native session json")).expect("native session hint");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("native session mode");
+    path
 }
 
 #[test]
@@ -2142,6 +2154,84 @@ fn agent_orchestrator_endpoint_reads_a_live_0600_service_file() {
 }
 
 #[test]
+fn agent_orchestrator_endpoint_reports_the_persisted_native_session_id() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = agent_state(root.path());
+    let working = project_root(root.path());
+    write_binding(&state, &surface(SURFACE), &session(SESSION));
+    let password = service_password();
+    let (script, count) = fake_app(root.path(), "endpoint-native", &password);
+    let host = host_with_app(&state, &script, &count, &password);
+    let mut link = RecordingLink::default();
+    let started = host.start(
+        &start_command("endpoint-native", OrchestratorApp::Opencode),
+        Some(&working),
+        &mut link,
+    );
+    assert!(started.accepted, "{started:?}");
+
+    let endpoint = host.endpoint("endpoint-native").expect("live endpoint");
+    assert!(
+        endpoint.native_session_id.is_none(),
+        "the app service file names no session and no hint exists yet"
+    );
+
+    let hint = write_native_session_hint(&state, "endpoint-native", "ses_bridge_first");
+    assert_private_file(&hint);
+    let endpoint = host.endpoint("endpoint-native").expect("endpoint with a hint");
+    assert_eq!(endpoint.native_session_id.as_deref(), Some("ses_bridge_first"));
+    assert_eq!(endpoint.url.as_deref(), Some("http://127.0.0.1:54321"));
+
+    // A re-created app session replaces the hint; the endpoint reads the latest state.
+    write_native_session_hint(&state, "endpoint-native", "ses_bridge_second");
+    let endpoint = host
+        .endpoint("endpoint-native")
+        .expect("endpoint after a re-created session");
+    assert_eq!(endpoint.native_session_id.as_deref(), Some("ses_bridge_second"));
+    let hint_text = fs::read_to_string(&hint).expect("hint text");
+    assert!(
+        !hint_text.contains(&password),
+        "the hint carries no service password: {hint_text}"
+    );
+    assert!(
+        !hint_text.contains("http"),
+        "the hint carries no service URL: {hint_text}"
+    );
+    assert!(
+        !hint_text.contains("127.0.0.1"),
+        "the hint carries no service port: {hint_text}"
+    );
+
+    // The app's own service file wins over the bridge hint.
+    let config = host
+        .config("endpoint-native")
+        .expect("local config")
+        .expect("materialized config");
+    let service_json = PathBuf::from(config.service_json.expect("service path"));
+    write_service_file(
+        &service_json,
+        "http://127.0.0.1:54321",
+        54321,
+        &password,
+        Some("ses_service_file"),
+    );
+    let endpoint = host.endpoint("endpoint-native").expect("service-file endpoint");
+    assert_eq!(endpoint.native_session_id.as_deref(), Some("ses_service_file"));
+
+    let stopped = host.stop(&stop_command("endpoint-native"), &mut link);
+    assert!(stopped.accepted, "{stopped:?}");
+    assert!(
+        !hint.exists(),
+        "stopping the orchestrator clears the native session hint"
+    );
+    let endpoint = host.endpoint("endpoint-native").expect("stopped endpoint");
+    assert_eq!(endpoint.state, OrchestratorNodeState::Stopped);
+    assert!(endpoint.url.is_none());
+    assert!(endpoint.native_session_id.is_none());
+    assert!(endpoint.auth.is_none());
+}
+
+#[test]
 fn agent_orchestrator_endpoint_stopped_and_unknown_are_metadata_only() {
     let root = tempfile::tempdir().expect("temp dir");
     let state = agent_state(root.path());
@@ -2163,7 +2253,7 @@ fn agent_orchestrator_endpoint_stopped_and_unknown_are_metadata_only() {
     );
     // A stale service file from an earlier run must not become an endpoint.
     let stale = service_password();
-    write_service_file(&service_json, "http://127.0.0.1:47777", 47777, &stale);
+    write_service_file(&service_json, "http://127.0.0.1:47777", 47777, &stale, None);
     let host = OrchestratorHost::new(&state);
 
     let endpoint = host.endpoint("stopped").expect("stopped endpoint");
@@ -2264,7 +2354,13 @@ fn agent_orchestrator_endpoint_errors_never_echo_a_path_or_password() {
     }
 
     // A service file wider than 0600 is refused for the same reason and just as quietly.
-    write_service_file(&service_json, "http://127.0.0.1:48888", 48888, &service_password());
+    write_service_file(
+        &service_json,
+        "http://127.0.0.1:48888",
+        48888,
+        &service_password(),
+        None,
+    );
     fs::set_permissions(&service_json, fs::Permissions::from_mode(0o644)).expect("wide service mode");
     let error = host
         .endpoint("endpoint-broken")

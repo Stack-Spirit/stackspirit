@@ -1611,7 +1611,11 @@ impl AgentClient {
             binding.surface.clone(),
             binding.session.clone(),
         )
-        .and_then(|bridge| bridge.with_path_maps(&maps));
+        .and_then(|bridge| {
+            let hint = OrchestratorHost::native_session_path(&self.state_dir, name)
+                .map_err(|error| AgentError::Config(error.message))?;
+            bridge.with_native_session_state(hint).with_path_maps(&maps)
+        });
         let bridge = match bridge {
             Ok(bridge) => bridge,
             Err(error) => {

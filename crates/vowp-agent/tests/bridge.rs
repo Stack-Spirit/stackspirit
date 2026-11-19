@@ -466,6 +466,64 @@ fn opencode_bridge_records_native_ids_and_skips_duplicates() {
 }
 
 #[test]
+fn opencode_bridge_persists_a_native_session_id_0600_without_secrets() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let events = vec![app_event(
+        1,
+        "session.execution.started",
+        json!({ "sessionID": NATIVE_SESSION }),
+    )];
+    let server = FakeSse::start(events);
+    let service = write_service(dir.path(), server.port, PASSWORD);
+    let hint = dir.path().join("native-session.json");
+    let mut bridge = OpencodeBridge::load(&service, dir.path(), surface(), session())
+        .expect("load bridge")
+        .with_native_session_state(&hint);
+
+    let sync = bridge.drain().expect("drain");
+    assert!(!sync.frames.is_empty(), "the bridge mirrored the session event");
+    assert_eq!(bridge.observed_native_session(), Some(NATIVE_SESSION));
+
+    let bytes = fs::read(&hint).expect("native session hint");
+    assert_eq!(
+        fs::metadata(&hint).expect("hint metadata").permissions().mode() & 0o777,
+        0o600,
+        "the hint is private"
+    );
+    let value: Value = serde_json::from_slice(&bytes).expect("hint json");
+    assert_eq!(value["native_session_id"], NATIVE_SESSION);
+    let text = String::from_utf8(bytes).expect("hint text");
+    assert!(!text.contains(PASSWORD), "the hint carries no service password: {text}");
+    assert!(!text.contains("127.0.0.1"), "the hint carries no service URL: {text}");
+    assert!(!text.contains("http"), "the hint carries no service URL: {text}");
+}
+
+#[test]
+fn opencode_bridge_replaces_the_persisted_native_session_id_on_change() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let events = vec![
+        app_event(1, "session.execution.started", json!({ "sessionID": "ses_first" })),
+        app_event(2, "session.execution.started", json!({ "sessionID": "ses_second" })),
+    ];
+    let server = FakeSse::start(events);
+    let service = write_service(dir.path(), server.port, PASSWORD);
+    let hint = dir.path().join("native-session.json");
+    let mut bridge = OpencodeBridge::load(&service, dir.path(), surface(), session())
+        .expect("load bridge")
+        .with_native_session_state(&hint);
+
+    let sync = bridge.drain().expect("drain");
+    assert!(!sync.frames.is_empty());
+    assert_eq!(bridge.observed_native_session(), Some("ses_second"));
+    let value: Value = serde_json::from_slice(&fs::read(&hint).expect("native session hint")).expect("hint json");
+    assert_eq!(value["native_session_id"], "ses_second");
+    assert!(
+        !fs::read_to_string(&hint).expect("hint text").contains("ses_first"),
+        "a re-created app session replaces the previous id"
+    );
+}
+
+#[test]
 fn opencode_bridge_backfills_from_the_cursor() {
     let dir = tempfile::tempdir().expect("temp dir");
     let events = recorded_message();

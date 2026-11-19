@@ -76,6 +76,7 @@ that variable or a temporary `HOME`, so the real directory is never touched.
 | `orchestrators/<name>/opencode.json` | 0600 | opencode's global MCP config: the local `mcp.vowp` proxy command and the `instructions` entry for `AGENTS.md`; no token |
 | `orchestrators/<name>/orchestrator.json` | 0600 | redacted app record: name, app, project, session, surface and node; no token, port, password or local path |
 | `orchestrators/<name>/host.json` | 0600 | pid, lifecycle state (`starting`/`running`/`degraded`/`failed`/`stopped`) and a redacted detail |
+| `orchestrators/<name>/native-session.json` | 0600 | the last app-side session id the local bridge saw, `{"native_session_id": "…"}`; cleared on stop, never a URL or password |
 | `orchestrators/<name>/.opencode/{config,data,state,cache}/` | 0700 | private XDG roots for a managed opencode app |
 | `orchestrators/<name>/.opencode/state/opencode/service.json` | 0600 | the app's own service state; read for a port/password, never copied or logged |
 | `spool/<session>/<run>/events.jsonl` | 0600 | every sent event and the terminal summary, fsynced before send |
@@ -272,6 +273,8 @@ impl OpencodeBridge {
     pub fn load(service_json: &Path, state_dir: &Path, surface: SurfaceId, session: SessionId)
         -> Result<Self, AgentError>;
     pub fn with_native_session(self, native_session: impl Into<String>) -> Self;
+    pub fn with_native_session_state(self, path: impl Into<PathBuf>) -> Self;
+    pub fn observed_native_session(&self) -> Option<&str>;
     pub fn with_path_roots(self, roots: Vec<PathRoot>) -> Self;
     pub fn with_path_maps(self, maps: &[AgentPathMap]) -> Result<Self, AgentError>;
     pub fn with_path_root(self, root: PathRoot) -> Self;
@@ -767,6 +770,16 @@ contiguous. A pending assistant message holds the cursor until it is flushed, so
 before the flush replays its text parts rather than losing them. The home's native-id
 deduplication covers the case where a write reached the home but the local cursor did not.
 
+**Native session id.** Every app event carrying a `sessionID` tells the bridge which app-side
+session it is mirroring. The bridge keeps the latest id in memory (`observed_native_session`) and,
+when the client supplies `with_native_session_state(path)`, writes it to the orchestrator's private
+`native-session.json` on first sight and whenever the id changes. The write goes through the
+orchestrator host's atomic 0600 helper and the file holds only the id; it never carries the service
+URL, port, password or a local path. A re-created app session therefore replaces the previous hint.
+The id is remembered before the optional `with_native_session` filter, so a new session is visible
+even when the bridge is pinned to the old one. A hint write failure is diagnostic only: the frames
+are already spooled and the home remains the authority, and the bridge retries on the next event.
+
 **Paths.** `PathRoot`s are matched longest first. The exact project root becomes
 `project:<name>`; a path below it becomes `subdir:<name>/<relative>` when `PathRef::parse`
 accepts the result; the exact worktree root becomes `worktree:<name>/<job>`. Any other
@@ -926,18 +939,20 @@ is removed and the config stays for a later `Resume`. The agent and every other 
 are untouched.
 
 `OrchestratorHost::endpoint(name)` is the local discovery read used by
-`vowp agent orchestrator endpoint`. It reads `config.json`, the recorded `host.json` and, only
-while the host's pid is alive, the app's 0600 `service.json` named by `service_json`. The base
-document carries the name, app, paired home session id and `location: "node"`; the live
-opencode values add the canonical `http://127.0.0.1:<port>` URL and Basic auth (header
-`Authorization`, scheme `Basic`, username `opencode`, the service password). A stopped host,
-Claude or chat, or a missing service file leaves `url`, `native_session_id` and `auth` `None`.
-The agent does not learn the desktop app's native session id, so `native_session_id` is `None`
-unless the app's own service file carries one. An unknown name is `not_found`; a corrupt,
-too-wide or unreadable private file is `config_invalid`. Every error names the orchestrator
-and the failure class, and no message carries a path, port, password, token or pair link.
-The password appears only in the explicit `--json` document, never in the human block, a log
-or an error.
+`vowp agent orchestrator endpoint`. It reads `config.json`, the recorded `host.json`, and, only
+while the host's pid is alive, the app's 0600 `service.json` named by `service_json` and the
+bridge's `native-session.json` hint. The base document carries the name, app, paired home session
+id and `location: "node"`; the live opencode values add the canonical
+`http://127.0.0.1:<port>` URL and Basic auth (header `Authorization`, scheme `Basic`, username
+`opencode`, the service password). A stopped host, Claude or chat, or a missing service file
+leaves `url` and `auth` `None`. `native_session_id` prefers a non-empty id in the app's own
+service file, then the latest id the bridge persisted beside `host.json`, and otherwise stays
+`None`; it is never guessed from a session's `time.updated`. A stop or a failed host clears the
+hint, and a fresh app process starts without one. An unknown name is `not_found`; a corrupt,
+too-wide or unreadable required private file is `config_invalid` (the hint is tightened to 0600
+when it is read). Every error names the orchestrator and the failure class, and no message
+carries a path, port, password, token or pair link. The password appears only in the explicit
+`--json` document, never in the human block, a log or an error.
 
 A lost home connection keeps the app process and marks `host.json` `degraded`; a reconnect
 re-attaches every live host and marks it `running` without spawning a duplicate. A lost or
@@ -1227,9 +1242,12 @@ macOS host slice adds `orchestrator_macos_stdout_readiness_materializes_0600_ser
 `orchestrator_chat_default_command_carries_the_session_and_holds_stdin` and
 `orchestrator_claude_holds_stdin_and_reports_an_early_exit`; the endpoint slice adds
 `agent_orchestrator_endpoint_reads_a_live_0600_service_file`,
-`agent_orchestrator_endpoint_stopped_and_unknown_are_metadata_only` and
-`agent_orchestrator_endpoint_errors_never_echo_a_path_or_password`; the transport adds
-`agent_reconnects_after_a_ping_precedes_an_old_home_path_map_refusal` and
+`agent_orchestrator_endpoint_stopped_and_unknown_are_metadata_only`,
+`agent_orchestrator_endpoint_errors_never_echo_a_path_or_password` and, for the v0.5.1 native-id
+hint, `agent_orchestrator_endpoint_reports_the_persisted_native_session_id`; the bridge adds
+`opencode_bridge_persists_a_native_session_id_0600_without_secrets` and
+`opencode_bridge_replaces_the_persisted_native_session_id_on_change` in `tests/bridge.rs`; the
+transport adds `agent_reconnects_after_a_ping_precedes_an_old_home_path_map_refusal` and
 `agent_reconnects_after_any_non_retryable_home_error`.
 
 The phase-4 hardening slice adds five loopback transport tests in `tests/transport.rs`, with a

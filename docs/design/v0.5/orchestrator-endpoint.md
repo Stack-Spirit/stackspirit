@@ -1,6 +1,7 @@
 # v0.5 — official orchestrator endpoint discovery
 
-Status: **implemented** for v0.5 Slice 3. `vowp orchestrator endpoint <name>` returns the
+Status: **implemented** for v0.5 Slice 3; v0.5.1 adds the agent-side native-session hint.
+`vowp orchestrator endpoint <name>` returns the
 typed document a desktop client uses to connect its chat UI to an orchestrator's paired app
 process, and `vowp agent orchestrator endpoint <name>` returns the same document on the
 machine that runs the app. The scope is in [`scope.md`](scope.md) §3; the command contracts
@@ -39,7 +40,7 @@ always present, and an unavailable value is `null`, not an omitted key.
 | `node` | The node that runs the app, when the record knows one. |
 | `state` | The card's lifecycle state (`starting`, `running`, `stopped`, `degraded`, `node_offline`, `failed`). |
 | `url` | A loopback URL (`http://127.0.0.1:<port>`), only for a live local endpoint. |
-| `native_session_id` | The app's own session id, when the local host knows one. |
+| `native_session_id` | The app's own session id, when the local host knows one: a value in the app's `service.json` first, then the latest id its bridge persisted beside `host.json`, else `null`. |
 | `auth` | Local auth material, only for a live local endpoint. |
 
 `OrchestratorAuth` carries `header`, `scheme`, `username` and `password`. Its custom
@@ -88,16 +89,34 @@ run on that machine: vowp agent orchestrator endpoint main --json
   state is not readable`, `config_invalid`) and never echo a path, port, password, token or
   pair link.
 
+## Native session id
+
+OpenCode's `service.json` normally carries `password`, `pid`, `port`, `url` and `version`, not a
+session id. The agent's opencode bridge learns the app-side id from the `sessionID` on the events
+it mirrors and keeps the latest one in `<agent-state>/orchestrators/<name>/native-session.json`
+(0600, next to `host.json`). The 0600 file is written atomically through the same private helper
+as the host state, on first sight and whenever the app switches session, and contains only:
+
+```json
+{ "native_session_id": "ses_01HZY4Q3V7J8K9M0N1P2Q3R4S5" }
+```
+
+It never carries the Basic-auth password, the loopback URL, a port or a local path. A stop, a
+failed host or a fresh app process clears the hint; a re-created app session replaces it. The
+endpoint prefers a non-empty value in the app's `service.json`, then this persisted id, and
+otherwise returns `null`. It never guesses from the app's newest `time.updated`. A node-hosted
+record on the home still returns `null`, because only the agent-side command reads the hint.
+
 ## Stopped, remote, unknown and corrupt cases
 
 | Case | Document |
 |---|---|
 | Live home-hosted opencode | `location: home`, loopback `url`, native id when the host knows one, `auth` with the password. |
-| Stopped home host | `location: home`, `state: stopped`, `url`/`native_session_id`/`auth` null. A stale service file is ignored. |
+| Stopped home host | `location: home`, `state: stopped`, `url`/`native_session_id`/`auth` null. A stale service file and a stale native-session hint are ignored. |
 | Home-hosted Claude or chat | `location: home`, `url`/`auth` null: there is no loopback endpoint. |
 | Node-hosted (home command) | `location: node`, the recorded node, the same home `session_id`, all three endpoint values null. No node file is read. |
-| Agent command, live opencode | `location: node`, loopback `url`, `auth`; `native_session_id` is null unless the app's service file names one, because the desktop client creates that app session. |
-| Agent command, stopped | The base document with `state: stopped` and all three endpoint values null. |
+| Agent command, live opencode | `location: node`, loopback `url`, `auth`; `native_session_id` is the service-file value, else the id the local bridge persisted, else null. |
+| Agent command, stopped | The base document with `state: stopped` and all three endpoint values null; the native-session hint was removed. |
 | Unknown name | Typed not-found (`not_found` on the agent). |
 | Corrupt or too-wide private file | Typed `config_invalid` on the agent or an invalid error on the home; the message carries no path, port or secret. |
 
@@ -119,8 +138,14 @@ Core (`crates/vowp-core/tests/orchestrator_endpoint.rs`):
 Agent (`crates/vowp-agent/tests/orchestrator.rs`):
 
 - `agent_orchestrator_endpoint_reads_a_live_0600_service_file`
+- `agent_orchestrator_endpoint_reports_the_persisted_native_session_id`
 - `agent_orchestrator_endpoint_stopped_and_unknown_are_metadata_only`
 - `agent_orchestrator_endpoint_errors_never_echo_a_path_or_password`
+
+Bridge (`crates/vowp-agent/tests/bridge.rs`):
+
+- `opencode_bridge_persists_a_native_session_id_0600_without_secrets`
+- `opencode_bridge_replaces_the_persisted_native_session_id_on_change`
 
 CLI (`crates/vowp-cli/tests/orchestrator.rs` and `tests/agent.rs`):
 

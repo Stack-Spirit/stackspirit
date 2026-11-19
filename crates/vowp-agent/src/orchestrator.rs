@@ -42,6 +42,8 @@ pub const ORCHESTRATORS_DIR: &str = "orchestrators";
 pub const ORCHESTRATOR_CONFIG_FILE: &str = "config.json";
 /// Private host state and pid file name.
 pub const ORCHESTRATOR_HOST_FILE: &str = "host.json";
+/// Private hint file holding the last app-side session id seen by the bridge.
+pub const ORCHESTRATOR_NATIVE_SESSION_FILE: &str = "native-session.json";
 /// The app-facing standing instruction file name.
 pub const ORCHESTRATOR_AGENTS_FILE: &str = "AGENTS.md";
 /// The app-facing opencode MCP and instruction config file name.
@@ -363,6 +365,11 @@ impl OrchestratorHost {
         Ok(Self::dir(state_dir, name)?.join(ORCHESTRATOR_HOST_FILE))
     }
 
+    /// Returns one orchestrator's private native-session hint path.
+    pub fn native_session_path(state_dir: &Path, name: &str) -> Result<PathBuf, OrchestratorError> {
+        Ok(Self::dir(state_dir, name)?.join(ORCHESTRATOR_NATIVE_SESSION_FILE))
+    }
+
     /// Reads one materialized config, tightening a file left wider than 0600.
     pub fn config(&self, name: &str) -> Result<Option<OrchestratorConfig>, OrchestratorError> {
         let path = Self::config_path(&self.state_dir, name)?;
@@ -439,17 +446,21 @@ impl OrchestratorHost {
         if live.is_none() || config.app != OrchestratorApp::Opencode {
             return Ok(endpoint);
         }
-        let Some(service_json) = config.service_json.as_deref() else {
-            return Ok(endpoint);
-        };
-        let Some(service) =
-            read_service_endpoint(Path::new(service_json)).map_err(|error| endpoint_error(name, error))?
-        else {
-            return Ok(endpoint);
-        };
-        endpoint.url = Some(service.url);
-        endpoint.native_session_id = service.native_session_id;
-        endpoint.auth = Some(service.auth);
+        if let Some(service_json) = config.service_json.as_deref()
+            && let Some(service) =
+                read_service_endpoint(Path::new(service_json)).map_err(|error| endpoint_error(name, error))?
+        {
+            endpoint.url = Some(service.url);
+            endpoint.native_session_id = service.native_session_id.filter(|id| !id.trim().is_empty());
+            endpoint.auth = Some(service.auth);
+        }
+        // The app's own service file wins when it names a session. Otherwise the bridge's
+        // last observed app-side id is the only honest value; when neither exists the field
+        // stays null rather than guessing the newest app session.
+        if endpoint.native_session_id.is_none() {
+            endpoint.native_session_id =
+                read_native_session_id(&self.state_dir, name).map_err(|error| endpoint_error(name, error))?;
+        }
         Ok(endpoint)
     }
 
@@ -552,7 +563,7 @@ impl OrchestratorHost {
             }
             Ok(Some(_)) => {
                 self.release_stdin(&name);
-                let _ = fs::remove_file(Self::host_path(&self.state_dir, &name).unwrap_or_default());
+                remove_host_state(&self.state_dir, &name);
             }
             Ok(None) => {}
             Err(error) => {
@@ -598,6 +609,9 @@ impl OrchestratorHost {
         let name = name.clone();
         let capture_output = config.app == OrchestratorApp::Opencode || service_json.is_some();
 
+        // A fresh app process creates a fresh app-side session; an id left from a previous
+        // run must never be reported for it.
+        clear_native_session(&state_dir, &name);
         self.release_stdin(&name);
         let spawned = match spawn_app(
             &program,
@@ -626,7 +640,7 @@ impl OrchestratorHost {
         {
             stop_process(pid, Duration::from_millis(0));
             let _ = child.wait();
-            let _ = fs::remove_file(Self::host_path(&state_dir, &name).unwrap_or_default());
+            remove_host_state(&state_dir, &name);
             return PrepareOutcome::Failed(failed_result(&request_id, OrchestratorNodeState::Failed, error));
         }
         let started_at = Timestamp::now();
@@ -651,7 +665,7 @@ impl OrchestratorHost {
             let Some(service_json) = service_json.as_deref() else {
                 stop_process(pid, Duration::from_millis(0));
                 let _ = child.wait();
-                let _ = fs::remove_file(Self::host_path(&state_dir, &name).unwrap_or_default());
+                remove_host_state(&state_dir, &name);
                 return PrepareOutcome::Failed(failed_result(
                     &request_id,
                     OrchestratorNodeState::Failed,
@@ -661,7 +675,7 @@ impl OrchestratorHost {
             if let Err(error) = wait_for_service(service_json, &mut child, startup, capture.as_ref()) {
                 stop_process(pid, Duration::from_millis(0));
                 let _ = child.wait();
-                let _ = fs::remove_file(Self::host_path(&state_dir, &name).unwrap_or_default());
+                remove_host_state(&state_dir, &name);
                 return PrepareOutcome::Failed(failed_result(&request_id, OrchestratorNodeState::Failed, error));
             }
         }
@@ -744,6 +758,9 @@ impl OrchestratorHost {
         let state = match self.state(&name) {
             Ok(Some(state)) => state,
             Ok(None) => {
+                // A crash can leave the hint without `host.json`; an explicit stop still
+                // clears it so a later start cannot report the old app session.
+                clear_native_session(&self.state_dir, &name);
                 let mut result = OrchestratorResult::accepted(&request_id, OrchestratorNodeState::Stopped);
                 result.detail = Some("the host was not running".to_owned());
                 return result;
@@ -774,7 +791,7 @@ impl OrchestratorHost {
             }
         }
         self.release_stdin(&name);
-        let _ = fs::remove_file(Self::host_path(&self.state_dir, &name).unwrap_or_default());
+        remove_host_state(&self.state_dir, &name);
         let mut result = OrchestratorResult::accepted(&request_id, OrchestratorNodeState::Stopped);
         result.detail = Some(if detach_failed {
             "the host stopped; the home detach frame could not be sent".to_owned()
@@ -840,7 +857,7 @@ impl OrchestratorHost {
                 stop_process(pid, self.stop_grace);
             }
             self.release_stdin(&state.name);
-            let _ = fs::remove_file(Self::host_path(&self.state_dir, &state.name).unwrap_or_default());
+            remove_host_state(&self.state_dir, &state.name);
         }
     }
 
@@ -905,7 +922,7 @@ impl OrchestratorHost {
             if clean {
                 let _ = fs::remove_dir_all(&dir);
             } else {
-                let _ = fs::remove_file(dir.join(ORCHESTRATOR_HOST_FILE));
+                remove_host_state(&self.state_dir, name);
             }
         }
     }
@@ -1164,7 +1181,7 @@ impl OrchestratorHost {
             stop_process(pid, self.stop_grace);
         }
         self.release_stdin(name);
-        let _ = fs::remove_file(Self::host_path(&self.state_dir, name).unwrap_or_default());
+        remove_host_state(&self.state_dir, name);
     }
 
     fn set_state(
@@ -1180,6 +1197,7 @@ impl OrchestratorHost {
         current.detail = detail.map(|text| redact_detail(&text));
         if state == OrchestratorNodeState::Stopped || state == OrchestratorNodeState::Failed {
             current.pid = None;
+            clear_native_session(&self.state_dir, name);
         }
         write_host_state(&self.state_dir, &current)
     }
@@ -1760,6 +1778,62 @@ fn url_port(url: &str) -> Option<u16> {
     let (_, port) = url.rsplit_once(':')?;
     let port = port.trim_end_matches('/');
     port.parse::<u16>().ok().filter(|port| *port != 0)
+}
+
+/// The private hint the bridge writes beside `host.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct NativeSessionState {
+    native_session_id: String,
+}
+
+/// Writes one app-side session id 0600 beside the host state.
+///
+/// The bridge calls this on first sight and whenever the app switches to another session.
+/// The file carries only the id: never the service URL, password or any local path.
+pub(crate) fn write_native_session_file(path: &Path, native_session_id: &str) -> Result<(), AgentError> {
+    let id = native_session_id.trim();
+    if id.is_empty() || id.chars().any(char::is_control) {
+        return Err(AgentError::Config(
+            "the app reported an unusable native session id".to_owned(),
+        ));
+    }
+    let value = NativeSessionState {
+        native_session_id: id.to_owned(),
+    };
+    let bytes = serde_json::to_vec_pretty(&value)
+        .map_err(|error| AgentError::Config(format!("the native session hint could not be encoded: {error}")))?;
+    write_atomic_private(path, &bytes)
+}
+
+/// Reads one app-side session id hint, tightening a file left wider than 0600.
+fn read_native_session_id(state_dir: &Path, name: &str) -> Result<Option<String>, OrchestratorError> {
+    let path = OrchestratorHost::native_session_path(state_dir, name)?;
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+            let state: NativeSessionState = serde_json::from_slice(&bytes)
+                .map_err(|_| config_error("the local native session hint is not valid JSON"))?;
+            let id = state.native_session_id.trim();
+            Ok((!id.is_empty()).then(|| id.to_owned()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(config_error("the local native session hint could not be read")),
+    }
+}
+
+/// Removes one app-side session id hint; a missing file is not an error.
+fn clear_native_session(state_dir: &Path, name: &str) {
+    if let Ok(path) = OrchestratorHost::native_session_path(state_dir, name) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Removes the pid/state file and the native-session hint of one stopped host.
+fn remove_host_state(state_dir: &Path, name: &str) {
+    if let Ok(path) = OrchestratorHost::host_path(state_dir, name) {
+        let _ = fs::remove_file(path);
+    }
+    clear_native_session(state_dir, name);
 }
 
 fn read_host_state(path: &Path) -> Result<Option<OrchestratorHostState>, OrchestratorError> {
