@@ -107,6 +107,11 @@ interface ConversationState {
   loadEarlier: (session: SessionId) => Promise<void>;
   /** Preview-only project creation demo; a real bridge shows the VOWP gate. */
   requestProject: (request: ProjectRequest) => void;
+  /**
+   * Shows the app-owned new-server secure card in the setup chat because the owner
+   * explicitly asked to add a server. A saved profile never seeds it on its own.
+   */
+  requestSecureServerCard: () => void;
   /** Notes a host-key scan on the card message. Only the host name, which is not a secret. */
   noteSecureServerScan: (session: SessionId, messageId: string, host: string) => void;
   /** Records a verified key-only install; the secure card turns into a receipt. */
@@ -494,24 +499,16 @@ async function onboardingIncomplete(bridge: SpiritBridge): Promise<boolean> {
   }
 }
 
-function hasSecureCard(messages: ChatMessageView[] | undefined): boolean {
-  return (messages ?? []).some(
-    (message) =>
-      message.card?.kind === "secure-server" || message.card?.kind === "secure-received",
-  );
+function hasSecureServerForm(messages: ChatMessageView[] | undefined): boolean {
+  return (messages ?? []).some((message) => message.card?.kind === "secure-server");
 }
 
-/**
- * Seeds the app-owned secure-server card for setup when the loaded history has no card
- * and onboarding has not completed. It is not a model reply and carries no secret.
- */
-async function ensureSetupCard(bridge: SpiritBridge): Promise<void> {
-  const session: SessionId = "setup";
-  if (hasSecureCard(useConversations.getState().messages[session])) return;
-  if (!(await onboardingIncomplete(bridge))) return;
-  if (hasSecureCard(useConversations.getState().messages[session])) return;
+function hasSecureReceipt(messages: ChatMessageView[] | undefined): boolean {
+  return (messages ?? []).some((message) => message.card?.kind === "secure-received");
+}
 
-  const card: ChatMessageView = {
+function secureServerMessage(): ChatMessageView {
+  return {
     id: "app:secure-server",
     role: "assistant",
     text: [
@@ -522,8 +519,46 @@ async function ensureSetupCard(bridge: SpiritBridge): Promise<void> {
     origin: "app",
     card: { kind: "secure-server" },
   };
+}
+
+/**
+ * Drops a secure-server form that was seeded before a profile was saved. A saved
+ * server never sees the new-server password card unless the owner asks for it.
+ */
+function removeSecureServerForm(): void {
   useConversations.setState((state) => {
-    if (hasSecureCard(state.messages[session])) return {};
+    const current = state.messages.setup ?? [];
+    const next = current.filter((message) => message.card?.kind !== "secure-server");
+    if (next.length === current.length) return {};
+    return { messages: { ...state.messages, setup: next } };
+  });
+}
+
+/**
+ * Seeds the app-owned secure-server card for setup when no server profile is saved
+ * and onboarding has not completed. It is not a model reply and carries no secret.
+ * Once a profile is saved the owner must ask to add a server explicitly.
+ */
+async function ensureSetupCard(bridge: SpiritBridge): Promise<void> {
+  const session: SessionId = "setup";
+  if (useFleetStore.getState().hosts.length > 0) {
+    removeSecureServerForm();
+    return;
+  }
+  if (hasSecureServerForm(useConversations.getState().messages[session])) return;
+  if (hasSecureReceipt(useConversations.getState().messages[session])) return;
+  if (!(await onboardingIncomplete(bridge))) return;
+  // A profile may have been saved while the onboarding read was pending.
+  if (useFleetStore.getState().hosts.length > 0) {
+    removeSecureServerForm();
+    return;
+  }
+  if (hasSecureServerForm(useConversations.getState().messages[session])) return;
+
+  const card = secureServerMessage();
+  useConversations.setState((state) => {
+    if (useFleetStore.getState().hosts.length > 0) return {};
+    if (hasSecureServerForm(state.messages[session])) return {};
     return {
       messages: {
         ...state.messages,
@@ -773,6 +808,20 @@ export const useConversations = create<ConversationState>((set, get) => ({
         [session]: [...(state.messages[session] ?? []), user, reply],
       },
     }));
+  },
+
+  requestSecureServerCard: () => {
+    const session: SessionId = "setup";
+    const card = secureServerMessage();
+    set((state) => {
+      if (hasSecureServerForm(state.messages[session])) return {};
+      return {
+        messages: {
+          ...state.messages,
+          [session]: [card, ...(state.messages[session] ?? [])],
+        },
+      };
+    });
   },
 
   noteSecureServerScan: (session, messageId, host) => {

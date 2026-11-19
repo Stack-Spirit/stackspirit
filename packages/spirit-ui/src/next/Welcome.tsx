@@ -53,11 +53,18 @@ export interface ConnectPromptProps {
   state: string;
   error: string | null;
   onConnect: () => void;
-  onSetupWithAi: () => void;
+  onChatWithSetupAssistant: () => void;
 }
 
 /** Main area when a server is saved but not connected. */
-export function ConnectPrompt({ serverLabel, address, state, error, onConnect, onSetupWithAi }: ConnectPromptProps) {
+export function ConnectPrompt({
+  serverLabel,
+  address,
+  state,
+  error,
+  onConnect,
+  onChatWithSetupAssistant,
+}: ConnectPromptProps) {
   const connecting = state === "connecting";
   return (
     <section className="nx-main" aria-label="Connect">
@@ -72,24 +79,30 @@ export function ConnectPrompt({ serverLabel, address, state, error, onConnect, o
             {error}
           </p>
         ) : null}
-        <button
-          type="button"
-          className="nx-btn"
-          style={{ marginTop: 12, padding: "10px 28px", fontSize: 14 }}
-          onClick={onConnect}
-          disabled={connecting}
-          data-testid="connect-prompt-connect"
-        >
-          {connecting ? "Connecting…" : "Connect"}
-        </button>
-        <button
-          type="button"
-          className="nx-link nx-link--muted"
-          style={{ marginTop: 8, justifySelf: "center" }}
-          onClick={onSetupWithAi}
-        >
-          Trouble connecting? Ask the setup assistant
-        </button>
+        <div className="nx-connect-actions">
+          <button
+            type="button"
+            className="nx-btn"
+            style={{ padding: "10px 28px", fontSize: 14 }}
+            onClick={onConnect}
+            disabled={connecting}
+            data-testid="connect-prompt-connect"
+          >
+            {connecting ? "Connecting…" : "Connect"}
+          </button>
+          <button
+            type="button"
+            className="nx-btn nx-btn--quiet"
+            onClick={onChatWithSetupAssistant}
+            data-testid="connect-prompt-chat"
+          >
+            Chat with the setup assistant
+          </button>
+        </div>
+        <p className="nx-welcome__fine" style={{ maxWidth: 360 }}>
+          The setup assistant chats on this Mac with the bundled engine. No server connection
+          needed.
+        </p>
       </div>
     </section>
   );

@@ -28,7 +28,7 @@ import "./theme.css";
  * The redesigned desktop shell (Meadow theme, chat-first, DeepSeek Harness layout).
  *
  * - No saved server: a full-page welcome with "Add server" and "Set up with AI".
- * - A saved server that is not connected: sidebar + one Connect action.
+ * - A saved server that is not connected: sidebar + Connect and a local setup chat.
  * - Connected: sidebar (server health, global orchestrator, projects with their
  *   orchestrator and workers), the main view, and a details panel that is closed
  *   until it is toggled or something is opened in it.
@@ -72,7 +72,8 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
     if (hostsLoaded) void loadCluster();
   }, [bridge, hostsLoaded, connection.host_id, connection.state, loadCluster]);
   // "global" shows the Connect prompt until a saved server is connected; the setup
-  // assistant is opened explicitly from the welcome page or the sidebar.
+  // assistant is opened explicitly from the welcome page, the Connect prompt or the
+  // sidebar, and chats locally without connecting.
   const [view, setView] = useState<NextView>({ kind: "session", session: "global" });
   const [setupChosen, setSetupChosen] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -143,6 +144,10 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const openServer = () => setView({ kind: "server" });
 
   const serverLabel = connected && activeHost ? activeHost.label : null;
+  // The setup chat can show a saved server without connecting. It is read-only and
+  // never exposes a key path; ChatView derives only the key file's name.
+  const setupServer =
+    view.kind === "session" && view.session === "setup" && hosts.length > 0 ? activeHost : null;
   const scopeProject =
     view.kind === "workers"
       ? view.project
@@ -169,7 +174,13 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
     main = <WorkersPage key={`workers:${view.project}`} project={view.project} onOpenSession={() => openSession(view.project)} />;
   } else if (view.kind === "session" && (connected || view.session === "setup")) {
     main = (
-      <ChatView key={`chat:${view.session}`} session={view.session} serverLabel={serverLabel} onOpenWorkers={openWorkers} />
+      <ChatView
+        key={`chat:${view.session}`}
+        session={view.session}
+        serverLabel={serverLabel}
+        savedServer={setupServer}
+        onOpenWorkers={openWorkers}
+      />
     );
   } else if (activeHost) {
     main = (
@@ -179,11 +190,11 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
         state={connection.host_id === activeHost.id ? connection.state : "disconnected"}
         error={connection.host_id === activeHost.id ? (connection.error?.message ?? null) : null}
         onConnect={() => void connect(activeHost.id)}
-        onSetupWithAi={() => setView({ kind: "session", session: "setup" })}
+        onChatWithSetupAssistant={() => setView({ kind: "session", session: "setup" })}
       />
     );
   } else {
-    main = <ChatView key="chat:setup" session="setup" serverLabel={null} />;
+    main = <ChatView key="chat:setup" session="setup" serverLabel={null} savedServer={null} />;
   }
 
   return (

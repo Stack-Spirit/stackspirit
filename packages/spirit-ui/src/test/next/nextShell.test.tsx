@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SpiritBridge } from "../../bridge/SpiritBridge";
+import type { HostProfile } from "../../bridge/wire";
 import { MockBridge, type MockScenario } from "../../bridge/MockBridge";
 import { resetConversations, useConversations } from "../../next/conversations";
 import { NextShell } from "../../next/NextShell";
@@ -30,6 +31,25 @@ async function renderConnected(scenario: MockScenario = "busy") {
   await user.click(screen.getByTestId("connect-prompt-connect"));
   await waitFor(() => expect(useFleetStore.getState().connection.state).toBe("connected"));
   return { user, ...rendered };
+}
+
+function savedHost(): HostProfile {
+  return {
+    id: "host-saved",
+    label: "staging-vps",
+    ssh: { user: "owner", host: "203.0.113.10", port: 2222 },
+    identity_file: "/home/owner/.ssh/id_ed25519",
+    vowp_home: null,
+    default_project: null,
+    host_key: {
+      algorithm: "ssh-ed25519",
+      sha256: "SHA256:nextShellSavedHost000000000000000000000000",
+      pinned_at: "2026-11-18T09:00:00.000Z",
+    },
+    created_at: "2026-11-18T09:00:00.000Z",
+    updated_at: "2026-11-18T09:00:00.000Z",
+    last_connected_at: null,
+  };
 }
 
 afterEach(() => {
@@ -71,10 +91,95 @@ describe("NextShell", () => {
     expect(await screen.findByText(/Preview reply\./)).toBeInTheDocument();
     expect(screen.getByTestId("preview-tag")).toHaveTextContent("Preview");
 
-    // The secure card is app-owned, not a model reply.
+    // The secure card is app-owned, not a model reply, and no profile is shown.
     const setupMessages = useConversations.getState().messages.setup ?? [];
     expect(setupMessages[0]?.card).toEqual({ kind: "secure-server" });
     expect(setupMessages[0]?.origin).toBe("app");
+    expect(screen.queryByTestId("saved-server-card")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add another server" })).not.toBeInTheDocument();
+  });
+
+  it("chats from a saved offline server without connecting or showing the password card", async () => {
+    const user = userEvent.setup();
+    const bridge = new MockBridge({ scenario: "busy", hosts: [savedHost()] });
+    await renderWithBridge(bridge);
+    const connect = vi.spyOn(bridge.connection, "connect");
+
+    expect(
+      screen.getByRole("button", { name: "Chat with the setup assistant" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByTestId("connect-prompt-chat"));
+
+    expect(
+      await screen.findByRole("heading", { name: "Setup assistant", level: 1 }),
+    ).toBeInTheDocument();
+    expect(useFleetStore.getState().connection.state).toBe("disconnected");
+    expect(connect).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByTestId("session-location")).toHaveTextContent("Local · this Mac"),
+    );
+
+    const card = screen.getByTestId("saved-server-card");
+    expect(card).toHaveTextContent("staging-vps");
+    expect(card).toHaveTextContent("203.0.113.10");
+    expect(card).toHaveTextContent("owner");
+    expect(card).toHaveTextContent("2222");
+    expect(card).toHaveTextContent("id_ed25519");
+    expect(card).not.toHaveTextContent("/home/owner");
+    expect(screen.queryByRole("form", { name: "Secure server details" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Secure server details")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled();
+  });
+
+  it("opens the same saved-server setup chat from the sidebar without a password card", async () => {
+    const user = userEvent.setup();
+    const bridge = new MockBridge({ scenario: "busy", hosts: [savedHost()] });
+    await renderWithBridge(bridge);
+    const connect = vi.spyOn(bridge.connection, "connect");
+
+    await user.click(
+      within(screen.getByRole("navigation", { name: "Sessions" })).getByRole("button", {
+        name: /Setup assistant/,
+      }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Setup assistant", level: 1 }),
+    ).toBeInTheDocument();
+    expect(connect).not.toHaveBeenCalled();
+    expect(screen.getByTestId("saved-server-card")).toHaveTextContent("staging-vps");
+    expect(screen.queryByRole("form", { name: "Secure server details" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled();
+  });
+
+  it("shows the new-server password card only when the owner asks to add a server", async () => {
+    const user = userEvent.setup();
+    await renderNext("busy");
+    await user.click(screen.getByTestId("connect-prompt-chat"));
+    expect(await screen.findByTestId("saved-server-card")).toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: "Secure server details" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Add another server" }));
+
+    expect(
+      await screen.findByRole("form", { name: "Secure server details" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("One-time password from your provider")).toBeInTheDocument();
+    expect(screen.getByTestId("saved-server-card")).toBeInTheDocument();
+  });
+
+  it("keeps the honest engine error in a saved-server setup chat and never fakes a reply", async () => {
+    const user = userEvent.setup();
+    await renderNext("chat-engine-stopped");
+    await user.click(screen.getByTestId("connect-prompt-chat"));
+
+    const error = await screen.findByTestId("chat-error");
+    expect(error).toHaveTextContent("The bundled StackSpirit Engine is stopped.");
+    expect(error).toHaveTextContent("Settings → Engine");
+    expect(screen.queryByText(/Preview reply\./)).not.toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: "Secure server details" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("saved-server-card")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled();
   });
 
   it("keeps a typed password out of the conversation", async () => {

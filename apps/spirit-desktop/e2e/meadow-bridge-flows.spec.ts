@@ -240,12 +240,19 @@ test("setup assistant installs a key and reports password login without leaking 
       );
       await expect(page.getByTestId("next-shell")).toBeVisible();
       await page
-        .getByRole("button", { name: /Ask the setup assistant/ })
+        .getByRole("button", { name: "Chat with the setup assistant" })
         .click();
 
       const chip = page.getByTestId("session-location");
       await expect(chip).toContainText("Local · this Mac");
       await expectReadOnlyLocationChip(page, chip);
+
+      // A saved server never sees the new-server password card until the owner asks
+      // for another server.
+      const savedCard = page.getByTestId("saved-server-card");
+      await expect(savedCard).toContainText("staging-vps");
+      await expect(page.getByRole("form", { name: "Secure server details" })).toHaveCount(0);
+      await savedCard.getByRole("button", { name: "Add another server", exact: true }).click();
 
       const form = page.getByRole("form", { name: "Secure server details" });
       await expect(form).toBeVisible();
@@ -340,14 +347,44 @@ test("the setup session chip reads Local and is read-only", async ({ page }) => 
   }
 });
 
-test("a connected session chip reads Server and is read-only", async ({ page }) => {
+test("a connected session chip reads Local and is read-only", async ({ page }) => {
   for (const theme of THEMES) {
     await page.goto(`${BASE_URL}/?scenario=busy&theme=${theme}`);
     await page.getByTestId("sidebar-connect").click();
     await expect(page.getByTestId("health-card")).toBeVisible();
     const chip = page.getByTestId("session-location");
-    await expect(chip).toContainText("Server · staging-vps");
+    await expect(chip).toContainText("Local · this Mac");
     await expectReadOnlyLocationChip(page, chip);
+    await expectNoWcagViolations(page);
+  }
+});
+
+test("a saved offline server chats without connecting and meets WCAG 2.2 AA", async ({
+  page,
+}) => {
+  for (const theme of THEMES) {
+    await page.goto(`${BASE_URL}/?scenario=fresh&theme=${theme}`);
+    await expect(page.getByTestId("next-shell")).toBeVisible();
+    await expect(page.getByTestId("connect-prompt-connect")).toBeVisible();
+
+    await page.getByRole("button", { name: "Chat with the setup assistant" }).click();
+    const chip = page.getByTestId("session-location");
+    await expect(chip).toContainText("Local · this Mac");
+    await expectReadOnlyLocationChip(page, chip);
+
+    const card = page.getByTestId("saved-server-card");
+    await expect(card).toContainText("staging-vps");
+    await expect(card).toContainText("203.0.113.10");
+    await expect(card).toContainText("owner");
+    await expect(card).toContainText("22");
+    await expect(page.getByRole("form", { name: "Secure server details" })).toHaveCount(0);
+    await expect(page.getByTestId("sidebar-connect")).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Message" })).toBeEnabled();
+
+    await page.getByRole("textbox", { name: "Message" }).fill("What can I do with my server?");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByText(/Preview reply\./)).toBeVisible();
+
     await expectNoWcagViolations(page);
   }
 });

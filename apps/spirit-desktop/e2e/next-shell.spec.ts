@@ -78,7 +78,7 @@ test("connected shell, details panel and settings menu meet WCAG 2.2 AA", async 
     await page.goto(url("busy", theme));
     await connect(page);
     await expect(page.getByRole("heading", { name: "Global orchestrator", level: 1 })).toBeVisible();
-    await expect(page.getByTestId("session-location")).toContainText("Server · staging-vps");
+    await expect(page.getByTestId("session-location")).toContainText("Local · this Mac");
     await expect(page.getByTestId("details-panel")).toHaveAttribute("aria-hidden", "true");
     await expectNoWcagViolations(page);
 

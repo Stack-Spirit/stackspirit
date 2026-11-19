@@ -59,7 +59,8 @@ VITE_SPIRIT_MOCK=1 npm run dev -w @stackspirit/desktop   # http://127.0.0.1:1420
 - Right **details panel**: hidden by default; opens from the header toggle, when a node
   or row is selected, or when an agent reply points at something. Draggable width.
 - No saved server → full-page welcome with **Add server** and **Set up with AI**.
-  Saved but offline → one Connect action.
+  Saved but offline → **Connect** or **Chat with the setup assistant**; the saved server
+  may be shown read-only in the chat without connecting.
 
 **Naming**: "Server" for the always-on machine (VPS or a computer at home reached over
 SSH), "Local" for this Mac. Not VM/AOM.
@@ -185,6 +186,18 @@ owner model turn (`docs/ORCHESTRATOR-CHAT.md` §2.2.5 and §9.1; `ss-43` live pr
 verification script `ss-47`, `76b48ac`). The **non-streaming final message is real**: the
 reply arrives as one complete assistant message, not token by token. Do not call it
 streaming until the owner verification records the cadence.
+
+The setup assistant now respects a saved profile (`ss-70`). With at least one saved
+server, **Chat with the setup assistant** on the Connect prompt (or the sidebar's
+**Setup assistant** row) opens the same local setup chat directly: no Connect is
+required and the composer is live on the bundled engine's included models. The saved
+server is shown as a compact read-only card in the chat with its label, host, user, port
+and the key file's **name only**; the card never renders a key path, passphrase, token or
+password. The app-owned one-time-password card is not seeded while a profile is saved;
+it appears only after the owner chooses **Add another server** on that card. First run
+with no profile keeps the welcome page and its secure card unchanged. If the engine is
+not ready, the chat shows the existing typed `engine_not_ready` error and its
+Settings → Engine hint, and never invents a reply.
 
 Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 - Assistant replies in the `MockBridge` preview scenarios, and the agent opening the
@@ -341,9 +354,14 @@ Running the app against the real Mac orchestrator found problems that fake-backe
 (the shell still asked for a **Server** location although only **Local** chat is live). Next, in
 order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md`:
 
-1. **Set up with AI respects an existing profile.** With a saved server, the setup assistant opens
-   directly as a normal chat on the bundled engine's free models, without requiring Connect and
-   without the new-server password form. A saved server may be shown as an info card.
+1. **Set up with AI respects an existing profile — landed (`ss-70`).** With a saved server,
+   **Chat with the setup assistant** and the sidebar's **Setup assistant** open the setup chat
+   directly as a normal conversation on the bundled engine's free models. No Connect is required
+   and the new-server password form is not seeded; the saved server is a compact read-only card
+   (label, host, user, port and key file name only). The password card is reachable only through
+   the card's explicit **Add another server** action. The no-profile welcome and secure-card path
+   is unchanged, the honest engine error still wins when the engine is not ready, and component
+   plus Meadow e2e coverage (axe WCAG 2.2 AA in light and dark) records both entry points.
 2. **Server chat transport options** (document only): what a home-hosted orchestrator's endpoint
    allows, versus an app-owned SSH forward, versus keeping Server chat gated. The owner decides.
 3. **Session ownership in the UI** (after VOWP v0.5.1 slice 3): show which surface holds the

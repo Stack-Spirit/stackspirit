@@ -1,7 +1,13 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
 import { errorTitle, toSpiritError, type SpiritError } from "../bridge/errors";
-import type { ChatSessionState, HostDraft, HostKeyPin, HostKeyScan } from "../bridge/wire";
+import type {
+  ChatSessionState,
+  HostDraft,
+  HostKeyPin,
+  HostKeyScan,
+  HostProfile,
+} from "../bridge/wire";
 import { useFleet, useFleetStore } from "../state/fleetStore";
 import {
   useConversations,
@@ -16,6 +22,8 @@ export interface ChatViewProps {
   session: SessionId;
   /** Label of the connected server, used in the location chip. */
   serverLabel: string | null;
+  /** A saved profile that may be shown read-only in the setup chat without connecting. */
+  savedServer?: HostProfile | null;
   onOpenWorkers?: (project: string) => void;
 }
 
@@ -78,7 +86,12 @@ function composerPlaceholder(
   }
 }
 
-export function ChatView({ session, serverLabel, onOpenWorkers }: ChatViewProps) {
+export function ChatView({
+  session,
+  serverLabel,
+  savedServer = null,
+  onOpenWorkers,
+}: ChatViewProps) {
   const messages = useConversations((state) => state.messages[session]) ?? [];
   const view = useConversations((state) => state.views[session]) ?? null;
   const send = useConversations((state) => state.send);
@@ -86,10 +99,12 @@ export function ChatView({ session, serverLabel, onOpenWorkers }: ChatViewProps)
   const open = useConversations((state) => state.open);
   const restart = useConversations((state) => state.restart);
   const loadEarlier = useConversations((state) => state.loadEarlier);
+  const requestSecureServerCard = useConversations((state) => state.requestSecureServerCard);
   const hasEarlier = useConversations((state) => Boolean(state.earlier[session]));
   const loadingEarlier = useConversations((state) => state.loadingEarlier[session] ?? false);
   const truncated = useConversations((state) => state.truncated[session] ?? false);
   const endRef = useRef<HTMLDivElement>(null);
+  const [newServerRequested, setNewServerRequested] = useState(false);
   const project = session.startsWith("project:") ? session.slice("project:".length) : null;
   const state = view?.state ?? "idle";
 
@@ -104,13 +119,19 @@ export function ChatView({ session, serverLabel, onOpenWorkers }: ChatViewProps)
   const isSetup = session === "setup";
   const missingModel = isSetup && state === "ready" && !view?.model;
   const canChat = state === "ready" && !missingModel;
-  const hasConversation = messages.some(
+  // A saved profile never shows the new-server password form unless the owner asks
+  // for another server from the saved-server card.
+  const showSecureServerForm = !savedServer || newServerRequested;
+  const visibleMessages = showSecureServerForm
+    ? messages
+    : messages.filter((message) => message.card?.kind !== "secure-server");
+  const hasConversation = visibleMessages.some(
     (message) =>
       message.role === "user" ||
       message.origin === "model" ||
       message.origin === "preview",
   );
-  const hasReply = messages.some(
+  const hasReply = visibleMessages.some(
     (message) => message.origin === "model" || message.origin === "preview",
   );
   const error = view?.error ?? null;
@@ -208,6 +229,16 @@ export function ChatView({ session, serverLabel, onOpenWorkers }: ChatViewProps)
         ) : null}
       </PageHeader>
 
+      {isSetup && savedServer ? (
+        <SavedServerCard
+          host={savedServer}
+          onAddServer={() => {
+            setNewServerRequested(true);
+            requestSecureServerCard();
+          }}
+        />
+      ) : null}
+
       <div className="nx-chat">
         {hasEarlier || truncated ? (
           <div className="nx-chat__earlier">
@@ -229,14 +260,15 @@ export function ChatView({ session, serverLabel, onOpenWorkers }: ChatViewProps)
         {!hasConversation ? (
           <EmptySession
             session={session}
+            savedServer={savedServer}
             onPick={(text) => void send(session, text)}
             disabled={!canChat}
-            compact={messages.length > 0}
+            compact={visibleMessages.length > 0}
           />
         ) : null}
-        {messages.length > 0 ? (
+        {visibleMessages.length > 0 ? (
           <div className="nx-chat__inner">
-            {messages.map((message) => (
+            {visibleMessages.map((message) => (
               <Message key={message.id} session={session} message={message} />
             ))}
             <div ref={endRef} />
@@ -303,13 +335,67 @@ export function ChatView({ session, serverLabel, onOpenWorkers }: ChatViewProps)
   );
 }
 
+/** The key file's name only; a profile may hold an absolute path that stays private. */
+export function keyFileName(identityFile: string | null): string | null {
+  const trimmed = identityFile?.trim();
+  if (!trimmed) return null;
+  const name = trimmed.split(/[\\/]/).filter(Boolean).pop();
+  return name && name.length > 0 ? name : null;
+}
+
+/**
+ * A saved server shown read-only inside the setup chat. It exists so the owner can
+ * recognize the computer without connecting; it never renders a key path, a
+ * passphrase or a password. "Add another server" is the explicit ask that unlocks
+ * the one-time-password card for a new server.
+ */
+function SavedServerCard({ host, onAddServer }: { host: HostProfile; onAddServer: () => void }) {
+  const keyName = keyFileName(host.identity_file);
+  return (
+    <aside className="nx-saved-server" aria-label="Saved server" data-testid="saved-server-card">
+      <div className="nx-saved-server__head">
+        <span className="nx-chip nx-chip--tiny nx-chip--local">Saved</span>
+        <span className="nx-saved-server__name">{host.label}</span>
+      </div>
+      <dl className="nx-saved-server__facts">
+        <div>
+          <dt>Host</dt>
+          <dd>{host.ssh.host}</dd>
+        </div>
+        <div>
+          <dt>User</dt>
+          <dd>{host.ssh.user}</dd>
+        </div>
+        <div>
+          <dt>Port</dt>
+          <dd>{host.ssh.port}</dd>
+        </div>
+        {keyName ? (
+          <div>
+            <dt>Key file</dt>
+            <dd>{keyName}</dd>
+          </div>
+        ) : null}
+      </dl>
+      <p className="nx-saved-server__note">
+        Saved on this Mac. You don&apos;t need to connect to chat here.
+      </p>
+      <button type="button" className="nx-btn nx-btn--quiet nx-btn--sm" onClick={onAddServer}>
+        Add another server
+      </button>
+    </aside>
+  );
+}
+
 function EmptySession({
   session,
+  savedServer,
   onPick,
   disabled,
   compact,
 }: {
   session: SessionId;
+  savedServer: HostProfile | null;
   onPick: (text: string) => void;
   disabled: boolean;
   compact: boolean;
@@ -320,10 +406,21 @@ function EmptySession({
   let suggestions: string[];
 
   if (session === "setup") {
-    title = "Let's connect your always-on server";
-    body =
-      "A VPS from a provider, or a computer at home you can reach over SSH. I'll ask for what I need; anything secret goes into a secure box I can't read.";
-    suggestions = ["I have a new VPS", "I want to use a computer at home", "What is an always-on server?"];
+    if (savedServer) {
+      title = "Ask me anything about your setup";
+      body =
+        "Your saved server is above. Chatting runs here on this Mac with the bundled engine's free models; you don't need to connect to the server first.";
+      suggestions = [
+        "What can I do with my server?",
+        "How do I add another server?",
+        "What is an always-on server?",
+      ];
+    } else {
+      title = "Let's connect your always-on server";
+      body =
+        "A VPS from a provider, or a computer at home you can reach over SSH. I'll ask for what I need; anything secret goes into a secure box I can't read.";
+      suggestions = ["I have a new VPS", "I want to use a computer at home", "What is an always-on server?"];
+    }
   } else if (session === "global") {
     const projects = fleet?.projects.length ?? 0;
     const running = fleet?.running.length ?? 0;

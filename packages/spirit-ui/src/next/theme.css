@@ -1087,6 +1087,15 @@ button.nx-node:focus-visible {
   font-size: 12px;
 }
 
+/* The saved-but-offline screen keeps Connect and offers the local setup chat. */
+.nx-connect-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 @media (max-width: 640px) {
   .nx-choices {
     grid-template-columns: 1fr;
@@ -1096,6 +1105,69 @@ button.nx-node:focus-visible {
 /* ======================================================================
    Chat
    ====================================================================== */
+
+/* A saved profile inside the setup chat: read-only, never a key path. */
+.nx-saved-server {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  width: min(760px, calc(100% - 40px));
+  margin: 12px auto 0;
+  padding: 10px 14px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius);
+  background: var(--nx-raised);
+  color: var(--nx-text);
+  font-size: 13px;
+}
+
+.nx-saved-server__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nx-saved-server__name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.nx-saved-server__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+}
+
+.nx-saved-server__facts > div {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.nx-saved-server__facts dt {
+  color: var(--nx-muted);
+}
+
+.nx-saved-server__facts dd {
+  margin: 0;
+  color: var(--nx-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.nx-saved-server__note {
+  flex: 1 1 320px;
+  margin: 0;
+  color: var(--nx-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.nx-saved-server .nx-btn {
+  margin-left: auto;
+}
 
 .nx-chat {
   flex: 1;
