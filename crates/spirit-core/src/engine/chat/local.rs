@@ -26,9 +26,9 @@ use crate::engine::chat::endpoint::{
 };
 use crate::engine::chat::model::{
     ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage, ChatMessageOrigin,
-    ChatModelView, ChatRole, ChatSendReceipt, ChatSessionId, ChatSessionLocation, ChatSessionState,
-    ChatSessionView, ChatStartInput, MAX_MESSAGE_CHARS, cap_text, normalize_text,
-    validate_project_name, validate_user_text,
+    ChatModelTier, ChatModelView, ChatRole, ChatSendReceipt, ChatSessionId, ChatSessionLocation,
+    ChatSessionState, ChatSessionView, ChatStartInput, ChatUsageView, MAX_MESSAGE_CHARS, cap_text,
+    normalize_text, validate_project_name, validate_user_text,
 };
 use crate::engine::chat::pump::{
     ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper,
@@ -146,6 +146,26 @@ pub trait ChatEngine: Send + Sync {
         None
     }
 
+    /// Returns every model the running engine reports as usable now.
+    ///
+    /// The default only knows the selected model. A real engine adapter overrides this
+    /// with verified included models plus models whose provider key is configured.
+    fn available_models(&self) -> Vec<ChatModelView> {
+        self.selected_model().into_iter().collect()
+    }
+
+    /// Selects a model for the setup assistant.
+    ///
+    /// `persist` is true only for an explicit owner choice. The automatic default passes
+    /// false so a launch never looks like the owner saved a model in Settings.
+    async fn select_model(
+        &self,
+        _model_id: &str,
+        _persist: bool,
+    ) -> Result<ChatModelView, SpiritError> {
+        Err(model_selection_unavailable_error())
+    }
+
     /// Returns the engine status for the external-engine gate.
     ///
     /// This is core-only and is never serialized into a chat DTO.
@@ -170,6 +190,12 @@ pub trait ChatTransport: Send + Sync {
     ) -> Result<ChatSendReceipt, SpiritError>;
     /// Aborts the turn when supported and returns the stopped view.
     async fn stop(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError>;
+    /// Switches the setup assistant's model and returns the updated view.
+    async fn set_model(
+        &self,
+        session: &ChatSessionId,
+        model_id: &str,
+    ) -> Result<ChatSessionView, SpiritError>;
     /// Reads one backward log page.
     async fn log(
         &self,
@@ -225,6 +251,7 @@ struct SessionRecord {
     started_at: Option<Timestamp>,
     last_event_at: Option<Timestamp>,
     error: Option<SpiritError>,
+    usage: Option<ChatUsageView>,
     applier: ChatEventApplier,
     mapper: SseEventMapper,
     active_turn: Option<String>,
@@ -242,6 +269,7 @@ impl SessionRecord {
             started_at: None,
             last_event_at: None,
             error: None,
+            usage: None,
             applier: ChatEventApplier::new(),
             mapper: SseEventMapper::new(),
             active_turn: None,
@@ -388,6 +416,9 @@ impl LocalChatProvider {
         let port = self.inner.ensure_engine().await?;
         self.inner.check_health(port).await?;
         let endpoint = ChatEndpoint::engine(port, &self.inner.workspace);
+        // An unsaved first run defaults to the first verified free runtime model. A
+        // selection failure is not fatal: the view honestly reports no model.
+        let _ = self.inner.resolve_setup_model().await;
 
         let existing = {
             let state = self.inner.state.lock().await;
@@ -413,6 +444,7 @@ impl LocalChatProvider {
             self.inner.create_native_session(&endpoint).await?
         };
         let body = self.inner.read_log(&endpoint, &native).await?;
+        let usage = parse_usage(&body, self.inner.selected_context_limit());
         let now = self.inner.clock.now();
         let view = {
             let mut state = self.inner.state.lock().await;
@@ -434,6 +466,7 @@ impl LocalChatProvider {
             record.started_at.get_or_insert(now);
             record.last_event_at = Some(now);
             record.error = None;
+            record.usage = usage;
             record
                 .applier
                 .replace_log(parse_log(&body, self.inner.clock.now()));
@@ -499,6 +532,9 @@ impl LocalChatProvider {
             Err(error) => return Err(error),
         }
         let body = self.inner.read_log(&endpoint, &native).await?;
+        // The orchestrator owns its model choice; only its reported token metadata is
+        // used, and the context limit stays `null` because the app does not know it.
+        let usage = parse_usage(&body, None);
         let now = self.inner.clock.now();
         let view = {
             let mut state = self.inner.state.lock().await;
@@ -520,6 +556,7 @@ impl LocalChatProvider {
             record.started_at.get_or_insert(now);
             record.last_event_at = Some(now);
             record.error = None;
+            record.usage = usage;
             record
                 .applier
                 .replace_log(parse_log(&body, self.inner.clock.now()));
@@ -555,6 +592,7 @@ impl LocalChatProvider {
         let port = self.inner.ensure_engine().await?;
         self.inner.check_health(port).await?;
         let endpoint = ChatEndpoint::engine(port, &self.inner.workspace);
+        let _ = self.inner.resolve_setup_model().await;
         match self.inner.get_native_session(&endpoint, &native).await {
             Ok(()) => {}
             Err(error) if error.code == SpiritErrorCode::NotFound => {
@@ -564,6 +602,7 @@ impl LocalChatProvider {
             Err(error) => return Err(error),
         }
         let body = self.inner.read_log(&endpoint, &native).await?;
+        let usage = parse_usage(&body, self.inner.selected_context_limit());
         let now = self.inner.clock.now();
         let view = {
             let mut state = self.inner.state.lock().await;
@@ -585,6 +624,7 @@ impl LocalChatProvider {
             record.started_at.get_or_insert(now);
             record.last_event_at = Some(now);
             record.error = None;
+            record.usage = usage;
             record
                 .applier
                 .replace_log(parse_log(&body, self.inner.clock.now()));
@@ -680,14 +720,15 @@ impl LocalChatProvider {
             }
             stored_endpoint
         };
-        // The setup assistant needs its verified bundled model. A VOWP orchestrator owns
-        // its own OpenCode config, so no model is invented or copied from the setup
-        // engine; the message omits `model` and lets the orchestrator choose.
+        // The setup assistant defaults to the first verified free runtime model when the
+        // owner has not saved a choice. A VOWP orchestrator owns its own OpenCode config,
+        // so no model is invented or copied from the setup engine; the message omits
+        // `model` and lets the orchestrator choose.
         let model = if setup {
             Some(
                 self.inner
-                    .engine
-                    .selected_model()
+                    .resolve_setup_model()
+                    .await?
                     .ok_or_else(no_model_error)?,
             )
         } else {
@@ -783,6 +824,47 @@ impl LocalChatProvider {
         Ok(view)
     }
 
+    /// Switches the setup assistant's model and returns the updated view.
+    ///
+    /// The explicit owner choice is persisted by the engine adapter. An orchestrator
+    /// session owns its own model config, so switching it here is refused rather than
+    /// pretending the app can change it.
+    pub async fn set_model(
+        &self,
+        session: &ChatSessionId,
+        model_id: &str,
+    ) -> Result<ChatSessionView, SpiritError> {
+        let model_id = validate_model_id(model_id)?;
+        if !matches!(session, ChatSessionId::Setup) {
+            return Err(chat_model_switch_gated_error());
+        }
+        {
+            let state = self.inner.state.lock().await;
+            let record = state
+                .sessions
+                .get(session)
+                .filter(|record| record.attached)
+                .ok_or_else(chat_not_started_error)?;
+            if record.endpoint.is_none() {
+                return Err(chat_not_started_error());
+            }
+        }
+        self.inner
+            .engine
+            .select_model(&model_id, true)
+            .await
+            .map_err(|error| error.with_hint("Choose an available model and retry."))?;
+        let view = {
+            let state = self.inner.state.lock().await;
+            let record = state
+                .sessions
+                .get(session)
+                .ok_or_else(chat_not_started_error)?;
+            self.inner.view_for(session, record)
+        };
+        Ok(self.inner.clone().emit_session(view).await)
+    }
+
     /// Reads the active native log, newest page first.
     pub async fn log(
         &self,
@@ -836,6 +918,14 @@ impl ChatTransport for LocalChatProvider {
         LocalChatProvider::stop(self, session).await
     }
 
+    async fn set_model(
+        &self,
+        session: &ChatSessionId,
+        model_id: &str,
+    ) -> Result<ChatSessionView, SpiritError> {
+        LocalChatProvider::set_model(self, session, model_id).await
+    }
+
     async fn log(
         &self,
         session: &ChatSessionId,
@@ -847,24 +937,54 @@ impl ChatTransport for LocalChatProvider {
 
 impl Inner {
     fn view_for(&self, session: &ChatSessionId, record: &SessionRecord) -> ChatSessionView {
+        // The setup assistant shows the bundled engine's selected model and its verified
+        // usable list. A VOWP orchestrator owns its own config, so the core neither copies
+        // the setup model nor invents an orchestrator model list.
+        let (model, available_models) = if matches!(session, ChatSessionId::Setup) {
+            (
+                self.engine.selected_model(),
+                Some(self.engine.available_models()),
+            )
+        } else {
+            (None, None)
+        };
         ChatSessionView {
             session: session.clone(),
             location: ChatSessionLocation::Local,
             state: record.state,
             attached: record.attached,
             streaming_supported: self.stream_support.is_supported(),
-            // The setup assistant shows the bundled engine's selected model. A VOWP
-            // orchestrator owns its own config, so the core does not copy the setup
-            // model into its view.
-            model: if matches!(session, ChatSessionId::Setup) {
-                self.engine.selected_model()
-            } else {
-                None
-            },
+            model,
+            available_models,
+            usage: record.usage.clone(),
             started_at: record.started_at,
             last_event_at: record.last_event_at,
             error: record.error.clone(),
         }
+    }
+
+    /// Returns a saved selection, or defaults to the first verified free model.
+    ///
+    /// A BYOK model is a legitimate fallback when the engine reports no free model. A
+    /// zero-model engine returns `None`; no fake included model is ever constructed.
+    async fn resolve_setup_model(&self) -> Result<Option<ChatModelView>, SpiritError> {
+        if let Some(model) = self.engine.selected_model() {
+            return Ok(Some(model));
+        }
+        let available = self.engine.available_models();
+        let Some(preferred) = preferred_setup_model(&available) else {
+            return Ok(None);
+        };
+        self.engine
+            .select_model(&preferred.id, false)
+            .await
+            .map(Some)
+    }
+
+    fn selected_context_limit(&self) -> Option<u64> {
+        self.engine
+            .selected_model()
+            .and_then(|model| model.context_tokens)
     }
 
     async fn ensure_engine(&self) -> Result<u16, SpiritError> {
@@ -1175,6 +1295,12 @@ impl Inner {
             }
         };
         let messages = parse_log(&body, self.clock.now());
+        let context_limit = if matches!(session, ChatSessionId::Setup) {
+            self.selected_context_limit()
+        } else {
+            None
+        };
+        let usage = parse_usage(&body, context_limit);
         let changed = {
             let mut state = self.state.lock().await;
             let Some(record) = state.sessions.get_mut(session) else {
@@ -1183,6 +1309,7 @@ impl Inner {
             if record.native_session_id != native {
                 return;
             }
+            record.usage = usage;
             let old = record.applier.messages().to_vec();
             record.applier.replace_log(messages.clone());
             record.applier.observe_revision(self.bus.revision());
@@ -1470,10 +1597,13 @@ fn spawn_turn(
                 return;
             }
         };
+        let usage_endpoint = endpoint.clone();
         let result = inner
             .request("POST", endpoint, path, Some(body), TURN_CAP)
             .await;
-        inner.finish_turn(&session, &native, result).await;
+        inner
+            .finish_turn(&session, &native, &usage_endpoint, result)
+            .await;
     });
 }
 
@@ -1482,9 +1612,27 @@ impl Inner {
         self: Arc<Self>,
         session: &ChatSessionId,
         native: &str,
+        endpoint: &ChatEndpoint,
         result: Result<ChatResponse, SpiritError>,
     ) {
         let now = self.clock.now();
+        let succeeded = matches!(&result, Ok(response) if (200..300).contains(&response.status));
+        // The log is authoritative for tokens and cost. The engine may report usage on
+        // the message response, but the next log read carries the same metadata; a failed
+        // read leaves the previous usage untouched instead of inventing a value.
+        let usage = if succeeded {
+            let context_limit = if matches!(session, ChatSessionId::Setup) {
+                self.selected_context_limit()
+            } else {
+                None
+            };
+            self.read_log(endpoint, native)
+                .await
+                .ok()
+                .and_then(|body| parse_usage(&body, context_limit))
+        } else {
+            None
+        };
         let outcome = match result {
             Ok(response) if (200..300).contains(&response.status) => {
                 parse_assistant_response(&response.body, now)
@@ -1508,6 +1656,9 @@ impl Inner {
             let active = record.active_turn.take();
             if active.is_none() && !record.turn_completed {
                 return;
+            }
+            if let Some(usage) = usage {
+                record.usage = Some(usage);
             }
             let mut emits = Vec::new();
             match outcome {
@@ -2000,6 +2151,34 @@ fn ensure_success(response: &ChatResponse) -> Result<(), SpiritError> {
     }
 }
 
+fn preferred_setup_model(available: &[ChatModelView]) -> Option<ChatModelView> {
+    available
+        .iter()
+        .find(|model| model.tier == ChatModelTier::Included)
+        .or_else(|| {
+            available
+                .iter()
+                .find(|model| model.tier == ChatModelTier::Byok)
+        })
+        .cloned()
+}
+
+fn validate_model_id(model_id: &str) -> Result<String, SpiritError> {
+    let model_id = model_id.trim();
+    if model_id.is_empty()
+        || model_id.len() > 200
+        || model_id
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(SpiritError::invalid_input(
+            "model",
+            "choose a model from the available list",
+        ));
+    }
+    Ok(model_id.to_owned())
+}
+
 fn message_body(model: Option<&ChatModelView>, text: &str, message_id: &str) -> Vec<u8> {
     let mut body = json!({
         "messageID": message_id,
@@ -2065,6 +2244,169 @@ fn parse_log(body: &[u8], now: Timestamp) -> Vec<ChatMessage> {
         }
     }
     messages
+}
+
+#[derive(Default)]
+struct UsageTotals {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    saw_input: bool,
+    saw_output: bool,
+    saw_cache_read: bool,
+    seen: bool,
+    cost: f64,
+    saw_cost: bool,
+}
+
+impl UsageTotals {
+    fn add_tokens(&mut self, tokens: &Value) {
+        if let Some(value) = token_count(tokens.get("input")) {
+            self.input = self.input.saturating_add(value);
+            self.saw_input = true;
+            self.seen = true;
+        }
+        if let Some(value) = token_count(tokens.get("output")) {
+            self.output = self.output.saturating_add(value);
+            self.saw_output = true;
+            self.seen = true;
+        }
+        if let Some(value) = token_count(tokens.pointer("/cache/read")) {
+            self.cache_read = self.cache_read.saturating_add(value);
+            self.saw_cache_read = true;
+            self.seen = true;
+        }
+        if let Some(value) = token_count(tokens.pointer("/cache/write")) {
+            self.cache_write = self.cache_write.saturating_add(value);
+            self.seen = true;
+        }
+    }
+
+    fn merge(&mut self, other: &Self) {
+        if other.saw_input {
+            self.input = self.input.saturating_add(other.input);
+            self.saw_input = true;
+        }
+        if other.saw_output {
+            self.output = self.output.saturating_add(other.output);
+            self.saw_output = true;
+        }
+        if other.saw_cache_read {
+            self.cache_read = self.cache_read.saturating_add(other.cache_read);
+            self.saw_cache_read = true;
+        }
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.seen |= other.seen;
+        if other.saw_cost {
+            self.cost += other.cost;
+            self.saw_cost = true;
+        }
+    }
+
+    fn context_tokens(&self) -> u64 {
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+    }
+}
+
+fn token_count(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|count| u64::try_from(count).ok()))
+    })
+}
+
+/// Parses assistant token and cost metadata from an OpenCode message log.
+///
+/// OpenCode may report usage either on `info.tokens`/`info.cost` or on `step-finish`
+/// parts. Step parts win when present so a multi-step turn is not double-counted. Each
+/// field stays `None` unless at least one message reported it.
+fn parse_usage(body: &[u8], context_limit: Option<u64>) -> Option<ChatUsageView> {
+    let Ok(document) = serde_json::from_slice::<Value>(body) else {
+        return None;
+    };
+    let Value::Array(entries) = document else {
+        return None;
+    };
+    let mut totals = UsageTotals::default();
+    let mut turns = 0_u64;
+    let mut last_context = None;
+    for entry in &entries {
+        let info = entry.get("info").unwrap_or(entry);
+        match info.get("role").and_then(Value::as_str) {
+            Some("user") => {
+                turns = turns.saturating_add(1);
+                continue;
+            }
+            Some("assistant") => {}
+            _ => continue,
+        }
+        let step_parts: Vec<&Value> = entry
+            .get("parts")
+            .and_then(Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter(|part| {
+                        matches!(
+                            part.get("type").and_then(Value::as_str),
+                            Some("step-finish" | "step_finish")
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut message = UsageTotals::default();
+        if step_parts.is_empty() {
+            if let Some(tokens) = info.get("tokens") {
+                message.add_tokens(tokens);
+            }
+        } else {
+            for part in &step_parts {
+                if let Some(tokens) = part.get("tokens") {
+                    message.add_tokens(tokens);
+                }
+            }
+        }
+        if message.seen {
+            last_context = Some(message.context_tokens());
+            totals.merge(&message);
+        }
+        let cost = if step_parts.is_empty() {
+            info.get("cost").and_then(Value::as_f64)
+        } else {
+            let mut sum = 0.0;
+            let mut seen = false;
+            for part in &step_parts {
+                if let Some(value) = part.get("cost").and_then(Value::as_f64) {
+                    sum += value;
+                    seen = true;
+                }
+            }
+            seen.then_some(sum)
+        };
+        if let Some(cost) = cost {
+            totals.cost += cost;
+            totals.saw_cost = true;
+            totals.seen = true;
+        }
+    }
+    if !totals.seen {
+        return None;
+    }
+    Some(ChatUsageView {
+        context_tokens_used: last_context,
+        context_limit,
+        input_tokens: totals.saw_input.then_some(totals.input),
+        output_tokens: totals.saw_output.then_some(totals.output),
+        cache_read_tokens: totals.saw_cache_read.then_some(totals.cache_read),
+        turns,
+        cost_usd: totals.saw_cost.then_some(totals.cost),
+    })
 }
 
 fn render_parts(parts: &[Value]) -> String {
@@ -2472,9 +2814,25 @@ fn engine_request_error(detail: &str) -> SpiritError {
 fn no_model_error() -> SpiritError {
     SpiritError::new(
         SpiritErrorCode::Engine,
-        "no_model: choose a model in Settings → Engine",
+        "no_model: the bundled engine reports no free model and no provider key is configured",
     )
-    .with_hint("Select a model for the setup assistant and retry.")
+    .with_hint("Add a provider key or choose a model in Settings → Engine, then retry.")
+}
+
+fn model_selection_unavailable_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::Engine,
+        "model_selection_unavailable: this engine cannot switch models from chat",
+    )
+    .with_hint("Choose the model in Settings → Engine.")
+}
+
+fn chat_model_switch_gated_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::Conflict,
+        "chat_model_gated: an orchestrator owns its own model choice",
+    )
+    .with_hint("Change the model in the orchestrator's OpenCode config.")
 }
 
 fn chat_gated_error(detail: &str) -> SpiritError {

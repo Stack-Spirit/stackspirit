@@ -255,6 +255,8 @@ export class TauriBridge implements SpiritBridge {
     },
     stop: (session: SessionId): Promise<ChatSessionView> =>
       call("chat_stop", { session }),
+    setModel: (session: SessionId, modelId: string): Promise<ChatSessionView> =>
+      call("chat_set_model", { session, modelId }),
     log: (session: SessionId, query?: ChatLogQuery): Promise<ChatLogPage> =>
       call("chat_log", { session, query: query ?? null }),
     subscribe: (listener: (event: ChatEvent) => void): (() => void) => {

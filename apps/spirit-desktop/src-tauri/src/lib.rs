@@ -68,6 +68,7 @@ pub fn run() {
             commands::chat::chat_start,
             commands::chat::chat_attach,
             commands::chat::chat_send,
+            commands::chat::chat_set_model,
             commands::chat::chat_stop,
             commands::chat::chat_log,
             commands::asif::gates_get_with_build_flags,

@@ -105,6 +105,14 @@ describe("TauriBridge chat commands", () => {
     await expect(chat.stop("setup")).resolves.toEqual(VIEW);
     expect(invoke).toHaveBeenLastCalledWith("chat_stop", { session: "setup" });
 
+    if (!chat.setModel) throw new Error("TauriBridge must expose chat.setModel");
+    invoke.mockResolvedValueOnce(VIEW);
+    await expect(chat.setModel("setup", "opencode/big-pickle")).resolves.toEqual(VIEW);
+    expect(invoke).toHaveBeenLastCalledWith("chat_set_model", {
+      session: "setup",
+      modelId: "opencode/big-pickle",
+    });
+
     invoke.mockResolvedValueOnce(PAGE);
     await expect(chat.log("setup")).resolves.toEqual(PAGE);
     expect(invoke).toHaveBeenLastCalledWith("chat_log", {
@@ -124,6 +132,7 @@ describe("TauriBridge chat commands", () => {
       "chat_attach",
       "chat_send",
       "chat_stop",
+      "chat_set_model",
       "chat_log",
       "chat_log",
     ]);

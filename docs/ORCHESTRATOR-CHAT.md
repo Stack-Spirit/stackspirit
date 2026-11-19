@@ -2,7 +2,8 @@
 
 Status: implementation contract, 2026-11-18; live-probe facts applied 2026-11-18; the
 Local `global`/`project` endpoint resolver landed 2026-11-19 (ss-61) behind the VOWP 0.5
-command gate. Server chat remains gated.
+command gate. The setup free-model default, inline `setModel` and usage projection landed
+2026-11-19 (ss-72). Server chat remains gated.
 Audience: the follow-up chat jobs named in §8, the VOWP owner, and the desktop reviewer.
 
 This document specifies how the Meadow shell's orchestrator chat moves from the preview store
@@ -1045,10 +1046,30 @@ export type ChatSessionState =
   | "stopped"
   | "error";
 
+export type ChatModelTier = "included" | "byok" | "orchestrator";
+
 export interface ChatModelView {
   id: string;
   label: string;
   provider: string;
+  /** Added in ss-72; older bridges omit it. */
+  tier?: ChatModelTier;
+  /** Context window when the engine reports it; otherwise null/absent. */
+  context_tokens?: number | null;
+}
+
+/**
+ * Token and context usage reported by the engine. Every counter is `null` when the
+ * engine did not report it; a value is never invented.
+ */
+export interface ChatUsageView {
+  context_tokens_used: number | null;
+  context_limit: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  turns: number;
+  cost_usd: number | null;
 }
 
 export interface ChatSessionView {
@@ -1061,6 +1082,15 @@ export interface ChatSessionView {
   /** False when the server has no usable SSE; the UI says so. */
   streaming_supported: boolean;
   model: ChatModelView | null;
+  /**
+   * Verified models this session's engine can use right now: included free runtime
+   * models plus models whose provider key is configured. `undefined` means the
+   * transport cannot report a list (an orchestrator owns its config); an empty array
+   * is an honest "no usable model".
+   */
+  available_models?: ChatModelView[];
+  /** Live token/context usage, or null/absent when the engine reported none. */
+  usage?: ChatUsageView | null;
   started_at: Timestamp | null;
   last_event_at: Timestamp | null;
   error: SpiritErrorDto | null;
@@ -1148,6 +1178,25 @@ No type above has a `url`, `port`, `token`, `authorization`, `password`, `key_pa
 `identity_file`, `directory`, `binary_path`, `pid`, `native_session_id`, `ssh_target` or
 `remote_port` field. That is intentional. The core keeps those values private.
 
+`ChatModelView.tier` marks an included free runtime model, a configured BYOK model, or an
+orchestrator-owned choice. `available_models` is the verified usable list for this
+session's engine, in the engine's order; it is not a build-time catalog copy.
+`ChatUsageView` comes from the OpenCode assistant message metadata: `input`, `output`,
+`cache.read`/`cache.write` and `cost`, or `step-finish` parts when a turn has several
+steps. `context_tokens_used` is the latest assistant turn's prompt plus completion;
+`input_tokens`/`output_tokens`/`cache_read_tokens` and `cost_usd` sum the reported
+assistant messages. A missing field stays `null`; it is never reported as zero. `turns`
+counts user messages. The usage object is omitted when no assistant message reported any
+of these values.
+
+**Setup auto-default (ss-72).** When the bundled engine is ready and no model has been
+explicitly saved, the first verified free runtime model is selected in memory and the
+composer unlocks. A configured BYOK model is the fallback only when the engine reports no
+free model. If the runtime reports zero free models and no BYOK provider key is configured,
+`model` stays `null` and `available_models` is an empty array; no fake free model is
+constructed and `send` returns `no_model`. The automatic choice is not written to
+`engine.json`; only an explicit `setModel` persists it.
+
 ### 4.3 The `chat` bridge surface
 
 Add this optional namespace to `SpiritBridge` in
@@ -1163,6 +1212,12 @@ export interface ChatBridgeSurface {
   send(input: ChatSendInput): Promise<ChatSendReceipt>;
   /** Abort the current turn (when supported) and return the stopped view. */
   stop(session: SessionId): Promise<ChatSessionView>;
+  /**
+   * Switch the setup assistant's model to one in `available_models` and return the
+   * updated view. Persists locally; never writes to VOWP. An orchestrator owns its own
+   * model config, so that session rejects. Optional for older bridges.
+   */
+  setModel?(session: SessionId, modelId: string): Promise<ChatSessionView>;
   /** Read the conversation log; pages move backward from newest, each oldest-first. */
   log(session: SessionId, query?: ChatLogQuery): Promise<ChatLogPage>;
   /** Returns an unsubscribe function; callers must clean up on unmount. */
@@ -1183,6 +1238,12 @@ the preview store when it is absent.
 
 Semantics:
 
+- `setModel` is setup-only. The core validates the session and the model id, asks the
+  bundled engine adapter to select a model from `available_models`, and the adapter writes
+  the explicit choice to the local engine preferences (`selected_model_id`) before
+  returning the updated view. An automatic first-run default never writes that file. A
+  `global`/`project` session rejects with `chat_model_gated` because VOWP's orchestrator
+  owns its model config; StackSpirit does not pretend to change it.
 - `start` is idempotent. For `setup`, it ensures the bundled engine and creates one native
   session if none is attached; `resume: false` creates a new one and leaves the old log
   intact. For `global`/`project`, `start` resolves the VOWP endpoint and attaches to the
@@ -1504,9 +1565,13 @@ Behaviour:
 - Keep `aria-live` off the streaming text; announce "Reply complete" and state changes in
   a polite status region. The current `aria-live="polite"` wrapper must not read every
   delta.
-- The model chip shows `view.model?.label` or "Orchestrator default"; if no local model is
-  selected, "Choose a model in Settings → Engine" and the send is disabled with
-  `no_model`.
+- The model chip shows the active model, labelled honestly from `view.model.tier`:
+  "OpenCode free · <label>" for an included runtime model, the provider/model label for
+  BYOK, and the orchestrator's choice for `global`/`project`. A composer-level picker
+  switches among `view.available_models` through `chat.setModel` and never requires a trip
+  to Settings. Only when the engine genuinely reports no usable model does the chip show
+  "Set up a model" and send stay disabled with `no_model`. Live `view.usage` renders the
+  context ring and token pills; absent values render nothing rather than zero.
 
 ### 4.7 `MockBridge` and preview honesty
 
@@ -1520,8 +1585,11 @@ working:
   current demo URLs keep working.
 - `start` returns a deterministic `ChatSessionView` with the requested location (unless
   the scenario gates it), `state: "ready"`, `attached: true`,
-  `streaming_supported: true` and the first mock model. It throws typed errors for the
-  gated/stopped/external scenarios.
+  `streaming_supported: true`, the first included free preview model, its
+  `available_models` list and sample `usage` (clearly preview data, not a receipt). It
+  throws typed errors for the gated/stopped/external scenarios. `setModel` switches among
+  the preview models for `setup`; `global`/`project` reject with `chat_model_gated` just
+  like the real path.
 - `attach` returns the existing view or `chat_not_started`/`session_lost`.
 - `send` returns the user message and schedules preview events with `origin: "preview"`.
   The default reply uses the same regex-based hints as the old `previewReply` and sets
@@ -1683,8 +1751,9 @@ The UI shows `errorTitle(error)` plus the message and hint; it never shows a raw
 | `engine` — `engine_not_ready` | The engine is starting/stopped/degraded after the wait | "StackSpirit Engine is not ready." with the redacted reason | Retry after Restart |
 | `engine` — `engine_external` | The selected engine is an external harness, not the bundled engine | "The setup assistant needs StackSpirit Engine; switch to it in Settings → Advanced." | After switching |
 | `engine` — `engine_unavailable` | The bundled binary is missing/unreadable | "StackSpirit Engine is unavailable — repair the installation." | Repair |
-| `engine` — `no_model` | No selected model for a local setup turn | "Choose a model in Settings → Engine." | After selecting |
+| `engine` — `no_model` | The runtime reports zero free models and no BYOK provider key is configured for a setup turn | "The bundled engine reports no free model and no provider key is configured." | After adding a key or selecting a verified model |
 | `engine` — `protocol_unsupported` | The server is a v2 `/api/...` OpenCode or an unknown dialect | "This orchestrator runs an unsupported OpenCode API; use the pinned engine or wait for the v2 adapter." | No |
+| `conflict` — `chat_model_gated` | `setModel` on a `global`/`project` session | "An orchestrator owns its own model choice." | Change it in the orchestrator's OpenCode config |
 | `conflict` — `chat_busy` | A second send while streaming | Composer disabled; the race guard shows "Wait for the current reply or stop it." | After done/stop |
 | `conflict` — `chat_not_started` | `attach`/`log` before a native session | "Start the conversation first." | Start |
 | `not_found` — `session_lost` | The native session was deleted/recreated; the mapping is stale | "The orchestrator's app session was recreated. Its server log is still in Sessions." | Setup: `resume: false`; global/project: create/recreate in VOWP |

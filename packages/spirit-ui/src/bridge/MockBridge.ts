@@ -20,11 +20,13 @@ import type {
   ChatLogPage,
   ChatLogQuery,
   ChatMessage,
+  ChatModelView,
   ChatPanelTarget,
   ChatSendInput,
   ChatSendReceipt,
   ChatSessionView,
   ChatStartInput,
+  ChatUsageView,
   ClusterConfigView,
   ClusterFormInput,
   ClusterFormedView,
@@ -312,6 +314,34 @@ export class MockBridge implements SpiritBridge {
   private localState: MockLocalState;
   private keys = new Map<string, KeyStatus>();
   private modelChoices: ModelChoice[];
+  /**
+   * Preview-only chat models. The first is a verified included OpenCode free model, so
+   * the setup composer has an honest default; the BYOK entry demonstrates a configured
+   * provider without pretending a key exists in the real path.
+   */
+  private chatModels: ChatModelView[] = [
+    {
+      id: "opencode/deepseek-v4.1-flash-free",
+      label: "DeepSeek V4.1 Flash Free",
+      provider: "opencode",
+      tier: "included",
+      context_tokens: 128_000,
+    },
+    {
+      id: "opencode/big-pickle",
+      label: "Big Pickle",
+      provider: "opencode",
+      tier: "included",
+      context_tokens: null,
+    },
+    {
+      id: "deepseek/deepseek-flash",
+      label: "DeepSeek V4.1 Flash",
+      provider: "deepseek",
+      tier: "byok",
+      context_tokens: 128_000,
+    },
+  ];
   /** Preview-only chat state. Nothing here talks to an engine, host or model. */
   private chatSessions = new Map<SessionId, ChatSessionView>();
   private chatLogs = new Map<SessionId, ChatMessage[]>();
@@ -1384,6 +1414,32 @@ export class MockBridge implements SpiritBridge {
       });
       return clone(stopped);
     },
+    setModel: async (session: SessionId, modelId: string): Promise<ChatSessionView> => {
+      this.validateChatSession(session);
+      if (!this.chatSessions.has(session)) {
+        throw errorDto(
+          "chat_not_started",
+          "No session has been started in this app run.",
+          "Call chat.start first.",
+        );
+      }
+      if (session !== "setup") {
+        throw errorDto(
+          "chat_model_gated",
+          "An orchestrator owns its own model choice.",
+          "Change the model in the orchestrator's OpenCode config.",
+        );
+      }
+      const model = this.chatModels.find((candidate) => candidate.id === modelId);
+      if (!model) {
+        throw errorDto(
+          "not_found",
+          "That model is not available in this preview build.",
+          "Choose a model from the inline list.",
+        );
+      }
+      return clone(this.updateChatView(session, { model: clone(model), error: null }));
+    },
     log: async (
       session: SessionId,
       query: ChatLogQuery = {},
@@ -1462,19 +1518,60 @@ export class MockBridge implements SpiritBridge {
     session: SessionId,
     location: ChatSessionView["location"],
   ): ChatSessionView {
-    const selected = this.modelChoices[0];
+    const setup = session === "setup";
+    const selected = setup ? (this.chatModels[0] ?? null) : null;
     return {
       session,
       location,
       state: "ready",
       attached: true,
       streaming_supported: true,
-      model: selected
-        ? { id: selected.id, label: selected.label, provider: selected.provider }
-        : null,
+      model: selected ? clone(selected) : null,
+      available_models: setup ? this.chatModels.map((model) => clone(model)) : undefined,
+      usage: setup && selected ? this.sampleChatUsage(selected) : null,
       started_at: this.now(),
       last_event_at: this.now(),
       error: null,
+    };
+  }
+
+  /** Deterministic preview usage; every value is sample data, never a real receipt. */
+  private sampleChatUsage(model: ChatModelView): ChatUsageView {
+    const limit = model.context_tokens ?? null;
+    return {
+      context_tokens_used: limit === null ? null : Math.min(limit, 23_600),
+      context_limit: limit,
+      input_tokens: 12_800,
+      output_tokens: 2_400,
+      cache_read_tokens: 8_400,
+      turns: 3,
+      cost_usd: model.tier === "included" ? 0 : 0.0042,
+    };
+  }
+
+  /** Advances the preview usage after one turn; never a real model receipt. */
+  private advanceChatUsage(
+    view: ChatSessionView,
+    reply: ChatMessage,
+  ): ChatUsageView | null {
+    const usage = view.usage;
+    if (!usage) return null;
+    const output = Math.max(1, Math.ceil(reply.text.join(" ").length / 4));
+    const input = Math.max(1, output);
+    const used =
+      usage.context_tokens_used === null
+        ? null
+        : usage.context_limit === null
+          ? usage.context_tokens_used + input + output
+          : Math.min(usage.context_limit, usage.context_tokens_used + input + output);
+    return {
+      ...usage,
+      context_tokens_used: used,
+      input_tokens:
+        usage.input_tokens === null ? null : usage.input_tokens + input,
+      output_tokens:
+        usage.output_tokens === null ? null : usage.output_tokens + output,
+      turns: usage.turns + 1,
     };
   }
 
@@ -1622,6 +1719,7 @@ export class MockBridge implements SpiritBridge {
       state: "ready",
       attached: true,
       error: null,
+      usage: this.advanceChatUsage(view, reply),
     });
   }
 

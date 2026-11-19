@@ -174,9 +174,18 @@ describe("MockBridge chat", () => {
       error: null,
     });
     expect(view.model).toEqual({
-      id: "deepseek/deepseek-flash",
-      label: "DeepSeek V4.1 Flash",
-      provider: "deepseek",
+      id: "opencode/deepseek-v4.1-flash-free",
+      label: "DeepSeek V4.1 Flash Free",
+      provider: "opencode",
+      tier: "included",
+      context_tokens: 128_000,
+    });
+    expect(view.available_models?.map((model) => model.id)).toContain(
+      "opencode/big-pickle",
+    );
+    expect(view.usage).toMatchObject({
+      context_limit: 128_000,
+      turns: 3,
     });
     await expect(chat.attach("setup")).resolves.toMatchObject({
       state: "ready",

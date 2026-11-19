@@ -20,9 +20,9 @@ use crate::time::Timestamp;
 pub use catalog::{CatalogEntry, CatalogVerification, ModelCatalog, bundled_catalog};
 pub use chat::{
     ChatCloseReason, ChatEngine, ChatEvent, ChatEventApplier, ChatEventBus, ChatLogPage,
-    ChatLogQuery, ChatMessage, ChatModelView, ChatSendReceipt, ChatSessionId, ChatSessionLocation,
-    ChatSessionState, ChatSessionView, ChatStartInput, ChatTransport, LocalChatProvider,
-    StreamSupport,
+    ChatLogQuery, ChatMessage, ChatModelTier, ChatModelView, ChatSendReceipt, ChatSessionId,
+    ChatSessionLocation, ChatSessionState, ChatSessionView, ChatStartInput, ChatTransport,
+    ChatUsageView, LocalChatProvider, StreamSupport,
 };
 pub use config::{EnginePreferences, EnginePreferencesStore, JsonEnginePreferences};
 pub use external::{ExternalHarness, HarnessProbe, PathHarnessProbe, scan_external_harnesses};

@@ -50,6 +50,18 @@ pub async fn chat_send(
     chat.send(&input.session, &input.text).await
 }
 
+/// Switches the setup assistant's model. The core validates the session and the engine
+/// adapter persists the explicit owner choice; no key or endpoint crosses this boundary.
+#[tauri::command]
+pub async fn chat_set_model(
+    state: State<'_, AppState>,
+    session: ChatSessionId,
+    model_id: String,
+) -> CommandResult<ChatSessionView> {
+    let chat = state.chat();
+    chat.set_model(&session, &model_id).await
+}
+
 /// Aborts the current turn when supported and returns the stopped view.
 #[tauri::command]
 pub async fn chat_stop(

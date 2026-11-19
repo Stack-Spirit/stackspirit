@@ -1252,10 +1252,34 @@ export type ChatSessionState =
   | "stopped"
   | "error";
 
+/**
+ * Why a model is usable without visiting Settings: included free with the engine,
+ * configured with a BYOK key, or owned by the orchestrator.
+ */
+export type ChatModelTier = "included" | "byok" | "orchestrator";
+
 export interface ChatModelView {
   id: string;
   label: string;
   provider: string;
+  /** Added in ss-72; older bridges omit it. */
+  tier?: ChatModelTier;
+  /** Context window when the engine reports it; otherwise null/absent. */
+  context_tokens?: number | null;
+}
+
+/**
+ * Token and context usage reported by the session engine. Every counter is `null`
+ * when the engine did not report it; a value is never invented.
+ */
+export interface ChatUsageView {
+  context_tokens_used: number | null;
+  context_limit: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  turns: number;
+  cost_usd: number | null;
 }
 
 export interface ChatSessionView {
@@ -1268,6 +1292,14 @@ export interface ChatSessionView {
   /** False when the server has no usable SSE; the UI says so. */
   streaming_supported: boolean;
   model: ChatModelView | null;
+  /**
+   * Verified models this session's engine can use right now. `undefined` means the
+   * transport cannot report a list (an orchestrator owns its config); an empty array
+   * is an honest "no usable model".
+   */
+  available_models?: ChatModelView[];
+  /** Live token/context usage, or null/absent when the engine reported none. */
+  usage?: ChatUsageView | null;
   started_at: Timestamp | null;
   last_event_at: Timestamp | null;
   error: SpiritErrorDto | null;

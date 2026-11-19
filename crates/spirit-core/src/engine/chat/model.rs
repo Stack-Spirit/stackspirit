@@ -188,6 +188,18 @@ pub enum ChatRole {
     Assistant,
 }
 
+/// Why a model is usable without visiting Settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatModelTier {
+    /// Verified free with the bundled engine; no provider key required.
+    Included,
+    /// Requires a provider key already stored in the OS keychain.
+    Byok,
+    /// Chosen by the VOWP orchestrator, not by this app.
+    Orchestrator,
+}
+
 /// The model selected for the session, without a provider key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatModelView {
@@ -197,6 +209,32 @@ pub struct ChatModelView {
     pub label: String,
     /// Provider id.
     pub provider: String,
+    /// Included, BYOK or orchestrator-owned.
+    pub tier: ChatModelTier,
+    /// Context window, when the engine reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+}
+
+/// Token and context usage reported by the OpenCode session.
+///
+/// Every counter is optional: `null` means the engine did not report it, never zero.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChatUsageView {
+    /// Context window occupancy of the latest assistant turn, when reported.
+    pub context_tokens_used: Option<u64>,
+    /// The selected model's context window, when known.
+    pub context_limit: Option<u64>,
+    /// Input tokens reported across assistant messages.
+    pub input_tokens: Option<u64>,
+    /// Output tokens reported across assistant messages.
+    pub output_tokens: Option<u64>,
+    /// Prompt-cache read tokens reported across assistant messages.
+    pub cache_read_tokens: Option<u64>,
+    /// User turns in the conversation.
+    pub turns: u64,
+    /// Provider-reported cost in USD, when at least one assistant message reported one.
+    pub cost_usd: Option<f64>,
 }
 
 /// One safe chat message.
@@ -302,7 +340,7 @@ impl ChatMessage {
 }
 
 /// One safe chat session view. It is derived from the transport, not a toggle.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatSessionView {
     /// Shell routing key.
     pub session: ChatSessionId,
@@ -316,6 +354,15 @@ pub struct ChatSessionView {
     pub streaming_supported: bool,
     /// Selected model, when one is selected.
     pub model: Option<ChatModelView>,
+    /// Verified models this session's engine can use right now.
+    ///
+    /// `None` means the transport cannot report a verified list (an orchestrator owns
+    /// its own config). An empty list is an honest "no usable model".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_models: Option<Vec<ChatModelView>>,
+    /// Token and context usage reported by the engine, or `None` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ChatUsageView>,
     /// When the session was first attached in this app run.
     pub started_at: Option<Timestamp>,
     /// The last event time.
@@ -341,7 +388,7 @@ pub enum ChatCloseReason {
 }
 
 /// One event from the chat event bus.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChatEvent {
     /// A session metadata change.
@@ -656,6 +703,18 @@ mod tests {
                 id: "opencode/big-pickle".to_owned(),
                 label: "Big Pickle".to_owned(),
                 provider: "opencode".to_owned(),
+                tier: ChatModelTier::Included,
+                context_tokens: Some(128_000),
+            }),
+            available_models: Some(Vec::new()),
+            usage: Some(ChatUsageView {
+                context_tokens_used: Some(2_400),
+                context_limit: Some(128_000),
+                input_tokens: Some(1_200),
+                output_tokens: Some(300),
+                cache_read_tokens: Some(800),
+                turns: 1,
+                cost_usd: None,
             }),
             started_at: None,
             last_event_at: None,

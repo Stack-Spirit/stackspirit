@@ -9,12 +9,12 @@ use std::sync::{Arc, Mutex};
 
 use spirit_core::SpiritCore;
 use spirit_core::connection::ConnectionManager;
-use spirit_core::engine::chat::{ChatEngine, ChatModelView, LocalChatProvider};
+use spirit_core::engine::chat::{ChatEngine, ChatModelTier, ChatModelView, LocalChatProvider};
 use spirit_core::engine::{
     EngineChoice, EnginePreferences, EnginePreferencesStore, EngineRuntime, EngineState,
     EngineStatus, EngineSupervisor, EngineSupervisorConfig, GateFeatureFlags, GateSnapshot,
-    HostGateCache, JsonEnginePreferences, Keychain, ModelCatalog, ModelChoice, OsKeychain,
-    PrivateEngineTree, ProcessEngineRuntime, bundled_catalog,
+    HostGateCache, JsonEnginePreferences, Keychain, ModelAccess, ModelCatalog, ModelChoice,
+    OsKeychain, PrivateEngineTree, ProcessEngineRuntime, bundled_catalog,
 };
 use spirit_core::error::{SpiritError, SpiritErrorCode};
 use spirit_core::host::{HostProfile, HostStore, JsonHostStore};
@@ -73,6 +73,8 @@ struct EngineHost {
     runtime: Arc<dyn EngineRuntime>,
     catalog: ModelCatalog,
     preferences: Arc<dyn EnginePreferencesStore>,
+    /// Provider names with a stored key. Never a key value.
+    keychain: Arc<dyn Keychain>,
 }
 
 impl EngineHost {
@@ -132,19 +134,19 @@ impl EngineHost {
         status
     }
 
-    /// Re-applies the saved model id only when the runtime verifies it. A currently
-    /// selected model is re-verified too; a model the engine no longer reports is left
-    /// unselected, and no replacement is selected automatically.
+    /// Re-applies the saved model id only when the runtime verifies it as usable. A
+    /// currently selected model is re-verified too; a model the engine no longer
+    /// reports is left unselected, and no replacement is selected here.
     async fn apply_saved_model(&self) {
         let status = self.core.lock().await.engine_status();
         if !matches!(status.state, EngineState::Ready) {
             return;
         }
-        let models = self.verified_models(&status).await;
+        let models = self.usable_chat_models(&status).await;
         let current_selected_is_live = status
             .selected_model
             .as_ref()
-            .is_some_and(|selected| models.iter().any(|model| model.id == selected.id));
+            .is_some_and(|selected| models.iter().any(|(view, _)| view.id == selected.id));
         if current_selected_is_live {
             return;
         }
@@ -152,8 +154,8 @@ impl EngineHost {
         let Some(model_id) = preferences.selected_model_id else {
             return;
         };
-        if let Some(model) = models.into_iter().find(|model| model.id == model_id) {
-            self.core.lock().await.select_model(model);
+        if let Some((_, choice)) = models.into_iter().find(|(view, _)| view.id == model_id) {
+            self.core.lock().await.select_model(choice);
         }
     }
 
@@ -176,12 +178,138 @@ impl EngineHost {
             .verify_runtime(&runtime_models, Timestamp::now())
             .models
     }
+
+    /// Returns the models chat can use right now: verified free runtime models plus
+    /// runtime models whose provider has a stored BYOK key. Order is the runtime's.
+    async fn usable_chat_models(&self, status: &EngineStatus) -> Vec<(ChatModelView, ModelChoice)> {
+        if !matches!(status.state, EngineState::Ready) {
+            return Vec::new();
+        }
+        let Some(port) = status.port else {
+            return Vec::new();
+        };
+        let runtime_models = self.runtime.models(port).await.unwrap_or_default();
+        let configured = self.keychain.list().unwrap_or_default();
+        let verified_at = Timestamp::now();
+        let mut usable = Vec::new();
+        for runtime in runtime_models {
+            let tier = if runtime.free {
+                ChatModelTier::Included
+            } else if configured
+                .iter()
+                .any(|provider| provider == &runtime.provider)
+            {
+                ChatModelTier::Byok
+            } else {
+                continue;
+            };
+            let catalog = self
+                .catalog
+                .entries
+                .iter()
+                .find(|entry| entry.id == runtime.id);
+            let label = catalog
+                .map(|entry| entry.label.clone())
+                .filter(|label| !label.is_empty())
+                .unwrap_or_else(|| runtime.label.clone());
+            let label = if label.is_empty() {
+                runtime.id.clone()
+            } else {
+                label
+            };
+            let context_tokens = runtime
+                .context_tokens
+                .or_else(|| catalog.and_then(|entry| entry.context_tokens));
+            let access = if tier == ChatModelTier::Included {
+                ModelAccess::Included
+            } else {
+                ModelAccess::Byok
+            };
+            let view = ChatModelView {
+                id: runtime.id.clone(),
+                label,
+                provider: runtime.provider.clone(),
+                tier,
+                context_tokens,
+            };
+            let choice = ModelChoice {
+                id: runtime.id,
+                label: view.label.clone(),
+                provider: runtime.provider,
+                access,
+                context_tokens,
+                notes: catalog.map(|entry| entry.notes.clone()).unwrap_or_default(),
+                verified_at: Some(verified_at),
+            };
+            usable.push((view, choice));
+        }
+        usable
+    }
+
+    /// Selects a model for the setup assistant and optionally persists the choice.
+    async fn select_chat_model(
+        &self,
+        model_id: &str,
+        persist: bool,
+    ) -> Result<ChatModelView, SpiritError> {
+        let status = self.core.lock().await.engine_status();
+        if matches!(status.choice, EngineChoice::External { .. }) {
+            return Err(SpiritError::new(
+                SpiritErrorCode::Conflict,
+                "an external harness manages its own models",
+            )
+            .with_hint("Switch to the bundled engine before choosing a model."));
+        }
+        if !matches!(status.state, EngineState::Ready) {
+            return Err(SpiritError::new(
+                SpiritErrorCode::Conflict,
+                "start the StackSpirit Engine before choosing a model",
+            )
+            .with_hint("Restart the engine and retry."));
+        }
+        let selected = self
+            .usable_chat_models(&status)
+            .await
+            .into_iter()
+            .find(|(view, _)| view.id == model_id)
+            .ok_or_else(|| {
+                SpiritError::new(
+                    SpiritErrorCode::NotFound,
+                    "that model is not available in this engine build",
+                )
+                .with_hint("Choose a model from the list or add a provider key.")
+            })?;
+        let (view, choice) = selected;
+        self.core.lock().await.select_model(choice);
+        if persist {
+            let mut preferences = self.load_preferences();
+            preferences.selected_model_id = Some(view.id.clone());
+            preferences.onboarding_complete = true;
+            self.save_preferences(&preferences)?;
+        }
+        Ok(view)
+    }
 }
 
-/// The last observed selected model, used when the core lock is briefly busy.
+/// The last observed model state, used when the core lock is briefly busy.
 #[derive(Default)]
 struct ChatModelCache {
     selected_model: Option<ChatModelView>,
+    available_models: Vec<ChatModelView>,
+}
+
+fn chat_model_view(model: &ModelChoice) -> ChatModelView {
+    ChatModelView {
+        id: model.id.clone(),
+        label: model.label.clone(),
+        provider: model.provider.clone(),
+        tier: if model.access == ModelAccess::Included {
+            ChatModelTier::Included
+        } else {
+            ChatModelTier::Byok
+        },
+        context_tokens: model.context_tokens,
+    }
 }
 
 /// The desktop [`ChatEngine`] adapter over the shared [`EngineHost`].
@@ -202,16 +330,13 @@ impl DesktopChatEngine {
         }
     }
 
-    fn remember(&self, status: &EngineStatus) {
+    fn remember(&self, selected: Option<ChatModelView>, available: Vec<ChatModelView>) {
         let mut cache = self
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.selected_model = status.selected_model.as_ref().map(|model| ChatModelView {
-            id: model.id.clone(),
-            label: model.label.clone(),
-            provider: model.provider.clone(),
-        });
+        cache.selected_model = selected;
+        cache.available_models = available;
     }
 
     fn cached(&self) -> std::sync::MutexGuard<'_, ChatModelCache> {
@@ -231,8 +356,8 @@ impl ChatEngine for DesktopChatEngine {
     {
         Box::pin(async move {
             let status = self.engine.ensure_chat_ready().await;
-            self.remember(&status);
             if matches!(status.choice, EngineChoice::External { .. }) {
+                self.remember(None, Vec::new());
                 return Err(SpiritError::new(
                     SpiritErrorCode::Engine,
                     "engine_external: the setup assistant needs the bundled StackSpirit Engine",
@@ -242,8 +367,29 @@ impl ChatEngine for DesktopChatEngine {
             if matches!(status.state, EngineState::Ready)
                 && let Some(port) = status.port
             {
+                // An unsaved first run defaults to the first verified free runtime model.
+                // The choice is in-memory: only an explicit chat.setModel persists it.
+                let usable = self.engine.usable_chat_models(&status).await;
+                let mut selected = status.selected_model.as_ref().map(chat_model_view);
+                if selected.is_none()
+                    && let Some((view, choice)) = usable
+                        .iter()
+                        .find(|(view, _)| view.tier == ChatModelTier::Included)
+                        .or_else(|| {
+                            usable
+                                .iter()
+                                .find(|(view, _)| view.tier == ChatModelTier::Byok)
+                        })
+                        .cloned()
+                {
+                    self.engine.core.lock().await.select_model(choice);
+                    selected = Some(view);
+                }
+                let available = usable.into_iter().map(|(view, _)| view).collect();
+                self.remember(selected, available);
                 return Ok(port);
             }
+            self.remember(None, Vec::new());
             Err(SpiritError::new(
                 SpiritErrorCode::Engine,
                 "engine_not_ready: the StackSpirit Engine is not ready",
@@ -258,13 +404,44 @@ impl ChatEngine for DesktopChatEngine {
             Ok(core) => core
                 .engine_status()
                 .selected_model
-                .map(|model| ChatModelView {
-                    id: model.id,
-                    label: model.label,
-                    provider: model.provider,
-                }),
+                .as_ref()
+                .map(chat_model_view),
             Err(_) => self.cached().selected_model.clone(),
         }
+    }
+
+    fn available_models(&self) -> Vec<ChatModelView> {
+        self.cached().available_models.clone()
+    }
+
+    fn select_model<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        model_id: &'life1 str,
+        persist: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<ChatModelView, SpiritError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let view = self.engine.select_chat_model(model_id, persist).await?;
+            {
+                let mut cache = self
+                    .cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                cache.selected_model = Some(view.clone());
+                if !cache
+                    .available_models
+                    .iter()
+                    .any(|model| model.id == view.id)
+                {
+                    cache.available_models.push(view.clone());
+                }
+            }
+            Ok(view)
+        })
     }
 
     fn status(&self) -> EngineStatus {
@@ -348,6 +525,7 @@ impl AppState {
             runtime,
             catalog: bundled_catalog(),
             preferences,
+            keychain: keychain.clone(),
         };
 
         // The chat provider shares the engine host and uses the setup workspace the

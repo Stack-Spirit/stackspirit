@@ -41,6 +41,8 @@ fn model() -> ChatModelView {
         id: "opencode/big-pickle".to_owned(),
         label: "Big Pickle".to_owned(),
         provider: "opencode".to_owned(),
+        tier: spirit_core::engine::chat::ChatModelTier::Included,
+        context_tokens: Some(128_000),
     }
 }
 

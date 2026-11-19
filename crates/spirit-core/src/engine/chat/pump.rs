@@ -524,6 +524,8 @@ mod tests {
             attached: true,
             streaming_supported: true,
             model: None,
+            available_models: None,
+            usage: None,
             started_at: None,
             last_event_at: None,
             error: None,

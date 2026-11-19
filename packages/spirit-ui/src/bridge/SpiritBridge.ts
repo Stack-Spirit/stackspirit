@@ -103,6 +103,13 @@ export interface ChatBridgeSurface {
    * the engine, the VOWP orchestrator or the server, and never deletes a session.
    */
   stop(session: SessionId): Promise<ChatSessionView>;
+  /**
+   * Switch the setup assistant's model to one in `available_models` and return the
+   * updated view. An explicit choice is persisted locally and never written to VOWP. An
+   * orchestrator owns its own model config, so that session rejects rather than
+   * pretending the app can change it. Optional: an older bridge may omit it.
+   */
+  setModel?(session: SessionId, modelId: string): Promise<ChatSessionView>;
   /** Read the conversation log; pages move backward from newest, each oldest-first. */
   log(session: SessionId, query?: ChatLogQuery): Promise<ChatLogPage>;
   /**
