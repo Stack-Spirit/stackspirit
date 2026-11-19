@@ -29,3 +29,8 @@
    anything in `design/brand`, read `docs/HANDOFF-DESKTOP-UI.md`. It records the owner's
    design, naming, session and security decisions, what is real versus preview, and the
    planned next steps.
+6. **Fetch the engine before workspace Cargo:** `apps/spirit-desktop/src-tauri/binaries/` is
+   gitignored, so a fresh job worktree lacks the Tauri sidecar and `spirit-desktop`'s build
+   script fails before clippy reads any Rust code. Run `node scripts/fetch-engine.mjs` (or let
+   `scripts/cargo-gate.sh` do it) before any workspace `cargo` command, or create the job with
+   `--gates rust-check` / `rust-core-check`.

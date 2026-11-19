@@ -85,6 +85,39 @@ browsers. `cargo clippy -p spirit-desktop --all-targets -- -D warnings` also pas
 this image (run it through `scripts/desktop-build-container.sh shell`); it is not part
 of the default `check` command.
 
+## Workspace Rust gates
+
+A fresh job worktree does not contain `apps/spirit-desktop/src-tauri/binaries/`; the
+directory is gitignored. The `spirit-desktop` build script (`tauri-build`) validates the
+sidecar while compiling the host, so `cargo clippy --workspace` and
+`cargo test --workspace` abort with "resource path ... doesn't exist" before they read any
+Rust code. Run workspace Cargo through `scripts/cargo-gate.sh`: it resolves the repository
+root from its own path, runs the checksum-verified `node scripts/fetch-engine.mjs` (a
+no-op when the pinned binary is present), and then `exec`s Cargo with the arguments,
+quoting, stdio and exit code unchanged.
+
+```sh
+scripts/cargo-gate.sh fmt --all -- --check
+scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings
+scripts/cargo-gate.sh test -p spirit-core
+```
+
+`vowp.toml` defines two named gate sets built on that wrapper:
+
+| Gate set | Gates |
+|---|---|
+| `rust-check` | `node scripts/fetch-engine.mjs`; `scripts/cargo-gate.sh fmt --all -- --check`; `scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings` |
+| `rust-core-check` | The three `rust-check` gates plus `scripts/cargo-gate.sh test -p spirit-core` |
+
+Create a job with `vowp job add ... --gates rust-check` (or `--gates rust-core-check`) and
+the sidecar is fetched before the first Rust gate, with no hand-written fetch step in the
+brief.
+
+Desktop host builds and the desktop UI gates belong to
+`scripts/desktop-build-container.sh check` (above). Do not install GTK, WebKitGTK, Soup
+or JavaScriptCore development packages on the host; the pinned container is the supported
+path, and `cargo-gate.sh` only prepares the sidecar for Cargo.
+
 ## Commands
 
 | Command | What it does |

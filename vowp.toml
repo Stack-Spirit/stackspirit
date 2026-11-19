@@ -41,6 +41,17 @@ max_concurrent = 8
 [env]
 
 [gates]
+rust-check = [
+  { cmd = { run = "node scripts/fetch-engine.mjs", expect_exit = 0 } },
+  { cmd = { run = "scripts/cargo-gate.sh fmt --all -- --check", expect_exit = 0 } },
+  { cmd = { run = "scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings", expect_exit = 0 } },
+]
+rust-core-check = [
+  { cmd = { run = "node scripts/fetch-engine.mjs", expect_exit = 0 } },
+  { cmd = { run = "scripts/cargo-gate.sh fmt --all -- --check", expect_exit = 0 } },
+  { cmd = { run = "scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings", expect_exit = 0 } },
+  { cmd = { run = "scripts/cargo-gate.sh test -p spirit-core", expect_exit = 0 } },
+]
 
 [loops]
 
