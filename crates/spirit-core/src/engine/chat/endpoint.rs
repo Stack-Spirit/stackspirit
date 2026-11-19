@@ -8,6 +8,7 @@
 //! carries them.
 
 use std::fmt;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -102,8 +103,17 @@ pub struct ResolvedEndpoint {
     pub(crate) host: LoopbackHost,
     /// Loopback port; core-only.
     pub(crate) port: u16,
-    /// Native OpenCode session to attach to; core-only.
-    pub(crate) native_session_id: String,
+    /// Native OpenCode session to attach to, when VOWP reports one; core-only.
+    ///
+    /// `None` tells the chat transport to discover the host's newest session instead
+    /// of creating a new one.
+    pub(crate) native_session_id: Option<String>,
+    /// Private orchestrator workspace reported by VOWP, when it provides one; core-only.
+    ///
+    /// The current VOWP endpoint document does not carry this field. It is accepted
+    /// forward-compatibly so the transport can send the `x-opencode-directory` header
+    /// as soon as VOWP reports the workspace.
+    pub(crate) workspace: Option<PathBuf>,
     /// Optional loopback credential; core-only.
     pub(crate) auth: Option<LoopbackAuth>,
 }
@@ -120,6 +130,7 @@ impl fmt::Debug for ResolvedEndpoint {
             .field("port", &"[redacted]")
             .field("session_id", &"[redacted]")
             .field("native_session_id", &"[redacted]")
+            .field("workspace", &self.workspace.as_ref().map(|_| "[redacted]"))
             .field("auth", &self.auth)
             .finish()
     }
@@ -275,6 +286,14 @@ struct EndpointDocument {
     url: Option<String>,
     #[serde(default)]
     native_session_id: Option<String>,
+    /// Forward-compatible private workspace, absent from the current VOWP document.
+    #[serde(
+        default,
+        alias = "working_dir",
+        alias = "working_directory",
+        alias = "directory"
+    )]
+    workspace: Option<String>,
     #[serde(default)]
     auth: Option<AuthDocument>,
 }
@@ -334,17 +353,23 @@ impl EndpointDocument {
                 "reported a different home session than the attached log",
             ));
         }
-        let Some(native) = self
-            .native_session_id
-            .as_deref()
-            .filter(|native| usable_native_id(native))
-        else {
-            return Err(not_mirrored(
-                requested,
-                "has no usable mirrored OpenCode session",
-            ));
+        let native_session_id = match self.native_session_id.as_deref() {
+            Some(native) if usable_native_id(native) => Some(native.to_owned()),
+            // A present but unusable id is a malformed mirror, never a discovery hint.
+            Some(_) => {
+                return Err(not_mirrored(
+                    requested,
+                    "reported an unusable mirrored OpenCode session",
+                ));
+            }
+            None => None,
         };
-        let native_session_id = native.to_owned();
+        let workspace = match self.workspace.as_deref().filter(|value| !value.is_empty()) {
+            Some(workspace) => Some(parse_workspace_path(workspace).ok_or_else(|| {
+                incompatible(requested, "reported an unreadable orchestrator workspace")
+            })?),
+            None => None,
+        };
         let auth = match self.auth {
             Some(auth) => Some(auth.into_auth(requested)?),
             None => None,
@@ -359,6 +384,7 @@ impl EndpointDocument {
             host,
             port,
             native_session_id,
+            workspace,
             auth,
         })
     }
@@ -460,6 +486,24 @@ fn usable_native_id(native: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+/// Parses one private workspace path that may become the directory header.
+///
+/// The path must be absolute, control-free and traversal-free. It stays core-only: no
+/// error or DTO carries it.
+pub(crate) fn parse_workspace_path(value: &str) -> Option<PathBuf> {
+    if value.is_empty()
+        || value.len() > 4096
+        || value.chars().any(char::is_control)
+        || !Path::new(value).is_absolute()
+        || Path::new(value)
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return None;
+    }
+    Some(PathBuf::from(value))
+}
+
 fn valid_header_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     !name.is_empty()
@@ -532,7 +576,9 @@ fn not_mirrored(name: &str, detail: &str) -> SpiritError {
             safe_detail(name, "requested")
         ),
     )
-    .with_hint("VOWP must report an OpenCode session mirrored to the home log; StackSpirit never creates one.")
+    .with_hint(
+        "VOWP must report a usable OpenCode session mirrored to the home log; StackSpirit never creates one.",
+    )
 }
 
 fn incompatible(name: &str, detail: &str) -> SpiritError {
@@ -654,6 +700,7 @@ mod tests {
                 state: state.to_owned(),
                 url: url.map(str::to_owned),
                 native_session_id: native.map(str::to_owned),
+                workspace: None,
                 auth: None,
             };
 
@@ -689,10 +736,24 @@ mod tests {
         assert_eq!(error.code, SpiritErrorCode::VowpIncompatible);
         assert!(!error.message.contains("0.0.0.0"));
 
-        let error = document("opencode", "running", Some("http://127.0.0.1:12345"), None)
+        // A missing native id is a discovery signal, not a fence.
+        let resolved = document("opencode", "running", Some("http://127.0.0.1:12345"), None)
             .into_endpoint("global", None)
-            .unwrap_err();
+            .unwrap();
+        assert!(resolved.native_session_id.is_none());
+        assert!(resolved.workspace.is_none());
+
+        // A present but unusable id is still rejected rather than guessed.
+        let error = document(
+            "opencode",
+            "running",
+            Some("http://127.0.0.1:12345"),
+            Some("ses/1"),
+        )
+        .into_endpoint("global", None)
+        .unwrap_err();
         assert!(error.message.contains("chat_not_mirrored"));
+        assert!(!error.message.contains("ses/1"));
 
         let error = document(
             "opencode",
@@ -713,6 +774,48 @@ mod tests {
         .into_endpoint("global", None)
         .unwrap();
         assert_eq!((resolved.host, resolved.port), (LoopbackHost::V4, 12345));
-        assert_eq!(resolved.native_session_id, "ses_1");
+        assert_eq!(resolved.native_session_id.as_deref(), Some("ses_1"));
+    }
+
+    #[test]
+    fn a_reported_workspace_is_validated_and_kept_core_only() {
+        let document = |workspace: &str| EndpointDocument {
+            name: "global".to_owned(),
+            app: "opencode".to_owned(),
+            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            location: "node".to_owned(),
+            node: None,
+            state: "running".to_owned(),
+            url: Some("http://127.0.0.1:12345".to_owned()),
+            native_session_id: None,
+            workspace: Some(workspace.to_owned()),
+            auth: None,
+        };
+        let resolved = document("/tmp/orchestrator workspace")
+            .into_endpoint("global", None)
+            .expect("an absolute workspace is accepted");
+        assert_eq!(
+            resolved.workspace.as_deref(),
+            Some(Path::new("/tmp/orchestrator workspace"))
+        );
+        let debug = format!("{resolved:?}");
+        assert!(!debug.contains("/tmp/orchestrator workspace"));
+
+        let error = document("../escape")
+            .into_endpoint("global", None)
+            .unwrap_err();
+        assert_eq!(error.code, SpiritErrorCode::VowpIncompatible);
+        assert!(!error.message.contains("../escape"));
+    }
+
+    #[test]
+    fn workspace_paths_are_absolute_and_control_free() {
+        assert_eq!(
+            parse_workspace_path("/tmp/orchestrator"),
+            Some(PathBuf::from("/tmp/orchestrator"))
+        );
+        for rejected in ["", "relative/path", "/tmp/../escape", "/tmp/bad\npath"] {
+            assert_eq!(parse_workspace_path(rejected), None, "{rejected:?}");
+        }
     }
 }
