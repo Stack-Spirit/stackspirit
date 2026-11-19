@@ -13,9 +13,11 @@
 //! only reported as running while that host's pid is alive.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -140,6 +142,9 @@ const COMMAND_POLL: Duration = Duration::from_millis(20);
 /// Default time a home command waits for the live agent's result before treating the
 /// command as durably queued.
 pub const COMMAND_RESULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Counter that makes a private temporary file name unique within one process.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// How the home delivers orchestrator commands to a node's live agent connection.
 ///
@@ -1776,7 +1781,7 @@ impl Orchestrator {
                         }
                     }
                 });
-                write_private_json(&dir.join("opencode.json"), &config)?;
+                write_private_json_atomic(&dir.join("opencode.json"), &config)?;
             }
             OrchestratorApp::ClaudeCode => {
                 let config = serde_json::json!({
@@ -1795,7 +1800,7 @@ impl Orchestrator {
                         }
                     }
                 });
-                write_private_json(&dir.join(".mcp.json"), &config)?;
+                write_private_json_atomic(&dir.join(".mcp.json"), &config)?;
             }
             OrchestratorApp::Chat => {}
         }
@@ -2275,7 +2280,7 @@ fn read_endpoint_state(name: &str, dir: &Path) -> Result<Option<StateFile>, Core
 fn write_state(dir: &Path, state: &StateFile) -> Result<(), CoreError> {
     let mut stored = state.clone();
     stored.last_error = state.last_error();
-    write_private_json(&dir.join(STATE_FILE), &stored)
+    write_private_json_atomic(&dir.join(STATE_FILE), &stored)
 }
 
 /// Returns the live app handle recorded by a host, when its pid is still alive.
@@ -2295,18 +2300,58 @@ fn host_handle(dir: &Path, app: OrchestratorApp) -> Option<AppHandle> {
     })
 }
 
-/// Writes one private text file (mode 0600), creating its parent.
+/// Writes one private text file (mode 0600) atomically, creating its parent.
 fn write_private_text(path: &Path, text: &str) -> Result<(), CoreError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| CoreError::Io {
-            path: parent.display().to_string(),
-            source,
-        })?;
-    }
-    fs::write(path, text).map_err(|source| CoreError::Io {
-        path: path.display().to_string(),
+    write_private_bytes(path, text.as_bytes())
+}
+
+/// Writes one private JSON document (mode 0600) atomically, creating its parent.
+fn write_private_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), CoreError> {
+    let bytes = serde_json::to_vec(value).map_err(|error| CoreError::Invalid(error.to_string()))?;
+    write_private_bytes(path, &bytes)
+}
+
+/// Writes one private file (mode 0600) through a unique temporary file and a rename.
+///
+/// A reader either sees the old document or the new one, never a truncated file: the
+/// bytes go to a `create_new` temporary file in the same directory, `sync_all` flushes
+/// them, and `rename` replaces the target in one step. The temporary file is removed on
+/// every error path so a failed write leaves no `.tmp-*` litter.
+fn write_private_bytes(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| CoreError::Invalid(format!("the private file {} has no parent", path.display())))?;
+    fs::create_dir_all(parent).map_err(|source| CoreError::Io {
+        path: parent.display().to_string(),
         source,
     })?;
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp = parent.join(format!(".tmp-{}-{counter}", std::process::id()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .map_err(|source| CoreError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+    let result = (|| -> std::io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, path)?;
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    })();
+    if let Err(source) = result {
+        let _ = fs::remove_file(&temp);
+        return Err(CoreError::Io {
+            path: path.display().to_string(),
+            source,
+        });
+    }
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|source| CoreError::Io {
         path: path.display().to_string(),
         source,
@@ -2393,7 +2438,26 @@ fn fallback_join(app: OrchestratorApp, session: &SessionId) -> JoinInstructions 
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_text, validate_name};
+    use std::fs;
+
+    use super::{redact_text, validate_name, write_private_text};
+
+    #[test]
+    fn a_failed_atomic_write_removes_its_temp_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("state.json");
+        fs::create_dir(&target).expect("block the target with a directory");
+        fs::write(target.join("occupied"), b"keep").expect("occupant");
+
+        let error = write_private_text(&target, "{}").expect_err("a rename over a non-empty directory fails");
+        assert!(matches!(error, crate::CoreError::Io { .. }), "{error}");
+        let leftovers: Vec<String> = fs::read_dir(dir.path())
+            .expect("read dir")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left behind: {leftovers:?}");
+    }
 
     #[test]
     fn names_cannot_escape_the_orchestrator_root() {
