@@ -803,6 +803,18 @@ fn read_pid_file(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.lines().next()?.trim().parse().ok()
 }
 
+/// Reads an argv file written by a fake child process.
+///
+/// The fake scripts record argv with `printf '%s\n' "$@" > "$FAKE_..._ARGS"`, which creates
+/// and truncates the file before the first line is written. An empty file therefore means
+/// "the child has not recorded its arguments yet", not "the child started with no
+/// arguments", so it reads as `None`.
+fn read_recorded_args(path: &Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines().next()?;
+    Some(text.lines().map(str::to_owned).collect())
+}
+
 /// Returns whether `pid` still names a live process, using `kill -0` on every platform.
 fn process_alive(pid: u32) -> bool {
     if !vowp_adapters::proc::valid_pid(pid) {
@@ -1005,10 +1017,9 @@ done
         ]
     }
 
-    /// Returns the recorded argv, when the daemon started.
+    /// Returns the recorded argv, when the daemon has recorded at least one argument.
     fn args(&self) -> Option<Vec<String>> {
-        let text = std::fs::read_to_string(&self.args).ok()?;
-        Some(text.lines().map(str::to_owned).collect())
+        read_recorded_args(&self.args)
     }
 
     /// Returns the recorded `VOWP_API_TOKEN` value, when the daemon started.
@@ -1033,6 +1044,23 @@ impl Drop for FakeDaemon {
             kill_group(pid);
         }
     }
+}
+
+#[test]
+fn fake_daemon_args_stay_none_until_a_line_is_recorded() {
+    let fake = FakeDaemon::new();
+    std::fs::write(&fake.args, "").expect("empty daemon args file");
+    assert_eq!(
+        fake.args(),
+        None,
+        "an empty args file means the daemon has not started, not that it started with no arguments"
+    );
+    std::fs::write(&fake.args, "--home\n/tmp/node\n").expect("recorded daemon args");
+    assert_eq!(
+        fake.args(),
+        Some(vec!["--home".to_owned(), "/tmp/node".to_owned()]),
+        "the recorded lines are the parsed argv once the daemon writes them"
+    );
 }
 
 /// A detached supervisor stopped by `vowp down` even when the test panics.
@@ -3754,8 +3782,7 @@ done
     }
 
     fn args(&self) -> Option<Vec<String>> {
-        let text = std::fs::read_to_string(&self.args).ok()?;
-        Some(text.lines().map(str::to_owned).collect())
+        read_recorded_args(&self.args)
     }
 
     fn pid(&self) -> Option<u32> {
@@ -3773,6 +3800,23 @@ impl Drop for FakeGateway {
             kill_group(pid);
         }
     }
+}
+
+#[test]
+fn fake_gateway_args_stay_none_until_a_line_is_recorded() {
+    let fake = FakeGateway::new();
+    std::fs::write(&fake.args, "").expect("empty gateway args file");
+    assert_eq!(
+        fake.args(),
+        None,
+        "an empty args file means the gateway has not started, not that it started with no arguments"
+    );
+    std::fs::write(&fake.args, "--listen\n127.0.0.1:18743\n").expect("recorded gateway args");
+    assert_eq!(
+        fake.args(),
+        Some(vec!["--listen".to_owned(), "127.0.0.1:18743".to_owned()]),
+        "the recorded lines are the parsed argv once the gateway writes them"
+    );
 }
 
 /// Writes a node `config.toml` that enables or disables the WSS ingress.
