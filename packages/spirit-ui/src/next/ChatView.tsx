@@ -94,7 +94,7 @@ export function ChatView({ session, serverLabel, onOpenWorkers }: ChatViewProps)
   const state = view?.state ?? "idle";
 
   useEffect(() => {
-    void open(session, project, session === "setup" ? "local" : "server");
+    void open(session, project, "local");
   }, [open, session, project]);
 
   useEffect(() => {
@@ -256,7 +256,7 @@ export function ChatView({ session, serverLabel, onOpenWorkers }: ChatViewProps)
         onSend={(text) => void send(session, text)}
         onStop={() => void stop(session)}
         onStart={() =>
-          void open(session, project, session === "setup" ? "local" : "server")
+          void open(session, project, "local")
         }
       />
 
@@ -277,7 +277,7 @@ export function ChatView({ session, serverLabel, onOpenWorkers }: ChatViewProps)
                 type="button"
                 className="nx-btn nx-btn--quiet nx-btn--sm"
                 onClick={() =>
-                  void open(session, project, session === "setup" ? "local" : "server")
+                  void open(session, project, "local")
                 }
               >
                 Reconnect

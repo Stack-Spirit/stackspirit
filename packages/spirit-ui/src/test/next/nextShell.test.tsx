@@ -136,7 +136,7 @@ describe("NextShell", () => {
     expect(useShellUi.getState().panel).toBeNull();
   });
 
-  it("opens the global orchestrator after Connect with the reported server location", async () => {
+  it("opens the global orchestrator after Connect on Local, the only location that is live", async () => {
     await renderNext("busy");
     expect(screen.getByRole("heading", { name: "staging-vps is not connected" })).toBeInTheDocument();
 
@@ -146,7 +146,7 @@ describe("NextShell", () => {
 
     expect(await screen.findByRole("heading", { name: "Global orchestrator", level: 1 })).toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.getByTestId("session-location")).toHaveTextContent("Server · staging-vps"),
+      expect(screen.getByTestId("session-location")).toHaveTextContent("Local · this Mac"),
     );
     expect(screen.getByTestId("health-card")).toHaveTextContent("staging-vps");
   });
