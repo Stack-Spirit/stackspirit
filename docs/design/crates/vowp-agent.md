@@ -772,13 +772,15 @@ deduplication covers the case where a write reached the home but the local curso
 
 **Native session id.** Every app event carrying a `sessionID` tells the bridge which app-side
 session it is mirroring. The bridge keeps the latest id in memory (`observed_native_session`) and,
-when the client supplies `with_native_session_state(path)`, writes it to the orchestrator's private
-`native-session.json` on first sight and whenever the id changes. The write goes through the
-orchestrator host's atomic 0600 helper and the file holds only the id; it never carries the service
-URL, port, password or a local path. A re-created app session therefore replaces the previous hint.
-The id is remembered before the optional `with_native_session` filter, so a new session is visible
-even when the bridge is pinned to the old one. A hint write failure is diagnostic only: the frames
-are already spooled and the home remains the authority, and the bridge retries on the next event.
+when its `service.json` belongs to a local orchestrator, finds that orchestrator's private
+`native-session.json` from the same `config.json` that names the service file and writes it on first
+sight and whenever the id changes. A caller that already knows the path can override the discovered
+location with `with_native_session_state(path)`. The write goes through the orchestrator host's
+atomic 0600 helper and the file holds only the id; it never carries the service URL, port, password
+or a local path. A re-created app session therefore replaces the previous hint. The id is
+remembered before the optional `with_native_session` filter, so a new session is visible even when
+the bridge is pinned to the old one. A hint write failure is diagnostic only: the frames are
+already spooled and the home remains the authority, and the bridge retries on the next event.
 
 **Paths.** `PathRoot`s are matched longest first. The exact project root becomes
 `project:<name>`; a path below it becomes `subdir:<name>/<relative>` when `PathRef::parse`
@@ -1245,9 +1247,11 @@ macOS host slice adds `orchestrator_macos_stdout_readiness_materializes_0600_ser
 `agent_orchestrator_endpoint_stopped_and_unknown_are_metadata_only`,
 `agent_orchestrator_endpoint_errors_never_echo_a_path_or_password` and, for the v0.5.1 native-id
 hint, `agent_orchestrator_endpoint_reports_the_persisted_native_session_id`; the bridge adds
-`opencode_bridge_persists_a_native_session_id_0600_without_secrets` and
-`opencode_bridge_replaces_the_persisted_native_session_id_on_change` in `tests/bridge.rs`; the
-transport adds `agent_reconnects_after_a_ping_precedes_an_old_home_path_map_refusal` and
+`opencode_bridge_persists_a_native_session_id_0600_without_secrets`,
+`opencode_bridge_replaces_the_persisted_native_session_id_on_change` and
+`opencode_bridge_persists_the_native_session_id_beside_the_orchestrator_host` in
+`tests/bridge.rs`; the transport adds
+`agent_reconnects_after_a_ping_precedes_an_old_home_path_map_refusal` and
 `agent_reconnects_after_any_non_retryable_home_error`.
 
 The phase-4 hardening slice adds five loopback transport tests in `tests/transport.rs`, with a

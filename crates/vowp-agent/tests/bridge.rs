@@ -17,7 +17,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use vowp_agent::{
-    BRIDGE_EVENTS_FILE, BridgeFrame, BridgeNotice, BridgeSync, MIRROR_FILE, OpencodeBridge, PathRoot, Redaction,
+    BRIDGE_EVENTS_FILE, BridgeFrame, BridgeNotice, BridgeSync, MIRROR_FILE, OpencodeBridge, OrchestratorHost, PathRoot,
+    Redaction,
 };
 use vowp_protocol::agent::surface::{SurfaceEvent, SurfaceTurn, SurfaceTurnState};
 use vowp_protocol::{EventBody, JobId, ProjectName, SessionId, SurfaceId, UserMessage};
@@ -520,6 +521,47 @@ fn opencode_bridge_replaces_the_persisted_native_session_id_on_change() {
     assert!(
         !fs::read_to_string(&hint).expect("hint text").contains("ses_first"),
         "a re-created app session replaces the previous id"
+    );
+}
+
+#[test]
+fn opencode_bridge_persists_the_native_session_id_beside_the_orchestrator_host() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let state = dir.path();
+    let name = "native-hint";
+    let service = state
+        .join("orchestrators")
+        .join(name)
+        .join(".opencode/state/opencode/service.json");
+    fs::create_dir_all(service.parent().expect("service parent")).expect("service dir");
+    let events = vec![app_event(
+        1,
+        "session.execution.started",
+        json!({ "sessionID": NATIVE_SESSION }),
+    )];
+    let server = FakeSse::start(events);
+    let service = write_service(service.parent().expect("service parent"), server.port, PASSWORD);
+    let config_path = OrchestratorHost::config_path(state, name).expect("config path");
+    let config = json!({
+        "name": name,
+        "app": "opencode",
+        "service_json": service.display().to_string(),
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).expect("config json")).expect("config");
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).expect("config mode");
+    let hint = OrchestratorHost::native_session_path(state, name).expect("native session path");
+    assert!(!hint.exists(), "the bridge creates the hint only after an event");
+
+    let mut bridge = OpencodeBridge::load(&service, state, surface(), session()).expect("load bridge");
+    let sync = bridge.drain().expect("drain");
+    assert!(!sync.frames.is_empty(), "the bridge mirrored the session event");
+
+    let value: Value = serde_json::from_slice(&fs::read(&hint).expect("native session hint")).expect("hint json");
+    assert_eq!(value["native_session_id"], NATIVE_SESSION);
+    assert_eq!(
+        fs::metadata(&hint).expect("hint metadata").permissions().mode() & 0o777,
+        0o600,
+        "the hint is private"
     );
 }
 

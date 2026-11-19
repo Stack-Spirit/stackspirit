@@ -59,10 +59,10 @@ pub use isolation::{
 };
 pub use key::{NODE_KEY_FILE, NODE_PUB_FILE, NodeKey, fingerprint_of, handshake_payload, load_public};
 pub use orchestrator::{
-    AppCommand, LiveHost, ORCHESTRATOR_CONFIG_FILE, ORCHESTRATOR_HOST_FILE, ORCHESTRATOR_NATIVE_SESSION_FILE,
-    ORCHESTRATOR_POLL, ORCHESTRATOR_START_TIMEOUT, ORCHESTRATOR_STOP_GRACE, ORCHESTRATOR_XDG_DIR, ORCHESTRATORS_DIR,
-    OrchestratorConfig, OrchestratorHost, OrchestratorHostState, PrepareOutcome, PreparedHost, SurfaceAttachment,
-    SurfaceBinding, app_name, redact_detail, validate_name,
+    AppCommand, LiveHost, ORCHESTRATOR_CONFIG_FILE, ORCHESTRATOR_HOST_FILE, ORCHESTRATOR_POLL,
+    ORCHESTRATOR_START_TIMEOUT, ORCHESTRATOR_STOP_GRACE, ORCHESTRATOR_XDG_DIR, ORCHESTRATORS_DIR, OrchestratorConfig,
+    OrchestratorHost, OrchestratorHostState, PrepareOutcome, PreparedHost, SurfaceAttachment, SurfaceBinding, app_name,
+    redact_detail, validate_name,
 };
 pub use service::{
     CommandRecord, InstallOptions, InstallReport, LAUNCHD_LABEL, LAUNCHD_PLIST, LOG_DIR, LOG_FILE, RUN_MARKER,

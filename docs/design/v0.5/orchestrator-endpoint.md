@@ -101,6 +101,10 @@ as the host state, on first sight and whenever the app switches session, and con
 { "native_session_id": "ses_01HZY4Q3V7J8K9M0N1P2Q3R4S5" }
 ```
 
+An opencode bridge loaded from a service file named by an orchestrator's private `config.json`
+finds this path itself, so a normal start, resume or reconnect records the id without extra
+wiring.
+
 It never carries the Basic-auth password, the loopback URL, a port or a local path. A stop, a
 failed host or a fresh app process clears the hint; a re-created app session replaces it. The
 endpoint prefers a non-empty value in the app's `service.json`, then this persisted id, and
