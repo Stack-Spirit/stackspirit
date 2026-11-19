@@ -1,12 +1,13 @@
 # StackSpirit clusters — pooled compute and Home promotion
 
-Status: core only (`ss-54-cluster-core`), 2026-11-19.
-Audience: the future `SpiritBridge` / Tauri wiring, the CLI and the owner.
+Status: core (`ss-54-cluster-core`, `fe3146b`) and desktop UI (`ss-55-cluster-ui`,
+`58a37f2`, `04c9fdd`), 2026-11-19.
+Audience: the CLI, the desktop UI and the owner.
 
 This document describes the typed cluster model in
-`crates/spirit-core/src/cluster/mod.rs`, the exact VOWP commands the core runs, and the
-honest failure modes. The desktop UI and the Tauri commands are deliberately out of
-scope for this job.
+`crates/spirit-core/src/cluster/mod.rs`, the exact VOWP commands the core runs, the
+desktop UI, and the honest failure modes. The Tauri command adapter is
+`apps/spirit-desktop/src-tauri/src/commands/cluster.rs`; the UI is covered in §6.
 
 VOWP remains the source of truth. If this document and
 `/home/dev/vowp/docs/design/cli.md` or `crates/vowp-protocol/src/` disagree, the VOWP
@@ -292,7 +293,112 @@ promotion.
 Promotion never rewrites the local host store or the active Home selection. The caller
 must switch explicitly after reviewing the returned identity.
 
-## 6. Tests
+## 6. Desktop UI
+
+The desktop half is the optional `SpiritBridge.cluster` namespace (`form`, `health`,
+`promote`, `backupPolicy`, `removeWorker`) backed by the five Tauri commands in
+`apps/spirit-desktop/src-tauri/src/commands/cluster.rs`. Meadow uses:
+
+- `packages/spirit-ui/src/next/FormClusterDialog.tsx` — the Form a cluster flow;
+- `packages/spirit-ui/src/next/ClusterSection.tsx` — the Server page cluster block;
+- `packages/spirit-ui/src/next/PromoteBackupDialog.tsx` — the failover confirmation;
+- `packages/spirit-ui/src/next/cluster.ts` — form validation, formatting and the
+  confirmation phrase;
+- `packages/spirit-ui/src/next/clusterStore.ts` — cluster state.
+
+Cluster state is not part of `fleetStore`. `clusterStore` reads the bridge and host list
+from `fleetStore` so the shell has one bridge instance, and keeps the saved cluster beside
+the fleet snapshot: a failed health read drops the last pooled health instead of dimming
+the connected fleet view. The saved record is the app-private `cluster.json` and holds no
+path, backup destination or credential.
+
+### Form a cluster
+
+With fewer than two saved servers the Form a cluster entry point is not offered and the
+single-server layout is unchanged. With two or more, the Server card `⋯` menu and the
+Server page cluster block offer **Form a cluster**. The dialog collects one Home plus one
+or more Worker/Backup servers, a VOWP node name and role per worker, the optional
+per-worker project checkout, the Home project name and checkout, the backup interval and
+retention, and the `vowp backup --to` destination, then requires an explicit confirmation
+before the bridge is called. Client-side validation mirrors the core rules (one Home,
+unique node names, absolute paths, no credentials in the backup target) and keeps typed
+failures inline so a single worker can be fixed without retyping the form. Only the safe shape is saved; the
+paths and destination exist only in the request that uses them. A successful form reports
+the enrolled Home/workers, whether pooled compute was enabled, and the backup schedule,
+then `clusterStore` re-reads `ClusterHealth`; the dialog never copies a pooled total from
+its own placeholder fields.
+
+Removing a worker changes only StackSpirit's saved cluster. It does not revoke the VOWP
+agent credentials or remove Home's backup schedule.
+
+### Pooled health
+
+The sidebar Server card shows the `cluster` badge, pooled **Load** and
+`busy / pooled target` workers only when `ClusterHealth.online_workers > 0`. If every
+worker is offline, the card stays the single-server card and shows no pooled number. The
+Server page cluster block lists Home and each configured worker with its honest
+`agent_state`, VOWP node name, slot counts, mapped project count and sanitized last error,
+plus any `warnings`, the saved backup policy, and the promote action on backup workers.
+It never computes or caches a pooled total of its own.
+
+Which numbers come from where:
+
+- **Read from VOWP on Home:** the Home node name, Home target and running count, worker
+  status/presence/slots/mapped projects/`last_seen_at`/sanitized error, node registration,
+  and the additive `cluster` card's worker and slot totals when a Home reports one.
+- **Computed when the card is absent:** the values and warning described in §4. The UI
+  labels them `Pooled totals computed from Home and the visible worker nodes.` and
+  `totals_source` stays `computed`; it does not present them as VOWP totals.
+- **From the saved policy:** the backup interval and `keep`. `freshness ≤ every` is the
+  promotion bound, not an observed backup time.
+- **From a completed promotion:** the returned `backup_at` for that one promotion, shown
+  in the outcome and the last-promotion line. `ClusterHealth` itself has no backup
+  timestamp.
+
+### Promote backup to Home
+
+**Promote backup to Home** opens a confirmation dialog: choose the backup worker, the
+absolute backup directory, an optional fresh VOWP home, and type the exact phrase
+`promote-backup-to-home`. The host re-checks the phrase and all of §5's preconditions
+before anything is drained. The dialog warns that Home must answer the drain; a refusal
+keeps the saved cluster untouched. Success names the restored Home and node, the backup
+timestamp and the promotion time, offers **Connect to** the new Home, and states that the
+active server was not switched and that VOWP backups exclude secrets.
+
+### Preview mode
+
+Preview has no host and no SSH connection, so `MockBridge` returns typed
+`preview_unavailable` for every `cluster` action (`form`, `health`, `promote`,
+`backupPolicy`, `removeWorker`), with the message that clusters need the desktop host and
+the hint to run the app without `VITE_SPIRIT_MOCK`. The cluster store skips its health read
+when `bridge.preview` is true, so preview never renders a cluster section or a pooled
+total. The Form a cluster entry point can still open when the preview scenario has two or
+more saved servers, but submitting shows the typed error inline via `ClusterErrorAlert`;
+no success state, worker row or pooled number is invented.
+
+## 7. Limits / not yet
+
+- **No last-backup timestamp.** `ClusterHealth` has `checked_at` (when health was read) and
+  per-host `last_seen_at`, but no backup time. The Server page shows the policy bound
+  (`freshness ≤ every`) and the promotion dialog repeats it. An observed last-backup time
+  would need a new VOWP read; the UI does not invent one.
+- **Sidebar Load is cluster utilization.** With an online worker, the sidebar card's
+  **Load** is `busy_workers / pooled_target_workers`, not the single-host
+  higher-of-RAM-and-CPU figure. The single-server card keeps the per-host figure when no
+  pooled cluster is shown.
+- **Promotion needs a reachable old Home.** `promote` runs `vowp down --drain` on Home
+  before restoring. If Home cannot be drained, it refuses rather than risk two live Homes
+  (§5), so the action cannot currently be used once Home is completely unreachable. This
+  is an `ss-54` product gap, not a UI omission.
+- **VOWP `0.5` cluster totals are not installed.** The core and UI support the additive
+  `cluster` card when a Home reports it, but the installed VOWP (`0.4.0`) does not. The
+  pooled numbers are computed from Home and the visible online workers, labelled
+  `computed`, with a warning; no `0.5` field is claimed as available.
+- **Coverage is component and bridge tests, not a real cluster.** In `VITE_SPIRIT_MOCK=1`
+  every cluster action is `preview_unavailable`, so mock e2e can only prove the honest
+  gate. A real cluster test needs the desktop host and two servers.
+
+## 8. Tests
 
 `crates/spirit-core/tests/cluster.rs` uses `FakeCommandRunner`, `InMemoryHostStore` and
 `FakeClock`. It never opens a socket or touches a real home.
@@ -313,6 +419,12 @@ must switch explicitly after reviewing the returned identity.
 | `promote_refuses_an_unreachable_target_without_draining_home` | target preflight only |
 | `promote_reads_the_remote_backup_mtime_when_no_timestamp_is_supplied` | `stat -c %Y` before any mutation |
 | `promote_drains_home_restores_the_worker_and_returns_the_new_identity` | exact promote sequence and identity |
+
+The desktop half has component tests in
+`packages/spirit-ui/src/test/next/cluster.test.tsx` (form validation, pooled numbers,
+offline worker, promotion confirmation) and bridge tests in
+`apps/spirit-desktop/src/bridge/clusterBridge.test.ts` (the five command names and argument
+shapes). Both use a fake or mock bridge; neither forms a real cluster.
 
 Run:
 

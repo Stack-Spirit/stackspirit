@@ -83,13 +83,17 @@ cluster"**:
   install --now`) with `[offload] enabled = true`, `default_placement = "any"`, and
   `result_transport = "bundle"` so ready worker jobs spread across **both** the Home and
   all Worker servers simultaneously. Two identical 4-worker (or 8-worker) servers run up
-  to **8 (or 16) concurrent workers** (backed by VOWP `0.5` Slice 6 pooled cluster
-  capacity). The sidebar Server card and Server page display combined cluster Load,
-  combined active/max workers (`home + workers`), and per-server health/node map.
+  to **8 (or 16) concurrent workers**. The owner decision expected VOWP `0.5` Slice 6
+  pooled cluster capacity to back this; `0.5` is not installed yet, so pooled numbers are
+  computed from Home and the online workers (see §5 step 7). The sidebar Server card and
+  Server page display combined cluster Load, combined active/max workers (`home +
+  workers`), and per-server health/node map.
 - **Hot backup & Home promotion:** Home also runs scheduled `vowp backup` snapshots to the
-  Worker/Backup server(s), and if Home goes offline, StackSpirit provides an explicit,
-  confirmation-gated **"Promote backup to Home"** action (`vowp backup --restore` +
-  `vowp up` + repointing active Home). Matches VOWP's one-home/one-lease rule.
+  Worker/Backup server(s), and StackSpirit provides an explicit, confirmation-gated
+  **"Promote backup to Home"** action (`vowp backup --restore` + `vowp up` + repointing
+  active Home). It requires the old Home to answer `vowp down --drain` before anything is
+  restored, so a completely unreachable Home is not yet supported (see §5 step 7).
+  Matches VOWP's one-home/one-lease rule.
 
 **SSH and secrets** (security model the owner approved)
 - Keep the existing OpenSSH model in `crates/spirit-core/src/ssh` (system `ssh`,
@@ -137,6 +141,22 @@ profile uses the app key. That retry also asks for a one-time server password be
 the current `spirit_core` install API needs one more password login to re-check the key
 and apply the sshd drop-in; it is cleared before the call and reports `disabled`,
 `not_supported` or `failed` exactly.
+
+The cluster path is implemented end to end on the desktop host (`ss-54`, `fe3146b`;
+`ss-55`, `58a37f2`, `04c9fdd`). `crates/spirit-core/src/cluster/mod.rs` owns the typed
+model and every VOWP command; `apps/spirit-desktop/src-tauri/src/commands/cluster.rs`
+adapts the five Tauri commands (`cluster_form`, `cluster_health`, `cluster_promote`,
+`cluster_backup_policy`, `cluster_remove_worker`) to the optional
+`SpiritBridge.cluster` namespace (`form`, `health`, `promote`, `backupPolicy`,
+`removeWorker`). Meadow renders it through
+`packages/spirit-ui/src/next/FormClusterDialog.tsx`, `ClusterSection.tsx` and
+`PromoteBackupDialog.tsx`, with pure helpers in
+`packages/spirit-ui/src/next/cluster.ts`. Cluster state lives in
+`packages/spirit-ui/src/next/clusterStore.ts`, beside `fleetStore` rather than inside it:
+the store reads the bridge and host list from `fleetStore`, keeps a failed health read
+local (dropping the stale pooled total) instead of dimming the fleet view, and skips the
+read entirely in preview. Preview mode therefore never shows a cluster or a pooled
+number: every `cluster` action returns typed `preview_unavailable`.
 
 Settings → Advanced → **Server secrets** lists, stores and revokes keys in VOWP's own
 vault (`ss-38`, `bf45d31`; `ss-34`, `def3538`; `ss-35`, `506d9d2`). A value is
@@ -237,24 +257,33 @@ a read-only chip derived from the transport; there is no live switch. Moving a s
    this order: the chat location chip is read-only, and no switch is offered until these
    commands land.
 7. **Pooled-Compute & Failover Clusters (owner decision 2026-11-18 — Full VOWP-Native
-   Cluster V1):**
-   - Keep multiple saved servers **independent by default** with a clean server switcher
-     in the sidebar Server card / `⋯` menu.
-   - When 2+ servers are saved, offer **"Form a cluster"**: pick **1 Home** (source of
-     truth) and **1+ Worker/Backup servers**.
-   - Orchestrate cluster setup in `spirit-core` over verified SSH using VOWP primitives
-     only (no custom daemon): enroll each Worker server on Home (`vowp node enroll`) and
-     install/start its outbound `vowp agent` user service (`vowp agent enroll` + `vowp
-     agent service install --now`), enable pooled compute (`[offload] enabled = true`,
-     `default_placement = "any"`, `result_transport = "bundle"`) so jobs spread across
-     Home + all Worker servers for **combined worker capacity** (e.g. 2 identical servers
-     = 2× concurrent workers, reading VOWP `0.5`'s pooled `cluster` capacity totals), and
-     configure scheduled `vowp backup` replication from Home → Worker/Backup server(s).
-   - Show cluster topology, combined Load & combined active/total workers (`home +
-     workers`), backup freshness, and per-server health on the sidebar Server card and
-     **Server** page, plus an explicit confirmation-gated **"Promote backup to Home"**
-     recovery action (`vowp backup --restore` + `vowp up` + switching StackSpirit's active
-     Home profile) when Home is unreachable.
+   Cluster V1) — landed in two halves (`ss-54`, `fe3146b`; `ss-55`, `58a37f2`,
+   `04c9fdd`).** Multiple saved servers stay **independent by default** with the existing
+   sidebar switcher; **Form a cluster** appears only when 2+ servers are saved. The core
+   (`crates/spirit-core/src/cluster/mod.rs`) models `ClusterConfig`, `ClusterWorker`,
+   `BackupPolicy` and `ClusterHealth`, enrolls each worker over verified SSH (`vowp node
+   enroll`, `vowp agent enroll --code-file -`, `vowp agent service install --now`,
+   `vowp agent paths add`), enables pooled compute in `[offload]`, schedules `vowp backup`,
+   and implements the confirmation-gated promotion that refuses a stale backup. The UI
+   half is the `SpiritBridge.cluster` namespace plus the Tauri commands in
+   `apps/spirit-desktop/src-tauri/src/commands/cluster.rs` (`form`, `health`, `promote`,
+   `backupPolicy`, `removeWorker`), Meadow's `FormClusterDialog`, `ClusterSection` and
+   `PromoteBackupDialog`, `packages/spirit-ui/src/next/cluster.ts`, the sidebar pooled
+   **Load** / `cluster` badge, and the Server page cluster section; cluster state is read
+   through `packages/spirit-ui/src/next/clusterStore.ts` (see §4). The sidebar card
+   shows pooled Load and `busy / pooled target` workers; the Server page lists Home and
+   each worker with its state and slots, the saved backup policy, and the promote action.
+   A completed promotion shows the restored Home identity and offers an explicit
+   **Connect to** action; it never switches the active server silently.
+   - **Honest limits:** `ClusterHealth` has no last-backup timestamp, so the UI shows the
+     policy's maximum age at promotion (`freshness ≤ every`) and never invents a "last
+     backup" time. The sidebar **Load** in a cluster is pooled worker utilization
+     (`busy / pooled target`), not the single-host RAM/CPU figure. Promotion needs the old
+     Home to answer `vowp down --drain`, so it cannot promote while Home is unreachable.
+     VOWP `0.5`'s additive `cluster` capacity totals are not installed; the core computes
+     the numbers from Home and the visible online workers, labels them `computed`, and the
+     UI says so. Mock-mode e2e can only prove the honest `preview_unavailable` gate; a
+     real cluster needs the desktop host.
 8. **Full Meadow Cutover — retire the classic shell & complete Meadow E2E (owner decision
    2026-11-18) — landed (`ss-52`, `aba207d`; `ss-53`, `6f2a568`, `9d7d357`, `dde41d9`;
    `ss-56`, `a80775e`).** Meadow (`NextShell.tsx`) is the only shell. The classic frame
@@ -272,8 +301,8 @@ a read-only chip derived from the transport; there is no live switch. Moving a s
    composer. Proven green: `ss-56` (`a80775e`) ran
    `npm run test:e2e -w @stackspirit/desktop` at **18/18 on two consecutive runs** (2.6 m
    and 1.9 m), with zero failed, skipped or flaky tests, no waivers, and no spec or config
-   change. Steps 6–7 (Local/Server switch, live Server chat, Add project, clusters) remain
-   pending and are not claimed here.
+   change. Step 6 (Local/Server switch, live Server chat, Add project) remains pending and
+   is not claimed here; step 7 landed as `ss-54`/`ss-55` above.
 
 ## 6. Known gaps and cautions
 
@@ -282,6 +311,11 @@ a read-only chip derived from the transport; there is no live switch. Moving a s
   no waivers and no spec or config change). The specs are `next-shell`, `meadow-flows`,
   `meadow-bridge-flows`, `sessions-asif`, `local-orchestrator-gated` and
   `local-orchestrator-ready`.
+- **Cluster product gaps.** `ClusterHealth` carries no last-backup timestamp, so freshness
+  is shown as the backup policy's maximum age at promotion, not an observed backup time.
+  Promotion requires the old Home to answer `vowp down --drain`, so it cannot rescue an
+  unreachable Home. VOWP `0.5`'s additive `cluster` totals are not installed; pooled
+  numbers are computed from Home and the visible online workers and labelled `computed`.
 - **Setup chat is non-streaming for now.** The production transport reports
   `streaming_supported: false`: the pinned v1 event names and schema are recorded, but the
   runtime cadence and ordering of `message.part.updated`, `message.part.delta` and
