@@ -25,8 +25,8 @@ export interface EmptyHeroProps {
  * and prompt chips below.
  *
  * The same wrapper always surrounds the composer. When the first turn arrives it
- * becomes `nx-hero--docked`; the composer is not remounted, so focus survives the
- * move to the bottom of the conversation.
+ * becomes `nx-hero--docked`; the composer is not remounted, and the Message field
+ * regains focus when the turn leaves the session ready again.
  */
 export function EmptyHero({
   active,

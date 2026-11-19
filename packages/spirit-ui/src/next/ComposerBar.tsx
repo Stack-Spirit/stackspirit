@@ -62,10 +62,11 @@ export interface ComposerBarProps {
 /**
  * The elevated Meadow composer card.
  *
- * One instance stays mounted in the empty hero and in the docked layout so moving
- * from the centre to the bottom of the chat never loses the textarea's focus. The
- * left control row owns the inline model picker and the compact connect action; the
- * right owns the single 32 px circular Send / Stop button.
+ * One instance stays mounted in the empty hero and in the docked layout, so moving
+ * from the centre to the bottom of the chat never remounts the textarea. If a turn
+ * disables it, the field regains focus when the session returns to ready. The left
+ * control row owns the inline model picker and the compact connect action; the right
+ * owns the single 32 px circular Send / Stop button.
  */
 export function ComposerBar({
   session,
@@ -89,6 +90,8 @@ export function ComposerBar({
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
+  /** True while the Message field owns (or is about to regain) focus. */
+  const restoreFocus = useRef(false);
   const id = useId();
 
   useEffect(() => {
@@ -98,6 +101,16 @@ export function ComposerBar({
     const next = Math.min(Math.max(element.scrollHeight, 24), 200);
     element.style.height = `${next}px`;
   }, [text]);
+
+  // A disabled control cannot keep DOM focus. When a turn starts the field is
+  // disabled, so the browser moves focus to BODY; return it once the session is
+  // ready again, unless the owner deliberately focused another control meanwhile.
+  useEffect(() => {
+    const element = textarea.current;
+    if (!element || disabled || !restoreFocus.current) return;
+    restoreFocus.current = false;
+    if (document.activeElement === document.body) element.focus();
+  }, [disabled]);
 
   async function submit() {
     if (disabled || streaming || sending || submitting) return;
@@ -149,6 +162,15 @@ export function ComposerBar({
         placeholder={placeholder}
         disabled={disabled}
         onChange={(event) => setText(event.target.value)}
+        onFocus={() => {
+          restoreFocus.current = true;
+        }}
+        onBlur={(event) => {
+          // The browser blurs the field as it becomes disabled; remember the
+          // intent so it can be focused again when the turn finishes. A real
+          // focus move while enabled clears it.
+          if (!event.currentTarget.disabled) restoreFocus.current = false;
+        }}
         onKeyDown={onKeyDown}
       />
       <div className="nx-composer__controls">

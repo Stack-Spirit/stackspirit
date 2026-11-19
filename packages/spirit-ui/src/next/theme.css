@@ -1508,8 +1508,12 @@ button.nx-composer__start:hover {
 }
 
 .nx-model-menu {
+  width: 380px;
   min-width: 272px;
-  max-width: 380px;
+  max-width: min(380px, calc(100vw - 24px));
+  /* The popover is a grid; a fixed 1fr track keeps every row inside the panel
+     instead of letting the longest label size the track past it. */
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .nx-model-menu__item[aria-checked="true"] {

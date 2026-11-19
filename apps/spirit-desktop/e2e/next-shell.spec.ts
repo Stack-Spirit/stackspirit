@@ -66,6 +66,33 @@ test("setup assistant opens a calm hero, then sends without a password wall", as
   await expect(page.getByText("not-a-real-secret")).toHaveCount(0);
 });
 
+test("the Message field keeps focus on the hero dock and after a slow turn", async ({
+  page,
+}) => {
+  await page.goto(url("empty"));
+  await page.getByRole("button", { name: /Set up with AI/ }).click();
+  const message = page.getByRole("textbox", { name: "Message" });
+  await message.fill("keep my focus");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText(/Preview reply\./)).toBeVisible();
+  await expect(page.locator(".nx-hero")).toHaveClass(/nx-hero--docked/);
+  await expect(message).toBeFocused();
+
+  await page.goto(url("chat-slow"));
+  await page.getByTestId("sidebar-connect").click();
+  await expect(page.getByRole("heading", { name: "Global orchestrator", level: 1 })).toBeVisible();
+  const slow = page.getByRole("textbox", { name: "Message" });
+  await slow.fill("hold the turn open");
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("session-state")).toContainText("Replying…");
+  await expect(slow).toBeDisabled();
+  await page.getByRole("button", { name: "Stop" }).click();
+  await expect(page.getByTestId("session-state")).toContainText("Stopped");
+  await page.getByRole("button", { name: "Start" }).click();
+  await expect(page.getByTestId("session-state")).toContainText("Ready");
+  await expect(slow).toBeFocused();
+});
+
 test("empty hero, inline model picker and context meter meet WCAG 2.2 AA", async ({
   page,
 }) => {
@@ -82,6 +109,27 @@ test("empty hero, inline model picker and context meter meet WCAG 2.2 AA", async
     const models = page.getByRole("menu", { name: "Choose a model" });
     await expect(models).toBeVisible();
     await expect(models).toContainText("OpenCode free · DeepSeek V4.1 Flash Free");
+    // Every row (and its raised checked background) stays inside the panel with the
+    // same inset on both sides; the meta label keeps its normal right padding.
+    const rows = await models.evaluate((menu) => {
+      const panel = menu.getBoundingClientRect();
+      return [...menu.querySelectorAll(".nx-model-menu__item")].map((item) => {
+        const row = item.getBoundingClientRect();
+        const meta = item.querySelector(".nx-menu__meta")?.getBoundingClientRect();
+        return {
+          leftInset: row.left - panel.left,
+          rightInset: panel.right - row.right,
+          metaRightInset: meta ? panel.right - meta.right : 0,
+        };
+      });
+    });
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.leftInset).toBeGreaterThan(0);
+      expect(row.rightInset).toBeGreaterThan(0);
+      expect(Math.abs(row.rightInset - row.leftInset)).toBeLessThan(0.5);
+      expect(row.metaRightInset).toBeGreaterThan(0);
+    }
     await expectNoWcagViolations(page);
     await page.keyboard.press("Escape");
 

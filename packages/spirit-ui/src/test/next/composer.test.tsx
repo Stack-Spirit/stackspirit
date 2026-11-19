@@ -22,9 +22,9 @@ async function renderWithBridge(bridge: SpiritBridge) {
   return { bridge, ...result };
 }
 
-async function openSetup() {
+async function openSetup(bridge: SpiritBridge = new MockBridge("empty")) {
   const user = userEvent.setup();
-  const rendered = await renderWithBridge(new MockBridge("empty"));
+  const rendered = await renderWithBridge(bridge);
   await user.click(screen.getByRole("button", { name: /Set up with AI/ }));
   return { user, ...rendered };
 }
@@ -69,15 +69,40 @@ describe("Meadow composer", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps the same composer node when the hero moves to the docked layout", async () => {
+  it("keeps the same composer node and focus when the hero moves to the docked layout", async () => {
     const { user } = await openSetup();
     const composer = screen.getByRole("textbox", { name: "Message" });
-    await user.type(composer, "hold this composer");
-    await user.click(screen.getByRole("button", { name: "Send" }));
+    await user.type(composer, "hold this composer{Enter}");
 
     expect(await screen.findByText(/Preview reply\./)).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Message" })).toBe(composer);
+    const docked = screen.getByRole("textbox", { name: "Message" });
+    expect(docked).toBe(composer);
+    await waitFor(() => expect(document.activeElement).toBe(docked));
     expect(screen.queryByRole("heading", { name: "StackSpirit", level: 2 })).not.toBeInTheDocument();
+  });
+
+  it("restores focus to the Message field when a slow turn returns to ready", async () => {
+    const { user } = await openSetup(new MockBridge({ scenario: "chat-slow", hosts: [] }));
+    const composer = screen.getByRole("textbox", { name: "Message" });
+    await user.type(composer, "hold the turn open{Enter}");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("session-state")).toHaveTextContent("Replying…"),
+    );
+    // A disabled control cannot keep focus in a browser (Chromium is covered by
+    // the desktop e2e). The field must not remount or forget that it owned focus,
+    // so it is returnable once the session is ready again.
+    expect(composer).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("session-state")).toHaveTextContent("Stopped"),
+    );
+    await user.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("session-state")).toHaveTextContent("Ready"),
+    );
+    await waitFor(() => expect(document.activeElement).toBe(composer));
   });
 
   it("keeps the included free OpenCode model active and switches it inline", async () => {

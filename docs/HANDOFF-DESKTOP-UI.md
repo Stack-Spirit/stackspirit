@@ -207,7 +207,10 @@ session — setup, global or a project — opens as a centred `EmptyHero` with t
 deadpan `SpiritMark`, a 26/32 calm title (`StackSpirit` for setup), the saved-server
 card when one applies, the same composer card, and prompt chips. The composer stays
 mounted when the first turn arrives, so it moves to the bottom-docked layout without
-losing focus. **An empty setup chat no longer injects the "Secure server details"
+being remounted. The Message field is disabled while a turn runs; when the session
+returns to ready, focus returns to the field if it owned focus when the turn started,
+so pressing Enter to send leaves the caret in the composer. **An empty setup chat no
+longer injects the "Secure server details"
 password card:** the app-owned card appears only after the owner chooses the compact
 **＋ Connect server** action in the composer (or **Add another server** on a saved
 server card). The card itself is unchanged: one-time password, fingerprint
