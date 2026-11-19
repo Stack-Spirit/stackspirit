@@ -4807,6 +4807,60 @@ fn agent_orchestrator_endpoint_json_returns_local_auth_and_ls_stays_clean() {
     );
 }
 
+#[test]
+fn agent_orchestrator_endpoint_corrupt_private_file_exits_three_and_names_it() {
+    let home = TempDir::new().expect("agent home");
+    let state_dir = home.path().join(".vowp-agent");
+    ls_create_private_dir(&state_dir);
+    let name = "broken";
+    let dir = OrchestratorHost::dir(&state_dir, name).expect("orchestrator dir");
+    ls_create_private_dir(&dir);
+    let service_path = dir.join(".opencode/state/opencode/service.json");
+    let session = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("session");
+    let config = OrchestratorConfig {
+        name: name.to_owned(),
+        app: OrchestratorApp::Opencode,
+        project: None,
+        session: Some(session.clone()),
+        surface: Some(SurfaceId("01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned())),
+        command: Some("opencode".to_owned()),
+        args: vec!["serve".to_owned()],
+        working_dir: Some(home.path().display().to_string()),
+        service_json: Some(service_path.display().to_string()),
+    };
+    let config_path = OrchestratorHost::config_path(&state_dir, name).expect("config path");
+    write_private_file(&config_path, &serde_json::to_vec(&config).expect("config JSON"));
+    let host_path = OrchestratorHost::host_path(&state_dir, name).expect("host path");
+    let host_state = serde_json::json!({
+        "name": name,
+        "app": "opencode",
+        "session": session,
+        "pid": std::process::id(),
+        "state": "running",
+        "started_at": Timestamp::now(),
+    });
+    write_private_file(&host_path, &serde_json::to_vec(&host_state).expect("host JSON"));
+    // Assemble the marker at runtime so no secret-shaped literal is committed.
+    let password = format!("vowp-test-agent-{}", "G".repeat(20));
+    let corrupt = format!("{{\"url\":\"http://127.0.0.1:46333\",\"password\":\"{password}\",");
+    write_private_file(&service_path, corrupt.as_bytes());
+
+    let envs = [("VOWP_AGENT_HOME", state_dir.display().to_string())];
+    let (code, stdout, stderr) = run_binary_with(home.path(), &["agent", "orchestrator", "endpoint", name], &envs);
+    let text = format!("{stdout}\n{stderr}");
+    assert_eq!(code, 3, "a corrupt private file is config_invalid (exit 3): {text}");
+    assert!(text.contains(name), "the error names the orchestrator: {text}");
+    for forbidden in [
+        state_dir.display().to_string(),
+        service_path.display().to_string(),
+        password,
+        "127.0.0.1".to_owned(),
+        "46333".to_owned(),
+    ] {
+        assert!(!text.contains(&forbidden), "the error leaked a forbidden value: {text}");
+    }
+}
+
 /// Creates one 0700 directory, ignoring an existing one.
 fn ls_create_private_dir(dir: &Path) {
     std::fs::create_dir_all(dir).expect("private dir");

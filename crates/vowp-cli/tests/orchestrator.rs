@@ -2311,4 +2311,20 @@ fn orchestrator_endpoint_redacts_a_corrupt_private_file_error() {
     ] {
         assert!(!text.contains(forbidden), "the error leaked a forbidden value: {text}");
     }
+
+    // A corrupt home record names the orchestrator, never its path.
+    let (broken, _session) = write_endpoint_state(&env, "broken", None);
+    std::fs::write(state_path(&broken), b"{\"name\":").expect("corrupt record");
+    std::fs::set_permissions(state_path(&broken), std::fs::Permissions::from_mode(0o600)).expect("record mode");
+    let (code, stdout, stderr) = env.run(&["orchestrator", "endpoint", "broken"]);
+    let text = format!("{stdout}\n{stderr}");
+    assert_eq!(code, 2, "a corrupt home record is invalid input: {text}");
+    assert!(text.contains("broken"), "the error names the orchestrator: {text}");
+    for forbidden in [
+        broken.to_str().expect("broken dir"),
+        state_path(&broken).to_str().expect("record path"),
+        "orchestrator.json",
+    ] {
+        assert!(!text.contains(forbidden), "the error leaked a forbidden value: {text}");
+    }
 }

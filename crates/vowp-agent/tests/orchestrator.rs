@@ -2212,6 +2212,10 @@ fn agent_orchestrator_endpoint_errors_never_echo_a_path_or_password() {
         .expect_err("a corrupt service file is typed");
     assert_eq!(error.code, "config_invalid");
     let text = format!("{}: {}", error.code, error.message);
+    assert!(
+        text.contains("endpoint-broken"),
+        "the error names the orchestrator: {text}"
+    );
     for forbidden in [
         state.display().to_string(),
         service_json.display().to_string(),
@@ -2230,6 +2234,10 @@ fn agent_orchestrator_endpoint_errors_never_echo_a_path_or_password() {
         .endpoint("endpoint-broken")
         .expect_err("a wide service file is typed");
     let text = format!("{}: {}", error.code, error.message);
+    assert!(
+        text.contains("endpoint-broken"),
+        "the error names the orchestrator: {text}"
+    );
     assert!(text.contains("0600"), "the error names the permission class: {text}");
     assert!(!text.contains(&service_json.display().to_string()), "{text}");
 

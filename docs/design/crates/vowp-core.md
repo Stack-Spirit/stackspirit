@@ -1032,9 +1032,10 @@ home path.
   `http://127.0.0.1:<port>` URL, the native app session id from `host.json` and Basic auth
   (header `Authorization`, scheme `Basic`, username `opencode`, the service password).
   `ClaudeRemoteHost` and `chat` keep the default `None` because they expose no loopback
-  endpoint. A stopped host, an absent service file, a stale service pid or a zero port leaves
-  the three endpoint values `None`. A non-loopback URL, a corrupt file or a too-wide file is
-  a typed error whose message names only the orchestrator and the failure class.
+  endpoint. A stopped host, an absent service file or a stale service pid leaves the three
+  endpoint values `None`. A zero port is refused as a typed invalid error rather than
+  returning a guessed endpoint. A non-loopback URL, a corrupt file or a too-wide file is a
+  typed error whose message names only the orchestrator and the failure class.
 
 Named tests (in `crates/vowp-cli/tests/orchestrator.rs`): `orchestrator_new_with_a_node_creates_a_card_and_sends_start`,
 `orchestrator_new_refuses_an_unknown_or_revoked_node`,

@@ -968,7 +968,8 @@ impl Orchestrator {
     pub fn endpoint(&self, name: &str) -> Result<OrchestratorEndpoint, CoreError> {
         validate_name(name)?;
         let dir = self.dir(name);
-        let state = read_state(&dir)?.ok_or_else(|| CoreError::NotFound(format!("orchestrator {name}")))?;
+        let state =
+            read_endpoint_state(name, &dir)?.ok_or_else(|| CoreError::NotFound(format!("orchestrator {name}")))?;
         let remote = self.state_is_remote(&state)?;
         let info = self.info_from_dir(state, dir);
         let location = if remote {
@@ -2252,6 +2253,19 @@ fn read_state(dir: &Path) -> Result<Option<StateFile>, CoreError> {
             source,
         }),
     }
+}
+
+/// Reads one endpoint's state file, naming the orchestrator and never a path.
+fn read_endpoint_state(name: &str, dir: &Path) -> Result<Option<StateFile>, CoreError> {
+    read_state(dir).map_err(|error| match error {
+        CoreError::Invalid(_) => CoreError::Invalid(format!(
+            "orchestrator {name}: the local orchestrator record is not valid JSON"
+        )),
+        CoreError::Io { .. } => CoreError::Invalid(format!(
+            "orchestrator {name}: the local orchestrator record could not be read"
+        )),
+        other => other,
+    })
 }
 
 /// Writes an orchestrator state file with mode 0600.

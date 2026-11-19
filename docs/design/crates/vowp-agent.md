@@ -934,9 +934,10 @@ opencode values add the canonical `http://127.0.0.1:<port>` URL and Basic auth (
 Claude or chat, or a missing service file leaves `url`, `native_session_id` and `auth` `None`.
 The agent does not learn the desktop app's native session id, so `native_session_id` is `None`
 unless the app's own service file carries one. An unknown name is `not_found`; a corrupt,
-too-wide or unreadable private file is `config_invalid`, and no message carries a path, port,
-password, token or pair link. The password appears only in the explicit `--json` document,
-never in the human block, a log or an error.
+too-wide or unreadable private file is `config_invalid`. Every error names the orchestrator
+and the failure class, and no message carries a path, port, password, token or pair link.
+The password appears only in the explicit `--json` document, never in the human block, a log
+or an error.
 
 A lost home connection keeps the app process and marks `host.json` `degraded`; a reconnect
 re-attaches every live host and marks it `running` without spawning a duplicate. A lost or

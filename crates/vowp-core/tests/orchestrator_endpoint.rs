@@ -293,6 +293,19 @@ fn orchestrator_endpoint_stopped_or_unknown_has_no_credentials() {
         "the error names the orchestrator: {text}"
     );
 
+    // A corrupt local record is a typed, path-free failure naming the orchestrator.
+    let broken = write_orchestrator(&fixture.deps, "broken", None, OrchestratorNodeState::Running);
+    write_private(&broken.join("orchestrator.json"), b"{\"name\":");
+    let error = orchestrator.endpoint("broken").expect_err("a corrupt record is typed");
+    let text = error.to_string();
+    assert!(
+        text.contains("orchestrator broken"),
+        "the error names the orchestrator: {text}"
+    );
+    for forbidden in [broken.display().to_string(), "orchestrator.json".to_owned()] {
+        assert!(!text.contains(&forbidden), "the error leaked {forbidden:?}: {text}");
+    }
+
     // A corrupt service file is a typed, path-free failure.
     let corrupt = write_orchestrator(&fixture.deps, "corrupt", None, OrchestratorNodeState::Running);
     write_live_host(&corrupt, 45666);

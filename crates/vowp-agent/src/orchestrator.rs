@@ -404,14 +404,17 @@ impl OrchestratorHost {
     /// password, token or pair link.
     pub fn endpoint(&self, name: &str) -> Result<OrchestratorEndpoint, OrchestratorError> {
         validate_name(name)?;
-        let config = self.config(name)?.ok_or_else(|| {
-            OrchestratorError::new(
-                "not_found",
-                format!("there is no local record for orchestrator {name}"),
-                false,
-            )
-        })?;
-        let recorded = self.state(name)?;
+        let config = self
+            .config(name)
+            .map_err(|error| endpoint_error(name, error))?
+            .ok_or_else(|| {
+                OrchestratorError::new(
+                    "not_found",
+                    format!("there is no local record for orchestrator {name}"),
+                    false,
+                )
+            })?;
+        let recorded = self.state(name).map_err(|error| endpoint_error(name, error))?;
         let live = recorded.as_ref().filter(|state| state.pid.is_some_and(process_alive));
         let state = match (live, recorded.as_ref()) {
             (Some(live), _) => live.state,
@@ -439,7 +442,9 @@ impl OrchestratorHost {
         let Some(service_json) = config.service_json.as_deref() else {
             return Ok(endpoint);
         };
-        let Some(service) = read_service_endpoint(Path::new(service_json))? else {
+        let Some(service) =
+            read_service_endpoint(Path::new(service_json)).map_err(|error| endpoint_error(name, error))?
+        else {
             return Ok(endpoint);
         };
         endpoint.url = Some(service.url);
@@ -1814,6 +1819,15 @@ fn failed_result(request_id: &str, state: OrchestratorNodeState, error: Orchestr
 
 fn config_error(message: &str) -> OrchestratorError {
     OrchestratorError::new("config_invalid", message, false)
+}
+
+/// Adds the orchestrator name to an endpoint read failure, keeping its code and class.
+fn endpoint_error(name: &str, error: OrchestratorError) -> OrchestratorError {
+    OrchestratorError::new(
+        &error.code,
+        format!("orchestrator {name}: {}", error.message),
+        error.retryable,
+    )
 }
 
 fn import_error(code: &str, message: &str) -> OrchestratorError {
