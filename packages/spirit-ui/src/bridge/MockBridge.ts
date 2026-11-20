@@ -1860,6 +1860,7 @@ export class MockBridge implements SpiritBridge {
       attached: true,
       error: null,
       usage: this.advanceChatUsage(view, reply),
+      pending_permissions: undefined,
     });
   }
 
