@@ -101,8 +101,8 @@ The marks have different lifetimes:
 A run on a provider that ends `ok` clears that provider's limit row and its `limit:`, `probe_back:`,
 `probe_back_until:`, `probe_pending:` and `park:` keys: a successful turn is proof the provider works.
 A `credits` or `auth` row is never cleared this way; only `vowp inbox answer <id> resolved` resolves
-it. When choosing the next rung, an expired `unavailable` row is ignored, so a residual mark cannot
-outrank a healthy sibling rung.
+it. In L6's `next_rung`, an expired `unavailable` row is ignored, so a residual mark cannot outrank a
+healthy sibling rung.
 
 ### Quota failover, step by step
 
