@@ -9,14 +9,14 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Output;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use vowp_protocol::Timestamp;
 use vowp_protocol::{
-    Cost, Executor, HarnessConfig, Limit, LimitRowKind, NodeName, OnCreditsExhausted, ProviderConfig, Run, RunId,
-    RunOutcome, RunPurpose, RunRole, ScheduleAction, ScheduleConfig, VowpConfig,
+    Executor, HarnessConfig, OnCreditsExhausted, ProviderConfig, ScheduleAction, ScheduleConfig, VowpConfig,
 };
-use vowp_store::RunFinish;
 
 /// Provider key variables the tests remove so the runner's environment cannot leak in.
 const PROVIDER_KEY_VARIABLES: &[&str] = &["CLAUDE_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"];
@@ -521,129 +521,5 @@ fn agent_doctor_warns_when_a_surface_token_expires_within_seven_days() {
     assert!(
         !stdout.contains("expiring-token-placeholder"),
         "doctor never prints a token: {stdout}"
-    );
-}
-
-#[test]
-fn doctor_reports_stale_provider_marks_read_only() {
-    let env = common::TestEnv::new();
-    let store = env.store();
-    let now = Timestamp::now();
-    let since = now.minus(Duration::from_secs(20 * 60));
-    for (provider, detail) in [("deepseek", "3 consecutive unknown failures"), ("claude", "quota")] {
-        store
-            .upsert_limit(&Limit {
-                provider: provider.to_owned(),
-                harness: None,
-                kind: LimitRowKind::Unavailable,
-                resets_at: Some(now.minus(Duration::from_secs(60))),
-                detail: detail.to_owned(),
-                since,
-                last_probe_at: None,
-                probe_fail_streak: 0,
-                concurrency_cap: None,
-                cap_until: None,
-            })
-            .expect("stale row");
-        store
-            .kv_set(&format!("limit:{provider}"), "unavailable")
-            .expect("limit mark");
-        store
-            .kv_set(&format!("probe_back:{provider}"), "1")
-            .expect("probe-back mark");
-        store
-            .kv_set(
-                &format!("probe_back_until:{provider}"),
-                &now.minus(Duration::from_secs(30)).as_rfc3339(),
-            )
-            .expect("deadline");
-    }
-    store.kv_set("park:deepseek", "provider_blocked").expect("park mark");
-
-    // claude has finished an ok run since its mark; deepseek has not.
-    let run = Run {
-        id: RunId::new(),
-        job_id: None,
-        session_id: None,
-        role: RunRole::Worker,
-        purpose: RunPurpose::Start,
-        profile: Some("worker".to_owned()),
-        rung: 0,
-        executor: Some(Executor::parse("claude-code:claude-sonnet-5-5@medium").expect("claude")),
-        provider: Some("claude".to_owned()),
-        node: NodeName::parse("local").expect("node"),
-        native_session_id: None,
-        pid: None,
-        window: None,
-        cwd: None,
-        started_at: now,
-        ended_at: None,
-        exit_code: None,
-        outcome: None,
-        limit_kind: None,
-        cost: Cost::unknown(),
-        detail: String::new(),
-    };
-    store.insert_run(&run).expect("run");
-    store
-        .finish_run(
-            &run.id,
-            &RunFinish {
-                outcome: RunOutcome::Ok,
-                exit_code: Some(0),
-                limit_kind: None,
-                cost: Cost::unknown(),
-                native_session_id: None,
-                detail: String::new(),
-            },
-        )
-        .expect("finish run");
-
-    let bin = fake_bin();
-    let output = run_doctor(&env, bin.path());
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stale marks are warnings; stderr: {}; stdout: {}",
-        String::from_utf8_lossy(&output.stderr),
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor prints JSON");
-
-    let deepseek = find_check(&value, "provider-mark:deepseek");
-    assert_eq!(deepseek["status"], "warn", "{deepseek}");
-    let detail = deepseek["detail"].as_str().expect("detail");
-    assert!(detail.contains("deepseek:"), "{detail}");
-    assert!(
-        detail.contains("unavailable (3 consecutive unknown failures)"),
-        "{detail}"
-    );
-    assert!(detail.contains("20m"), "age is reported: {detail}");
-    assert!(detail.contains("no ok run since"), "{detail}");
-    assert!(detail.contains("probe-back until"), "{detail}");
-    assert!(detail.contains("park=provider_blocked"), "{detail}");
-
-    let claude = find_check(&value, "provider-mark:claude");
-    assert_eq!(claude["status"], "warn", "{claude}");
-    let detail = claude["detail"].as_str().expect("detail");
-    assert!(
-        detail.contains("an ok run has finished since"),
-        "doctor says whether the provider served a run: {detail}"
-    );
-
-    // Read-only: doctor leaves every mark exactly as it found it.
-    assert!(
-        store.limit_for("deepseek").expect("limit").is_some(),
-        "doctor must not clear the limit row"
-    );
-    assert_eq!(
-        store.kv_get("probe_back:deepseek").expect("mark").as_deref(),
-        Some("1"),
-        "doctor must not clear the probe-back mark"
-    );
-    assert_eq!(
-        store.kv_get("park:deepseek").expect("mark").as_deref(),
-        Some("provider_blocked"),
-        "doctor must not drain the park mark"
     );
 }

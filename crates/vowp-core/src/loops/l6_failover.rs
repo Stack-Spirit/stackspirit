@@ -53,25 +53,6 @@ pub enum ProbeVerdict {
     Failed(String),
 }
 
-/// One provider mark as reported by a read-only health view.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderMark {
-    /// Provider key, for example `deepseek`.
-    pub provider: String,
-    /// Limit kind and detail, or the residual mark when no limit row backs it.
-    pub reason: String,
-    /// When the mark was first recorded.
-    pub since: Timestamp,
-    /// Age of the mark in whole seconds at the time it was read.
-    pub age_secs: i64,
-    /// Whether the mark no longer blocks the provider now; credits/auth never go stale.
-    pub stale: bool,
-    /// Probe-back deadline, when a probe-back is still owed.
-    pub probe_back_until: Option<Timestamp>,
-    /// Queued `park:<provider>` request, when one exists.
-    pub park: Option<String>,
-}
-
 /// What L6 decided for one finished run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FailoverAction {
@@ -974,89 +955,6 @@ pub(crate) fn clear_mark_keys(store: &Store, provider: &str) -> Result<(), CoreE
     store.kv_delete(&format!("probe_pending:{provider}"))?;
     store.kv_delete(&format!("park:{provider}"))?;
     Ok(())
-}
-
-/// Reports provider marks that no longer block dispatch.
-///
-/// This is a read-only view for `vowp doctor`: it never clears, extends or otherwise writes
-/// a mark. Credits and auth rows are excluded because only the owner's inbox answer resolves
-/// them; every other row whose reset has passed, and every owed probe-back whose deadline has
-/// passed, is stale.
-pub fn stale_provider_marks(store: &Store, now: Timestamp) -> Result<Vec<ProviderMark>, CoreError> {
-    let mut providers = BTreeSet::new();
-    for limit in store.all_limits()? {
-        if limit.kind == LimitRowKind::Context {
-            // A context row is a per-run reseed, not a provider availability mark.
-            continue;
-        }
-        providers.insert(limit.provider);
-    }
-    for (key, value) in store.kv_prefix("probe_back:")? {
-        if value != "0"
-            && let Some(provider) = key.strip_prefix("probe_back:")
-        {
-            providers.insert(provider.to_owned());
-        }
-    }
-    for (key, _) in store.kv_prefix("park:")? {
-        if let Some(provider) = key.strip_prefix("park:") {
-            providers.insert(provider.to_owned());
-        }
-    }
-
-    let mut marks = Vec::new();
-    for provider in providers {
-        let limit = store.limit_for(&provider)?;
-        let probe_back = store.kv_entry(&format!("probe_back:{provider}"))?;
-        let park = store.kv_entry(&format!("park:{provider}"))?;
-        let since = limit
-            .as_ref()
-            .map(|limit| limit.since)
-            .or_else(|| probe_back.as_ref().map(|(_, at)| *at))
-            .or_else(|| park.as_ref().map(|(_, at)| *at));
-        let Some(since) = since else {
-            continue;
-        };
-        let stale = match &limit {
-            None => true,
-            Some(limit) if matches!(limit.kind, LimitRowKind::Credits | LimitRowKind::Auth) => false,
-            Some(limit) => limit.resets_at.is_none_or(|at| at <= now),
-        };
-        if !stale {
-            continue;
-        }
-        let probe_back_until = match (&limit, probe_back.as_ref()) {
-            (Some(limit), Some((value, _))) => probe_back_until(store, limit, value)?,
-            _ => None,
-        };
-        let reason = match &limit {
-            Some(limit) if limit.detail.is_empty() => limit_kind_name(limit.kind).to_owned(),
-            Some(limit) => format!("{} ({})", limit_kind_name(limit.kind), limit.detail),
-            None => "residual mark with no limit row".to_owned(),
-        };
-        marks.push(ProviderMark {
-            provider: provider.clone(),
-            reason,
-            since,
-            age_secs: i64::try_from(now.since(since).as_secs()).unwrap_or(i64::MAX),
-            stale,
-            probe_back_until,
-            park: park.map(|(reason, _)| reason),
-        });
-    }
-    Ok(marks)
-}
-
-/// Returns the lowercase name of a limit row kind.
-fn limit_kind_name(kind: LimitRowKind) -> &'static str {
-    match kind {
-        LimitRowKind::Quota => "quota",
-        LimitRowKind::Credits => "credits",
-        LimitRowKind::Rate => "rate",
-        LimitRowKind::Context => "context",
-        LimitRowKind::Auth => "auth",
-        LimitRowKind::Unavailable => "unavailable",
-    }
 }
 
 /// Finds the newest usable session of `role` for a project.

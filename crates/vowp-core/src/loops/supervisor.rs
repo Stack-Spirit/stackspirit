@@ -18,9 +18,9 @@ use vowp_graph::{
 };
 use vowp_protocol::{
     ActiveState, CancelToken, GateResult, InboxId, InboxItem, InboxKind, InboxState, Job, JobId, JobKind, JobState,
-    LedgerEntry, LedgerKind, Level, LoopBounds, NewSession, Node, NodeFile, ParkedReason, Profile, ProjectEntry,
-    ProjectName, ProjectState, Run, RunId, RunPurpose, SessionId, SessionRole, SessionState, Timestamp, VowpConfig,
-    Worker, WorkerKind, WorkerState,
+    LedgerEntry, LedgerKind, Level, LimitRowKind, LoopBounds, NewSession, Node, NodeFile, ParkedReason, Profile,
+    ProjectEntry, ProjectName, ProjectState, Run, RunId, RunPurpose, SessionId, SessionRole, SessionState, Timestamp,
+    VowpConfig, Worker, WorkerKind, WorkerState,
 };
 use vowp_store::{CrossDbReconcile, JobFilter, MigrationReport, Store};
 
@@ -776,9 +776,26 @@ impl Supervisor {
     /// Quota/rate/unavailable rows and probe-back blocks make a rung unavailable;
     /// credits/auth are parking reasons and must not advance the ladder (loops.md §8.3).
     fn current_rung_limits(&self, now: Timestamp) -> Result<HashMap<String, Option<Timestamp>>, CoreError> {
-        Ok(super::current_rung_limits(&self.store, now)?
+        let mut limited: HashMap<String, Option<Timestamp>> = self
+            .store
+            .active_limits(now)?
             .into_iter()
-            .collect::<HashMap<_, _>>())
+            .filter(|limit| !matches!(limit.kind, LimitRowKind::Credits | LimitRowKind::Auth))
+            .map(|limit| (limit.provider, limit.resets_at))
+            .collect();
+        for (key, value) in self.store.kv_prefix("probe_back:")? {
+            if value != "1" {
+                continue;
+            }
+            let provider = key.trim_start_matches("probe_back:").to_owned();
+            if self.store.limit_for(&provider)?.is_some() {
+                limited.insert(provider, None);
+            }
+        }
+        for (key, _) in self.store.kv_prefix("probe_pending:")? {
+            limited.insert(key.trim_start_matches("probe_pending:").to_owned(), None);
+        }
+        Ok(limited)
     }
 
     /// Applies L6 for a finished run whose runner thread left no marker (manual rows).

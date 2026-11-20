@@ -354,36 +354,8 @@ pub(crate) fn default_branch(deps: &Deps) -> &str {
 /// healthy sibling rung forever. `credits` and `auth` stay sticky until the owner resolves
 /// them.
 pub(crate) fn limited_map(store: &Store, now: Timestamp) -> Result<BTreeMap<String, Option<Timestamp>>, CoreError> {
-    limits_in_force(store, now, true)
-}
-
-/// Returns the limits that decide a job's current rung.
-///
-/// This is [`limited_map`] without `credits`/`auth`: those are parking reasons and never
-/// advance the ladder (loops.md §8.3).
-pub(crate) fn current_rung_limits(
-    store: &Store,
-    now: Timestamp,
-) -> Result<BTreeMap<String, Option<Timestamp>>, CoreError> {
-    limits_in_force(store, now, false)
-}
-
-/// Builds the limited map, optionally including the owner-resolved credits/auth rows.
-fn limits_in_force(
-    store: &Store,
-    now: Timestamp,
-    include_sticky: bool,
-) -> Result<BTreeMap<String, Option<Timestamp>>, CoreError> {
     let mut limited = BTreeMap::new();
     for limit in store.active_limits(now)? {
-        if !include_sticky
-            && matches!(
-                limit.kind,
-                vowp_protocol::LimitRowKind::Credits | vowp_protocol::LimitRowKind::Auth
-            )
-        {
-            continue;
-        }
         limited.insert(limit.provider, limit.resets_at);
     }
     for (key, value) in store.kv_prefix("probe_back:")? {

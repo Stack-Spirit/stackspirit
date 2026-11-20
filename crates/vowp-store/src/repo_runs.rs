@@ -3,8 +3,8 @@
 
 use rusqlite::{OptionalExtension, Row, params};
 use vowp_protocol::{
-    Cost, GateResult, JobId, LimitKind, NodeName, Run, RunId, RunOutcome, RunPurpose, RunRole, SessionId, Timestamp,
-    Tokens, Worker, WorkerKind, WorkerState,
+    Cost, GateResult, JobId, LimitKind, NodeName, Run, RunId, RunOutcome, RunPurpose, RunRole, SessionId, Tokens,
+    Worker, WorkerKind, WorkerState,
 };
 
 use crate::convert::{
@@ -436,23 +436,6 @@ impl Store {
             runs.push(run_from_row(row?)?);
         }
         Ok(runs)
-    }
-
-    /// Returns whether a run on `provider` has ended `ok` at or after `since`.
-    ///
-    /// A successful run is proof the provider works, so read-only health views use this to
-    /// tell a stale mark apart from a mark that still reflects a real outage.
-    pub fn successful_run_since(&self, provider: &str, since: Timestamp) -> Result<bool, StoreError> {
-        self.require_bound()?;
-        let found: i64 = self.conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM project.runs
-                WHERE provider = ?1 AND outcome = 'ok' AND ended_at IS NOT NULL AND ended_at >= ?2
-             )",
-            params![provider, ts_to_text(since)],
-            |row| row.get(0),
-        )?;
-        Ok(found != 0)
     }
 
     /// Returns a job's most recent run, when it has one.

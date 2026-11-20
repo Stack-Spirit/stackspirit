@@ -104,9 +104,6 @@ A `credits` or `auth` row is never cleared this way; only `vowp inbox answer <id
 it. When choosing the next rung, an expired `unavailable` row is ignored, so a residual mark cannot
 outrank a healthy sibling rung.
 
-`vowp doctor` reports stale provider marks read-only: provider, reason, age, and whether a run has
-finished `ok` since the mark. It never clears or extends a mark.
-
 ### Quota failover, step by step
 
 1. The adapter emits a `limit` event with `kind=quota` and, when the harness reports it, `resets_at`.
