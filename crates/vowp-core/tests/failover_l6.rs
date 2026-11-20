@@ -11,7 +11,7 @@ use f::*;
 use vowp_core::loops::l6_failover::{Failover, FailoverAction};
 use vowp_protocol::{
     ActiveState, Cost, Executor, HarnessKind, InboxKind, JobKind, JobState, LedgerKind, Limit, LimitKind, LimitRowKind,
-    ParkedReason, Role, Run, RunId, RunOutcome, RunRole, RunSummary,
+    OnCreditsExhausted, ParkedReason, ProviderConfig, Role, Run, RunId, RunOutcome, RunRole, RunSummary,
 };
 use vowp_store::LedgerFilter;
 
@@ -658,8 +658,11 @@ fn l6_marker_not_written_when_failover_errors() {
 }
 
 /// A two-rung worker ladder (claude then deepseek) whose opencode adapter answers a capsule
-/// write with a valid draft, so a quota failover can complete the switch.
-fn quota_failover_node() -> TestNode {
+/// write with a valid draft, so a failover can complete the switch.
+///
+/// `credits_policy` sets `[providers.claude].on_credits_exhausted`; `None` leaves the
+/// provider table empty, which must behave like the documented `park` default.
+fn two_rung_worker_node(credits_policy: Option<OnCreditsExhausted>) -> TestNode {
     let opencode = Arc::new(ScriptAdapter::new(
         HarnessKind::Opencode,
         Arc::new(|input: &vowp_protocol::StartInput| {
@@ -678,7 +681,21 @@ fn quota_failover_node() -> TestNode {
         let claude = Executor::parse("claude-code:claude-sonnet-5-5@medium").expect("claude");
         let deepseek = Executor::parse("opencode:deepseek/deepseek-flash#max").expect("deepseek");
         config.profiles.get_mut("worker").expect("worker profile").ladder = vec![claude, deepseek];
+        if let Some(policy) = credits_policy {
+            config.providers.insert(
+                "claude".to_owned(),
+                ProviderConfig {
+                    on_credits_exhausted: policy,
+                    ..ProviderConfig::default()
+                },
+            );
+        }
     })
+}
+
+/// A two-rung worker ladder (claude then deepseek) for quota failover tests.
+fn quota_failover_node() -> TestNode {
+    two_rung_worker_node(None)
 }
 
 /// Builds the incident's stale deepseek row: `unavailable` with an expired reset.
@@ -888,5 +905,350 @@ fn probe_back_deadline_in_the_past_makes_the_provider_eligible() {
         action,
         FailoverAction::NextRung { rung: 1 },
         "an expired probe-back deadline must not hide the rung"
+    );
+}
+
+#[test]
+fn credits_next_switches_to_declared_rung_and_records_limit_and_switch() {
+    let node = two_rung_worker_node(Some(OnCreditsExhausted::Next));
+    let store = node.store();
+    let job = node.insert_job("credits-next", JobKind::Build, Role::Worker, Some(vec![]));
+    let session = create_session(&node, &job);
+    let mut run = run_for(
+        &node,
+        Some(&job),
+        "claude",
+        RunRole::Worker,
+        RunOutcome::Credits,
+        Some(LimitKind::Credits),
+    );
+    run.session_id = Some(session.clone());
+
+    let action = Failover::new(node.deps.clone())
+        .on_run_outcome(&store, &run, &limit_summary(LimitKind::Credits, "claude", None))
+        .expect("credits next");
+    assert_eq!(
+        action,
+        FailoverAction::NextRung { rung: 1 },
+        "the explicit opt-in must use the declared fallback rung"
+    );
+
+    // The limit row still explains why the rung changed, and the provider is marked
+    // probe-able instead of being parked.
+    let limit = store.limit_for("claude").expect("limit").expect("credits row");
+    assert_eq!(limit.kind, LimitRowKind::Credits);
+    assert_eq!(limit.resets_at, None);
+    assert_eq!(
+        store.kv_get("probe_back:claude").expect("mark").as_deref(),
+        Some("1"),
+        "the exhausted provider is marked probe-able"
+    );
+    assert_eq!(
+        store.kv_get("park:claude").expect("park request"),
+        None,
+        "next must not request a park"
+    );
+    assert!(
+        store.list_inbox(None).expect("inbox").is_empty(),
+        "next must not open a park notice"
+    );
+
+    let switched = store.require_session(&session).expect("session");
+    assert_eq!(
+        switched.executor.as_ref().map(Executor::provider).as_deref(),
+        Some("deepseek"),
+        "the session moved to rung 1"
+    );
+    assert_eq!(
+        switched.executor.as_ref().map(ToString::to_string).as_deref(),
+        Some("opencode:deepseek/deepseek-flash#max")
+    );
+
+    let ledger = store
+        .ledger_since(&LedgerFilter {
+            kind: Some(LedgerKind::Switch),
+            ..LedgerFilter::default()
+        })
+        .expect("ledger");
+    assert_eq!(ledger.len(), 1, "one switch ledger entry: {ledger:?}");
+    let entry = &ledger[0];
+    assert_eq!(entry.session_id.as_ref(), Some(&session));
+    assert_eq!(entry.provider.as_deref(), Some("deepseek"));
+    assert_eq!(entry.detail["reason"], "limit");
+    assert!(
+        entry.summary.contains("opencode:deepseek/deepseek-flash#max"),
+        "summary: {}",
+        entry.summary
+    );
+}
+
+#[test]
+fn credits_next_without_a_healthy_rung_falls_back_to_park_provider() {
+    let node = two_rung_worker_node(Some(OnCreditsExhausted::Next));
+    let store = node.store();
+    // The only fallback rung is limited, so there is nowhere healthy to move.
+    store
+        .upsert_limit(&Limit {
+            provider: "deepseek".to_owned(),
+            harness: Some(HarnessKind::Opencode),
+            kind: LimitRowKind::Quota,
+            resets_at: Some(ts().plus(Duration::from_secs(3600))),
+            detail: "quota".to_owned(),
+            since: ts(),
+            last_probe_at: None,
+            probe_fail_streak: 0,
+            concurrency_cap: None,
+            cap_until: None,
+        })
+        .expect("deepseek quota");
+    let job = node.insert_job("credits-next-no-rung", JobKind::Build, Role::Worker, Some(vec![]));
+    let session = create_session(&node, &job);
+    let mut run = run_for(
+        &node,
+        Some(&job),
+        "claude",
+        RunRole::Worker,
+        RunOutcome::Credits,
+        Some(LimitKind::Credits),
+    );
+    run.session_id = Some(session);
+
+    let action = Failover::new(node.deps.clone())
+        .on_run_outcome(&store, &run, &limit_summary(LimitKind::Credits, "claude", None))
+        .expect("credits next without a rung");
+    assert_eq!(
+        action,
+        FailoverAction::ParkProvider {
+            provider: "claude".to_owned()
+        }
+    );
+    assert_eq!(
+        store.limit_for("claude").expect("limit").expect("credits row").kind,
+        LimitRowKind::Credits,
+        "the row is written even when the fallback is blocked"
+    );
+    assert_eq!(
+        store.kv_get("park:claude").expect("park request").as_deref(),
+        Some("provider_blocked")
+    );
+}
+
+#[test]
+fn credits_park_still_parks_even_with_a_healthy_rung() {
+    let node = two_rung_worker_node(Some(OnCreditsExhausted::Park));
+    let store = node.store();
+    let job = node.insert_job("credits-park", JobKind::Build, Role::Worker, Some(vec![]));
+    let session = create_session(&node, &job);
+    let mut run = run_for(
+        &node,
+        Some(&job),
+        "claude",
+        RunRole::Worker,
+        RunOutcome::Credits,
+        Some(LimitKind::Credits),
+    );
+    run.session_id = Some(session);
+
+    let action = Failover::new(node.deps.clone())
+        .on_run_outcome(&store, &run, &limit_summary(LimitKind::Credits, "claude", None))
+        .expect("credits park");
+    assert_eq!(
+        action,
+        FailoverAction::ParkProvider {
+            provider: "claude".to_owned()
+        },
+        "park remains the safe default even when another rung is healthy"
+    );
+    assert_eq!(
+        store.kv_get("park:claude").expect("park request").as_deref(),
+        Some("credits")
+    );
+    assert_eq!(
+        store.kv_get("probe_back:claude").expect("mark").as_deref(),
+        Some("0"),
+        "a parked provider is not probe-backed"
+    );
+    assert!(
+        store
+            .ledger_since(&LedgerFilter {
+                kind: Some(LedgerKind::Switch),
+                ..LedgerFilter::default()
+            })
+            .expect("ledger")
+            .is_empty(),
+        "park must not switch the session"
+    );
+}
+
+#[test]
+fn auth_requires_the_explicit_provider_opt_in() {
+    // Without a provider entry the effective policy is the documented `park` default.
+    let node = two_rung_worker_node(None);
+    let store = node.store();
+    let job = node.insert_job("auth-default", JobKind::Build, Role::Worker, Some(vec![]));
+    let session = create_session(&node, &job);
+    let mut run = run_for(
+        &node,
+        Some(&job),
+        "claude",
+        RunRole::Worker,
+        RunOutcome::Auth,
+        Some(LimitKind::Auth),
+    );
+    run.session_id = Some(session);
+    let action = Failover::new(node.deps.clone())
+        .on_run_outcome(&store, &run, &limit_summary(LimitKind::Auth, "claude", None))
+        .expect("auth default");
+    assert_eq!(
+        action,
+        FailoverAction::ParkProvider {
+            provider: "claude".to_owned()
+        },
+        "auth defaults to park even when a healthy rung exists"
+    );
+    assert_eq!(
+        store.kv_get("park:claude").expect("park request").as_deref(),
+        Some("auth")
+    );
+    assert!(store.list_inbox(None).expect("inbox").is_empty());
+    assert!(
+        store
+            .ledger_since(&LedgerFilter {
+                kind: Some(LedgerKind::Switch),
+                ..LedgerFilter::default()
+            })
+            .expect("ledger")
+            .is_empty(),
+        "the default auth policy never switches"
+    );
+
+    // The same explicit opt-in covers auth: it advances only when the provider sets it.
+    let node = two_rung_worker_node(Some(OnCreditsExhausted::Next));
+    let store = node.store();
+    let job = node.insert_job("auth-next", JobKind::Build, Role::Worker, Some(vec![]));
+    let session = create_session(&node, &job);
+    let mut run = run_for(
+        &node,
+        Some(&job),
+        "claude",
+        RunRole::Worker,
+        RunOutcome::Auth,
+        Some(LimitKind::Auth),
+    );
+    run.session_id = Some(session.clone());
+    let action = Failover::new(node.deps.clone())
+        .on_run_outcome(&store, &run, &limit_summary(LimitKind::Auth, "claude", None))
+        .expect("auth next");
+    assert_eq!(action, FailoverAction::NextRung { rung: 1 });
+    assert_eq!(
+        store.limit_for("claude").expect("limit").expect("auth row").kind,
+        LimitRowKind::Auth
+    );
+    assert_eq!(store.kv_get("probe_back:claude").expect("mark").as_deref(), Some("1"));
+    assert_eq!(store.kv_get("park:claude").expect("park request"), None);
+    assert_eq!(
+        store
+            .require_session(&session)
+            .expect("session")
+            .executor
+            .as_ref()
+            .map(Executor::provider)
+            .as_deref(),
+        Some("deepseek")
+    );
+}
+
+#[test]
+fn credits_next_harvest_does_not_park_the_running_job() {
+    let node = two_rung_worker_node(Some(OnCreditsExhausted::Next));
+    let job = node.insert_job("credits-next-harvest", JobKind::Build, Role::Worker, Some(vec![]));
+    node.force_state(&job, JobState::Running);
+    let session = create_session(&node, &job);
+    let store = node.store();
+    // A second job already ran on the exhausted provider. The old park path would park
+    // it too; the opt-in is per affected session, so this job must be left alone.
+    let other = node.insert_job("credits-next-other", JobKind::Build, Role::Worker, Some(vec![]));
+    node.force_state(&other, JobState::Running);
+    let mut other_run = run_for(&node, Some(&other), "claude", RunRole::Worker, RunOutcome::Ok, None);
+    other_run.ended_at = None;
+    other_run.outcome = None;
+    other_run.limit_kind = None;
+    store.insert_run(&other_run).expect("other open run");
+    store
+        .finish_run(
+            &other_run.id,
+            &vowp_store::RunFinish {
+                outcome: RunOutcome::Ok,
+                exit_code: Some(0),
+                limit_kind: None,
+                cost: Cost::unknown(),
+                native_session_id: None,
+                detail: "ok".to_owned(),
+            },
+        )
+        .expect("finish other run");
+    let mut run = run_for(
+        &node,
+        Some(&job),
+        "claude",
+        RunRole::Worker,
+        RunOutcome::Credits,
+        Some(LimitKind::Credits),
+    );
+    run.session_id = Some(session.clone());
+    run.ended_at = None;
+    run.outcome = None;
+    run.limit_kind = None;
+    store.insert_run(&run).expect("open run");
+    store
+        .finish_run(
+            &run.id,
+            &vowp_store::RunFinish {
+                outcome: RunOutcome::Credits,
+                exit_code: Some(1),
+                limit_kind: Some(LimitKind::Credits),
+                cost: Cost::unknown(),
+                native_session_id: None,
+                detail: "insufficient balance".to_owned(),
+            },
+        )
+        .expect("finish run");
+
+    let mut supervisor = node.supervisor();
+    for name in ["l2-worker", "l4-planner", "l5-keeper"] {
+        store.set_loop_state(name, ActiveState::Paused).expect("pause loop");
+    }
+    supervisor.tick().expect("harvest tick");
+
+    let job = store.require_job(&job.id).expect("job");
+    assert_ne!(
+        job.state,
+        JobState::Parked,
+        "the explicit next policy must not be undone by the harvest park path"
+    );
+    assert_eq!(job.parked_reason, None);
+    assert_eq!(
+        store.require_job(&other.id).expect("other job").state,
+        JobState::Running,
+        "the opt-in does not park other jobs that already ran on the provider"
+    );
+    assert_eq!(
+        store
+            .require_session(&session)
+            .expect("session")
+            .executor
+            .as_ref()
+            .map(Executor::provider)
+            .as_deref(),
+        Some("deepseek"),
+        "the session stays on the declared fallback rung"
+    );
+    assert!(
+        store.limit_for("claude").expect("limit").is_some(),
+        "the credits row still explains the rung change"
+    );
+    assert!(
+        store.list_inbox(None).expect("inbox").is_empty(),
+        "no park notice is opened for the opt-in"
     );
 }

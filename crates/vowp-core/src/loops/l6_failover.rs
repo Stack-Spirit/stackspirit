@@ -12,8 +12,8 @@ use std::time::Duration;
 use serde_json::json;
 use vowp_protocol::{
     CancelToken, CapsuleTrigger, Executor, ExecutorRef, HarnessKind, LedgerEntry, LedgerKind, Limit, LimitEvent,
-    LimitKind, LimitRowKind, NewSession, ParkedReason, Profile, Run, RunOutcome, RunPurpose, RunRole, RunSummary,
-    SessionId, SessionRole, SessionState, SwitchReason, SwitchRequest, Timestamp,
+    LimitKind, LimitRowKind, NewSession, OnCreditsExhausted, ParkedReason, Profile, Run, RunOutcome, RunPurpose,
+    RunRole, RunSummary, SessionId, SessionRole, SessionState, SwitchReason, SwitchRequest, Timestamp,
 };
 use vowp_store::{SessionFilter, Store};
 
@@ -190,6 +190,70 @@ impl Failover {
                 provider: provider.to_owned(),
             });
         }
+        self.advance_to_next_rung(store, run, provider)
+    }
+
+    /// Credits and auth keep `park` as the default; an explicit provider opt-in advances.
+    fn on_credits_or_auth(
+        &self,
+        store: &Store,
+        run: &Run,
+        summary: &RunSummary,
+        provider: &str,
+        credits: bool,
+    ) -> Result<FailoverAction, CoreError> {
+        let kind = if credits {
+            LimitRowKind::Credits
+        } else {
+            LimitRowKind::Auth
+        };
+        let detail = summary
+            .limit
+            .as_ref()
+            .map(|limit| limit.message.clone())
+            .unwrap_or_else(|| {
+                if credits {
+                    "credits exhausted".to_owned()
+                } else {
+                    "authentication failed".to_owned()
+                }
+            });
+        // The row is written for both policies: the owner must be able to see why the
+        // rung changed, and a parked job still needs its limit recorded.
+        self.write_limit(store, run, provider, kind, None, &detail, None, None)?;
+        let policy = self
+            .deps
+            .config
+            .providers
+            .get(provider)
+            .map(|provider| provider.on_credits_exhausted)
+            .unwrap_or_default();
+        let kind_name = if credits { "credits" } else { "auth" };
+        match policy {
+            OnCreditsExhausted::Park => {
+                self.mark_provider(store, provider, kind_name, false)?;
+                self.request_park(store, provider, kind_name)?;
+                Ok(FailoverAction::ParkProvider {
+                    provider: provider.to_owned(),
+                })
+            }
+            OnCreditsExhausted::Next => {
+                // The owner opted into using the declared fallback rung. The provider is
+                // still marked (and probe-able), then the session takes the same
+                // next-rung path as a quota limit.
+                self.mark_provider(store, provider, kind_name, true)?;
+                self.advance_to_next_rung(store, run, provider)
+            }
+        }
+    }
+
+    /// Switches the run's session to the next healthy declared rung, or parks the provider.
+    ///
+    /// Shared by a quota limit and the explicit credits/auth opt-in. The caller has
+    /// already written the limit row; this records the switch ledger and returns the
+    /// decision the supervisor applies.
+    fn advance_to_next_rung(&self, store: &Store, run: &Run, provider: &str) -> Result<FailoverAction, CoreError> {
+        let now = store.clock().now();
         let next = self.next_rung(run, store, now)?;
         let Some((rung, executor, node)) = next else {
             self.request_park(store, provider, "provider_blocked")?;
@@ -230,39 +294,6 @@ impl Failover {
                 })
             }
         }
-    }
-
-    /// Credits and auth both park every job whose current rung uses the provider.
-    fn on_credits_or_auth(
-        &self,
-        store: &Store,
-        run: &Run,
-        summary: &RunSummary,
-        provider: &str,
-        credits: bool,
-    ) -> Result<FailoverAction, CoreError> {
-        let kind = if credits {
-            LimitRowKind::Credits
-        } else {
-            LimitRowKind::Auth
-        };
-        let detail = summary
-            .limit
-            .as_ref()
-            .map(|limit| limit.message.clone())
-            .unwrap_or_else(|| {
-                if credits {
-                    "credits exhausted".to_owned()
-                } else {
-                    "authentication failed".to_owned()
-                }
-            });
-        self.write_limit(store, run, provider, kind, None, &detail, None, None)?;
-        self.mark_provider(store, provider, if credits { "credits" } else { "auth" }, false)?;
-        self.request_park(store, provider, if credits { "credits" } else { "auth" })?;
-        Ok(FailoverAction::ParkProvider {
-            provider: provider.to_owned(),
-        })
     }
 
     /// Writes the deterministic rate backoff and lowers the provider concurrency cap.

@@ -947,7 +947,7 @@ pub struct ProviderConfig { #[serde(default = "four")] pub max_concurrent: u32 /
                             #[serde(default)] pub on_credits_exhausted: OnCreditsExhausted /* park */,
                             #[serde(default)] pub prices: BTreeMap<String, PriceEntry> /* model -> $/M; default empty */ }
 #[serde(rename_all = "snake_case")]
-pub enum OnCreditsExhausted { #[default] Park }                                      // v0.1: only park (never switch silently)
+pub enum OnCreditsExhausted { #[default] Park, Next }                                // default park; next uses the next declared rung (spends on it)
 pub struct PriceEntry { pub input_per_m: f64, pub output_per_m: f64, pub cache_read_per_m: Option<f64>, pub cache_write_per_m: Option<f64> }
 pub struct HarnessConfig { pub binary: Option<String>, pub extra_args: Vec<String>, pub env_pass: Vec<String> /* env var NAMES to forward */,
                            pub permission_mode: Option<String>, pub mapping: Option<String> /* cli adapter: path to mapping .toml */ }
@@ -1002,6 +1002,12 @@ All structs except `LoopConfig` use `#[serde(deny_unknown_fields)]`. **Every fie
 default fn) giving exactly the value in its comment**; `Default` impls match. Config enums (`OnCreditsExhausted`, `Approval`, `MissedPolicy`, `OnQuota`, `ActiveState`)
 use `#[serde(rename_all = "snake_case")]`. `JobLoop` (§7) likewise: `#[serde(default = "...")]` on `until` (`gates`), `max_attempts` (3), `on_exhausted` (`escalate`).
 The only required keys in the whole file are `[project] name`, each profile's `ladder`, each `[env.*] checkout`, and each `[[schedules]] name` + `action`.
+
+`on_credits_exhausted = "park"` is the default and the safe behaviour: park the jobs and ask the owner.
+`"next"` is an explicit owner opt-in that writes the same limit row and then moves the affected session
+to the next healthy rung declared in its profile ladder; auth follows the same policy and also defaults
+to `park`. A ladder is a budget declaration, so `next` is only valid when rung 2 is explicitly
+configured for that profile and the owner accepts spending on it.
 
 `[offload]` is the §7.4 policy file embedded in `vowp.toml`. Offload is disabled by default, so
 every job stays on the home until the owner enables it and a project opts in. Validation refuses:

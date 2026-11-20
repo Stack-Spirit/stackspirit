@@ -608,11 +608,16 @@ impl Supervisor {
                 self.mark_run_harvested(&run.id)?;
                 continue;
             }
-            if matches!(
-                run.limit_kind,
-                Some(vowp_protocol::LimitKind::Credits) | Some(vowp_protocol::LimitKind::Auth)
-            ) && let Some(provider) = super::l6_failover::provider_of(&run)
+            if let Some(provider) = super::l6_failover::provider_of(&run)
+                && matches!(
+                    run.limit_kind,
+                    Some(vowp_protocol::LimitKind::Credits) | Some(vowp_protocol::LimitKind::Auth)
+                )
+                && self.credits_policy(&provider) == vowp_protocol::OnCreditsExhausted::Park
             {
+                // The default policy parks here as a backstop. With the explicit
+                // `next` opt-in L6 already moved the session, so parking the job
+                // would undo the owner's choice.
                 let reason = if run.limit_kind == Some(vowp_protocol::LimitKind::Credits) {
                     ParkedReason::Credits
                 } else {
@@ -743,6 +748,16 @@ impl Supervisor {
         Ok(parked)
     }
 
+    /// Returns the effective credits/auth policy for a provider.
+    fn credits_policy(&self, provider: &str) -> vowp_protocol::OnCreditsExhausted {
+        self.deps
+            .config
+            .providers
+            .get(provider)
+            .map(|config| config.on_credits_exhausted)
+            .unwrap_or_default()
+    }
+
     /// Returns the provider of a job's current rung.
     fn provider_of_job(&self, job: &Job) -> Result<String, CoreError> {
         if let Some(run) = self.store.last_run_of_job(&job.id)?
@@ -758,7 +773,9 @@ impl Supervisor {
             .ok_or_else(|| CoreError::NotFound(format!("profile {}", job.profile)))?;
         let now = self.store.clock().now();
         // loops.md §8.3: a job that never ran is on `Profile::pick`'s current rung.
-        // Credits/auth never advance the ladder, so those rows do not pick a rung.
+        // A credits/auth row is a parking reason, not a rung by itself. With the
+        // `next` opt-in L6 also sets the probe-back mark, which does block the
+        // provider so later starts choose the declared fallback.
         if let Some((_, executor)) = profile.pick(&self.current_rung_limits(now)?, now) {
             return Ok(executor.provider());
         }
