@@ -103,9 +103,10 @@ Rules that every follow-up job must preserve:
    working directory.
 6. **Loopback only.** The bundled engine binds `127.0.0.1`. The SSH forward binds
    `127.0.0.1`. There is no public listener, no `0.0.0.0`, and no wildcard `-L` bind.
-7. **No auto-approval.** If OpenCode asks for a tool permission, the chat shows a typed
-   error and never approves it. The owner uses the OpenCode app or a later approval
-   design.
+7. **Explicit owner approval only.** If OpenCode asks for a tool permission, the chat
+   pauses the turn, shows an inline "Permission needed" card with the redacted request,
+   and sends nothing until the owner clicks Allow once, Always allow or Reject. Nothing
+   auto-approves.
 
 ## 2. Local path
 
@@ -453,14 +454,16 @@ not require one. The pinned build uses `{ "id", "type", "properties" }`; the par
 | `message.removed` | Minor note only: a full-message removal is not reflected in the rendered log until the next log read; `session.idle`/reattach/reconnect backfill covers it. The pump may drop the message if present, but must not treat the event as the durable deletion. |
 | `session.idle` | Read the log once if the assistant text may be incomplete, then emit `done` for the active assistant message; set the session `ready`. This is the reconciliation point when deltas are ignored. |
 | `session.error` | Emit `error`; set the session `error`. Do not show the raw error object. |
-| `permission.asked` | Emit `permission_required`; never approve. The turn is left to the owner in the OpenCode app; if abort is available, abort it. |
-| `permission.replied` | Ignore; there is no approval UI in this contract. |
+| `permission.asked` | Publish a `ChatPermissionPrompt` in `pending_permissions` and leave the turn waiting. Nothing auto-approves. If the event carries no id, reconcile with `GET /permission` filtered to the native session id. |
+| `permission.replied` | Remove the matching prompt. An id-less reply also reconciles with `GET /permission`. |
 | Everything else | Ignore. Do not render tool JSON, step internals or delta-only UI events. |
 
 `permission.updated` is **not** in the pinned `/doc`; the v1 event name is
 `permission.asked`. Watching only `permission.updated` would make a permission request
-invisible and could hang the turn. `permission.v2.asked`/`permission.v2.replied` are
-v2-only and belong to a later v2 adapter, not this pump.
+invisible and could hang the turn. The pinned event may omit the request id; with no id
+the pump reconciles with `GET /permission` instead of dropping the request. A request must
+never become invisible and hang the turn. `permission.v2.asked`/`permission.v2.replied`
+are v2-only and belong to a later v2 adapter, not this pump.
 
 `message.part.updated` is the cumulative source of truth: set the text to the part's
 `text`, never append it. `message.part.delta` is a separate event; when the core applies
@@ -597,6 +600,8 @@ event.
 | `POST /session/{id}/message` accepts an omitted `model` | **Schema confirms optional; runtime server/owner** | `/doc` marks `model` optional; a successful server turn is still an owner/server check |
 | `GET /doc` exposes OpenAPI | **Proven live** | 200 `application/json`, OpenAPI 3.1.0, 162 paths, 479,667 bytes |
 | `permission.asked` is the v1 permission event | **Proven by `/doc`** | `permission.updated` is absent; `permission.replied` and v2-only `permission.v2.*` are separate |
+| The pinned permission reply route | **Assumed; legacy fallback implemented** | The 1.19.5 `/doc` was not readable from the v2 host used here. The core tries `POST /permission/{id}/reply {"reply": ...}`, then `POST /session/{sid}/permissions/{id} {"response": ...}`; both are fake-server tested only |
+| `GET /permission` lists pending requests for a native session | **Assumed from the brief; fake-tested** | Entries use `id`, `sessionID`, `permission` and `patterns`; the core filters by the attached native session id |
 | `server.heartbeat` is a liveness data event | **Proven live; undocumented in `/doc`** | Empty `properties`, about every 10 s; explicitly ignored, any byte counts |
 | `message.removed` exists | **Proven by `/doc`; minor** | `{sessionID,messageID}`; a full removal is covered by the next log read/backfill |
 
@@ -989,11 +994,42 @@ export interface ChatMessage {
   /** True while assistant text is still arriving. */
   streaming?: boolean;
   /**
+   * Compact, redacted tool-call rows for this assistant turn. Absent when the message
+   * has no tool parts; a later update without it keeps the rows already delivered.
+   */
+  tools?: ChatToolActivity[];
+  /**
    * A details-panel hint. Only app/preview messages set it; model text never does.
    * The renderer maps it to `PanelContent`.
    */
   show?: ChatPanelTarget | null;
 }
+
+export type ChatToolStatus = "pending" | "running" | "completed" | "error";
+
+/** One compact tool-call row. Never carries raw input, output or error text. */
+export interface ChatToolActivity {
+  /** The native part id. */
+  id: string;
+  /** The tool name, for example `bash`. */
+  name: string;
+  status: ChatToolStatus;
+  /** A short redacted hint such as the command or path. */
+  summary?: string;
+}
+
+/** One permission request the engine is waiting on. */
+export interface ChatPermissionPrompt {
+  /** The native request id, needed to reply. */
+  id: string;
+  /** The requested action, for example `bash` or `external_directory`. */
+  permission: string;
+  /** The requested patterns, already redacted for display. */
+  patterns: string[];
+  created_at: Timestamp;
+}
+
+export type ChatPermissionDecision = "once" | "always" | "reject";
 
 /** The details panel target, moved here so `MockBridge` need not import `next/`. */
 export type ChatPanelTarget =
@@ -1114,6 +1150,8 @@ export interface ChatSessionView {
   started_at: Timestamp | null;
   last_event_at: Timestamp | null;
   error: SpiritErrorDto | null;
+  /** Permission requests the engine is waiting on, oldest first. Absent when none. */
+  pending_permissions?: ChatPermissionPrompt[];
 }
 
 export interface ChatStartInput {
@@ -1239,6 +1277,16 @@ export interface ChatBridgeSurface {
    * model config, so that session rejects. Optional for older bridges.
    */
   setModel?(session: SessionId, modelId: string): Promise<ChatSessionView>;
+  /**
+   * Answer one pending permission request from an explicit owner click. Nothing is ever
+   * approved implicitly; a request that is already gone resolves with the current view.
+   * Optional for older bridges.
+   */
+  replyPermission?(
+    session: SessionId,
+    permissionId: string,
+    decision: ChatPermissionDecision,
+  ): Promise<ChatSessionView>;
   /** Read the conversation log; pages move backward from newest, each oldest-first. */
   log(session: SessionId, query?: ChatLogQuery): Promise<ChatLogPage>;
   /** Returns an unsubscribe function; callers must clean up on unmount. */
@@ -1380,8 +1428,42 @@ pub struct ChatMessage {
     pub created_at: Timestamp,
     pub origin: ChatMessageOrigin,
     pub streaming: bool,
+    /// Compact, redacted tool rows. None when the event cannot know them.
+    pub tools: Option<Vec<ChatToolActivity>>,
+}
+
+pub enum ChatToolStatus {
+    Pending,
+    Running,
+    Completed,
+    Error,
+}
+
+pub struct ChatToolActivity {
+    pub id: String,
+    pub name: String,
+    pub status: ChatToolStatus,
+    /// A short redacted hint such as the command or path.
+    pub summary: Option<String>,
+}
+
+pub struct ChatPermissionPrompt {
+    pub id: String,
+    pub permission: String,
+    /// Requested patterns, already redacted for display.
+    pub patterns: Vec<String>,
+    pub created_at: Timestamp,
+}
+
+pub enum ChatPermissionDecision {
+    Once,
+    Always,
+    Reject,
 }
 ```
+
+`ChatSessionView` carries `pending_permissions: Option<Vec<ChatPermissionPrompt>>`
+alongside `error`; it is absent when no request is waiting.
 
 The transport-side endpoint is core-only and has no `Debug`/`Serialize` that could leak
 it:
@@ -1724,6 +1806,11 @@ chat field. The chat surface adds no URL/port. No token is ever in the DOM.
   app-data directory.
 - The chat session mapping contains ids only, never a token or path. It is not a secret,
   but it is app-private.
+- Pending permission prompts carry only the native request id, the permission name,
+  redacted patterns and a timestamp. Tool rows carry only the tool name, status and a
+  redacted hint; tool input, output and error text never enter a view.
+- The app sends a permission reply only after an explicit owner click, and only for a
+  request currently in `pending_permissions`. Nothing auto-approves.
 - No chat data is written to the VOWP home from the app. VOWP writes its own log; the app
   does not open it.
 - The app never deletes a native or VOWP session. `stop` aborts/detaches. A new setup
@@ -1749,8 +1836,8 @@ chat field. The chat surface adds no URL/port. No token is ever in the DOM.
   StackSpirit tool and no secret, and the card never sends a password to the model. The
   orchestrator's OpenCode tools may read files or run commands as the Mac user; that is
   the existing OpenCode/orchestrator permission boundary, not something this chat can
-  sandbox. The app never auto-approves a permission request. The UI does not claim the
-  model is sandboxed.
+  sandbox. The app never auto-approves a permission request; only an explicit owner click
+  sends a reply. The UI does not claim the model is sandboxed.
 
 ## 6. Error states
 
@@ -1782,7 +1869,6 @@ The UI shows `errorTitle(error)` plus the message and hint; it never shows a raw
 | `remote` — `host_disconnected` | The host is not connected or the forward died | "The server is not connected; server chat needs the verified SSH connection." | Reconnect the host |
 | `ssh_auth` / `ssh_unavailable` / `host_key_mismatch` — `ssh_forward_failed` | The forward could not start | "The SSH forward to the server failed." (host label only) | After fixing the host/key |
 | `remote_timeout` — `stream_lost` | SSE retries exhausted | "Live updates stopped; reconnect to continue." | Reattach/backfill |
-| `refused` — `permission_required` | OpenCode asks for a tool permission | "This turn needs tool approval in OpenCode; StackSpirit does not auto-approve." | Open the OpenCode app; start a new turn |
 | `remote_timeout` — `turn_timeout` | The 10-minute turn cap | "The turn did not finish in time." | Retry after stop |
 | `conflict` — `stop_unconfirmed` | Abort is unsupported/failed | "Stopped here; the turn may still be running on the orchestrator." | Check OpenCode; not an error state |
 | `engine` — `stream_unsupported` | SSE is unavailable; final response mode is used | "Live text is unavailable; the reply appears when the turn completes." | No; informational |
@@ -1801,6 +1887,10 @@ HTTP mapping for the server/client:
 | 5xx | `engine` ("The orchestrator failed the request.") |
 | Connection refused | `engine` (`engine_unavailable`) or `remote` (`ssh_forward_failed`) |
 | Timeout | `remote_timeout` |
+
+A failed permission reply is not a session error. If the engine rejects the reply or
+exposes no permission reply route, the core returns a typed `engine` error and the card
+stays visible with the turn still paused; it never pretends the answer was sent.
 
 An HTTP 200 `info.error` in the assistant message uses the same mapping: 401/403 →
 `auth`, 429 → `limit`, everything else → `engine` (`provider_error`). Never render the raw
@@ -1822,6 +1912,9 @@ error object.
 - `ChatView`/`conversations.ts` wiring for the **setup assistant** and the honest
   `chat_unavailable`/`engine_*` states. The global/project surfaces show the gate until
   the server path opens; they do not show preview replies when `bridge.preview` is false.
+- Live tool-activity rows and the inline permission card. Allow once / Always allow /
+  Reject call `replyPermission` (`chat_reply_permission`); the route is fake-tested. Confirm
+  the pinned 1.19.5 reply route before claiming the live path.
 - The removal of the label-only Local/Server toggle.
 - The `ChatMessageView` card flow, the secure server card and the onboarding actions are
   unchanged and real.
