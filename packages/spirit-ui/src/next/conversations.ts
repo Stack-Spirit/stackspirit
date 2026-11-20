@@ -63,6 +63,11 @@ export interface ChatMessageView extends Omit<ChatMessage, "created_at" | "origi
   /** Who produced the message; app-owned cards default to `app` when rendered. */
   origin?: ChatMessageOrigin;
   card?: ChatCard;
+  /**
+   * True only on a user bubble rendered from a `chat.send` receipt that no native
+   * event or log message has confirmed yet. Renderer-only: never sent over the bridge.
+   */
+  optimistic?: boolean;
 }
 
 /** The verified facts a successful onboarding may put in the conversation. */
@@ -275,41 +280,54 @@ function sameTurn(left: ChatMessageView, right: ChatMessageView): boolean {
   );
 }
 
+/** Drops the renderer-only optimistic marker after native truth arrives. */
+function withoutOptimistic(message: ChatMessageView): ChatMessageView {
+  const next = { ...message };
+  delete next.optimistic;
+  return next;
+}
+
 /**
- * Upserts by id. A native user message replaces the optimistic `local:` one when the
- * role, text and timestamp match; a receipt for an already-seen native message is
- * ignored rather than shown twice.
+ * Upserts by id and by the renderer-only `optimistic` marker. An exact id match always
+ * merges, with the incoming fields winning and the marker cleared. A `send` receipt
+ * with a different id merges into a same-turn native message and keeps the native id;
+ * a native event or log message with a different id replaces the same-turn optimistic
+ * bubble instead of appending a second one. Two native or two optimistic messages are
+ * never merged, so repeated identical user turns stay separate.
  */
-function upsertMessage(list: ChatMessageView[], message: ChatMessageView): ChatMessageView[] {
+export function upsertMessage(
+  list: ChatMessageView[],
+  message: ChatMessageView,
+): ChatMessageView[] {
   const exact = list.findIndex((candidate) => candidate.id === message.id);
   if (exact >= 0) {
     const existing = list[exact];
     if (!existing) return list;
     const next = list.slice();
-    next[exact] = { ...existing, ...message };
+    next[exact] = withoutOptimistic({ ...existing, ...message });
     return next;
   }
-  if (message.id.startsWith("local:")) {
+  if (message.optimistic === true) {
     const native = list.findIndex(
-      (candidate) => !candidate.id.startsWith("local:") && sameTurn(candidate, message),
+      (candidate) => candidate.optimistic !== true && sameTurn(candidate, message),
     );
     if (native >= 0) {
       const existing = list[native];
-      if (!existing) return [...list, message];
+      if (!existing) return [...list, { ...message, optimistic: true }];
       const next = list.slice();
-      next[native] = { ...existing, ...message, id: existing.id };
+      next[native] = withoutOptimistic({ ...existing, ...message, id: existing.id });
       return next;
     }
-    return [...list, message];
+    return [...list, { ...message, optimistic: true }];
   }
   const optimistic = list.findIndex(
-    (candidate) => candidate.id.startsWith("local:") && sameTurn(candidate, message),
+    (candidate) => candidate.optimistic === true && sameTurn(candidate, message),
   );
   if (optimistic >= 0) {
     const existing = list[optimistic];
     if (!existing) return [...list, message];
     const next = list.slice();
-    next[optimistic] = { ...existing, ...message };
+    next[optimistic] = withoutOptimistic({ ...existing, ...message });
     return next;
   }
   return [...list, message];
@@ -666,7 +684,10 @@ export const useConversations = create<ConversationState>((set, get) => ({
     try {
       const receipt = await chat.send({ session, text: trimmed });
       if (!bridge.preview && receipt.message.origin === "preview") return;
-      const message = normalizeMessage(receipt.message);
+      const message: ChatMessageView = {
+        ...normalizeMessage(receipt.message),
+        optimistic: true,
+      };
       useConversations.setState((state) => ({
         messages: {
           ...state.messages,
