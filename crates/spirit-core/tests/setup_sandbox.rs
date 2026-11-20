@@ -46,7 +46,7 @@ fn setup_engine_config_denies_every_host_tool_and_never_asks() {
 fn setup_agents_md_describes_real_flows_without_secrets_or_paths() {
     let temp = tempfile::tempdir().unwrap();
     let tree = PrivateEngineTree::prepare(temp.path()).unwrap();
-    let path = tree.setup_workspace.join("AGENTS.md");
+    let path = tree.opencode_config_dir().join("AGENTS.md");
     assert_eq!(mode(&path), 0o600);
     let text = std::fs::read_to_string(&path).unwrap();
     for needle in [
@@ -80,4 +80,104 @@ fn isolated_env_points_only_at_the_private_tree() {
         }
     }
     assert!(PrivateEngineTree::INHERITED_CONFIG_ENV.contains(&"OPENCODE_CONFIG_CONTENT"));
+}
+
+/// Runs the bundled engine against a loopback mock provider and returns the request bodies it sent.
+/// Returns `None` when the sidecar is not present (fresh worktree without `fetch-engine`).
+fn captured_model_requests(temp: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let triple = spirit_core::engine::current_target_triple()?;
+    let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/spirit-desktop/src-tauri/binaries")
+        .join(spirit_core::engine::sidecar_file_name(triple));
+    if !binary.exists() {
+        eprintln!("skipping: engine sidecar not fetched");
+        return None;
+    }
+    let tree = PrivateEngineTree::prepare(temp).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // Same sandbox config as production, plus a loopback provider so a turn can be captured.
+    let path = tree.opencode_config_dir().join("opencode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["provider"] = serde_json::json!({"openai": {"options": {
+        "baseURL": format!("http://127.0.0.1:{port}/v1"), "apiKey": "mock"}}});
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+    let captured = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&captured);
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            };
+            stream.set_nonblocking(false).ok();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .ok();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            while let Ok(n) = stream.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            sink.lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&buf));
+            let _ = stream.write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+            );
+            if sink.lock().unwrap().contains("StackSpirit") {
+                break;
+            }
+        }
+    });
+
+    let mut command = Command::new(&binary);
+    command
+        .args(["run", "--model", "openai/gpt-4o", "hello"])
+        .current_dir(&tree.setup_workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for name in PrivateEngineTree::INHERITED_CONFIG_ENV {
+        command.env_remove(name);
+    }
+    for (name, value) in tree.isolated_env() {
+        command.env(name, value);
+    }
+    let mut child = command.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline && !server.is_finished() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = server.join();
+    let text = captured.lock().unwrap().clone();
+    Some(text)
+}
+
+#[test]
+fn live_engine_sends_the_setup_prompt_to_the_model() {
+    let temp = tempfile::tempdir().unwrap();
+    let Some(requests) = captured_model_requests(temp.path()) else {
+        return;
+    };
+    for needle in ["StackSpirit", "+ Connect a new server", "Form a cluster"] {
+        assert!(
+            requests.contains(needle),
+            "the engine did not deliver the setup AGENTS.md ({needle} missing from the model request)"
+        );
+    }
 }

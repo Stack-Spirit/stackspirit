@@ -1352,7 +1352,7 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             directory.display()
         );
     }
-    let agents = tree.setup_workspace.join("AGENTS.md");
+    let agents = tree.opencode_config_dir().join("AGENTS.md");
     let prompt = std::fs::read_to_string(&agents).unwrap();
     assert!(prompt.contains("StackSpirit setup assistant"));
     assert!(!prompt.contains("/home/"));

@@ -2163,7 +2163,7 @@ contract is now:
   workspace as cwd. `OPENCODE_CONFIG_CONTENT` and `OPENCODE_PERMISSION` are removed from the
   inherited environment, so no external orchestrator `opencode.json` (for example one under
   a VOWP agent home) is loaded.
-- `workspaces/setup/AGENTS.md` (atomic, `0600`) tells the assistant it is chat-only and
+- `config/opencode/AGENTS.md` (atomic, `0600`; the pinned engine loads only `$OPENCODE_CONFIG_DIR/AGENTS.md` once project config is disabled, so it is not in the workspace) tells the assistant it is chat-only and
   explains the real flows: `+ Connect a new server` in the composer, `Settings -> Add
   server` for key-auth hosts, `Form a cluster` once two or more servers are saved, and
   never to paste passwords, keys or tokens into chat. It contains no host, path or secret.

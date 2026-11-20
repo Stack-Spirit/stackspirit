@@ -254,7 +254,7 @@ impl EngineLogBuffer {
 
 /// The app-private tree from `docs/ORCHESTRATOR-CHAT.md` §2.1.3.
 ///
-/// All directories are created `0700`; the setup `AGENTS.md` and `opencode.json` are `0600`. The renderer
+/// All directories are created `0700`; the setup `AGENTS.md` and `opencode.json` (both in `engine/config/opencode`) are `0600`. The renderer
 /// never receives these paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateEngineTree {
@@ -297,9 +297,9 @@ impl PrivateEngineTree {
         ] {
             create_private_directory(directory)?;
         }
-        write_setup_agents(&tree.setup_workspace)?;
         let opencode_dir = tree.opencode_config_dir();
         create_private_directory(&opencode_dir)?;
+        write_setup_agents(&opencode_dir)?;
         write_setup_opencode_config(&opencode_dir)?;
         Ok(tree)
     }
@@ -410,9 +410,11 @@ fn create_private_directory(path: &Path) -> Result<(), SpiritError> {
     Ok(())
 }
 
-fn write_setup_agents(setup_workspace: &Path) -> Result<(), SpiritError> {
+/// The pinned engine ignores the workspace `AGENTS.md` once project config is disabled and loads
+/// only `$OPENCODE_CONFIG_DIR/AGENTS.md`, so the setup prompt lives beside `opencode.json`.
+fn write_setup_agents(config_dir: &Path) -> Result<(), SpiritError> {
     write_private_file_atomic(
-        &setup_workspace.join("AGENTS.md"),
+        &config_dir.join("AGENTS.md"),
         SETUP_AGENTS_MD.as_bytes(),
         "the private setup workspace instructions",
     )
