@@ -66,12 +66,12 @@ actionable hint:
 harness not found: <requested>; install the harness or fix [harnesses.*].binary
 ```
 
-A locator miss is **not** a provider fault. The failed-start path writes no
+A locator miss is **not** a provider fault at the failed start: that path writes no
 `limit:<provider>` or `probe_back:<provider>` key and no `limits` row, and an existing
 provider mark is never cleared by the failed spawn. Genuine provider errors (auth, credits,
-quota, rate) keep their normal classification. The failed run is recorded as
-`AdapterUnavailable`, which keeps the classifier from treating the missing binary as a
-provider outage.
+quota, rate) keep their normal classification. L6's unknown-failure accounting is
+unchanged; keeping a repeated locator miss out of that streak needs the loop/session
+change noted in the fix report.
 
 `AdapterRegistry::from_config_with_search_path` is a `#[doc(hidden)]` test seam: tests
 inject a private directory as the whole resolution `PATH` (and opencode then skips the real
