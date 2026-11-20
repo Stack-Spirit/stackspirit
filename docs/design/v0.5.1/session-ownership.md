@@ -16,12 +16,25 @@ commands are marked **proposed**; they do not exist yet.
 - **A new surface kind.** `SurfaceKind::DesktopUi` (wire `desktop_ui`, store `desktop-ui`) names a UI
   that talks to an app engine itself. The opencode app host stays `Opencode`; `vowp chat` stays `Chat`;
   a worker run stays `Agent`.
-- **Visible ownership.** A new `SessionOwner` read model is added to `SessionSurfaceCard` (the session
-  card), the orchestrator endpoint document and `vowp fleet status`. It names the owner, its kind, node,
-  holder, mode, state, epoch and timestamps, and never contains a token.
-- **Explicit takeover, with an epoch.** Every acquire or takeover increments `owner_epoch` in the same
-  transaction that replaces the token. A previous writer is fenced immediately; an expired or released
-  interactive session has no owner and refuses writes.
+- **Visible ownership + activity + friendly names (owner confirmed 2026-11-20).** A new `SessionOwner`
+  read model is added to `SessionSurfaceCard` (the session card), the orchestrator endpoint document,
+  `vowp fleet status`, and MCP `session_resume` / write-refusal payloads. It names the owner, its kind,
+  friendly saved surface **label** (stored in the existing `surfaces` table, auto-defaulted as e.g.
+  `"StackSpirit · macbook"`, `"OpenCode · macbook"`, `"Claude Code · macbook"`, and renameable via
+  `--label` / `vowp surface rename`), node, holder, mode, state, **activity** (`idle` | `running` |
+  `waiting`, derived from open runs/active turns), epoch and timestamps, and never contains a token.
+- **Explicit takeover, with an epoch — 1-click when idle, extra confirm when running (owner confirmed
+  2026-11-20).** Every acquire or takeover increments `owner_epoch` in the same transaction that replaces
+  the token. Taking over an `idle` surface is a single click/confirm; taking over a `running` surface
+  requires one extra confirmation because a remote or external harness cannot always be process-killed
+  directly — takeover immediately fences writes, updates the `leases` table, and sends a clear
+  stop/handoff notice (`LeaseRevoked` / `ownership_conflict`) so the other surface/agent knows the
+  orchestrator surface switched and stops cleanly.
+- **Harness / MCP / CLI awareness (owner confirmed 2026-11-20).** Harnesses without a custom UI
+  (OpenCode, Claude Code, CLI) check ownership from the home DB via MCP/CLI before acting: if another
+  surface owns the session, the agent briefly informs the user which surface holds it (label, node,
+  `idle` vs `running`), asks whether to take over here, and on confirmation takes over (updating
+  `leases`, notifying the old surface to stop, and continuing).
 - **A direct-engine writer is not a supported writer until it owns.** A UI first attaches as a
   `DesktopUi` surface and takes ownership; the orchestrator endpoint reports the owner and whether the
   asking surface may write. The enforcement point for a UI that keeps using the app's HTTP API is a
@@ -279,14 +292,18 @@ Read model:
 ```rust
 pub enum OwnershipState { Active, Stale, Expired }
 
+pub enum SurfaceActivity { Idle, Running, Waiting }
+
 pub struct SessionOwner {
     pub session_id: SessionId,
     pub surface_id: Option<SurfaceId>, // None for a job run with no paired surface
     pub kind: SurfaceKind,
+    pub label: Option<String>,         // friendly saved surface name, e.g. "StackSpirit · macbook"
     pub holder: String,
     pub node: NodeName,
     pub mode: OwnershipMode,
     pub state: OwnershipState,
+    pub activity: SurfaceActivity,     // Idle | Running | Waiting, derived from live runs/turns
     pub epoch: u64,
     pub acquired_at: Timestamp,
     pub heartbeat_at: Timestamp,
