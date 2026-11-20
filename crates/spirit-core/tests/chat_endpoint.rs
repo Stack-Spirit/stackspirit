@@ -381,11 +381,29 @@ fn handle_session_route(
     if let Some(id) = rest.strip_suffix("/message") {
         if method == "POST" {
             let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-            let user_id = parsed
-                .get("messageID")
-                .and_then(Value::as_str)
-                .unwrap_or("msg_user")
-                .to_owned();
+            let Some(user_id) = parsed.get("messageID").and_then(Value::as_str) else {
+                write_json(
+                    stream,
+                    400,
+                    &json!({"name": "BadRequest", "data": {
+                        "message": "Expected a string starting with \"msg\", got nothing at [\"messageID\"]",
+                        "kind": "Payload",
+                    }}),
+                );
+                return;
+            };
+            if !user_id.starts_with("msg") {
+                write_json(
+                    stream,
+                    400,
+                    &json!({"name": "BadRequest", "data": {
+                        "message": format!("Expected a string starting with \"msg\", got \"{user_id}\" at [\"messageID\"]"),
+                        "kind": "Payload",
+                    }}),
+                );
+                return;
+            }
+            let user_id = user_id.to_owned();
             let text = parsed
                 .get("parts")
                 .and_then(Value::as_array)

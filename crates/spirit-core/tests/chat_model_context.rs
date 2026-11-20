@@ -351,11 +351,29 @@ fn handle_session_route(
 
 fn handle_message_post(stream: &mut TcpStream, state: &Arc<Mutex<ServerState>>, body: &str) {
     let request: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-    let user_id = request
-        .get("messageID")
-        .and_then(Value::as_str)
-        .unwrap_or("msg_user")
-        .to_owned();
+    let Some(user_id) = request.get("messageID").and_then(Value::as_str) else {
+        write_json(
+            stream,
+            400,
+            &json!({"name": "BadRequest", "data": {
+                "message": "Expected a string starting with \"msg\", got nothing at [\"messageID\"]",
+                "kind": "Payload",
+            }}),
+        );
+        return;
+    };
+    if !user_id.starts_with("msg") {
+        write_json(
+            stream,
+            400,
+            &json!({"name": "BadRequest", "data": {
+                "message": format!("Expected a string starting with \"msg\", got \"{user_id}\" at [\"messageID\"]"),
+                "kind": "Payload",
+            }}),
+        );
+        return;
+    }
+    let user_id = user_id.to_owned();
     let text = request
         .get("parts")
         .and_then(Value::as_array)
@@ -729,4 +747,52 @@ async fn step_finish_parts_are_used_when_the_message_omits_tokens() {
     assert_eq!(usage.cache_read_tokens, Some(200));
     assert_eq!(usage.context_tokens_used, Some(228));
     assert_eq!(usage.cost_usd, Some(0.002));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_turn_uses_a_msg_id_and_parses_the_reported_total() {
+    // Exact token shape from a real bundled OpenCode turn. `total` includes the
+    // reasoning tokens, so the context occupancy must use it rather than re-summing.
+    let tokens = json!({
+        "total": 12260,
+        "input": 12247,
+        "output": 3,
+        "reasoning": 10,
+        "cache": {"read": 0, "write": 0},
+    });
+    let server = FakeServer::new(Vec::new(), assistant(tokens, Some(0.0)));
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, _engine) = provider(
+        &server,
+        vec![included("opencode/deepseek-v4.1-flash-free")],
+        workspace.path(),
+    );
+    let mut receiver = provider.subscribe();
+    provider.start(&setup_input()).await.unwrap();
+
+    let receipt = provider.send(&SETUP, "Hello?").await.unwrap();
+    assert!(receipt.message.id.starts_with("msg_"));
+    wait_for_done(&mut receiver, Duration::from_secs(3)).await;
+
+    let body = server.last_body().expect("the message request body");
+    assert_eq!(body["messageID"], receipt.message.id);
+    assert!(
+        body["messageID"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("msg")),
+        "the fake OpenCode server rejects ids without the msg prefix"
+    );
+
+    let usage = provider
+        .attach(&SETUP)
+        .await
+        .unwrap()
+        .usage
+        .expect("live turn usage");
+    assert_eq!(usage.context_tokens_used, Some(12_260));
+    assert_eq!(usage.input_tokens, Some(12_247));
+    assert_eq!(usage.output_tokens, Some(3));
+    assert_eq!(usage.cache_read_tokens, Some(0));
+    assert_eq!(usage.turns, 1);
+    assert_eq!(usage.cost_usd, Some(0.0));
 }

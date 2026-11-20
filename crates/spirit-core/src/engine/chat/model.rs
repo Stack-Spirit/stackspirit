@@ -240,7 +240,7 @@ pub struct ChatUsageView {
 /// One safe chat message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
-    /// Stable across reconnects; a native message id or `local:<ULID>`.
+    /// Stable across reconnects; a native message id or `msg_<ULID>`.
     pub id: String,
     /// User or assistant.
     pub role: ChatRole,

@@ -736,7 +736,10 @@ impl LocalChatProvider {
         };
 
         let now = self.inner.clock.now();
-        let user = ChatMessage::user(format!("local:{}", Ulid::generate()), &text, now);
+        // OpenCode validates outgoing message ids and rejects anything that does not
+        // start with `msg`. It echoes this id in the native log, so the optimistic
+        // message upserts by id instead of appearing twice.
+        let user = ChatMessage::user(format!("msg_{}", Ulid::generate()), &text, now);
         let view = {
             let mut state = self.inner.state.lock().await;
             let record = state
@@ -2248,13 +2251,17 @@ fn parse_log(body: &[u8], now: Timestamp) -> Vec<ChatMessage> {
 
 #[derive(Default)]
 struct UsageTotals {
+    total: u64,
     input: u64,
     output: u64,
     cache_read: u64,
     cache_write: u64,
+    reasoning: u64,
+    saw_total: bool,
     saw_input: bool,
     saw_output: bool,
     saw_cache_read: bool,
+    saw_reasoning: bool,
     seen: bool,
     cost: f64,
     saw_cost: bool,
@@ -2262,6 +2269,11 @@ struct UsageTotals {
 
 impl UsageTotals {
     fn add_tokens(&mut self, tokens: &Value) {
+        if let Some(value) = token_count(tokens.get("total")) {
+            self.total = self.total.saturating_add(value);
+            self.saw_total = true;
+            self.seen = true;
+        }
         if let Some(value) = token_count(tokens.get("input")) {
             self.input = self.input.saturating_add(value);
             self.saw_input = true;
@@ -2270,6 +2282,11 @@ impl UsageTotals {
         if let Some(value) = token_count(tokens.get("output")) {
             self.output = self.output.saturating_add(value);
             self.saw_output = true;
+            self.seen = true;
+        }
+        if let Some(value) = token_count(tokens.get("reasoning")) {
+            self.reasoning = self.reasoning.saturating_add(value);
+            self.saw_reasoning = true;
             self.seen = true;
         }
         if let Some(value) = token_count(tokens.pointer("/cache/read")) {
@@ -2284,6 +2301,10 @@ impl UsageTotals {
     }
 
     fn merge(&mut self, other: &Self) {
+        if other.saw_total {
+            self.total = self.total.saturating_add(other.total);
+            self.saw_total = true;
+        }
         if other.saw_input {
             self.input = self.input.saturating_add(other.input);
             self.saw_input = true;
@@ -2291,6 +2312,10 @@ impl UsageTotals {
         if other.saw_output {
             self.output = self.output.saturating_add(other.output);
             self.saw_output = true;
+        }
+        if other.saw_reasoning {
+            self.reasoning = self.reasoning.saturating_add(other.reasoning);
+            self.saw_reasoning = true;
         }
         if other.saw_cache_read {
             self.cache_read = self.cache_read.saturating_add(other.cache_read);
@@ -2305,8 +2330,13 @@ impl UsageTotals {
     }
 
     fn context_tokens(&self) -> u64 {
+        if self.saw_total {
+            // OpenCode reports the turn total directly, including reasoning tokens.
+            return self.total;
+        }
         self.input
             .saturating_add(self.output)
+            .saturating_add(self.reasoning)
             .saturating_add(self.cache_read)
             .saturating_add(self.cache_write)
     }

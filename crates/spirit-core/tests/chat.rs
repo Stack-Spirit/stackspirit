@@ -502,11 +502,29 @@ fn handle_message_post(
     body: &str,
 ) {
     let request: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-    let user_id = request
-        .get("messageID")
-        .and_then(Value::as_str)
-        .unwrap_or("msg_user")
-        .to_owned();
+    let Some(user_id) = request.get("messageID").and_then(Value::as_str) else {
+        write_json(
+            stream,
+            400,
+            &json!({"name": "BadRequest", "data": {
+                "message": "Expected a string starting with \"msg\", got nothing at [\"messageID\"]",
+                "kind": "Payload",
+            }}),
+        );
+        return;
+    };
+    if !user_id.starts_with("msg") {
+        write_json(
+            stream,
+            400,
+            &json!({"name": "BadRequest", "data": {
+                "message": format!("Expected a string starting with \"msg\", got \"{user_id}\" at [\"messageID\"]"),
+                "kind": "Payload",
+            }}),
+        );
+        return;
+    }
+    let user_id = user_id.to_owned();
     let text = request
         .get("parts")
         .and_then(Value::as_array)
@@ -869,7 +887,7 @@ async fn one_turn_streams_deltas_and_done_without_duplicates() {
     wait_until(|| server.event_connections() >= 1, Duration::from_secs(2)).await;
     let receipt = provider.send(&SETUP, "Hello?").await.unwrap();
     assert!(receipt.accepted);
-    assert!(receipt.message.id.starts_with("local:"));
+    assert!(receipt.message.id.starts_with("msg_"));
     assert_eq!(receipt.message.text, vec!["Hello?"]);
 
     let events = collect_until_done(&mut receiver, Duration::from_secs(5)).await;
@@ -924,6 +942,30 @@ async fn one_turn_streams_deltas_and_done_without_duplicates() {
     assert_eq!(body["model"]["providerID"], "opencode");
     assert_eq!(body["model"]["modelID"], "big-pickle");
     assert_eq!(body["parts"][0]["text"], "Hello?");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_fake_engine_rejects_message_ids_without_the_msg_prefix() {
+    let server = FakeEngine::new();
+    let body = json!({
+        "messageID": "local:01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "parts": [{"type": "text", "text": "Hello?"}],
+    })
+    .to_string();
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port())).expect("connect fake engine");
+    write!(
+        stream,
+        "POST /session/ses_fake_1/message HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .expect("write fake message request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read fake message response");
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    assert!(response.contains("BadRequest"), "{response}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
