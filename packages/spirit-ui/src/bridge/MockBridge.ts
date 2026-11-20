@@ -297,6 +297,26 @@ const ASIF_IMPORT_LOSSES: AsifLoss[] = [
   },
 ];
 
+/** Realistic preview catalogs a connected provider unlocks in the mock picker. */
+const PREVIEW_PROVIDER_MODELS: Record<string, Array<{ id: string; label: string }>> = {
+  openrouter: [
+    { id: "openrouter/anthropic/claude-sonnet-4", label: "Claude Sonnet 4" },
+    { id: "openrouter/anthropic/claude-opus-4", label: "Claude Opus 4" },
+    { id: "openrouter/google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { id: "openrouter/openai/gpt-5", label: "GPT-5" },
+    { id: "openrouter/deepseek/deepseek-chat-v3.1", label: "DeepSeek V3.1" },
+    { id: "openrouter/meta-llama/llama-4-maverick", label: "Llama 4 Maverick" },
+  ],
+  anthropic: [
+    { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4" },
+    { id: "anthropic/claude-haiku-4", label: "Claude Haiku 4" },
+  ],
+  openai: [
+    { id: "openai/gpt-5", label: "GPT-5" },
+    { id: "openai/gpt-5-mini", label: "GPT-5 mini" },
+  ],
+};
+
 export class MockBridge implements SpiritBridge {
   readonly kind = "mock" as const;
   readonly preview = true;
@@ -884,16 +904,22 @@ export class MockBridge implements SpiritBridge {
 
   private unlockPreviewModels(provider: string): void {
     if (this.unlockedChatModels.has(provider) || provider === "opencode") return;
-    const id = `${provider}/preview-model`;
-    if (this.chatModels.some((model) => model.id === id)) return;
-    this.chatModels.push({
-      id,
-      label: `${provider} preview model`,
-      provider,
-      tier: "byok",
-      context_tokens: 128_000,
-    });
-    this.unlockedChatModels.set(provider, [id]);
+    const fixtures = PREVIEW_PROVIDER_MODELS[provider] ?? [
+      { id: `${provider}/preview-model`, label: `${provider} preview model` },
+    ];
+    const added: string[] = [];
+    for (const fixture of fixtures) {
+      if (this.chatModels.some((model) => model.id === fixture.id)) continue;
+      this.chatModels.push({
+        id: fixture.id,
+        label: fixture.label,
+        provider,
+        tier: "byok",
+        context_tokens: 128_000,
+      });
+      added.push(fixture.id);
+    }
+    if (added.length > 0) this.unlockedChatModels.set(provider, added);
   }
 
   private lockPreviewModels(provider: string): void {

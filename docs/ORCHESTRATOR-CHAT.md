@@ -2509,7 +2509,7 @@ of the connected provider's models appeared in the chat model selector. Inspecti
      immediately without an app restart, regardless of whether the change came from
      `SettingsPage`, the composer modal, or `EngineView`.
 
-### OpenCode-inspired searchable model picker contract (ss-87)
+### OpenCode-inspired searchable model picker contract (ss-87, landed)
 
 With OpenRouter connected (`371` models + `11` OpenCode Free models = `382` models), a flat
 unsearchable menu is unusable. Modeled on OpenCode's model selector
@@ -2529,6 +2529,13 @@ unsearchable menu is unusable. Modeled on OpenCode's model selector
   - Sticky footer inside the picker with **Manage models** (`data-testid="composer-manage-models"`,
     opening Settings → Engine & Models) and **Connect another provider…**
     (`data-testid="composer-connect-provider"`).
+  - **Landed behaviour:** the popover is `role="dialog"` (`model-picker-popover`) with a
+    `listbox` of `option` rows; `aria-activedescendant` on the search field tracks the
+    highlight. **Manage models** and **Connect another provider…** both close the picker
+    and open the in-place `Engine & Models` modal (the `Modal` + `SettingsPage` pattern),
+    not `onOpenEngineSettings`, so the owner returns straight to the chat. Search matches
+    every whitespace-separated token against label, id, provider id and provider label.
+    An empty result shows `No models match “<query>”.`.
 
 ### Sequenced follow-up jobs queued by ss-85
 

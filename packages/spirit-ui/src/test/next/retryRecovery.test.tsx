@@ -52,16 +52,16 @@ describe("free-limit retry recovery", () => {
     const { user } = await openFreeLimit();
     await user.click(screen.getByRole("button", { name: "Switch model" }));
 
-    const menu = await screen.findByRole("menu", { name: "Choose a model" });
-    await waitFor(() => expect(screen.getByTestId("composer-model")).toHaveFocus());
+    const menu = await screen.findByTestId("model-picker-popover");
+    await waitFor(() => expect(screen.getByTestId("composer-model-search")).toHaveFocus());
     expect(
-      within(menu).getByRole("menuitemradio", { name: /OpenCode free · Big Pickle/ }),
+      within(menu).getByRole("option", { name: /Big Pickle/ }),
     ).toBeInTheDocument();
     expect(
-      within(menu).getByRole("menuitemradio", { name: /BYOK · DeepSeek V4.1 Flash/ }),
+      within(menu).getByRole("option", { name: /DeepSeek V4.1 Flash(?! Free)/ }),
     ).toBeInTheDocument();
 
-    await user.click(within(menu).getByRole("menuitemradio", { name: /Big Pickle/ }));
+    await user.click(within(menu).getByRole("option", { name: /Big Pickle/ }));
     await waitFor(() =>
       expect(screen.getByTestId("composer-model")).toHaveTextContent(
         "OpenCode free · Big Pickle",

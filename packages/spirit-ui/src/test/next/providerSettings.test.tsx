@@ -164,7 +164,7 @@ describe("Composer → Engine & Models", () => {
     await waitFor(() =>
       expect(
         useConversations.getState().views.setup?.available_models?.map((m) => m.id),
-      ).toContain("anthropic/preview-model"),
+      ).toContain("anthropic/claude-sonnet-4"),
     );
 
     await user.click(
@@ -175,8 +175,39 @@ describe("Composer → Engine & Models", () => {
     await waitFor(() =>
       expect(
         useConversations.getState().views.setup?.available_models?.map((m) => m.id),
-      ).not.toContain("anthropic/preview-model"),
+      ).not.toContain("anthropic/claude-sonnet-4"),
     );
+  });
+
+  it("lists a connected OpenRouter in its own searchable picker section", async () => {
+    const { user, dialog } = await openProviderPanel();
+    const card = within(dialog).getByTestId("engine-models-settings");
+    await user.type(
+      within(card).getByRole("searchbox", { name: "Search providers" }),
+      "openrouter",
+    );
+    const row = within(card).getByTestId("provider-openrouter");
+    await user.click(within(row).getByRole("button", { name: "Connect OpenRouter" }));
+    await user.type(within(row).getByLabelText("API key for OpenRouter"), "not-a-real-key");
+    await user.click(within(row).getByRole("button", { name: "Save key" }));
+    await within(card).findByRole("status");
+    await waitFor(() =>
+      expect(
+        useConversations.getState().views.setup?.available_models?.map((m) => m.id),
+      ).toContain("openrouter/anthropic/claude-sonnet-4"),
+    );
+
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Engine & Models" })).not.toBeInTheDocument(),
+    );
+    await user.click(screen.getByTestId("composer-model"));
+    const section = screen.getByRole("group", { name: "OpenRouter" });
+    expect(section).toHaveTextContent("Connected");
+    await user.type(screen.getByTestId("composer-model-search"), "openrouter claude");
+    const options = screen.getAllByRole("option");
+    expect(options.length).toBe(2);
+    expect(options[0]).toHaveTextContent("anthropic/claude-sonnet-4");
   });
 
   async function connectAnthropic(

@@ -1,6 +1,7 @@
 import {
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
@@ -25,35 +26,117 @@ export function modelDisplayLabel(model: ChatModelView | null): string {
   return model.label;
 }
 
-function tierLabel(model: ChatModelView): string {
-  if (model.tier === "included") return "Included";
-  if (model.tier === "byok") return "BYOK";
-  if (model.tier === "orchestrator") return "Orchestrator";
-  return model.provider;
+/**
+ * Provider order the connect dialog uses (mirrors `POPULAR_PROVIDER_IDS` in
+ * `crates/spirit-core/src/engine/providers.rs`). Connected sections follow it, then
+ * fall back to alphabetical by display label.
+ */
+export const POPULAR_PROVIDER_IDS = [
+  "opencode",
+  "opencode-go",
+  "anthropic",
+  "github-copilot",
+  "openai",
+  "google",
+  "openrouter",
+  "vercel",
+] as const;
+
+const PROVIDER_LABELS: Record<string, string> = {
+  opencode: "OpenCode",
+  "opencode-go": "OpenCode Go",
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  google: "Google",
+  openrouter: "OpenRouter",
+  deepseek: "DeepSeek",
+  "github-copilot": "GitHub Copilot",
+  vercel: "Vercel",
+};
+
+/** A readable provider name for a provider id the engine reports. */
+export function providerDisplayLabel(provider: string): string {
+  const known = PROVIDER_LABELS[provider];
+  if (known) return known;
+  return provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : "Other";
 }
 
-interface ChatModelGroup {
-  id: "included" | "connected";
+export interface ChatModelGroup {
+  /** `included` for the bundled free models, otherwise the provider id. */
+  id: string;
   title: string;
+  tier: "included" | "byok" | "orchestrator";
   models: ChatModelView[];
 }
 
+function popularRank(provider: string): number {
+  const index = (POPULAR_PROVIDER_IDS as readonly string[]).indexOf(provider);
+  return index === -1 ? POPULAR_PROVIDER_IDS.length : index;
+}
+
 /**
- * Groups the verified chat model list the way the composer shows it: the bundled
- * free models first under "OpenCode Free", then every provider-owned choice under
- * "Connected providers". Empty groups are omitted, never rendered as a blank heading.
+ * Groups the verified chat model list the way the picker shows it: the bundled free
+ * models first under "OpenCode Free", then one named section per connected provider,
+ * popular providers first and the rest alphabetical. Empty groups are never produced.
  */
 export function groupChatModels(models: ChatModelView[]): ChatModelGroup[] {
   const included = models.filter((model) => model.tier === "included");
-  const connected = models.filter((model) => model.tier !== "included");
+  const byProvider = new Map<string, ChatModelView[]>();
+  for (const model of models) {
+    if (model.tier === "included") continue;
+    const list = byProvider.get(model.provider) ?? [];
+    list.push(model);
+    byProvider.set(model.provider, list);
+  }
+  const sections: ChatModelGroup[] = [...byProvider.entries()].map(([provider, list]) => ({
+    id: provider,
+    title: providerDisplayLabel(provider),
+    tier: list.every((model) => model.tier === "orchestrator") ? "orchestrator" : "byok",
+    models: list,
+  }));
+  sections.sort(
+    (a, b) =>
+      popularRank(a.id) - popularRank(b.id) ||
+      a.title.localeCompare(b.title, undefined, { sensitivity: "base" }),
+  );
   return [
     ...(included.length > 0
-      ? [{ id: "included" as const, title: "OpenCode Free", models: included }]
+      ? [{ id: "included", title: "OpenCode Free", tier: "included" as const, models: included }]
       : []),
-    ...(connected.length > 0
-      ? [{ id: "connected" as const, title: "Connected providers", models: connected }]
-      : []),
+    ...sections,
   ];
+}
+
+/** Case-insensitive, multi-word substring match over label, id and provider name/id. */
+export function filterChatModels(models: ChatModelView[], query: string): ChatModelView[] {
+  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return models;
+  return models.filter((model) => {
+    const haystack = [
+      model.label,
+      model.id,
+      model.provider,
+      providerDisplayLabel(model.provider),
+      model.tier === "included" ? "opencode free" : "",
+    ]
+      .join(" ")
+      .toLowerCase();
+    return tokens.every((token) => haystack.includes(token));
+  });
+}
+
+/** The secondary id line: the id without its provider prefix, when it adds information. */
+function modelSubId(model: ChatModelView): string | null {
+  if (model.tier === "included") return null;
+  const prefix = `${model.provider}/`;
+  const rest = model.id.startsWith(prefix) ? model.id.slice(prefix.length) : model.id;
+  return rest && rest !== model.label ? rest : null;
+}
+
+function tierBadge(tier: ChatModelGroup["tier"]): string {
+  if (tier === "included") return "Free";
+  if (tier === "orchestrator") return "Orchestrator";
+  return "Connected";
 }
 
 export interface ComposerBarProps {
@@ -399,39 +482,30 @@ function ModelPicker({
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [active, setActive] = useState(0);
+  const [active, setActive] = useState<string | null>(null);
   const id = useId();
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const search = useRef<HTMLInputElement>(null);
-  /** A recovery notice opens the picker with focus left on the trigger (ss-76 contract). */
-  const keepTriggerFocus = useRef(false);
+  const list = useRef<HTMLDivElement>(null);
 
-  const optionId = (index: number) => `${id}-opt-${index}`;
-  const visible = filterChatModels(models, query);
-  const sections = providerSections(visible);
-  const flat = sections.flatMap((section) => section.models);
-  const indexOf = new Map(flat.map((candidate, index) => [candidate.id, index]));
-  const activeIndex = Math.min(active, Math.max(flat.length - 1, 0));
-
-  const close = (restoreFocus: boolean) => {
-    setOpen(false);
+  function openPicker() {
     setQuery("");
-    setActive(0);
-    if (restoreFocus) trigger.current?.focus();
-  };
+    setActive(null);
+    setOpen(true);
+  }
 
   useEffect(() => {
     if (openRequest <= 0) return;
     // A recovery notice asks for the picker after its click handler; defer one tick so
     // the popover can measure the trigger before it opens.
-    const timer = setTimeout(() => {
-      keepTriggerFocus.current = true;
-      setOpen(true);
-      trigger.current?.focus();
-    }, 0);
+    const timer = setTimeout(openPicker, 0);
     return () => clearTimeout(timer);
   }, [openRequest]);
+
+  useEffect(() => {
+    if (open) search.current?.focus();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -451,32 +525,51 @@ function ModelPicker({
     };
   }, [open]);
 
+  const groups = useMemo(
+    () =>
+      open ? groupChatModels(filterChatModels(models, query)) : [],
+    [open, models, query],
+  );
+  const visible = useMemo(() => groups.flatMap((group) => group.models), [groups]);
+  const highlighted =
+    visible.find((candidate) => candidate.id === active)?.id ??
+    visible.find((candidate) => candidate.id === model?.id && query.trim() === "")?.id ??
+    visible[0]?.id ??
+    null;
+  const optionId = (modelId: string) => `${id}-opt-${modelId}`;
+
   useEffect(() => {
-    if (!open) return;
-    document.getElementById(optionId(activeIndex))?.scrollIntoView?.({ block: "nearest" });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- optionId only closes over `id`
-  }, [open, activeIndex, query, id]);
+    if (!open || !highlighted) return;
+    document
+      .getElementById(`${id}-opt-${highlighted}`)
+      ?.scrollIntoView?.({ block: "nearest" });
+  }, [open, highlighted, id]);
 
-  const choose = (candidate: ChatModelView) => {
-    close(true);
-    onSelect?.(candidate.id);
-  };
+  function choose(modelId: string) {
+    setOpen(false);
+    trigger.current?.focus();
+    onSelect?.(modelId);
+  }
 
-  const onSearchKey = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "ArrowDown") {
+  function onSearchKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      if (flat.length > 0) setActive((activeIndex + 1) % flat.length);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      if (flat.length > 0) setActive((activeIndex - 1 + flat.length) % flat.length);
+      if (visible.length === 0) return;
+      const index = visible.findIndex((candidate) => candidate.id === highlighted);
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      const next = (index + step + visible.length) % visible.length;
+      setActive(visible[next]!.id);
     } else if (event.key === "Enter") {
       event.preventDefault();
-      const candidate = flat[activeIndex];
-      if (candidate) choose(candidate);
+      if (highlighted) choose(highlighted);
+    } else if (event.key === "Escape") {
+      // A search field clears itself on Escape; the picker closes instead.
+      event.preventDefault();
     }
-  };
+  }
 
   const current = model ? modelDisplayLabel(model) : "Choose a model";
+  const trimmed = query.trim();
 
   return (
     <div className="nx-menu nx-model-picker" ref={root}>
@@ -484,14 +577,14 @@ function ModelPicker({
         ref={trigger}
         type="button"
         className="nx-model-picker__trigger"
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-expanded={open}
-        aria-controls={id}
+        aria-controls={open ? id : undefined}
         aria-label={`Model: ${current}`}
         data-testid="composer-model"
         title={current}
         disabled={disabled || !onSelect}
-        onClick={() => (open ? close(false) : setOpen(true))}
+        onClick={() => (open ? setOpen(false) : openPicker())}
       >
         <span className="nx-model-picker__label">{current}</span>
         <Chevron />
@@ -500,105 +593,113 @@ function ModelPicker({
         <div
           id={id}
           className="nx-menu__pop nx-menu__pop--above nx-menu__pop--start nx-model-menu"
-          data-testid="composer-model-popover"
+          role="dialog"
+          aria-label="Choose a model"
+          data-testid="model-picker-popover"
         >
-          <input
-            ref={search}
-            type="search"
-            role="searchbox"
-            className="nx-model-menu__search"
-            data-testid="composer-model-search"
-            placeholder="Search models"
-            aria-label="Search models"
-            aria-controls={`${id}-list`}
-            aria-activedescendant={flat.length > 0 ? optionId(activeIndex) : undefined}
-            autoComplete="off"
-            spellCheck={false}
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value);
-              setActive(0);
-            }}
-            onKeyDown={onSearchKey}
-          />
-          <div
-            id={`${id}-list`}
-            className="nx-model-menu__list"
-            data-testid="composer-model-list"
-            role="menu"
-            aria-label="Choose a model"
-          >
-            {sections.map((section) => (
-              <div
-                key={section.id}
-                className="nx-model-menu__section"
-                role="group"
-                aria-label={section.title}
-              >
-                <span className="nx-model-menu__heading">
-                  <span aria-hidden="true">{section.title}</span>
-                  <span className="nx-model-menu__badge" data-testid="model-section-badge">
-                    {section.badge}
-                  </span>
-                </span>
-                {section.models.map((candidate) => {
-                  const index = indexOf.get(candidate.id) ?? 0;
-                  return (
-                    <button
-                      key={candidate.id}
-                      id={optionId(index)}
-                      type="button"
-                      tabIndex={-1}
-                      role="menuitemradio"
-                      aria-checked={candidate.id === model?.id}
-                      data-active={index === activeIndex ? "true" : undefined}
-                      className="nx-menu__item nx-model-menu__item"
-                      onMouseMove={() => setActive(index)}
-                      onClick={() => choose(candidate)}
-                    >
-                      <span className="nx-menu__icon" aria-hidden="true">
-                        {candidate.id === model?.id ? "✓" : ""}
-                      </span>
-                      <span className="nx-menu__text">
-                        {modelDisplayLabel(candidate)}
-                        <span className="nx-model-menu__id" aria-hidden="true">
-                          {candidate.id}
-                        </span>
-                      </span>
-                      <span className="nx-menu__meta">{tierLabel(candidate)}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            ))}
-            {flat.length === 0 ? (
+          <div className="nx-model-menu__search">
+            <input
+              ref={search}
+              type="search"
+              aria-controls={visible.length > 0 ? `${id}-list` : undefined}
+              aria-activedescendant={highlighted ? optionId(highlighted) : undefined}
+              aria-autocomplete="list"
+              aria-label="Search models"
+              placeholder="Search models…"
+              autoComplete="off"
+              spellCheck={false}
+              data-testid="composer-model-search"
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setActive(null);
+              }}
+              onKeyDown={onSearchKeyDown}
+            />
+          </div>
+          <div className="nx-model-menu__scroll" ref={list}>
+            {visible.length === 0 ? (
               <p className="nx-model-menu__empty" role="status">
-                No models match “{query}”.
+                {`No models match “${trimmed}”.`}
               </p>
-            ) : null}
+            ) : (
+              <div
+                id={`${id}-list`}
+                role="listbox"
+                aria-label="Models"
+                className="nx-model-menu__list"
+              >
+                {groups.map((group) => (
+                  <div
+                    key={group.id}
+                    className="nx-model-menu__section"
+                    role="group"
+                    aria-label={group.title}
+                  >
+                    <div className="nx-model-menu__heading" aria-hidden="true">
+                      <span className="nx-model-menu__heading-title">{group.title}</span>
+                      <span className="nx-model-menu__badge">{tierBadge(group.tier)}</span>
+                      {group.tier === "included" ? null : (
+                        <span className="nx-model-menu__count">{group.models.length}</span>
+                      )}
+                    </div>
+                    {group.models.map((candidate) => {
+                      const selected = candidate.id === model?.id;
+                      const sub = modelSubId(candidate);
+                      return (
+                        <div
+                          key={candidate.id}
+                          id={optionId(candidate.id)}
+                          role="option"
+                          aria-selected={selected}
+                          className={`nx-model-menu__item${
+                            candidate.id === highlighted ? " is-active" : ""
+                          }${selected ? " is-selected" : ""}`}
+                          onPointerMove={() => {
+                            if (candidate.id !== highlighted) setActive(candidate.id);
+                          }}
+                          onClick={() => choose(candidate.id)}
+                        >
+                          <span className="nx-menu__icon" aria-hidden="true">
+                            {selected ? "✓" : ""}
+                          </span>
+                          <span className="nx-model-menu__name">
+                            <span className="nx-model-menu__label">{candidate.label}</span>
+                            {sub ? <span className="nx-model-menu__sub">{sub}</span> : null}
+                          </span>
+                          <span className="nx-model-menu__badge">
+                            {tierBadge(candidate.tier ?? "byok")}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
           <div className="nx-model-menu__footer">
             <button
               type="button"
-              className="nx-menu__item nx-model-menu__manage"
+              className="nx-menu__item nx-model-menu__action"
               data-testid="composer-manage-models"
+              disabled={!onManageModels}
               onClick={() => {
-                close(false);
+                setOpen(false);
                 onManageModels?.();
               }}
-              disabled={!onManageModels}
             >
               <span className="nx-menu__text">Manage models</span>
             </button>
             <button
               type="button"
-              className="nx-menu__item nx-model-menu__connect"
+              className="nx-menu__item nx-model-menu__action"
               data-testid="composer-connect-provider"
+              disabled={!onConnectProvider}
               onClick={() => {
-                close(false);
+                setOpen(false);
                 onConnectProvider?.();
               }}
-              disabled={!onConnectProvider}
             >
               <span className="nx-menu__icon" aria-hidden="true">
                 ＋

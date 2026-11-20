@@ -33,22 +33,40 @@ for (const theme of THEMES) {
     const model = page.getByTestId("composer-model");
     await expect(model).toContainText("OpenCode free");
     await model.click();
-    const popover = page.getByTestId("composer-model-popover");
-    const menu = popover.getByRole("menu", { name: "Choose a model" });
-    await expect(popover.getByRole("searchbox", { name: "Search models" })).toBeFocused();
-    await expect(menu.getByRole("group", { name: "OpenCode Free" })).toContainText(
-      "OpenCode free",
-    );
-    await expect(menu).toContainText("BYOK · DeepSeek V4.1 Flash");
-    await expect(popover.getByTestId("composer-manage-models")).toContainText(
-      "Manage models",
-    );
-    await expect(popover.getByTestId("composer-connect-provider")).toContainText(
+    const menu = page.getByTestId("model-picker-popover");
+    await expect(menu).toBeVisible();
+    await expect(menu.getByTestId("composer-model-search")).toBeFocused();
+    await expect(menu.getByRole("group", { name: "OpenCode Free" })).toContainText("Free");
+    await expect(menu.getByRole("group", { name: "DeepSeek" })).toContainText("Connected");
+    await expect(menu.getByTestId("composer-manage-models")).toContainText("Manage models");
+    await expect(menu.getByTestId("composer-connect-provider")).toContainText(
       "Connect another provider…",
     );
     await expectNoWcagViolations(page);
 
-    await popover.getByTestId("composer-connect-provider").click();
+    // Search narrows the list, an empty search says so, and axe stays clean on both.
+    const modelSearch = menu.getByTestId("composer-model-search");
+    await modelSearch.fill("deepseek");
+    await expect(menu.getByRole("option")).toHaveCount(2);
+    await expectNoWcagViolations(page);
+    await modelSearch.fill("zzz-no-such-model");
+    await expect(menu).toContainText("No models match “zzz-no-such-model”.");
+    await expectNoWcagViolations(page);
+
+    // Switch to the connected provider's model with the keyboard.
+    await modelSearch.fill("deepseek flash");
+    await menu.getByRole("option", { name: /^DeepSeek V4\.1 Flash(?! Free)/ }).click();
+    await expect(model).toContainText("BYOK · DeepSeek V4.1 Flash");
+    await expect(menu).toHaveCount(0);
+
+    // Manage models opens Engine & Models in place and closes the picker.
+    await model.click();
+    await page.getByTestId("composer-manage-models").click();
+    await expect(page.getByTestId("model-picker-popover")).toHaveCount(0);
+    await expect(page.getByRole("dialog", { name: "Engine & Models" })).toBeVisible();
+    await page.getByRole("dialog", { name: "Engine & Models" }).getByRole("button", { name: "Close dialog" }).click();
+    await model.click();
+    await menu.getByTestId("composer-connect-provider").click();
     const dialog = page.getByRole("dialog", { name: "Engine & Models" });
     await expect(dialog).toBeVisible();
     const card = dialog.getByTestId("engine-models-settings");
@@ -76,10 +94,9 @@ for (const theme of THEMES) {
     await dialog.getByRole("button", { name: "Close dialog" }).click();
     await model.click();
     await expect(
-      page
-        .getByRole("menu", { name: "Choose a model" })
-        .getByRole("group", { name: "Connected providers" }),
-    ).toContainText("anthropic preview model");
+      page.getByTestId("model-picker-popover").getByRole("group", { name: "Anthropic" }),
+    ).toContainText("Claude Sonnet 4");
+    await expectNoWcagViolations(page);
     await page.keyboard.press("Escape");
     await model.click();
     await page.getByTestId("composer-connect-provider").click();
@@ -95,8 +112,8 @@ for (const theme of THEMES) {
     // Closing the panel returns to the picker, which dropped the removed key's model.
     await dialog.getByRole("button", { name: "Close dialog" }).click();
     await model.click();
-    await expect(page.getByRole("menu", { name: "Choose a model" })).not.toContainText(
-      "anthropic preview model",
+    await expect(page.getByTestId("model-picker-popover")).not.toContainText(
+      "Claude Sonnet 4",
     );
   });
 }

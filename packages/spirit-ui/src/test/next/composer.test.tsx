@@ -3,8 +3,9 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SpiritBridge } from "../../bridge/SpiritBridge";
-import type { ChatUsageView } from "../../bridge/wire";
+import type { ChatModelView, ChatUsageView } from "../../bridge/wire";
 import { MockBridge } from "../../bridge/MockBridge";
+import { ComposerBar, groupChatModels } from "../../next/ComposerBar";
 import { ContextMeter } from "../../next/ContextMeter";
 import { resetConversations, useConversations } from "../../next/conversations";
 import { NextShell } from "../../next/NextShell";
@@ -115,16 +116,18 @@ describe("Meadow composer", () => {
 
     const setModel = vi.spyOn(bridge.chat!, "setModel");
     await user.click(model);
-    const menu = screen.getByRole("menu", { name: "Choose a model" });
-    expect(within(menu).getByRole("menuitemradio", { name: /Big Pickle/ })).toBeInTheDocument();
-    expect(
-      within(menu).getByRole("menuitemradio", { name: /BYOK · DeepSeek V4.1 Flash/ }),
-    ).toBeInTheDocument();
+    const popover = screen.getByTestId("model-picker-popover");
+    expect(popover).toHaveAttribute("role", "dialog");
+    expect(screen.getByTestId("composer-model-search")).toHaveFocus();
+    const list = within(popover).getByRole("listbox");
+    expect(within(list).getByRole("option", { name: /Big Pickle/ })).toBeInTheDocument();
+    expect(within(list).getByRole("option", { name: /DeepSeek V4.1 Flash(?! Free)/ })).toBeInTheDocument();
 
-    await user.click(within(menu).getByRole("menuitemradio", { name: /Big Pickle/ }));
+    await user.click(within(list).getByRole("option", { name: /Big Pickle/ }));
     await waitFor(() =>
       expect(setModel).toHaveBeenCalledWith("setup", "opencode/big-pickle"),
     );
+    expect(screen.queryByTestId("model-picker-popover")).not.toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByTestId("composer-model")).toHaveTextContent(
         "OpenCode free · Big Pickle",
@@ -132,49 +135,35 @@ describe("Meadow composer", () => {
     );
   });
 
-  it("groups the picker by OpenCode Free and connected providers and links to Settings", async () => {
+  it("groups the picker by OpenCode Free and named provider sections", async () => {
     const { user } = await openSetup();
     await user.click(await screen.findByTestId("composer-model"));
-    const menu = screen.getByRole("menu", { name: "Choose a model" });
-    const free = within(menu).getByRole("group", { name: "OpenCode Free" });
-    expect(free).toHaveTextContent("DeepSeek V4.1 Flash Free");
-    expect(free).toHaveTextContent("Free");
-    expect(menu).toHaveTextContent("BYOK · DeepSeek V4.1 Flash");
-    expect(screen.getAllByTestId("model-section-badge").map((b) => b.textContent)).toContain(
-      "Connected",
-    );
+    const popover = screen.getByTestId("model-picker-popover");
+    const groups = within(popover).getAllByRole("group");
+    expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual([
+      "OpenCode Free",
+      "DeepSeek",
+    ]);
+    expect(groups[0]).toHaveTextContent("Free");
+    expect(groups[0]).toHaveTextContent("DeepSeek V4.1 Flash Free");
+    expect(groups[1]).toHaveTextContent("Connected");
+    expect(groups[1]).not.toHaveTextContent("BYOK ·");
+    expect(within(groups[0]!).getByRole("option", { selected: true })).toHaveTextContent("DeepSeek V4.1 Flash Free");
+  });
 
-    await user.click(screen.getByTestId("composer-connect-provider"));
+  it("Manage models opens Engine & Models in place and closes the picker", async () => {
+    const { user } = await openSetup();
+    await user.click(await screen.findByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-manage-models"));
+    expect(screen.queryByTestId("model-picker-popover")).not.toBeInTheDocument();
     const dialog = await screen.findByRole("dialog", { name: "Engine & Models" });
     expect(within(dialog).getByTestId("engine-models-settings")).toBeInTheDocument();
   });
 
-  it("searches, navigates by keyboard and opens Manage models", async () => {
-    const { user, bridge } = await openSetup();
-    const setModel = vi.spyOn(bridge.chat!, "setModel");
+  it("Connect another provider opens Engine & Models", async () => {
+    const { user } = await openSetup();
     await user.click(await screen.findByTestId("composer-model"));
-    const search = screen.getByRole("searchbox", { name: "Search models" });
-    expect(search).toHaveFocus();
-
-    await user.type(search, "zzz-no-such-model");
-    expect(screen.getByText(/No models match/)).toBeInTheDocument();
-
-    await user.clear(search);
-    await user.type(search, "pickle");
-    const menu = screen.getByRole("menu", { name: "Choose a model" });
-    expect(within(menu).getAllByRole("menuitemradio")).toHaveLength(1);
-    await user.keyboard("{Enter}");
-    await waitFor(() =>
-      expect(setModel).toHaveBeenCalledWith("setup", "opencode/big-pickle"),
-    );
-
-    await user.click(screen.getByTestId("composer-model"));
-    await user.keyboard("{Escape}");
-    expect(screen.queryByTestId("composer-model-popover")).not.toBeInTheDocument();
-    expect(screen.getByTestId("composer-model")).toHaveFocus();
-
-    await user.click(screen.getByTestId("composer-model"));
-    await user.click(screen.getByTestId("composer-manage-models"));
+    await user.click(screen.getByTestId("composer-connect-provider"));
     const dialog = await screen.findByRole("dialog", { name: "Engine & Models" });
     expect(within(dialog).getByTestId("engine-models-settings")).toBeInTheDocument();
   });
@@ -251,3 +240,125 @@ function useConversationsView() {
   // Read the same store the shell reads without adding a hook to the test body.
   return useConversations.getState().views.setup ?? null;
 }
+
+const PICKER_MODELS: ChatModelView[] = [
+  { id: "opencode/big-pickle", label: "Big Pickle", provider: "opencode", tier: "included" },
+  { id: "openrouter/anthropic/claude-sonnet-4", label: "Claude Sonnet 4", provider: "openrouter", tier: "byok" },
+  { id: "openrouter/google/gemini-2.5-pro", label: "Gemini 2.5 Pro", provider: "openrouter", tier: "byok" },
+  { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4", provider: "anthropic", tier: "byok" },
+  { id: "deepseek/deepseek-flash", label: "DeepSeek Flash", provider: "deepseek", tier: "byok" },
+  { id: "acme/zeta", label: "Zeta", provider: "acme", tier: "byok" },
+];
+
+function renderPicker(onSelect = vi.fn(), onOpenEngineSettings = vi.fn()) {
+  const user = userEvent.setup();
+  render(
+    <ComposerBar
+      session="setup"
+      placeholder="Message"
+      model={PICKER_MODELS[0]!}
+      models={PICKER_MODELS}
+      modelMissing={false}
+      disabled={false}
+      streaming={false}
+      stopped={false}
+      onSend={() => {}}
+      onStop={() => {}}
+      onStart={() => {}}
+      onSelectModel={onSelect}
+      onOpenEngineSettings={onOpenEngineSettings}
+    />,
+  );
+  return { user, onSelect, onOpenEngineSettings };
+}
+
+describe("Searchable model picker", () => {
+  it("orders sections: OpenCode Free, popular providers, then alphabetical", () => {
+    expect(groupChatModels(PICKER_MODELS).map((group) => group.title)).toEqual([
+      "OpenCode Free",
+      "Anthropic",
+      "OpenRouter",
+      "Acme",
+      "DeepSeek",
+    ]);
+  });
+
+  it("shows provider sections with badges, counts, clean names and secondary ids", async () => {
+    const { user } = renderPicker();
+    await user.click(screen.getByTestId("composer-model"));
+    const router = screen.getByRole("group", { name: "OpenRouter" });
+    expect(router).toHaveTextContent("Connected");
+    expect(router).toHaveTextContent("2");
+    expect(router).toHaveTextContent("anthropic/claude-sonnet-4");
+    expect(router).not.toHaveTextContent("BYOK");
+    expect(screen.getByRole("group", { name: "OpenCode Free" })).toHaveTextContent("Free");
+    const selected = screen.getByRole("option", { selected: true });
+    expect(selected).toHaveTextContent("Big Pickle");
+    expect(selected).toHaveTextContent("✓");
+  });
+
+  it("filters by model name, model id and provider name", async () => {
+    const { user } = renderPicker();
+    await user.click(screen.getByTestId("composer-model"));
+    const search = screen.getByTestId("composer-model-search");
+    expect(search).toHaveAttribute("type", "search");
+    expect(search).toHaveAttribute("placeholder", "Search models…");
+
+    await user.type(search, "gemini");
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+
+    await user.clear(search);
+    await user.type(search, "openrouter/anthropic");
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+
+    await user.clear(search);
+    await user.type(search, "OPENROUTER claude");
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(1);
+    expect(options[0]).toHaveTextContent("Claude Sonnet 4");
+
+    await user.clear(search);
+    await user.type(search, "anthropic");
+    expect(screen.getAllByRole("option").length).toBe(2);
+
+    await user.clear(search);
+    await user.type(search, "nothing-here");
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
+    expect(screen.getByText("No models match “nothing-here”.")).toBeInTheDocument();
+  });
+
+  it("navigates with ArrowDown/ArrowUp, selects with Enter and closes with Escape", async () => {
+    const { user, onSelect } = renderPicker();
+    await user.click(screen.getByTestId("composer-model"));
+    const search = screen.getByTestId("composer-model-search");
+    expect(search).toHaveFocus();
+    // Highlight starts on the active model (Big Pickle), then moves across groups.
+    await user.keyboard("{ArrowDown}{ArrowDown}");
+    const highlighted = () =>
+      document.getElementById(search.getAttribute("aria-activedescendant") ?? "");
+    expect(highlighted()).toHaveTextContent("Claude Sonnet 4");
+    expect(highlighted()).toHaveTextContent("anthropic/claude-sonnet-4".split("/")[1]!);
+    await user.keyboard("{ArrowUp}");
+    expect(highlighted()).toHaveTextContent("Claude Sonnet 4");
+    await user.keyboard("{ArrowUp}");
+    expect(highlighted()).toHaveTextContent("Big Pickle");
+
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(onSelect).toHaveBeenCalledWith("anthropic/claude-sonnet-4");
+    expect(screen.queryByTestId("model-picker-popover")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("composer-model"));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("model-picker-popover")).not.toBeInTheDocument();
+    expect(screen.getByTestId("composer-model")).toHaveFocus();
+  });
+
+  it("Manage models opens Engine & Models in place (not onOpenEngineSettings)", async () => {
+    const { user, onOpenEngineSettings } = renderPicker();
+    await user.click(screen.getByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-manage-models"));
+    expect(screen.queryByTestId("model-picker-popover")).not.toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Engine & Models" })).toBeInTheDocument();
+    expect(onOpenEngineSettings).not.toHaveBeenCalled();
+  });
+});

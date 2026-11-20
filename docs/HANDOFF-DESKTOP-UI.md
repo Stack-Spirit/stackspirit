@@ -230,7 +230,20 @@ auto-selects the first verified included OpenCode runtime model (`ss-72`), label
 honestly as `OpenCode free · <label>`; a BYOK choice is `BYOK · <label>` and an
 orchestrator-owned session shows its own choice. The picker lists only
 `view.available_models` and switches through `bridge.chat.setModel`; no Settings trip
-is needed. A compact **Set up a model** link appears only when the engine genuinely
+is needed. Since `ss-87` the trigger opens a searchable popover
+(`data-testid="model-picker-popover"`, `role="dialog"`): an auto-focused
+`type="search"` field (`composer-model-search`) filters by label, id and provider
+name/id (multi-word, case-insensitive); `ArrowUp`/`ArrowDown`/`Enter`/`Escape` navigate,
+select and close (focus returns to `composer-model`). The bounded list
+(`max-height: min(360px, 55vh)`) is grouped by `groupChatModels`: **OpenCode Free**
+(`Free` badge) first, then one section per connected provider, popular-first then
+alphabetical, each with a `Connected` badge and model count. Rows show a `✓` on the
+active model, the clean label (no repeated `BYOK ·`), a secondary id such as
+`anthropic/claude-sonnet-4`, and a badge. A sticky footer holds **Manage models**
+(`composer-manage-models`) and **Connect another provider…**
+(`composer-connect-provider`); both close the picker and open the in-place
+`Engine & Models` modal, so the owner stays in the chat (`onOpenEngineSettings` is not
+used). The preview OpenRouter/Anthropic/OpenAI connects unlock multi-model catalogs. A compact **Set up a model** link appears only when the engine genuinely
 reports zero usable models (an empty array), and Send stays disabled in that state.
 The right side is the single 32×32 circular primary button: the arrow in
 `--nx-btn-ink` (white on the light theme's darker green) when ready, a square Stop
@@ -445,13 +458,13 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
    with axe WCAG 2.2 AA in light and dark. The text-field focus indicator is that border
    step plus the caret, not a 3:1 ring.
 9. **BYOK keychain fix, searchable model picker with Manage models, and VPS Xvfb verification
-   — planned (`ss-85`, queued as `ss-86`–`ss-88`).** Root-cause analysis in
+   — `ss-86` and `ss-87` landed; `ss-88` planned (`ss-85` diagnosis).** Root-cause analysis in
    `docs/ORCHESTRATOR-CHAT.md` found that root `Cargo.toml` declared `keyring = "3"` without
    platform features (`apple-native`, `windows-native`, `linux-native`), silently compiling
    the non-persistent mock store so saved provider keys disappeared on `verify_key` and
    sidecar restart. `ss-86` fixes real keychain persistence, isolated ephemeral-XDG key
    verification with smart text-model selection, non-destructive verification UX, and live
-   `ChatEvent::Session` model propagation; `ss-87` upgrades `ComposerBar.tsx`'s model menu
+   `ChatEvent::Session` model propagation; `ss-87` (landed) upgraded `ComposerBar.tsx`'s model menu
    into an OpenCode-inspired searchable, provider-grouped popover with bounded scroll,
    free/connected badges, and a **Manage models** button (Meadow tokens, WCAG 2.2 AA);
    `ss-88` verifies the real bundled `opencode` `1.19.5` sidecar and desktop app under

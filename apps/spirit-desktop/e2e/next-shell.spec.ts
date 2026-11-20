@@ -309,21 +309,16 @@ test("empty hero, inline model picker and context meter meet WCAG 2.2 AA", async
     await expectNoWcagViolations(page);
 
     await page.getByTestId("composer-model").click();
-    const models = page.getByRole("menu", { name: "Choose a model" });
+    const models = page.getByTestId("model-picker-popover");
     await expect(models).toBeVisible();
-    await expect(models).toContainText("OpenCode free · DeepSeek V4.1 Flash Free");
-    // Every row (and its raised checked background) stays inside the panel with the
-    // same inset on both sides; the meta label keeps its normal right padding.
+    await expect(models).toContainText("DeepSeek V4.1 Flash Free");
+    // Every row (and its highlighted background) stays inside the panel with the
+    // same inset on both sides, and the list is bounded.
     const rows = await models.evaluate((menu) => {
       const panel = menu.getBoundingClientRect();
       return [...menu.querySelectorAll(".nx-model-menu__item")].map((item) => {
         const row = item.getBoundingClientRect();
-        const meta = item.querySelector(".nx-menu__meta")?.getBoundingClientRect();
-        return {
-          leftInset: row.left - panel.left,
-          rightInset: panel.right - row.right,
-          metaRightInset: meta ? panel.right - meta.right : 0,
-        };
+        return { leftInset: row.left - panel.left, rightInset: panel.right - row.right };
       });
     });
     expect(rows).toHaveLength(3);
@@ -331,7 +326,6 @@ test("empty hero, inline model picker and context meter meet WCAG 2.2 AA", async
       expect(row.leftInset).toBeGreaterThan(0);
       expect(row.rightInset).toBeGreaterThan(0);
       expect(Math.abs(row.rightInset - row.leftInset)).toBeLessThan(0.5);
-      expect(row.metaRightInset).toBeGreaterThan(0);
     }
     await expectNoWcagViolations(page);
     await page.keyboard.press("Escape");
