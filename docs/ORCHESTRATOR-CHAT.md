@@ -223,9 +223,22 @@ child itself.
   body must contain `"healthy": true`; `"version"` is optional and is surfaced as the
   engine version. A non-2xx status, a non-JSON body or `healthy != true` is an engine
   error. The live probe returned `200` with `{ "healthy": true, "version": "1.19.5" }`.
-- **Other proven engine reads:** `GET /provider` (10 s timeout; the document can be
-  several MiB) and `GET /config/providers` (3 s). These are for the model catalog and
-  provider list, not chat. `GET /doc` is an OpenAPI document, not a chat read.
+- **Other proven engine reads:** these are for the model catalog and provider list, not
+  chat. `GET /doc` is an OpenAPI document, not a chat read.
+  - **Model catalog order:** read `GET /config/providers` first (3 s). Fall back to
+    `GET /provider` (10 s; the document can be several MiB) only when that read fails or
+    yields nothing usable. `/provider` is not gone: it stays the model-catalog fallback.
+    `fetch_providers` (the BYOK provider list) is a separate call and still reads
+    `/provider` first; do not treat the provider list and the model catalog as one read.
+  - **Connected filter:** when a provider document carries a `connected` id array (the
+    live `/provider` does: `connected: ["opencode"]`), only models from those providers
+    are usable. `all` entries outside `connected` are disconnected catalog rows (the live
+    document lists 100+ of them) and must not be offered. The array is optional: the
+    parser filters only when it is present, and otherwise keeps every row.
+  - **Live failure:** selecting a disconnected row fails the turn with
+    `ProviderModelNotFoundError` (HTTP 500); the old `/provider`-first code offered
+    `opencode-go/beam-free` and hit exactly that. Fixed in `39171a6`; regression test
+    `parse_models_filters_disconnected_providers_when_connected_list_is_present`.
 - **No CORS and no browser fetch:** the renderer never calls the engine. All requests go
   through `spirit-core` and Tauri commands.
 
@@ -599,6 +612,7 @@ event.
 | `POST /session/{id}/message` accepts `{ model, parts }` | **Proven live with a real turn (2026-11-20)** | `verify_against_engine` and the live turn: 200 `{info, parts}` on a free model with `cost: 0` and `tokens.total: 12260` (`input 12247`, `output 3`, `reasoning 10`, `cache.read 0`). `/doc` remains the schema source: `parts` is the only required body field; `messageID` and `model` are optional |
 | `messageID` must start with `msg` | **Proven live (2026-11-20)** | The real sidecar returned `HTTP 400 BadRequest` for a non-`msg` id (exact payload in §2.2.5); `msg_<ULID>` was accepted on the live turn and the assistant message carries `parentID: msg_...` |
 | The user message with the sent `messageID` is preserved in `GET /session/{id}/message` | **Owner-turn unknown** | `/doc` accepts the field, but the live turn did not pin the *user*-message log entry. Keep the role/text/time reconciliation in §4.6 until §9 pins it |
+| The model catalog is `/config/providers`, not `/provider.all` | **Proven live (2026-11-20)** | The live `/provider` document lists 100+ disconnected catalog providers in `all` next to `connected: ["opencode"]`; offering `opencode-go/beam-free` from `all` failed a turn with `ProviderModelNotFoundError` (HTTP 500). Fixed in `39171a6`: `/config/providers` is read first, `/provider` is the fallback, and `all` is filtered by `connected`. Regression test `parse_models_filters_disconnected_providers_when_connected_list_is_present`. `connected` is optional; the parser filters only when it is present |
 | `DELETE /session/{id}` exists | **Proven** | key-verification cleanup |
 | A provider error can arrive in an HTTP 200 body (`info.error.statusCode`) | **Proven** | `classify_message_response`; `/doc` types `AssistantMessage.error` as the provider-error union |
 | The child is killed on stop/drop; no orphan | **Proven** | process tests |
@@ -1284,7 +1298,11 @@ No type above has a `url`, `port`, `token`, `authorization`, `password`, `key_pa
 
 `ChatModelView.tier` marks an included free runtime model, a configured BYOK model, or an
 orchestrator-owned choice. `available_models` is the verified usable list for this
-session's engine, in the engine's order; it is not a build-time catalog copy.
+session's engine, in the engine's order; it is not a build-time catalog copy. It holds
+the connected providers' models from the preferred catalog read (`/config/providers`
+first, `/provider` as fallback, filtered by `connected` when present; see §2.1.2). A
+disconnected catalog entry is not part of `available_models`, and the picker must not
+show it: selecting one fails the turn with `ProviderModelNotFoundError` (HTTP 500).
 `ChatUsageView` comes from the OpenCode assistant message metadata: `total`, `input`,
 `output`, `reasoning`, `cache.read`/`cache.write` and `cost`, or `step-finish` parts when
 a turn has several steps. `context_tokens_used` is the latest assistant turn's reported
@@ -2210,7 +2228,8 @@ model. Use one free included model turn and the setup assistant.
    the setup assistant from the welcome page.
 2. Confirm the engine starts/reuses the existing process (no second `opencode` child;
    `ps` shows one bundled child), health is green and the chip is `Local · this Mac`.
-3. Send one short message using a free included model. Confirm text appears progressively
+3. Send one short message using a free included model chosen from the picker (it lists
+   connected providers only; see §2.1.2). Confirm text appears progressively
    (or the honest "reply appears when the turn completes" note if SSE is unsupported), and
    the reply is not labelled Preview. Record whether `message.part.delta` is emitted, the
    real `message.part.updated` payload, and the `session.idle` ordering; do not describe
