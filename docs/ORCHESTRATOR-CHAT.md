@@ -5,8 +5,10 @@ Local `global`/`project` endpoint resolver landed 2026-11-19 (ss-61) behind the 
 command gate. The setup free-model default, inline `setModel` and usage projection landed
 2026-11-19 (ss-72). A real free-model turn on 2026-11-20 proved the `msg` `messageID`
 prefix (the `msg_<ULID>` id form) and the live `tokens.total` shape (ss-74); `messageID`
-log preservation and the `message.part.*` cadence remain owner-turn unknowns. Server chat
-remains gated.
+log preservation and the `message.part.*` cadence remain owner-turn unknowns. Live
+tool-activity rows and explicit inline permission Allow/Reject cards landed 2026-11-20
+(ss-81); the pinned `1.19.5` `/doc` proves the permission list and reply routes, while a
+live tool/permission turn remains owner verification. Server chat remains gated.
 Audience: the follow-up chat jobs named in §8, the VOWP owner, and the desktop reviewer.
 
 This document specifies how the Meadow shell's orchestrator chat moves from the preview store
@@ -363,6 +365,9 @@ evidence for the pinned sidecar.
 | `messageID` in the user log | `GET /session/{id}/message` includes the user message with the sent `messageID` | Still unproven | **Owner-turn unknown**: `/doc` accepts the field, but preservation of the *user* message in the read log is not proven. Keep the role/text/time reconciliation in §4.6 until §9 pins it |
 | Read the log | `GET /session/{id}/message` | `Array<{ "info": Message, "parts": Part[] }>` | **Proven live**: `[]` for a new session; `/doc` requires both `info` and `parts`; it is **not** a flat `Message[]`. The endpoint accepts `directory`, `workspace`, `limit` and `before` query parameters. The parser stays tolerant. |
 | Abort a turn | `POST /session/{id}/abort` | `boolean` | **Proven live**: idle abort returns 200 `true`; the session still exists afterwards |
+| List pending permissions | `GET /permission` | `PermissionRequest[]`: `{ "id", "sessionID", "permission", "patterns", "metadata", "always", "tool"? }` | **Proven by `/doc`**; the core filters to the attached native session id |
+| Answer a permission | `POST /permission/{requestID}/reply` with `{ "reply": "once" \| "always" \| "reject" }` | `boolean` | **Proven by `/doc`**; fake-engine tested |
+| Legacy permission reply | `POST /session/{sessionID}/permissions/{permissionID}` with `{ "response": "once" \| "always" \| "reject" }` | `boolean` | **Proven by `/doc`**; fallback only when the primary route returns 404/405 |
 | Live events | `GET /event`, `Accept: text/event-stream` | SSE frames with `data: { "id", "type", "properties" }` | **Proven live**: 200 `text/event-stream`; first `server.connected`; `server.heartbeat` about every 10 s |
 | OpenAPI | `GET /doc` | OpenAPI 3.1.0 document with 162 paths | **Proven live**: 200 `application/json`, 479,667 bytes |
 | Delete session | `DELETE /session/{id}` | `{ "ok": true }` | **Proven** by the key-verification cleanup; chat must **not** use it |
@@ -450,20 +455,22 @@ not require one. The pinned build uses `{ "id", "type", "properties" }`; the par
 | `message.updated` with `info.role == "assistant"` | Create or update the assistant message shell (`id` from `info.id`, `origin: "model"`, `streaming: true`). If `info.error` is non-null, map it to the error rules in §6 and stop the turn. |
 | `message.part.updated` with `part.type == "text"` | The cumulative `TextPart.text` source. Set the part text to the new `text` (never append it) and compute the append-only delta from the last text for `(messageID, partID)`. If the new text starts with the old text, emit a `delta` for the suffix. If it does not (a rewrite, shrink or non-prefix update), emit a `message` event with the full replacement text. |
 | `message.part.delta` with `field == "text"` | Append `delta` to that `(messageID, partID)`. A `field` other than `text` is ignored. The pinned probe cannot prove the emission cadence without a model turn; the core may apply deltas or explicitly ignore them and rely on `message.part.updated` plus the `session.idle` log backfill. It must pick one behavior and must not claim token-by-token streaming. |
+| `message.part.updated` with `part.type == "tool"` | Queue one coalesced log refresh for the session; the refreshed log renders compact redacted tool rows from the part state. Raw input, output and error text are never rendered. |
 | `message.part.removed` | Remove that part's text; if the message has no text left and no error, remove the placeholder. |
 | `message.removed` | Minor note only: a full-message removal is not reflected in the rendered log until the next log read; `session.idle`/reattach/reconnect backfill covers it. The pump may drop the message if present, but must not treat the event as the durable deletion. |
 | `session.idle` | Read the log once if the assistant text may be incomplete, then emit `done` for the active assistant message; set the session `ready`. This is the reconciliation point when deltas are ignored. |
 | `session.error` | Emit `error`; set the session `error`. Do not show the raw error object. |
 | `permission.asked` | Publish a `ChatPermissionPrompt` in `pending_permissions` and leave the turn waiting. Nothing auto-approves. If the event carries no id, reconcile with `GET /permission` filtered to the native session id. |
 | `permission.replied` | Remove the matching prompt. An id-less reply also reconciles with `GET /permission`. |
-| Everything else | Ignore. Do not render tool JSON, step internals or delta-only UI events. |
+| Everything else | Ignore. Do not render raw tool JSON, step internals or delta-only UI events. |
 
 `permission.updated` is **not** in the pinned `/doc`; the v1 event name is
 `permission.asked`. Watching only `permission.updated` would make a permission request
-invisible and could hang the turn. The pinned event may omit the request id; with no id
-the pump reconciles with `GET /permission` instead of dropping the request. A request must
-never become invisible and hang the turn. `permission.v2.asked`/`permission.v2.replied`
-are v2-only and belong to a later v2 adapter, not this pump.
+invisible and could hang the turn. The v1 schema requires the request `id`; the pump still
+reconciles with `GET /permission` when a runtime event omits it, instead of dropping the
+request. A request must never become invisible and hang the turn.
+`permission.v2.asked`/`permission.v2.replied` are v2-only and belong to a later v2
+adapter, not this pump.
 
 `message.part.updated` is the cumulative source of truth: set the text to the part's
 `text`, never append it. `message.part.delta` is a separate event; when the core applies
@@ -600,8 +607,9 @@ event.
 | `POST /session/{id}/message` accepts an omitted `model` | **Schema confirms optional; runtime server/owner** | `/doc` marks `model` optional; a successful server turn is still an owner/server check |
 | `GET /doc` exposes OpenAPI | **Proven live** | 200 `application/json`, OpenAPI 3.1.0, 162 paths, 479,667 bytes |
 | `permission.asked` is the v1 permission event | **Proven by `/doc`** | `permission.updated` is absent; `permission.replied` and v2-only `permission.v2.*` are separate |
-| The pinned permission reply route | **Assumed; legacy fallback implemented** | The 1.19.5 `/doc` was not readable from the v2 host used here. The core tries `POST /permission/{id}/reply {"reply": ...}`, then `POST /session/{sid}/permissions/{id} {"response": ...}`; both are fake-server tested only |
-| `GET /permission` lists pending requests for a native session | **Assumed from the brief; fake-tested** | Entries use `id`, `sessionID`, `permission` and `patterns`; the core filters by the attached native session id |
+| The pinned permission reply route | **Proven by `/doc`** | The pinned `1.19.5` `/doc` lists `POST /permission/{requestID}/reply` with `{ "reply": "once" \| "always" \| "reject" }` and the legacy `POST /session/{sessionID}/permissions/{permissionID}` with `{ "response": ... }`. The core uses the former and falls back to the latter only on 404/405; both are fake-engine tested |
+| `GET /permission` lists pending requests for a native session | **Proven by `/doc`; fake-tested** | `PermissionRequest` requires `id`, `sessionID`, `permission`, `patterns`, `metadata` and `always`; the core keeps the entries for the attached native id |
+| Tool parts carry a compact status and input | **Proven by `/doc`** | `ToolPart.state` is `pending`, `running`, `completed` or `error`; the core reads only the tool name, status and a known input hint, never output or error text |
 | `server.heartbeat` is a liveness data event | **Proven live; undocumented in `/doc`** | Empty `properties`, about every 10 s; explicitly ignored, any byte counts |
 | `message.removed` exists | **Proven by `/doc`; minor** | `{sessionID,messageID}`; a full removal is covered by the next log read/backfill |
 
@@ -1913,8 +1921,9 @@ error object.
   `chat_unavailable`/`engine_*` states. The global/project surfaces show the gate until
   the server path opens; they do not show preview replies when `bridge.preview` is false.
 - Live tool-activity rows and the inline permission card. Allow once / Always allow /
-  Reject call `replyPermission` (`chat_reply_permission`); the route is fake-tested. Confirm
-  the pinned 1.19.5 reply route before claiming the live path.
+  Reject call `replyPermission` (`chat_reply_permission`); the pinned 1.19.5 `/doc` proves
+  the reply route, and the fake-engine tests cover the round trip. A live tool/permission
+  turn is still owner verification, so do not claim it has been observed end to end.
 - The removal of the label-only Local/Server toggle.
 - The `ChatMessageView` card flow, the secure server card and the onboarding actions are
   unchanged and real.
