@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 
 use crate::engine::chat::model::{
-    ChatEvent, ChatMessage, ChatMessageOrigin, ChatRole, ChatSessionId, ChatSessionView,
-    MAX_MESSAGE_CHARS, cap_text, normalize_text,
+    ChatEvent, ChatMessage, ChatMessageOrigin, ChatPermissionPrompt, ChatRole, ChatSessionId,
+    ChatSessionView, MAX_ACTIVITY_ITEMS, MAX_MESSAGE_CHARS, cap_text, display_snippet,
+    normalize_text,
 };
 use crate::engine::chat::sse::{EngineEvent, EnginePartUpdate};
 use crate::time::Timestamp;
@@ -260,8 +261,11 @@ impl ChatEventApplier {
                     .position(|message| &message.id == message_id)
                 {
                     self.messages[index].streaming = false;
-                    if self.messages[index].text.is_empty()
-                        || self.messages[index].joined_text().is_empty()
+                    if self.messages[index].joined_text().is_empty()
+                        && self.messages[index]
+                            .tools
+                            .as_ref()
+                            .is_none_or(Vec::is_empty)
                     {
                         self.messages.remove(index);
                     }
@@ -272,12 +276,15 @@ impl ChatEventApplier {
         ApplyOutcome::Applied
     }
 
-    fn upsert(&mut self, message: ChatMessage) {
+    fn upsert(&mut self, mut message: ChatMessage) {
         if let Some(existing) = self
             .messages
             .iter_mut()
             .find(|existing| existing.id == message.id)
         {
+            if message.tools.is_none() {
+                message.tools = existing.tools.take();
+            }
             *existing = message;
         } else {
             self.messages.push(message);
@@ -306,6 +313,7 @@ impl ChatEventApplier {
             created_at: now,
             origin: ChatMessageOrigin::Model,
             streaming: true,
+            tools: None,
         };
         if message.append_delta(text) {
             self.truncated.insert(message_id.to_owned());
@@ -342,8 +350,15 @@ pub enum Mapped {
         /// The provider status code, when present.
         status: Option<u16>,
     },
-    /// OpenCode asked for a tool permission. The transport never approves it.
-    PermissionRequired,
+    /// A tool part changed; the transport reloads the native log to render the rows.
+    ToolActivity,
+    /// OpenCode is waiting on a permission. The owner answers it; nothing auto-approves.
+    PermissionAsked(ChatPermissionPrompt),
+    /// A permission request was answered (here or in another OpenCode client).
+    PermissionReplied {
+        /// The native request id.
+        id: String,
+    },
 }
 
 /// Derives deltas from cumulative text part updates.
@@ -406,6 +421,7 @@ impl SseEventMapper {
                     created_at: now,
                     origin: ChatMessageOrigin::Model,
                     streaming: true,
+                    tools: None,
                 })
             }
             EngineEvent::MessagePartUpdated { part } => self.map_part(part, now),
@@ -438,11 +454,32 @@ impl SseEventMapper {
             EngineEvent::SessionError { error_status, .. } => Mapped::Error {
                 status: *error_status,
             },
-            EngineEvent::PermissionAsked { .. } => Mapped::PermissionRequired,
+            EngineEvent::ToolPartUpdated { .. } => Mapped::ToolActivity,
+            EngineEvent::PermissionAsked {
+                id,
+                permission,
+                patterns,
+                ..
+            } => match id {
+                Some(id) => Mapped::PermissionAsked(ChatPermissionPrompt {
+                    id: id.clone(),
+                    permission: display_snippet(permission),
+                    patterns: patterns
+                        .iter()
+                        .take(MAX_ACTIVITY_ITEMS)
+                        .map(|pattern| display_snippet(pattern))
+                        .collect(),
+                    created_at: now,
+                }),
+                None => Mapped::ToolActivity,
+            },
+            EngineEvent::PermissionReplied { id, .. } => match id {
+                Some(id) => Mapped::PermissionReplied { id: id.clone() },
+                None => Mapped::ToolActivity,
+            },
             EngineEvent::ServerConnected
             | EngineEvent::ServerHeartbeat
             | EngineEvent::SessionUpdated { .. }
-            | EngineEvent::PermissionReplied
             | EngineEvent::Unknown => Mapped::None,
         }
     }
@@ -529,6 +566,7 @@ mod tests {
             started_at: None,
             last_event_at: None,
             error: None,
+            pending_permissions: None,
         }
     }
 
@@ -646,11 +684,19 @@ mod tests {
         assert_eq!(
             mapper.map(
                 &EngineEvent::PermissionAsked {
-                    session_id: Some("ses_1".to_owned())
+                    session_id: Some("ses_1".to_owned()),
+                    id: Some("per_1".to_owned()),
+                    permission: "write".to_owned(),
+                    patterns: vec!["/tmp/x".to_owned()],
                 },
                 Timestamp::epoch()
             ),
-            Mapped::PermissionRequired
+            Mapped::PermissionAsked(ChatPermissionPrompt {
+                id: "per_1".to_owned(),
+                permission: "write".to_owned(),
+                patterns: vec!["/tmp/x".to_owned()],
+                created_at: Timestamp::epoch(),
+            })
         );
         assert_eq!(
             mapper.map(

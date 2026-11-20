@@ -70,6 +70,7 @@ pub fn run() {
             commands::chat::chat_send,
             commands::chat::chat_set_model,
             commands::chat::chat_stop,
+            commands::chat::chat_reply_permission,
             commands::chat::chat_log,
             commands::asif::gates_get_with_build_flags,
             commands::asif::probe_gates_with_build_flags,

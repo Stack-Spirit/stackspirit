@@ -1223,7 +1223,38 @@ export interface ChatMessage {
    * The renderer maps it to `PanelContent`.
    */
   show?: ChatPanelTarget | null;
+  /**
+   * Compact, redacted tool-call rows for an assistant turn. Absent when the message has
+   * no tool parts. Never carries raw tool input, output or error text.
+   */
+  tools?: ChatToolActivity[];
 }
+
+export type ChatToolStatus = "pending" | "running" | "completed" | "error";
+
+/** One compact tool-call row. */
+export interface ChatToolActivity {
+  /** The native part id. */
+  id: string;
+  /** The tool name, for example `bash`. */
+  name: string;
+  status: ChatToolStatus;
+  /** A short redacted hint such as the command or path. */
+  summary?: string;
+}
+
+/** One permission request the engine is waiting on. */
+export interface ChatPermissionPrompt {
+  /** The native request id, needed to reply. */
+  id: string;
+  /** The requested action, for example `bash` or `external_directory`. */
+  permission: string;
+  /** The requested patterns, already redacted for display. */
+  patterns: string[];
+  created_at: Timestamp;
+}
+
+export type ChatPermissionDecision = "once" | "always" | "reject";
 
 /** The details panel target, moved here so `MockBridge` need not import `next/`. */
 export type ChatPanelTarget =
@@ -1303,6 +1334,8 @@ export interface ChatSessionView {
   started_at: Timestamp | null;
   last_event_at: Timestamp | null;
   error: SpiritErrorDto | null;
+  /** Permission requests the engine is waiting on, oldest first. Absent when none. */
+  pending_permissions?: ChatPermissionPrompt[];
 }
 
 export interface ChatStartInput {

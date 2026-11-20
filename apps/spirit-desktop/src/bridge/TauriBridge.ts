@@ -20,6 +20,7 @@ import type {
   ChatEvent,
   ChatLogPage,
   ChatLogQuery,
+  ChatPermissionDecision,
   ChatSendInput,
   ChatSendReceipt,
   ChatSessionView,
@@ -257,6 +258,12 @@ export class TauriBridge implements SpiritBridge {
       call("chat_stop", { session }),
     setModel: (session: SessionId, modelId: string): Promise<ChatSessionView> =>
       call("chat_set_model", { session, modelId }),
+    replyPermission: (
+      session: SessionId,
+      permissionId: string,
+      decision: ChatPermissionDecision,
+    ): Promise<ChatSessionView> =>
+      call("chat_reply_permission", { session, permissionId, decision }),
     log: (session: SessionId, query?: ChatLogQuery): Promise<ChatLogPage> =>
       call("chat_log", { session, query: query ?? null }),
     subscribe: (listener: (event: ChatEvent) => void): (() => void) => {

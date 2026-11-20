@@ -26,9 +26,11 @@ use crate::engine::chat::endpoint::{
 };
 use crate::engine::chat::model::{
     ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage, ChatMessageOrigin,
-    ChatModelTier, ChatModelView, ChatRole, ChatSendReceipt, ChatSessionId, ChatSessionLocation,
-    ChatSessionState, ChatSessionView, ChatStartInput, ChatUsageView, MAX_MESSAGE_CHARS, cap_text,
-    normalize_text, validate_project_name, validate_user_text,
+    ChatModelTier, ChatModelView, ChatPermissionDecision, ChatPermissionPrompt, ChatRole,
+    ChatSendReceipt, ChatSessionId, ChatSessionLocation, ChatSessionState, ChatSessionView,
+    ChatStartInput, ChatToolActivity, ChatToolStatus, ChatUsageView, MAX_ACTIVITY_ITEMS,
+    MAX_MESSAGE_CHARS, cap_text, display_snippet, normalize_text, validate_project_name,
+    validate_user_text,
 };
 use crate::engine::chat::pump::{
     ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper,
@@ -256,6 +258,10 @@ struct SessionRecord {
     mapper: SseEventMapper,
     active_turn: Option<String>,
     turn_completed: bool,
+    /// Permission requests OpenCode is waiting on, oldest first.
+    pending_permissions: Vec<ChatPermissionPrompt>,
+    /// True while a coalesced tool-activity log refresh is queued.
+    tool_refresh_queued: bool,
 }
 
 impl SessionRecord {
@@ -274,6 +280,8 @@ impl SessionRecord {
             mapper: SseEventMapper::new(),
             active_turn: None,
             turn_completed: false,
+            pending_permissions: Vec::new(),
+            tool_refresh_queued: false,
         }
     }
 }
@@ -566,7 +574,9 @@ impl LocalChatProvider {
         };
         let view = self.inner.clone().emit_session(view).await;
         ensure_pump(&self.inner, &endpoint);
-        Ok(view)
+        // A turn that was already waiting on a permission when the UI (re)attached.
+        self.inner.clone().sync_permissions(session).await;
+        Ok(self.inner.current_view(session).await.unwrap_or(view))
     }
 
     /// Reuses the stored native session. It never creates one.
@@ -634,7 +644,9 @@ impl LocalChatProvider {
         };
         let view = self.inner.clone().emit_session(view).await;
         ensure_pump(&self.inner, &endpoint);
-        Ok(view)
+        // A turn that was already waiting on a permission when the UI (re)attached.
+        self.inner.clone().sync_permissions(session).await;
+        Ok(self.inner.current_view(session).await.unwrap_or(view))
     }
 
     async fn attach_orchestrator(
@@ -777,6 +789,21 @@ impl LocalChatProvider {
         })
     }
 
+    /// Answers one pending OpenCode permission request and returns the refreshed view.
+    ///
+    /// Nothing is approved implicitly; this is only called from an owner click.
+    pub async fn reply_permission(
+        &self,
+        session: &ChatSessionId,
+        permission_id: &str,
+        decision: ChatPermissionDecision,
+    ) -> Result<ChatSessionView, SpiritError> {
+        self.inner
+            .clone()
+            .reply_permission(session, permission_id, decision)
+            .await
+    }
+
     /// Aborts the current turn when supported and returns the stopped view.
     pub async fn stop(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError> {
         let now = self.inner.clock.now();
@@ -797,6 +824,7 @@ impl LocalChatProvider {
             record.attached = true;
             record.active_turn = None;
             record.turn_completed = true;
+            record.pending_permissions.clear();
             record.last_event_at = Some(now);
             record.error = None;
             (record.native_session_id.clone(), endpoint, streaming)
@@ -963,7 +991,156 @@ impl Inner {
             started_at: record.started_at,
             last_event_at: record.last_event_at,
             error: record.error.clone(),
+            pending_permissions: (!record.pending_permissions.is_empty())
+                .then(|| record.pending_permissions.clone()),
         }
+    }
+
+    async fn current_view(&self, session: &ChatSessionId) -> Option<ChatSessionView> {
+        let state = self.state.lock().await;
+        state
+            .sessions
+            .get(session)
+            .map(|record| self.view_for(session, record))
+    }
+
+    /// Reads `GET /permission`, keeps the entries for this session's native id and
+    /// publishes the view when the pending set changed. Errors are ignored: the SSE
+    /// events remain the primary signal and this is a best-effort reconciliation.
+    async fn sync_permissions(self: Arc<Self>, session: &ChatSessionId) {
+        let (endpoint, native) = {
+            let state = self.state.lock().await;
+            let Some(record) = state.sessions.get(session) else {
+                return;
+            };
+            let Some(endpoint) = record.endpoint.clone() else {
+                return;
+            };
+            (endpoint, record.native_session_id.clone())
+        };
+        let Ok(response) = self
+            .request(
+                "GET",
+                endpoint,
+                "/permission".to_owned(),
+                None,
+                SESSION_TIMEOUT,
+            )
+            .await
+        else {
+            return;
+        };
+        if !(200..300).contains(&response.status) {
+            return;
+        }
+        let now = self.clock.now();
+        let view = {
+            let mut state = self.state.lock().await;
+            let Some(record) = state.sessions.get_mut(session) else {
+                return;
+            };
+            if record.native_session_id != native {
+                return;
+            }
+            let mut found = parse_permissions(&response.body, &native, now);
+            for prompt in &mut found {
+                if let Some(existing) = record
+                    .pending_permissions
+                    .iter()
+                    .find(|existing| existing.id == prompt.id)
+                {
+                    prompt.created_at = existing.created_at;
+                }
+            }
+            if found == record.pending_permissions {
+                return;
+            }
+            record.pending_permissions = found;
+            record.last_event_at = Some(now);
+            self.view_for(session, record)
+        };
+        self.emit_session(view).await;
+    }
+
+    /// Answers one pending permission and returns the refreshed view.
+    async fn reply_permission(
+        self: Arc<Self>,
+        session: &ChatSessionId,
+        permission_id: &str,
+        decision: ChatPermissionDecision,
+    ) -> Result<ChatSessionView, SpiritError> {
+        let id = safe_native_id(permission_id)
+            .map_err(|_| SpiritError::invalid_input("permission", "invalid permission id"))?;
+        let (endpoint, native) = {
+            let state = self.state.lock().await;
+            let record = state
+                .sessions
+                .get(session)
+                .ok_or_else(chat_not_started_error)?;
+            let endpoint = record
+                .endpoint
+                .clone()
+                .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
+            (endpoint, record.native_session_id.clone())
+        };
+        // A request that another client already answered is gone from the list; the
+        // reply then reduces to refreshing the view instead of guessing.
+        self.clone().sync_permissions(session).await;
+        let known = {
+            let state = self.state.lock().await;
+            state.sessions.get(session).is_some_and(|record| {
+                record
+                    .pending_permissions
+                    .iter()
+                    .any(|prompt| prompt.id == permission_id)
+            })
+        };
+        if known {
+            let body =
+                serde_json::to_vec(&json!({ "reply": decision.as_wire() })).unwrap_or_default();
+            let response = self
+                .request(
+                    "POST",
+                    endpoint.clone(),
+                    format!("/permission/{id}/reply"),
+                    Some(body),
+                    SESSION_TIMEOUT,
+                )
+                .await?;
+            if matches!(response.status, 404 | 405) {
+                // Older engines answer on the session route with `response`.
+                let body = serde_json::to_vec(&json!({ "response": decision.as_wire() }))
+                    .unwrap_or_default();
+                let legacy = self
+                    .request(
+                        "POST",
+                        endpoint,
+                        format!("/session/{}/permissions/{id}", safe_native_id(&native)?),
+                        Some(body),
+                        SESSION_TIMEOUT,
+                    )
+                    .await?;
+                if legacy.status != 404 {
+                    ensure_success(&legacy)?;
+                }
+            } else {
+                ensure_success(&response)?;
+            }
+        }
+        let now = self.clock.now();
+        let view = {
+            let mut state = self.state.lock().await;
+            let record = state
+                .sessions
+                .get_mut(session)
+                .ok_or_else(chat_not_started_error)?;
+            record
+                .pending_permissions
+                .retain(|prompt| prompt.id != permission_id);
+            record.last_event_at = Some(now);
+            self.view_for(session, record)
+        };
+        Ok(self.emit_session(view).await)
     }
 
     /// Returns a saved selection, or defaults to the first verified free model.
@@ -1266,6 +1443,7 @@ impl Inner {
             record.error = Some(error.clone());
             record.active_turn = None;
             record.turn_completed = true;
+            record.pending_permissions.clear();
             record.last_event_at = Some(now);
             self.view_for(session, record)
         };
@@ -1277,6 +1455,12 @@ impl Inner {
     }
 
     async fn reload_session(self: Arc<Self>, session: &ChatSessionId) {
+        self.reload_log(session, true).await;
+    }
+
+    /// Reloads the native log and emits changed messages. A quiet reload (tool
+    /// activity) ignores a transient read failure instead of failing the session.
+    async fn reload_log(self: Arc<Self>, session: &ChatSessionId, fail_on_error: bool) {
         let (endpoint, native) = {
             let state = self.state.lock().await;
             let Some(record) = state.sessions.get(session) else {
@@ -1293,7 +1477,9 @@ impl Inner {
         let body = match self.read_log(&endpoint, &native).await {
             Ok(body) => body,
             Err(error) => {
-                self.fail_session(session, error).await;
+                if fail_on_error {
+                    self.fail_session(session, error).await;
+                }
                 return;
             }
         };
@@ -1379,27 +1565,53 @@ impl Inner {
                 self.fail_session(&session, map_provider_error(status))
                     .await;
             }
-            Mapped::PermissionRequired => {
-                self.clone()
-                    .fail_session(&session, permission_required_error())
-                    .await;
-                self.abort_best_effort(&session).await;
+            Mapped::ToolActivity => {
+                let queue = {
+                    let mut state = self.state.lock().await;
+                    state.sessions.get_mut(&session).is_some_and(|record| {
+                        let queue = !record.tool_refresh_queued;
+                        record.tool_refresh_queued = true;
+                        queue
+                    })
+                };
+                if queue {
+                    schedule_tool_refresh(&self, session);
+                }
+            }
+            Mapped::PermissionAsked(prompt) => {
+                let view = {
+                    let mut state = self.state.lock().await;
+                    let Some(record) = state.sessions.get_mut(&session) else {
+                        return;
+                    };
+                    if record
+                        .pending_permissions
+                        .iter()
+                        .any(|existing| existing.id == prompt.id)
+                    {
+                        return;
+                    }
+                    record.pending_permissions.push(prompt);
+                    self.view_for(&session, record)
+                };
+                self.emit_session(view).await;
+            }
+            Mapped::PermissionReplied { id } => {
+                let view = {
+                    let mut state = self.state.lock().await;
+                    let Some(record) = state.sessions.get_mut(&session) else {
+                        return;
+                    };
+                    let before = record.pending_permissions.len();
+                    record.pending_permissions.retain(|prompt| prompt.id != id);
+                    if record.pending_permissions.len() == before {
+                        return;
+                    }
+                    self.view_for(&session, record)
+                };
+                self.emit_session(view).await;
             }
         }
-    }
-
-    async fn abort_best_effort(self: Arc<Self>, session: &ChatSessionId) {
-        let (endpoint, native) = {
-            let state = self.state.lock().await;
-            let Some(record) = state.sessions.get(session) else {
-                return;
-            };
-            let Some(endpoint) = record.endpoint.clone() else {
-                return;
-            };
-            (endpoint, record.native_session_id.clone())
-        };
-        let _ = self.abort(&endpoint, &native).await;
     }
 
     async fn handle_idle(
@@ -1585,6 +1797,20 @@ fn schedule_reload(inner: &Arc<Inner>, session: ChatSessionId) {
     tokio::spawn(future);
 }
 
+fn schedule_tool_refresh(inner: &Arc<Inner>, session: ChatSessionId) {
+    let inner = Arc::clone(inner);
+    let future: BoxedTask = Box::pin(async move {
+        {
+            let mut state = inner.state.lock().await;
+            if let Some(record) = state.sessions.get_mut(&session) {
+                record.tool_refresh_queued = false;
+            }
+        }
+        inner.reload_log(&session, false).await;
+    });
+    tokio::spawn(future);
+}
+
 fn spawn_turn(
     inner: Arc<Inner>,
     endpoint: ChatEndpoint,
@@ -1689,10 +1915,19 @@ impl Inner {
                     text,
                     created_at,
                     truncated,
+                    tools,
                 } => {
-                    if !record.applier.has_text(&id) {
+                    // A mid-turn log refresh can leave partial text behind, so the final
+                    // response replaces the projection whenever text or tools differ.
+                    let current = record.applier.message(&id);
+                    let stale = current.is_none_or(|message| {
+                        message.joined_text() != normalize_text(&text)
+                            || (tools.is_some() && message.tools != tools)
+                    });
+                    if stale {
                         let mut message = ChatMessage::model(id.clone(), &text, created_at);
                         message.streaming = false;
+                        message.tools = tools;
                         emits.push(TurnEmit::Message(message));
                     }
                     if active.is_some() {
@@ -1709,6 +1944,7 @@ impl Inner {
                 }
             }
             record.active_turn = None;
+            record.pending_permissions.clear();
             (self.view_for(session, record), emits)
         };
         for emit in emits {
@@ -2221,12 +2457,14 @@ fn parse_log(body: &[u8], now: Timestamp) -> Vec<ChatMessage> {
             "assistant" => (ChatRole::Assistant, ChatMessageOrigin::Model),
             _ => continue,
         };
-        let text = entry
-            .get("parts")
-            .and_then(Value::as_array)
-            .map(|parts| render_parts(parts))
-            .unwrap_or_default();
-        if text.is_empty() {
+        let parts = entry.get("parts").and_then(Value::as_array);
+        let text = parts.map(|parts| render_parts(parts)).unwrap_or_default();
+        let tools = if role == ChatRole::Assistant {
+            parts.and_then(|parts| parse_tool_parts(parts))
+        } else {
+            None
+        };
+        if text.is_empty() && tools.is_none() {
             continue;
         }
         let id = info
@@ -2239,7 +2477,8 @@ fn parse_log(body: &[u8], now: Timestamp) -> Vec<ChatMessage> {
             .and_then(|time| time.get("created"))
             .and_then(Value::as_i64)
             .map_or(now, Timestamp::from_unix_millis);
-        let message = ChatMessage::from_text(id.clone(), role, origin, &text, created_at);
+        let mut message = ChatMessage::from_text(id.clone(), role, origin, &text, created_at);
+        message.tools = tools;
         if let Some(existing) = messages.iter_mut().find(|existing| existing.id == id) {
             *existing = message;
         } else {
@@ -2439,6 +2678,110 @@ fn parse_usage(body: &[u8], context_limit: Option<u64>) -> Option<ChatUsageView>
     })
 }
 
+/// Reads OpenCode `type: "tool"` parts into compact redacted rows.
+///
+/// Only the tool name, its status and a short hint taken from a known input field are
+/// kept. Output, metadata and error text are never read, so a tool result cannot leak.
+fn parse_tool_parts(parts: &[Value]) -> Option<Vec<ChatToolActivity>> {
+    let tools: Vec<ChatToolActivity> = parts
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("tool"))
+        .filter_map(|part| {
+            let id = part
+                .get("id")
+                .or_else(|| part.get("callID"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())?;
+            let name = part.get("tool").and_then(Value::as_str)?;
+            let state = part.get("state");
+            let status = match state
+                .and_then(|state| state.get("status"))
+                .and_then(Value::as_str)
+            {
+                Some("running") => ChatToolStatus::Running,
+                Some("completed") => ChatToolStatus::Completed,
+                Some("error") => ChatToolStatus::Error,
+                _ => ChatToolStatus::Pending,
+            };
+            let summary = state
+                .and_then(|state| state.get("input"))
+                .and_then(tool_summary)
+                .map(|summary| display_snippet(&summary))
+                .filter(|summary| !summary.is_empty());
+            Some(ChatToolActivity {
+                id: id.to_owned(),
+                name: display_snippet(name),
+                status,
+                summary,
+            })
+        })
+        .take(MAX_ACTIVITY_ITEMS)
+        .collect();
+    (!tools.is_empty()).then_some(tools)
+}
+
+fn tool_summary(input: &Value) -> Option<String> {
+    const KEYS: [&str; 8] = [
+        "description",
+        "command",
+        "filePath",
+        "path",
+        "pattern",
+        "url",
+        "query",
+        "prompt",
+    ];
+    KEYS.iter()
+        .find_map(|key| input.get(key).and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
+/// Reads `GET /permission` and keeps the requests that belong to one native session.
+fn parse_permissions(body: &[u8], native: &str, now: Timestamp) -> Vec<ChatPermissionPrompt> {
+    let Ok(Value::Array(entries)) = serde_json::from_slice::<Value>(body) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("sessionID")
+                .or_else(|| entry.get("sessionId"))
+                .and_then(Value::as_str)
+                == Some(native)
+        })
+        .filter_map(|entry| {
+            let id = entry.get("id").and_then(Value::as_str)?;
+            if id.is_empty() {
+                return None;
+            }
+            let permission = entry
+                .get("permission")
+                .or_else(|| entry.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("permission");
+            let patterns = entry
+                .get("patterns")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .take(MAX_ACTIVITY_ITEMS)
+                        .map(display_snippet)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(ChatPermissionPrompt {
+                id: id.to_owned(),
+                permission: display_snippet(permission),
+                patterns,
+                created_at: now,
+            })
+        })
+        .collect()
+}
+
 fn render_parts(parts: &[Value]) -> String {
     let mut text = String::new();
     for part in parts {
@@ -2466,6 +2809,7 @@ enum AssistantOutcome {
         text: String,
         created_at: Timestamp,
         truncated: bool,
+        tools: Option<Vec<ChatToolActivity>>,
     },
     Empty,
     Failed(SpiritError),
@@ -2484,12 +2828,10 @@ fn parse_assistant_response(body: &[u8], now: Timestamp) -> AssistantOutcome {
     if let Some(error) = info.get("error").filter(|error| !error.is_null()) {
         return AssistantOutcome::Failed(map_provider_error(error_status(error)));
     }
-    let text = document
-        .get("parts")
-        .and_then(Value::as_array)
-        .map(|parts| render_parts(parts))
-        .unwrap_or_default();
-    if text.is_empty() {
+    let parts = document.get("parts").and_then(Value::as_array);
+    let text = parts.map(|parts| render_parts(parts)).unwrap_or_default();
+    let tools = parts.and_then(|parts| parse_tool_parts(parts));
+    if text.is_empty() && tools.is_none() {
         return AssistantOutcome::Empty;
     }
     let (text, truncated) = cap_text(&text, MAX_MESSAGE_CHARS);
@@ -2508,6 +2850,7 @@ fn parse_assistant_response(body: &[u8], now: Timestamp) -> AssistantOutcome {
         text,
         created_at,
         truncated,
+        tools,
     }
 }
 
@@ -2692,7 +3035,9 @@ fn changed_messages(old: &[ChatMessage], new: &[ChatMessage]) -> Vec<ChatMessage
             old.iter()
                 .find(|existing| existing.id == message.id)
                 .is_none_or(|existing| {
-                    existing.text != message.text || existing.streaming != message.streaming
+                    existing.text != message.text
+                        || existing.streaming != message.streaming
+                        || existing.tools != message.tools
                 })
         })
         .cloned()
@@ -2948,14 +3293,6 @@ fn stream_lost_error() -> SpiritError {
     )
     .retryable()
     .with_hint("Reattach the conversation to continue.")
-}
-
-fn permission_required_error() -> SpiritError {
-    SpiritError::new(
-        SpiritErrorCode::Refused,
-        "permission_required: this turn needs tool approval in OpenCode; StackSpirit does not auto-approve",
-    )
-    .with_hint("Open the OpenCode app and start a new turn.")
 }
 
 fn stop_unconfirmed_error() -> SpiritError {

@@ -3,7 +3,11 @@ import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { errorTitle, toSpiritError, type SpiritError } from "../bridge/errors";
 import type {
   ChatModelView,
+  ChatPermissionDecision,
+  ChatPermissionPrompt,
   ChatSessionState,
+  ChatToolActivity,
+  ChatToolStatus,
   FleetView,
   HostDraft,
   HostKeyPin,
@@ -104,6 +108,9 @@ export function ChatView({
   const send = useConversations((state) => state.send);
   const stop = useConversations((state) => state.stop);
   const setModel = useConversations((state) => state.setModel);
+  const replyPermission = useConversations((state) => state.replyPermission);
+  const permissionBusy = useConversations((state) => state.permissionBusy[session] ?? null);
+  const permissionError = useConversations((state) => state.permissionError[session] ?? null);
   const open = useConversations((state) => state.open);
   const restart = useConversations((state) => state.restart);
   const loadEarlier = useConversations((state) => state.loadEarlier);
@@ -123,7 +130,7 @@ export function ChatView({
 
   useEffect(() => {
     endRef.current?.scrollIntoView?.({ block: "end" });
-  }, [messages.length]);
+  }, [messages.length, view?.pending_permissions?.length]);
 
   const isSetup = session === "setup";
   const models: ChatModelView[] | undefined = view?.available_models;
@@ -149,7 +156,8 @@ export function ChatView({
   const hasReply = visibleMessages.some(
     (message) => message.origin === "model" || message.origin === "preview",
   );
-  const hero = !hasConversation && visibleMessages.length === 0;
+  const pendingPermissions = view?.pending_permissions ?? [];
+  const hero = !hasConversation && visibleMessages.length === 0 && pendingPermissions.length === 0;
   const secureCardOpen = visibleMessages.some(
     (message) => message.card?.kind === "secure-server",
   );
@@ -289,10 +297,20 @@ export function ChatView({
               ) : null}
             </div>
           ) : null}
-          {visibleMessages.length > 0 ? (
+          {visibleMessages.length > 0 || pendingPermissions.length > 0 ? (
             <div className="nx-chat__inner">
               {visibleMessages.map((message) => (
                 <Message key={message.id} session={session} message={message} />
+              ))}
+              {pendingPermissions.map((prompt) => (
+                <PermissionCard
+                  key={prompt.id}
+                  prompt={prompt}
+                  busy={permissionBusy === prompt.id}
+                  locked={permissionBusy !== null}
+                  error={permissionError?.message ?? null}
+                  onReply={(decision) => void replyPermission(session, prompt.id, decision)}
+                />
               ))}
               <div ref={endRef} />
             </div>
@@ -525,13 +543,148 @@ function Message({ session, message }: { session: SessionId; message: ChatMessag
         {message.streaming ? <span className="nx-msg__cursor" aria-hidden="true" /> : null}
       </div>
       {received ? card : null}
-      {message.text.map((paragraph, index) => (
-        <p key={index} className={received ? "nx-secure__outcome" : undefined}>
-          {paragraph}
-        </p>
-      ))}
+      {message.tools && message.tools.length > 0 ? <ToolActivity tools={message.tools} /> : null}
+      {message.text
+        .filter((paragraph) => paragraph.trim() !== "" || !message.tools?.length)
+        .map((paragraph, index) => (
+          <p key={index} className={received ? "nx-secure__outcome" : undefined}>
+            {paragraph}
+          </p>
+        ))}
       {received ? null : card}
     </div>
+  );
+}
+
+const TOOL_STATUS_LABEL: Record<ChatToolStatus, string> = {
+  pending: "waiting",
+  running: "running",
+  completed: "done",
+  error: "failed",
+};
+
+/** Compact, calm tool-call rows. The text states the status; the dot only reinforces it. */
+function ToolActivity({ tools }: { tools: ChatToolActivity[] }) {
+  return (
+    <ul className="nx-tools" aria-label="Tool activity" data-testid="tool-activity">
+      {tools.map((tool) => (
+        <li
+          key={tool.id}
+          className={`nx-tool nx-tool--${tool.status}`}
+          data-testid="tool-row"
+          data-status={tool.status}
+        >
+          <span className="nx-tool__dot" aria-hidden="true" />
+          <span className="nx-tool__name">{tool.name}</span>
+          {tool.summary ? <span className="nx-tool__summary">{tool.summary}</span> : null}
+          <span className="nx-tool__status">{TOOL_STATUS_LABEL[tool.status]}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function describePermission(permission: string): string {
+  switch (permission) {
+    case "external_directory":
+      return "access a folder outside its workspace";
+    case "bash":
+      return "run a command";
+    case "edit":
+    case "write":
+      return "change files";
+    case "read":
+      return "read files";
+    case "webfetch":
+      return "fetch a web page";
+    default:
+      return `use “${permission}”`;
+  }
+}
+
+/**
+ * An unmistakable inline card for a permission the engine is waiting on. The turn is
+ * paused until an owner click; nothing here approves anything by itself.
+ */
+function PermissionCard({
+  prompt,
+  busy,
+  locked,
+  error,
+  onReply,
+}: {
+  prompt: ChatPermissionPrompt;
+  busy: boolean;
+  locked: boolean;
+  error: string | null;
+  onReply: (decision: ChatPermissionDecision) => void;
+}) {
+  const titleId = useId();
+  return (
+    <section
+      className="nx-perm"
+      aria-labelledby={titleId}
+      data-testid="permission-card"
+      data-permission={prompt.permission}
+    >
+      <span className="nx-sr" role="alert">
+        Permission needed: StackSpirit wants to {describePermission(prompt.permission)}.
+      </span>
+      <h2 className="nx-perm__title" id={titleId}>
+        <span className="nx-perm__icon" aria-hidden="true">
+          !
+        </span>
+        Permission needed
+      </h2>
+      <p className="nx-perm__what">
+        The assistant wants to {describePermission(prompt.permission)}. It is paused until you
+        answer.
+      </p>
+      <div className="nx-perm__detail">
+        <span className="nx-perm__kind">{prompt.permission}</span>
+        {prompt.patterns.length > 0 ? (
+          <ul className="nx-perm__patterns" aria-label="Requested access">
+            {prompt.patterns.map((pattern, index) => (
+              <li key={index}>
+                <code>{pattern}</code>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+      {error ? (
+        <p className="nx-perm__error" data-testid="permission-error">
+          Could not send your answer: {error} Try again.
+        </p>
+      ) : null}
+      <div className="nx-perm__actions">
+        <button
+          type="button"
+          className="nx-btn nx-btn--sm"
+          disabled={locked}
+          aria-busy={busy}
+          onClick={() => onReply("once")}
+        >
+          Allow once
+        </button>
+        <button
+          type="button"
+          className="nx-btn nx-btn--quiet nx-btn--sm"
+          disabled={locked}
+          onClick={() => onReply("always")}
+        >
+          Always allow
+        </button>
+        <button
+          type="button"
+          className="nx-btn nx-btn--quiet nx-btn--sm nx-perm__reject"
+          disabled={locked}
+          onClick={() => onReply("reject")}
+        >
+          Reject
+        </button>
+      </div>
+    </section>
   );
 }
 

@@ -18,10 +18,12 @@ pub use local::{
 };
 pub use model::{
     ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage, ChatMessageOrigin,
-    ChatModelTier, ChatModelView, ChatRole, ChatSendInput, ChatSendReceipt, ChatSessionId,
-    ChatSessionLocation, ChatSessionState, ChatSessionView, ChatStartInput, ChatUsageView,
-    DEFAULT_LOG_LIMIT, MAX_LOG_LIMIT, MAX_MESSAGE_CHARS, MAX_USER_MESSAGE_CHARS, cap_text,
-    normalize_text, paragraphs, validate_project_name, validate_user_text,
+    ChatModelTier, ChatModelView, ChatPermissionDecision, ChatPermissionPrompt, ChatRole,
+    ChatSendInput, ChatSendReceipt, ChatSessionId, ChatSessionLocation, ChatSessionState,
+    ChatSessionView, ChatStartInput, ChatToolActivity, ChatToolStatus, ChatUsageView,
+    DEFAULT_LOG_LIMIT, MAX_ACTIVITY_CHARS, MAX_ACTIVITY_ITEMS, MAX_LOG_LIMIT, MAX_MESSAGE_CHARS,
+    MAX_USER_MESSAGE_CHARS, cap_text, display_snippet, normalize_text, paragraphs,
+    validate_project_name, validate_user_text,
 };
 pub use pump::{ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper};
 pub use sse::{

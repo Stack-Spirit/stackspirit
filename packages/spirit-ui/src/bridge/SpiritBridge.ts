@@ -16,6 +16,7 @@ import type {
   ChatEvent,
   ChatLogPage,
   ChatLogQuery,
+  ChatPermissionDecision,
   ChatSendInput,
   ChatSendReceipt,
   ChatSessionView,
@@ -110,6 +111,17 @@ export interface ChatBridgeSurface {
    * pretending the app can change it. Optional: an older bridge may omit it.
    */
   setModel?(session: SessionId, modelId: string): Promise<ChatSessionView>;
+  /**
+   * Answer one pending permission request (`ChatSessionView.pending_permissions`) from an
+   * owner click and return the refreshed view. Nothing is ever approved implicitly. A
+   * request that is already gone resolves with the current view. Optional: an older
+   * bridge may omit it.
+   */
+  replyPermission?(
+    session: SessionId,
+    permissionId: string,
+    decision: ChatPermissionDecision,
+  ): Promise<ChatSessionView>;
   /** Read the conversation log; pages move backward from newest, each oldest-first. */
   log(session: SessionId, query?: ChatLogQuery): Promise<ChatLogPage>;
   /**

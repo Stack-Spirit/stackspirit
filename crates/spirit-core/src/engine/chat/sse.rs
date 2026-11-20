@@ -217,13 +217,31 @@ pub enum EngineEvent {
         /// Provider status code, when present.
         error_status: Option<u16>,
     },
-    /// OpenCode asks for a tool permission. StackSpirit never approves it.
+    /// A tool part changed (pending, running, completed or error).
+    ToolPartUpdated {
+        /// Native session id, when present.
+        session_id: Option<String>,
+        /// Native message id.
+        message_id: String,
+    },
+    /// OpenCode asks for a tool permission. The owner answers it in the chat card.
     PermissionAsked {
         /// Native session id, when present.
         session_id: Option<String>,
+        /// Native request id (`per_...`), when present.
+        id: Option<String>,
+        /// The requested action.
+        permission: String,
+        /// The requested patterns, raw; the mapper redacts them.
+        patterns: Vec<String>,
     },
-    /// A permission reply, which has no UI in this contract.
-    PermissionReplied,
+    /// A permission request was answered.
+    PermissionReplied {
+        /// Native session id, when present.
+        session_id: Option<String>,
+        /// Native request id, when present.
+        id: Option<String>,
+    },
     /// An unknown or unsupported event, ignored by the pump.
     Unknown,
 }
@@ -239,12 +257,11 @@ impl EngineEvent {
             | Self::MessagePartRemoved { session_id, .. }
             | Self::SessionUpdated { session_id }
             | Self::SessionError { session_id, .. }
-            | Self::PermissionAsked { session_id } => session_id.as_deref(),
+            | Self::ToolPartUpdated { session_id, .. }
+            | Self::PermissionReplied { session_id, .. }
+            | Self::PermissionAsked { session_id, .. } => session_id.as_deref(),
             Self::SessionIdle { session_id } => Some(session_id),
-            Self::ServerConnected
-            | Self::ServerHeartbeat
-            | Self::PermissionReplied
-            | Self::Unknown => None,
+            Self::ServerConnected | Self::ServerHeartbeat | Self::Unknown => None,
         }
     }
 }
@@ -290,10 +307,14 @@ pub fn parse_engine_event(frame: &SseFrame) -> EngineEvent {
             session_id: session_id(properties).map(str::to_owned),
             error_status: properties.get("error").and_then(error_status),
         },
-        "permission.asked" | "permission.updated" => EngineEvent::PermissionAsked {
+        "permission.asked" | "permission.updated" => permission_asked(properties),
+        "permission.replied" => EngineEvent::PermissionReplied {
             session_id: session_id(properties).map(str::to_owned),
+            id: text(properties, "requestID")
+                .or_else(|| text(properties, "permissionID"))
+                .or_else(|| text(properties, "id"))
+                .map(str::to_owned),
         },
-        "permission.replied" => EngineEvent::PermissionReplied,
         _ => EngineEvent::Unknown,
     }
 }
@@ -321,8 +342,40 @@ fn message_updated(properties: &Value) -> EngineEvent {
     }
 }
 
+fn permission_asked(properties: &Value) -> EngineEvent {
+    let patterns = properties
+        .get("patterns")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    EngineEvent::PermissionAsked {
+        session_id: session_id(properties).map(str::to_owned),
+        id: text(properties, "id").map(str::to_owned),
+        permission: text(properties, "permission")
+            .or_else(|| text(properties, "type"))
+            .unwrap_or("permission")
+            .to_owned(),
+        patterns,
+    }
+}
+
 fn message_part_updated(properties: &Value) -> EngineEvent {
     let part = properties.get("part").unwrap_or(properties);
+    if part.get("type").and_then(Value::as_str) == Some("tool") {
+        let Some(message_id) = text(part, "messageID") else {
+            return EngineEvent::Unknown;
+        };
+        return EngineEvent::ToolPartUpdated {
+            session_id: session_id(part).map(str::to_owned),
+            message_id: message_id.to_owned(),
+        };
+    }
     if part.get("type").and_then(Value::as_str) != Some("text") {
         return EngineEvent::Unknown;
     }
@@ -468,7 +521,10 @@ mod tests {
         assert_eq!(
             parse_engine_event(&permission),
             EngineEvent::PermissionAsked {
-                session_id: Some("ses_1".to_owned())
+                session_id: Some("ses_1".to_owned()),
+                id: None,
+                permission: "write".to_owned(),
+                patterns: Vec::new(),
             }
         );
 

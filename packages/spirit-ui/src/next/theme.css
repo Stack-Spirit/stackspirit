@@ -3244,6 +3244,174 @@ button.nx-node:hover {
 }
 
 /* ======================================================================
+   Tool activity rows and the inline permission card
+   ====================================================================== */
+
+.nx-tools {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nx-tool {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 0;
+  color: var(--nx-muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.nx-tool__dot {
+  flex: none;
+  align-self: center;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--nx-faint);
+}
+
+.nx-tool--running .nx-tool__dot {
+  background: var(--nx-accent);
+  animation: nx-tool-pulse 1.4s ease-in-out infinite;
+}
+
+.nx-tool--completed .nx-tool__dot {
+  background: var(--nx-ok);
+}
+
+.nx-tool--error .nx-tool__dot {
+  background: var(--nx-danger);
+}
+
+.nx-tool__name {
+  flex: none;
+  color: var(--nx-text);
+  font-weight: 500;
+}
+
+.nx-tool__summary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--nx-muted);
+  font-family: var(--nx-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nx-tool__status {
+  flex: none;
+  margin-left: auto;
+  color: var(--nx-muted);
+  font-size: 12px;
+}
+
+.nx-tool--error .nx-tool__status {
+  color: var(--nx-danger);
+}
+
+@keyframes nx-tool-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.nx-perm {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--nx-warn);
+  border-left-width: 4px;
+  border-radius: var(--nx-radius);
+  background: var(--nx-warn-soft);
+  color: var(--nx-text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.nx-perm__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--nx-warn);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.nx-perm__icon {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--nx-warn);
+  color: var(--nx-warn-soft);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.nx-perm__what {
+  margin: 0;
+}
+
+.nx-perm__detail {
+  display: grid;
+  gap: 6px;
+}
+
+.nx-perm__kind {
+  color: var(--nx-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.nx-perm__patterns {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nx-perm__patterns code {
+  display: block;
+  overflow-wrap: anywhere;
+  padding: 5px 8px;
+  border: 1px solid var(--nx-line-strong);
+  border-radius: var(--nx-radius-sm);
+  background: var(--nx-panel);
+  color: var(--nx-text);
+  font-size: 12.5px;
+}
+
+.nx-perm__error {
+  margin: 0;
+  color: var(--nx-danger);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.nx-perm__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nx-tool--running .nx-tool__dot {
+    animation: none;
+  }
+}
+
+/* ======================================================================
    Motion and small screens
    ====================================================================== */
 

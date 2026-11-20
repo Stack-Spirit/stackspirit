@@ -11,8 +11,8 @@
 //! them.
 
 use spirit_core::engine::chat::{
-    ChatLogPage, ChatLogQuery, ChatSendInput, ChatSendReceipt, ChatSessionId, ChatSessionView,
-    ChatStartInput,
+    ChatLogPage, ChatLogQuery, ChatPermissionDecision, ChatSendInput, ChatSendReceipt,
+    ChatSessionId, ChatSessionView, ChatStartInput,
 };
 use tauri::State;
 
@@ -82,4 +82,19 @@ pub async fn chat_log(
     let chat = state.chat();
     let query = query.unwrap_or_default();
     chat.log(&session, &query).await
+}
+
+/// Answers one pending OpenCode permission request from an owner click.
+///
+/// Core refuses ids it does not know and never approves anything on its own.
+#[tauri::command]
+pub async fn chat_reply_permission(
+    state: State<'_, AppState>,
+    session: ChatSessionId,
+    permission_id: String,
+    decision: ChatPermissionDecision,
+) -> CommandResult<ChatSessionView> {
+    let chat = state.chat();
+    chat.reply_permission(&session, &permission_id, decision)
+        .await
 }

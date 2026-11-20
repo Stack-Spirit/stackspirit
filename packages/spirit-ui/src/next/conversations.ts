@@ -9,6 +9,7 @@ import type {
   ChatMessage,
   ChatMessageOrigin,
   ChatPanelTarget,
+  ChatPermissionDecision,
   ChatSessionView,
   ProjectRequest,
   SessionId,
@@ -89,6 +90,10 @@ interface ConversationState {
   /** Opaque cursor for older messages; `null`/absent means no older page. */
   earlier: Partial<Record<SessionId, string | null>>;
   loadingEarlier: Partial<Record<SessionId, boolean>>;
+  /** Permission ids whose reply is in flight, so a card cannot be answered twice. */
+  permissionBusy: Partial<Record<SessionId, string | null>>;
+  /** The last failed permission reply per session. It never changes the turn state. */
+  permissionError: Partial<Record<SessionId, SpiritErrorDto | null>>;
   /** Per-session operation guard; prevents StrictMode double opens. */
   opening: Partial<Record<SessionId, OpeningPromise | undefined>>;
   /** The last applied event revision, for gap detection. */
@@ -110,6 +115,15 @@ interface ConversationState {
   stop: (session: SessionId) => Promise<void>;
   /** Switch the setup assistant's model inline; an orchestrator-owned session rejects. */
   setModel: (session: SessionId, modelId: string) => Promise<void>;
+  /**
+   * Answers one pending permission card. The returned view replaces the session view, so
+   * the card disappears immediately; a failure keeps the card and records the error.
+   */
+  replyPermission: (
+    session: SessionId,
+    permissionId: string,
+    decision: ChatPermissionDecision,
+  ) => Promise<void>;
   /** Page older messages into the transcript using the opaque cursor. */
   loadEarlier: (session: SessionId) => Promise<void>;
   /** Preview-only project creation demo; a real bridge shows the VOWP gate. */
@@ -136,7 +150,15 @@ const backfilling = new Set<SessionId>();
 
 function createInitialState(): Pick<
   ConversationState,
-  "messages" | "views" | "truncated" | "earlier" | "loadingEarlier" | "opening" | "lastRevision"
+  | "messages"
+  | "views"
+  | "truncated"
+  | "earlier"
+  | "loadingEarlier"
+  | "permissionBusy"
+  | "permissionError"
+  | "opening"
+  | "lastRevision"
 > {
   return {
     messages: {},
@@ -144,6 +166,8 @@ function createInitialState(): Pick<
     truncated: {},
     earlier: {},
     loadingEarlier: {},
+    permissionBusy: {},
+    permissionError: {},
     opening: {},
     lastRevision: 0,
   };
@@ -465,7 +489,7 @@ function applyChatEvent(bridge: SpiritBridge, event: ChatEvent): void {
             const message = { ...existing, streaming: false };
             const empty = message.text.every((paragraph) => paragraph.trim() === "");
             next =
-              empty && !message.card
+              empty && !message.card && !message.tools?.length
                 ? list.filter((_, candidate) => candidate !== index)
                 : list.map((candidate, candidateIndex) =>
                     candidateIndex === index ? message : candidate,
@@ -737,6 +761,28 @@ export const useConversations = create<ConversationState>((set, get) => ({
         error: toSpiritError(caught),
         last_event_at: nowIso(),
       });
+    }
+  },
+
+  replyPermission: async (session, permissionId, decision) => {
+    const bridge = currentBridge();
+    const chat = bridge?.chat;
+    if (!chat?.replyPermission || get().permissionBusy[session]) return;
+    set((state) => ({
+      permissionBusy: { ...state.permissionBusy, [session]: permissionId },
+      permissionError: { ...state.permissionError, [session]: null },
+    }));
+    try {
+      const view = await chat.replyPermission(session, permissionId, decision);
+      setView(session, { ...view });
+    } catch (caught) {
+      set((state) => ({
+        permissionError: { ...state.permissionError, [session]: toSpiritError(caught) },
+      }));
+    } finally {
+      set((state) => ({
+        permissionBusy: { ...state.permissionBusy, [session]: null },
+      }));
     }
   },
 

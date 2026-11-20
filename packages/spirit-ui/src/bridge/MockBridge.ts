@@ -22,6 +22,9 @@ import type {
   ChatMessage,
   ChatModelView,
   ChatPanelTarget,
+  ChatPermissionDecision,
+  ChatPermissionPrompt,
+  ChatToolActivity,
   ChatSendInput,
   ChatSendReceipt,
   ChatSessionView,
@@ -133,6 +136,8 @@ export const MOCK_SCENARIOS = [
   "chat-external-engine",
   "chat-server-gated",
   "chat-session-lost",
+  "chat-tools",
+  "chat-permission",
 ] as const;
 
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
@@ -347,6 +352,8 @@ export class MockBridge implements SpiritBridge {
   private chatLogs = new Map<SessionId, ChatMessage[]>();
   private chatTimers = new Map<SessionId, ReturnType<typeof setTimeout>[]>();
   private chatListeners = new Set<(event: ChatEvent) => void>();
+  /** Preview-only: every permission answer, so tests can assert what was sent. */
+  readonly permissionAnswers: { id: string; decision: ChatPermissionDecision }[] = [];
   private chatSeq = 0;
 
   constructor(options: MockOptions | MockScenario = "fresh") {
@@ -1405,6 +1412,7 @@ export class MockBridge implements SpiritBridge {
         state: "stopped",
         attached: false,
         error: null,
+        pending_permissions: undefined,
       });
       this.emitChat({
         kind: "closed",
@@ -1413,6 +1421,40 @@ export class MockBridge implements SpiritBridge {
         reason: "stopped",
       });
       return clone(stopped);
+    },
+    replyPermission: async (
+      session: SessionId,
+      permissionId: string,
+      decision: ChatPermissionDecision,
+    ): Promise<ChatSessionView> => {
+      this.validateChatSession(session);
+      if (decision !== "once" && decision !== "always" && decision !== "reject") {
+        throw errorDto("invalid_input", "decision: must be once, always or reject");
+      }
+      const view = this.chatSessions.get(session);
+      if (!view) {
+        throw errorDto(
+          "chat_not_started",
+          "No session has been started in this app run.",
+          "Call chat.start first.",
+        );
+      }
+      const pending = view.pending_permissions ?? [];
+      if (!pending.some((prompt) => prompt.id === permissionId)) {
+        // Already answered elsewhere: a harmless refresh, nothing is invented.
+        return clone(view);
+      }
+      this.permissionAnswers.push({ id: permissionId, decision });
+      const rest = pending.filter((prompt) => prompt.id !== permissionId);
+      const next = this.updateChatView(session, {
+        pending_permissions: rest.length > 0 ? rest : undefined,
+      });
+      if (rest.length === 0) {
+        this.scheduleChat(session, 5, () =>
+          this.finishPermissionTurn(session, decision),
+        );
+      }
+      return clone(next);
     },
     setModel: async (session: SessionId, modelId: string): Promise<ChatSessionView> => {
       this.validateChatSession(session);
@@ -1629,7 +1671,105 @@ export class MockBridge implements SpiritBridge {
     this.chatTimers.delete(session);
   }
 
+  private previewTools(
+    statuses: ChatToolActivity["status"][],
+  ): ChatToolActivity[] {
+    const rows: Omit<ChatToolActivity, "status">[] = [
+      { id: "tool-1", name: "read", summary: "docs/PLAN.md" },
+      { id: "tool-2", name: "bash", summary: "git status --short" },
+      { id: "tool-3", name: "write", summary: "/srv/shared/report.md" },
+    ];
+    return statuses.map((status, index) => ({
+      ...rows[index % rows.length]!,
+      status,
+    }));
+  }
+
+  private permissionPrompt(): ChatPermissionPrompt {
+    return {
+      id: "per_preview_1",
+      permission: "external_directory",
+      patterns: ["/srv/shared/*"],
+      created_at: this.now(),
+    };
+  }
+
+  private permissionMessageId = "preview:permission-turn";
+
+  private finishPermissionTurn(
+    session: SessionId,
+    decision: ChatPermissionDecision,
+  ): void {
+    const view = this.chatSessions.get(session);
+    if (!view || view.state === "stopped") return;
+    const rejected = decision === "reject";
+    const reply: ChatMessage = {
+      id: this.permissionMessageId,
+      role: "assistant",
+      text: [
+        rejected
+          ? "Preview reply. You rejected the request, so nothing was written."
+          : "Preview reply. You allowed the request and the file was written.",
+      ],
+      created_at: this.now(),
+      origin: "preview",
+      streaming: false,
+      show: null,
+      tools: this.previewTools(["completed", rejected ? "error" : "completed", rejected ? "error" : "completed"]),
+    };
+    this.finishChatTurn(session, reply);
+  }
+
   private scheduleChatReply(session: SessionId, text: string): void {
+    if (this.scenario === "chat-tools") {
+      this.scheduleChat(session, 5, () => {
+        this.emitChat({
+          kind: "message",
+          revision: this.nextRevision(),
+          session,
+          message: {
+            id: this.permissionMessageId,
+            role: "assistant",
+            text: [],
+            created_at: this.now(),
+            origin: "preview",
+            streaming: true,
+            tools: this.previewTools(["completed", "running"]),
+          },
+        });
+      });
+      this.scheduleChat(session, 15, () => {
+        const reply = this.previewChatReply(session, text);
+        this.finishChatTurn(session, {
+          ...reply,
+          id: this.permissionMessageId,
+          tools: this.previewTools(["completed", "completed", "error"]),
+        });
+      });
+      return;
+    }
+    if (this.scenario === "chat-permission") {
+      this.scheduleChat(session, 5, () => {
+        this.emitChat({
+          kind: "message",
+          revision: this.nextRevision(),
+          session,
+          message: {
+            id: this.permissionMessageId,
+            role: "assistant",
+            text: [],
+            created_at: this.now(),
+            origin: "preview",
+            streaming: true,
+            tools: this.previewTools(["completed", "completed", "running"]),
+          },
+        });
+        this.updateChatView(session, {
+          pending_permissions: [this.permissionPrompt()],
+        });
+      });
+      return;
+    }
     // These scenarios keep a turn open so the Stop action has something to abort.
     if (this.scenario === "chat-slow" || this.scenario === "chat-stop") {
       return;

@@ -252,6 +252,94 @@ pub struct ChatMessage {
     pub origin: ChatMessageOrigin,
     /// True while assistant text is still arriving.
     pub streaming: bool,
+    /// Compact, redacted tool activity for an assistant turn. Absent when the message
+    /// carries no tool parts (or an event could not know them), so a shell update never
+    /// erases tool rows an earlier update delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ChatToolActivity>>,
+}
+
+/// Lifecycle of one tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatToolStatus {
+    /// Queued, not started.
+    Pending,
+    /// Executing.
+    Running,
+    /// Finished successfully.
+    Completed,
+    /// Failed.
+    Error,
+}
+
+/// One compact tool-call row. It never carries raw input, output or error text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatToolActivity {
+    /// The native part id.
+    pub id: String,
+    /// The tool name (for example `bash`), capped and redacted.
+    pub name: String,
+    /// Lifecycle status.
+    pub status: ChatToolStatus,
+    /// A short redacted hint such as the command or path, when one is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+/// One permission request OpenCode is waiting on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatPermissionPrompt {
+    /// The native permission request id (`per_...`). Needed to reply; not a secret.
+    pub id: String,
+    /// The requested action, such as `bash` or `external_directory`.
+    pub permission: String,
+    /// The requested patterns, redacted and capped for display.
+    pub patterns: Vec<String>,
+    /// When the core first saw the request.
+    pub created_at: Timestamp,
+}
+
+/// How the owner answers a permission prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatPermissionDecision {
+    /// Allow this one request.
+    Once,
+    /// Allow this and matching future requests in the session.
+    Always,
+    /// Refuse the request.
+    Reject,
+}
+
+impl ChatPermissionDecision {
+    /// The OpenCode wire word.
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Once => "once",
+            Self::Always => "always",
+            Self::Reject => "reject",
+        }
+    }
+}
+
+/// Longest display string for a tool summary or permission pattern.
+pub const MAX_ACTIVITY_CHARS: usize = 160;
+/// Most tool rows and permission patterns kept per message or prompt.
+pub const MAX_ACTIVITY_ITEMS: usize = 64;
+
+/// Redacts and shortens untrusted text for a one-line display.
+#[must_use]
+pub fn display_snippet(input: &str) -> String {
+    let redacted = crate::error::redact(input);
+    let one_line = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= MAX_ACTIVITY_CHARS {
+        return one_line;
+    }
+    let mut cut: String = one_line.chars().take(MAX_ACTIVITY_CHARS - 1).collect();
+    cut.push('…');
+    cut
 }
 
 impl ChatMessage {
@@ -272,6 +360,7 @@ impl ChatMessage {
             created_at,
             origin,
             streaming: false,
+            tools: None,
         }
     }
 
@@ -369,6 +458,9 @@ pub struct ChatSessionView {
     pub last_event_at: Option<Timestamp>,
     /// A safe error, when the state is `error` or a stop was unconfirmed.
     pub error: Option<SpiritError>,
+    /// Permission requests OpenCode is waiting on for this session, oldest first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_permissions: Option<Vec<ChatPermissionPrompt>>,
 }
 
 /// Why a session closed.
@@ -719,6 +811,7 @@ mod tests {
             started_at: None,
             last_event_at: None,
             error: None,
+            pending_permissions: None,
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(!json.contains("\"url\""));
