@@ -693,7 +693,8 @@ pub const HARNESS_BINARY_HINT: &str = "install the harness or fix [harnesses.*].
 /// Order: a configured multi-component path while it is executable (it wins over `PATH`);
 /// otherwise the configured file name after `previous` resolved successfully, a configured
 /// bare name, or `default_name` on `search_path` (the process `PATH` when `None`); and
-/// finally, only when no binary was configured, `home_relative` under `$HOME`.
+/// finally, only when no binary was configured and no test search path is injected,
+/// `home_relative` under `$HOME`.
 ///
 /// `previous` is the path this same configured value resolved to before. It gates the
 /// moved-path fallback: a path that was never resolved is a configuration error, not a
@@ -739,6 +740,11 @@ pub fn resolve_harness_binary(
         });
     }
 
+    // An injected search path is the whole resolution view for a test; do not leak the
+    // real `$HOME` install into it.
+    if search_path.is_some() {
+        return None;
+    }
     let relative = home_relative?;
     let home = std::env::var_os("HOME")?;
     let candidate = Path::new(&home).join(relative);
