@@ -23,7 +23,7 @@ use spirit_core::engine::chat::{
     ChatSessionLocation, ChatSessionState, ChatSessionView, ChatStartInput, ChatToolStatus,
     LocalChatProvider, StreamSupport,
 };
-use spirit_core::error::SpiritError;
+use spirit_core::error::{SpiritError, SpiritErrorCode};
 
 const SECRET: &str = "sk-live-9f8e7d6c5b4a39281716ABCDEFGH";
 
@@ -60,6 +60,8 @@ struct State {
     replies: Vec<(String, String)>,
     /// When set, `POST /permission/{id}/reply` answers 404 so the legacy route is used.
     legacy_only: bool,
+    /// When set, both reply routes answer 404.
+    no_reply_route: bool,
     answered: Option<String>,
     turn_with_permission: bool,
     turn_started: bool,
@@ -234,7 +236,7 @@ fn handle(mut stream: TcpStream, state: &Arc<Mutex<State>>, stop: &Arc<AtomicBoo
                 .trim_end_matches("/reply")
                 .to_owned();
             let mut guard = lock(state);
-            if guard.legacy_only {
+            if guard.legacy_only || guard.no_reply_route {
                 drop(guard);
                 respond(&mut stream, 404, &json!({}));
                 return;
@@ -248,6 +250,10 @@ fn handle(mut stream: TcpStream, state: &Arc<Mutex<State>>, stop: &Arc<AtomicBoo
             respond(&mut stream, 200, &json!(true));
         }
         ("POST", route) if route.starts_with("/session/ses_1/permissions/") => {
+            if lock(state).no_reply_route {
+                respond(&mut stream, 404, &json!({}));
+                return;
+            }
             let id = route.trim_start_matches("/session/ses_1/permissions/");
             let reply = serde_json::from_str::<Value>(&text)
                 .ok()
@@ -539,6 +545,28 @@ async fn an_older_engine_is_answered_on_the_session_permission_route() {
     assert_eq!(
         fake.replies(),
         vec![("per_2".to_owned(), "always".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn a_missing_reply_route_is_an_error_and_never_pretends_success() {
+    let fake = Fake::new(|state| state.no_reply_route = true);
+    let provider = provider(fake.port);
+    start(&provider).await;
+    fake.add_permission("per_3", "ses_1", "bash", &["git status"]);
+    let error = provider
+        .reply_permission(&ChatSessionId::Setup, "per_3", ChatPermissionDecision::Once)
+        .await
+        .expect_err("a missing route must not look like a successful reply");
+    assert_eq!(error.code, SpiritErrorCode::Engine);
+    assert!(
+        error.message.contains("permission reply route"),
+        "the error names the failed step: {}",
+        error.message
+    );
+    assert!(
+        fake.replies().is_empty(),
+        "no reply may be recorded when neither route exists"
     );
 }
 

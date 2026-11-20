@@ -1120,9 +1120,14 @@ impl Inner {
                         SESSION_TIMEOUT,
                     )
                     .await?;
-                if legacy.status != 404 {
-                    ensure_success(&legacy)?;
+                if legacy.status == 404 {
+                    // Neither route exists. Do not hide the card: the turn is still
+                    // waiting, and the owner must see that the answer was not sent.
+                    return Err(engine_request_error(
+                        "the engine exposes no permission reply route",
+                    ));
                 }
+                ensure_success(&legacy)?;
             } else {
                 ensure_success(&response)?;
             }
