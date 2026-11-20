@@ -11,15 +11,43 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 
 use crate::engine::chat::model::{
-    ChatEvent, ChatMessage, ChatMessageOrigin, ChatPermissionPrompt, ChatRole, ChatSessionId,
-    ChatSessionView, MAX_ACTIVITY_ITEMS, MAX_MESSAGE_CHARS, cap_text, display_snippet,
-    normalize_text,
+    ChatEvent, ChatMessage, ChatMessageOrigin, ChatPermissionPrompt, ChatRetryAction,
+    ChatRetryStatus, ChatRole, ChatSessionId, ChatSessionView, MAX_ACTIVITY_ITEMS,
+    MAX_MESSAGE_CHARS, cap_text, display_snippet, normalize_text,
 };
-use crate::engine::chat::sse::{EngineEvent, EnginePartUpdate};
+use crate::engine::chat::sse::{EngineEvent, EnginePartUpdate, EngineSessionStatus};
 use crate::time::Timestamp;
 
 /// The default broadcast capacity. It only needs to absorb one renderer hiccup.
 const DEFAULT_EVENT_CAPACITY: usize = 256;
+
+/// Converts one parsed OpenCode status into the safe retry view.
+///
+/// Every string is redacted and capped before it can cross to the renderer. `idle` and
+/// `busy` carry no retry, so they map to `None`.
+#[must_use]
+pub fn retry_status(status: &EngineSessionStatus) -> Option<ChatRetryStatus> {
+    let EngineSessionStatus::Retry {
+        attempt,
+        message,
+        next,
+        action,
+    } = status
+    else {
+        return None;
+    };
+    Some(ChatRetryStatus {
+        attempt: *attempt,
+        message: display_snippet(message),
+        next: *next,
+        action: action.as_ref().map(|action| ChatRetryAction {
+            reason: display_snippet(&action.reason),
+            title: display_snippet(&action.title),
+            message: display_snippet(&action.message),
+            provider: display_snippet(&action.provider),
+        }),
+    })
+}
 
 /// A revisioned broadcast bus for safe chat events.
 #[derive(Debug)]
@@ -361,6 +389,10 @@ pub enum Mapped {
         /// The native request id.
         id: String,
     },
+    /// OpenCode entered a retry wait.
+    Retry(ChatRetryStatus),
+    /// OpenCode became idle or busy, so any previous retry is over.
+    RetryCleared,
 }
 
 /// Derives deltas from cumulative text part updates.
@@ -481,6 +513,13 @@ impl SseEventMapper {
                 Some(id) => Mapped::PermissionReplied { id: id.clone() },
                 None => Mapped::PermissionSync,
             },
+            EngineEvent::SessionStatus { status, .. } => match status {
+                Some(status @ EngineSessionStatus::Retry { .. }) => {
+                    retry_status(status).map_or(Mapped::None, Mapped::Retry)
+                }
+                Some(EngineSessionStatus::Idle | EngineSessionStatus::Busy) => Mapped::RetryCleared,
+                None => Mapped::None,
+            },
             EngineEvent::ServerConnected
             | EngineEvent::ServerHeartbeat
             | EngineEvent::SessionUpdated { .. }
@@ -571,6 +610,7 @@ mod tests {
             last_event_at: None,
             error: None,
             pending_permissions: None,
+            retry: None,
         }
     }
 
@@ -738,6 +778,52 @@ mod tests {
                 Timestamp::epoch()
             ),
             Mapped::None
+        );
+    }
+
+    #[test]
+    fn mapper_maps_retry_status_and_clears_it_on_idle() {
+        let mut mapper = SseEventMapper::new();
+        let retry = EngineEvent::SessionStatus {
+            session_id: Some("ses_1".to_owned()),
+            status: Some(EngineSessionStatus::Retry {
+                attempt: 2,
+                message: "AI_APICallError: Free usage limit reached".to_owned(),
+                next: Some(1_763_673_600_000),
+                action: Some(crate::engine::chat::sse::EngineRetryAction {
+                    reason: "free_tier_limit".to_owned(),
+                    title: "Free limit reached".to_owned(),
+                    message: "Subscribe to OpenCode Go".to_owned(),
+                    provider: "opencode".to_owned(),
+                }),
+            }),
+        };
+        let Mapped::Retry(status) = mapper.map(&retry, Timestamp::epoch()) else {
+            panic!("expected a retry status");
+        };
+        assert_eq!(status.attempt, 2);
+        assert_eq!(status.next, Some(1_763_673_600_000));
+        assert_eq!(status.action.as_ref().unwrap().reason, "free_tier_limit");
+        assert_eq!(status.action.as_ref().unwrap().title, "Free limit reached");
+        assert_eq!(
+            mapper.map(
+                &EngineEvent::SessionStatus {
+                    session_id: Some("ses_1".to_owned()),
+                    status: Some(EngineSessionStatus::Idle),
+                },
+                Timestamp::epoch()
+            ),
+            Mapped::RetryCleared
+        );
+        assert_eq!(
+            mapper.map(
+                &EngineEvent::SessionStatus {
+                    session_id: Some("ses_1".to_owned()),
+                    status: Some(EngineSessionStatus::Busy),
+                },
+                Timestamp::epoch()
+            ),
+            Mapped::RetryCleared
         );
     }
 

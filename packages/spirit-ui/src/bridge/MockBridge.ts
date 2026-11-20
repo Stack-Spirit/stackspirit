@@ -132,6 +132,7 @@ export const MOCK_SCENARIOS = [
   "chat-stop",
   "chat-error",
   "chat-reconnect",
+  "chat-free-limit",
   "chat-engine-stopped",
   "chat-external-engine",
   "chat-server-gated",
@@ -1408,19 +1409,17 @@ export class MockBridge implements SpiritBridge {
         );
       }
       this.clearChatTimers(session);
-      const stopped = this.updateChatView(session, {
-        state: "stopped",
-        attached: false,
-        error: null,
-        pending_permissions: undefined,
-      });
-      this.emitChat({
-        kind: "closed",
-        revision: this.nextRevision(),
-        session,
-        reason: "stopped",
-      });
-      return clone(stopped);
+      // Stop is a turn control, not a session teardown. Keep the session attached and
+      // return Ready so the owner can switch model or send again immediately.
+      return clone(
+        this.updateChatView(session, {
+          state: "ready",
+          attached: true,
+          error: null,
+          retry: undefined,
+          pending_permissions: undefined,
+        }),
+      );
     },
     replyPermission: async (
       session: SessionId,
@@ -1720,9 +1719,13 @@ export class MockBridge implements SpiritBridge {
     this.finishChatTurn(session, reply);
   }
 
+  private userTurnCount(session: SessionId): number {
+    return (this.chatLogs.get(session) ?? []).filter((message) => message.role === "user")
+      .length;
+  }
+
   private scheduleChatReply(session: SessionId, text: string): void {
-    if (this.scenario === "chat-tools") {
-      this.scheduleChat(session, 5, () => {
+    if (this.scenario === "chat-tools") {      this.scheduleChat(session, 5, () => {
         this.emitChat({
           kind: "message",
           revision: this.nextRevision(),
@@ -1770,9 +1773,37 @@ export class MockBridge implements SpiritBridge {
       });
       return;
     }
-    // These scenarios keep a turn open so the Stop action has something to abort.
-    if (this.scenario === "chat-slow" || this.scenario === "chat-stop") {
+    // These scenarios keep the first turn open so the Stop action has something to
+    // abort. A later turn completes normally, which proves Stop-then-continue.
+    if (
+      (this.scenario === "chat-slow" || this.scenario === "chat-stop") &&
+      this.userTurnCount(session) <= 1
+    ) {
       return;
+    }
+    if (this.scenario === "chat-free-limit") {
+      if (this.userTurnCount(session) <= 1) {
+        this.scheduleChat(session, 5, () => {
+          this.updateChatView(session, {
+            state: "streaming",
+            attached: true,
+            error: null,
+            retry: {
+              attempt: 2,
+              message: "AI_APICallError: Free usage limit reached",
+              next: Date.now() + 90_000,
+              action: {
+                reason: "free_tier_limit",
+                title: "Free limit reached",
+                message:
+                  "Subscribe to OpenCode Go or connect another provider to keep going.",
+                provider: "opencode",
+              },
+            },
+          });
+        });
+        return;
+      }
     }
     if (this.scenario === "chat-error") {
       this.scheduleChat(session, 5, () => this.failChatTurn(session));

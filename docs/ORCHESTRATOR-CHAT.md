@@ -8,7 +8,10 @@ prefix (the `msg_<ULID>` id form) and the live `tokens.total` shape (ss-74); `me
 log preservation and the `message.part.*` cadence remain owner-turn unknowns. Live
 tool-activity rows and explicit inline permission Allow/Reject cards landed 2026-11-20
 (ss-81); the pinned `1.19.5` `/doc` proves the permission list and reply routes, while a
-live tool/permission turn remains owner verification. Server chat remains gated.
+live tool/permission turn remains owner verification. OpenCode `session.status` retry
+surfacing and Stop-returns-to-Ready landed 2026-11-20 (ss-83): a free-tier limit now shows
+a calm inline notice with Switch model, Connect a provider and Stop retrying, and Stop
+never locks the composer. Server chat remains gated.
 Audience: the follow-up chat jobs named in §8, the VOWP owner, and the desktop reviewer.
 
 This document specifies how the Meadow shell's orchestrator chat moves from the preview store
@@ -365,6 +368,7 @@ evidence for the pinned sidecar.
 | `messageID` in the user log | `GET /session/{id}/message` includes the user message with the sent `messageID` | Still unproven | **Owner-turn unknown**: `/doc` accepts the field, but preservation of the *user* message in the read log is not proven. Keep the role/text/time reconciliation in §4.6 until §9 pins it |
 | Read the log | `GET /session/{id}/message` | `Array<{ "info": Message, "parts": Part[] }>` | **Proven live**: `[]` for a new session; `/doc` requires both `info` and `parts`; it is **not** a flat `Message[]`. The endpoint accepts `directory`, `workspace`, `limit` and `before` query parameters. The parser stays tolerant. |
 | Abort a turn | `POST /session/{id}/abort` | `boolean` | **Proven live**: idle abort returns 200 `true`; the session still exists afterwards |
+| Session activity | `GET /session/status` | A map keyed by native session id; each value is the `session.status` union (`idle`, `busy`, `retry`) | **Incident-proven (2026-11-20)**: the retry entry carried `attempt`, `message`, `next` epoch ms and `action.reason/title/message/provider`; used on attach/reconnect so a retry that started before the UI attached is visible |
 | List pending permissions | `GET /permission` | `PermissionRequest[]`: `{ "id", "sessionID", "permission", "patterns", "metadata", "always", "tool"? }` | **Proven by `/doc`**; the core filters to the attached native session id |
 | Answer a permission | `POST /permission/{requestID}/reply` with `{ "reply": "once" \| "always" \| "reject" }` | `boolean` | **Proven by `/doc`**; fake-engine tested |
 | Legacy permission reply | `POST /session/{sessionID}/permissions/{permissionID}` with `{ "response": "once" \| "always" \| "reject" }` | `boolean` | **Proven by `/doc`**; fallback only when the primary route returns 404/405 |
@@ -459,6 +463,7 @@ not require one. The pinned build uses `{ "id", "type", "properties" }`; the par
 | `message.part.removed` | Remove that part's text; if the message has no text left and no error, remove the placeholder. |
 | `message.removed` | Minor note only: a full-message removal is not reflected in the rendered log until the next log read; `session.idle`/reattach/reconnect backfill covers it. The pump may drop the message if present, but must not treat the event as the durable deletion. |
 | `session.idle` | Read the log once if the assistant text may be incomplete, then emit `done` for the active assistant message; set the session `ready`. This is the reconciliation point when deltas are ignored. |
+| `session.status` | Parse the `idle`/`busy`/`retry` union from `properties.status`. `retry` sets `ChatSessionView.retry` (`attempt`, `message`, `next` epoch ms and `action.reason/title/message/provider`) and keeps the turn in `streaming`; `idle`/`busy` clear it. The retry is also read from `GET /session/status` on attach/reconnect so a session already asleep in a retry loop surfaces immediately. |
 | `session.error` | Emit `error`; set the session `error`. Do not show the raw error object. |
 | `permission.asked` | Publish a `ChatPermissionPrompt` in `pending_permissions` and leave the turn waiting. Nothing auto-approves. If the event carries no id, reconcile with `GET /permission` filtered to the native session id. |
 | `permission.replied` | Remove the matching prompt. An id-less reply also reconciles with `GET /permission`. |
@@ -513,11 +518,16 @@ the liveness rule. The 60 s rule is unchanged.
 
 Cancellation:
 
-- The primary cancel is `POST /session/{id}/abort`. If it returns success, wait for
-  `session.idle` or the background `POST message` to return, then set `stopped`.
-- If abort is unsupported (404/405), the app sets `stopped` locally and shows a non-fatal
-  `stop_unconfirmed` notice: "The turn may still be running on the orchestrator." It does
-  **not** delete the session and does not pretend it stopped.
+- The primary cancel is `POST /session/{id}/abort`. Stop is a **turn control, not a
+  session teardown**: as soon as the abort is sent the core clears `active_turn`, `retry`
+  and `pending_permissions`, keeps the native session attached and returns
+  `ChatSessionState::Ready`. The composer is usable immediately, so the owner can switch
+  model or send another turn without a separate Start step. A late `POST message` response
+  from the aborted turn is ignored by its turn sequence.
+- If abort is unsupported or unconfirmed (404/405 or a transport error), the app still
+  returns `ready` and shows a non-fatal `stop_unconfirmed` notice: "The turn may still be
+  running on the orchestrator." It does **not** delete the session and does not pretend
+  the turn stopped.
 - `stop` is not `vowp orchestrator stop`. It never stops the VOWP app host and never
   deletes the native session.
 
@@ -1039,6 +1049,30 @@ export interface ChatPermissionPrompt {
 
 export type ChatPermissionDecision = "once" | "always" | "reject";
 
+/** The provider action OpenCode attaches to a retry status. */
+export interface ChatRetryAction {
+  /** Stable reason such as `free_tier_limit` or `rate_limit`. */
+  reason: string;
+  /** Short title suitable for a notice heading. */
+  title: string;
+  /** One or two calm sentences from the provider. */
+  message: string;
+  /** Provider id such as `opencode`. */
+  provider: string;
+}
+
+/**
+ * One active `session.status` retry. OpenCode can sleep for hours before the next
+ * attempt; the UI shows this instead of a permanent “Replying…” line. `next` is epoch
+ * milliseconds.
+ */
+export interface ChatRetryStatus {
+  attempt: number;
+  message: string;
+  next?: number | null;
+  action?: ChatRetryAction | null;
+}
+
 /** The details panel target, moved here so `MockBridge` need not import `next/`. */
 export type ChatPanelTarget =
   | { kind: "overview" }
@@ -1160,6 +1194,8 @@ export interface ChatSessionView {
   error: SpiritErrorDto | null;
   /** Permission requests the engine is waiting on, oldest first. Absent when none. */
   pending_permissions?: ChatPermissionPrompt[];
+  /** An active retry wait, absent when OpenCode is not sleeping before another try. */
+  retry?: ChatRetryStatus | null;
 }
 
 export interface ChatStartInput {
@@ -1277,7 +1313,7 @@ export interface ChatBridgeSurface {
   attach(session: SessionId): Promise<ChatSessionView>;
   /** Accept one user turn; assistant text arrives via `subscribe`. */
   send(input: ChatSendInput): Promise<ChatSendReceipt>;
-  /** Abort the current turn (when supported) and return the stopped view. */
+  /** Abort the current turn (when supported) and return the ready view. */
   stop(session: SessionId): Promise<ChatSessionView>;
   /**
    * Switch the setup assistant's model to one in `available_models` and return the
@@ -1370,8 +1406,12 @@ Semantics:
   `session_lost`, not a silent new session.
 - `send` rejects while `streaming` (`chat_busy`). There is no queue. The composer is
   disabled accordingly; the check is the race guard.
-- `stop` aborts the current turn if supported and detaches the UI; it never stops the
-  engine, the VOWP orchestrator host or the server.
+- `stop` aborts the current turn if supported and returns the session to `ready`; it
+  never stops the engine, the VOWP orchestrator host or the server. It clears
+  `active_turn`, `retry` and `pending_permissions`, keeps the native session attached and
+  invalidates the background turn, so the composer stays usable and the next `send` is
+  accepted immediately. An unconfirmed abort adds the `stop_unconfirmed` notice rather
+  than locking the chat.
 - `log` reads the active OpenCode log; it is not the VOWP session log. The VOWP log stays
   VOWP's. If the native session is lost, `session_lost`; the existing Sessions drawer can
   still show/export the VOWP session.
@@ -1463,6 +1503,21 @@ pub struct ChatPermissionPrompt {
     pub created_at: Timestamp,
 }
 
+pub struct ChatRetryAction {
+    pub reason: String,
+    pub title: String,
+    pub message: String,
+    pub provider: String,
+}
+
+pub struct ChatRetryStatus {
+    pub attempt: u32,
+    pub message: String,
+    /// Epoch milliseconds of the next attempt, when reported.
+    pub next: Option<u64>,
+    pub action: Option<ChatRetryAction>,
+}
+
 pub enum ChatPermissionDecision {
     Once,
     Always,
@@ -1471,7 +1526,11 @@ pub enum ChatPermissionDecision {
 ```
 
 `ChatSessionView` carries `pending_permissions: Option<Vec<ChatPermissionPrompt>>`
-alongside `error`; it is absent when no request is waiting.
+alongside `error`; it is absent when no request is waiting. It also carries
+`retry: Option<ChatRetryStatus>`, absent unless OpenCode is in a `session.status` retry
+wait. `next` is epoch milliseconds; `action` mirrors the provider reason, title, message
+and provider. The strings are redacted and capped exactly like tool summaries, so raw
+provider error JSON never crosses the bridge.
 
 The transport-side endpoint is core-only and has no `Debug`/`Serialize` that could leak
 it:
@@ -1548,10 +1607,12 @@ idle
     engine ready + native session found -> ready
       send() -> streaming
         delta*/message* -> streaming
+        session.status retry -> streaming + retry notice
+          session.status idle/busy or turn finishes -> ready, retry cleared
         session.idle / POST response -> ready
-        stop() while streaming -> streaming (aborting)
-          abort ok + idle -> stopped
-          abort unsupported -> stopped + non-fatal stop_unconfirmed
+        stop() while streaming or retrying -> ready (composer usable)
+          abort ok -> ready
+          abort unsupported -> ready + non-fatal stop_unconfirmed
         SSE lost -> connecting
           log backfill + resubscribe -> streaming/ready
           retries exhausted -> error (stream_lost)
@@ -1572,10 +1633,11 @@ Additional rules:
   attach and log backfill. It has no spinner message with invented progress; the UI says
   "Connecting to <label>…".
 - `streaming` is set by a successful `send`; the composer rejects another send. The Stop
-  action is available.
+  action is available. A `session.status` retry keeps `streaming` but adds `retry`; the
+  header says "Retrying…" and the inline notice explains the wait.
 - `ready` means attached and idle. The input is enabled.
-- `stopped` means the owner stopped the turn or the engine was stopped cleanly. The input
-  is disabled until `start`/`attach`.
+- `stopped` remains a transport state for a closed session, but the Stop button no longer
+  sets it: Stop aborts the turn, returns `ready` and leaves the native session attached.
 - `error` carries a safe `SpiritErrorDto`. It is never a canned assistant message. The
   partial assistant text, if any, stays visible with an error note.
 - On app restart the state is `idle`; `attach` succeeds only if the native session still
@@ -1639,11 +1701,11 @@ Behaviour:
   per-message cap (32,000 characters), keep the first 32,000 and mark a `truncated` note;
   the core also caps the stream.
 - On `done`: set `streaming: false`; if the text is empty and there is no error, remove
-  the placeholder. Set `ready` from the accompanying `session` event.
+  the placeholder. Set `ready` from the accompanying `session` event and clear `retry`.
 - On `error`: set `views[session].error`, state `error`; keep any partial text. Do not
   append an assistant message with the error text.
-- On `closed`: set `stopped` or `error` per `reason`; keep the partial text. `stopped` is
-  not an error; it offers Start/Attach.
+- On `closed`: set `stopped` or `error` per `reason`; keep the partial text. Stop no
+  longer emits `closed`; a close is a real detach (engine, host or lost session).
 - On a revision gap: call `load(session)` (the last 50 messages) and replace the list.
 - `loadEarlier` uses `ChatLogPage.next` as the opaque cursor; prepend older messages and
   keep the scroll position.
@@ -1662,8 +1724,16 @@ Behaviour:
 - Remove the `⇄` toggle and the `setLocation` call. The chip uses the actual
   `ChatSessionView.location` and `state`.
 - Add a Stop button while `streaming`, a Reconnect button on a retryable `error`, and
-  Start/Attach on `stopped`/`idle`. A non-retryable gate shows its exact next step
-  (Settings, Connect, create the orchestrator) instead of a dead Reconnect button.
+  Start/Attach on `stopped`/`idle`. Stop only aborts the turn: it returns `ready` with the
+  composer enabled, so the owner can switch model or send again immediately.
+- When `view.retry` is present, render a calm inline notice with the provider title and
+  message, the attempt and a short countdown (or the retry time for a long wait), plus
+  **Switch model**, **Connect a provider** and **Stop retrying**. Switch model opens and
+  focuses the composer picker (enabled even while the turn is locked); Connect a provider
+  opens Settings → Engine; Stop retrying aborts and returns to Ready. The header label
+  reads "Retrying…" instead of "Replying…" for the whole wait.
+- The `error` region carries the same recovery actions where they apply (Switch model,
+  Connect a provider) in addition to Reconnect and Start a new conversation.
 - Disable the composer unless `state === "ready"`; the placeholder explains why. The
   empty-state suggestion buttons are disabled in the same states; they never inject a
   preview reply in the real path.
@@ -1692,9 +1762,10 @@ working:
 
 - Add scenarios to `MOCK_SCENARIOS`:
   `chat-preview`, `chat-streaming`, `chat-slow`, `chat-stop`, `chat-error`,
-  `chat-reconnect`, `chat-engine-stopped`, `chat-external-engine`, `chat-server-gated`,
-  `chat-session-lost`. Existing scenarios keep the default preview chat behavior so the
-  current demo URLs keep working.
+  `chat-reconnect`, `chat-free-limit`, `chat-engine-stopped`, `chat-external-engine`,
+  `chat-server-gated`, `chat-session-lost`. Existing scenarios keep the default preview
+  chat behavior so the current demo URLs keep working. `chat-free-limit` shows the
+  `free_tier_limit` retry notice; Stop returns `ready` and a later turn completes.
 - `start` returns a deterministic `ChatSessionView` with the requested location (unless
   the scenario gates it), `state: "ready"`, `attached: true`,
   `streaming_supported: true`, the first included free preview model, its
@@ -1709,9 +1780,10 @@ working:
   `chat-streaming` emits several deltas before `done`; `chat-slow` leaves a turn open for
   the Stop test; `chat-error` emits a safe error; `chat-reconnect` drops once and
   resumes with a full message.
-- `stop` clears timers and sets `stopped`. `log` returns the messages with `next: null`.
-  `subscribe` returns an unsubscribe function. Timers are cleared on `stop` and on the
-  bridge's disposal; no timer survives a test.
+- `stop` clears timers, clears `retry` and returns `ready` with the session still
+  attached. `log` returns the messages with `next: null`. `subscribe` returns an
+  unsubscribe function. Timers are cleared on `stop` and on the bridge's disposal; no
+  timer survives a test.
 - Every preview assistant message has `origin: "preview"` and a first paragraph that
   starts with "Preview reply." The text says "In the real app the orchestrator answers
   here." The real path never constructs this origin.
@@ -2138,8 +2210,9 @@ model. Use one free included model turn and the setup assistant.
    the result as token-by-token unless it was observed. The `msg` `messageID` prefix and
    the live `tokens.total` shape are already proven (2026-11-20, §2.2.5); still confirm
    that the user message with that `msg_` id appears in `GET /session/{id}/message`.
-4. Press Stop during a long turn. Confirm `stopped`, no duplicate assistant message, and
-   either a clean abort or the honest `stop_unconfirmed` note.
+4. Press Stop during a long turn. Confirm `ready` with the composer enabled immediately,
+   no duplicate assistant message, and either a clean abort or the honest
+   `stop_unconfirmed` note. Then send another turn without clicking Start.
 5. Reload/restart the app. Confirm the setup session reattaches and the log is intact; no
    duplicate user/assistant messages.
 6. In DevTools, search the DOM, console, network and error text for: the endpoint URL, a

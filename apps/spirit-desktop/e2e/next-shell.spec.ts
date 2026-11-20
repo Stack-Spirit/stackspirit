@@ -141,10 +141,12 @@ test("the Message field keeps focus on the hero dock and after a slow turn", asy
   await expect(page.getByTestId("session-state")).toContainText("Replying…");
   await expect(slow).toBeDisabled();
   await page.getByRole("button", { name: "Stop" }).click();
-  await expect(page.getByTestId("session-state")).toContainText("Stopped");
-  await page.getByRole("button", { name: "Start" }).click();
   await expect(page.getByTestId("session-state")).toContainText("Ready");
+  await expect(slow).toBeEnabled();
   await expect(slow).toBeFocused();
+  await slow.fill("continue with another model");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText(/Preview reply\./)).toBeVisible();
 });
 
 test("text fields keep a calm focus while buttons keep the keyboard ring", async ({ page }) => {

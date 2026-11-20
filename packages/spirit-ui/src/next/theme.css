@@ -1867,6 +1867,69 @@ button.nx-composer__start:hover {
   display: none;
 }
 
+/* OpenCode can sleep in a retry loop (the free-tier limit is the common case). This
+   notice replaces the silent "Replying…" wait and carries every recovery action. */
+.nx-retry {
+  display: grid;
+  flex: none;
+  gap: 6px;
+  width: min(760px, calc(100% - 40px));
+  margin: 0 auto 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--nx-warn);
+  border-left-width: 4px;
+  border-radius: var(--nx-radius);
+  background: var(--nx-warn-soft);
+  color: var(--nx-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.nx-retry__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--nx-warn);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.nx-retry__icon {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--nx-warn);
+  color: var(--nx-warn-soft);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.nx-retry__body,
+.nx-retry__detail,
+.nx-retry__wait {
+  margin: 0;
+}
+
+.nx-retry__detail {
+  color: var(--nx-muted);
+}
+
+.nx-retry__wait {
+  color: var(--nx-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.nx-retry__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 /* Secure field card: values typed here never enter the conversation. */
 .nx-secure {
   display: grid;

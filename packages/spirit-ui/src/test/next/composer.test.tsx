@@ -96,13 +96,15 @@ describe("Meadow composer", () => {
 
     await user.click(screen.getByRole("button", { name: "Stop" }));
     await waitFor(() =>
-      expect(screen.getByTestId("session-state")).toHaveTextContent("Stopped"),
-    );
-    await user.click(screen.getByRole("button", { name: "Start" }));
-    await waitFor(() =>
       expect(screen.getByTestId("session-state")).toHaveTextContent("Ready"),
     );
+    expect(composer).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Start" })).not.toBeInTheDocument();
     await waitFor(() => expect(document.activeElement).toBe(composer));
+
+    // Stop is a turn control: the same composer accepts the next message right away.
+    await user.type(composer, "continue with another model{Enter}");
+    expect(await screen.findByText(/Preview reply\./)).toBeInTheDocument();
   });
 
   it("keeps the included free OpenCode model active and switches it inline", async () => {

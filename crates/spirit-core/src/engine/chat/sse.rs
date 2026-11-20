@@ -160,6 +160,39 @@ pub struct EnginePartUpdate {
     pub delta: Option<String>,
 }
 
+/// The provider action OpenCode attaches to a retry status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineRetryAction {
+    /// Stable reason such as `free_tier_limit`.
+    pub reason: String,
+    /// Short title for the notice.
+    pub title: String,
+    /// Calm provider message.
+    pub message: String,
+    /// Provider id.
+    pub provider: String,
+}
+
+/// The parsed `session.status` union from OpenCode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineSessionStatus {
+    /// The session is idle.
+    Idle,
+    /// The session is running a turn.
+    Busy,
+    /// The session is waiting to retry the turn.
+    Retry {
+        /// 0-based attempt counter.
+        attempt: u32,
+        /// Provider message.
+        message: String,
+        /// Epoch milliseconds of the next attempt, when reported.
+        next: Option<u64>,
+        /// Provider action, when reported.
+        action: Option<EngineRetryAction>,
+    },
+}
+
 /// One parsed OpenCode event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineEvent {
@@ -171,6 +204,13 @@ pub enum EngineEvent {
     SessionUpdated {
         /// Native session id, when present.
         session_id: Option<String>,
+    },
+    /// The session activity state from `session.status`.
+    SessionStatus {
+        /// Native session id, when present.
+        session_id: Option<String>,
+        /// The parsed idle/busy/retry status, or `None` for an unknown shape.
+        status: Option<EngineSessionStatus>,
     },
     /// An assistant or user message update.
     MessageUpdated {
@@ -256,6 +296,7 @@ impl EngineEvent {
             Self::MessagePartDelta { session_id, .. }
             | Self::MessagePartRemoved { session_id, .. }
             | Self::SessionUpdated { session_id }
+            | Self::SessionStatus { session_id, .. }
             | Self::SessionError { session_id, .. }
             | Self::ToolPartUpdated { session_id, .. }
             | Self::PermissionReplied { session_id, .. }
@@ -282,6 +323,16 @@ pub fn parse_engine_event(frame: &SseFrame) -> EngineEvent {
         "session.updated" => EngineEvent::SessionUpdated {
             session_id: session_id(properties).map(str::to_owned),
         },
+        "session.status" => {
+            let status = properties
+                .get("status")
+                .or_else(|| properties.get("data").and_then(|data| data.get("status")))
+                .and_then(parse_session_status);
+            EngineEvent::SessionStatus {
+                session_id: session_id(properties).map(str::to_owned),
+                status,
+            }
+        }
         "message.updated" => message_updated(properties),
         "message.part.updated" => message_part_updated(properties),
         "message.part.delta" => message_part_delta(properties),
@@ -314,6 +365,38 @@ pub fn parse_engine_event(frame: &SseFrame) -> EngineEvent {
         },
         _ => EngineEvent::Unknown,
     }
+}
+
+/// Parses the `SessionStatus` object OpenCode sends inside `session.status` and
+/// `GET /session/status`. Unknown shapes are `None`; callers ignore them rather than
+/// clearing a live retry.
+#[must_use]
+pub fn parse_session_status(value: &Value) -> Option<EngineSessionStatus> {
+    match text(value, "type")? {
+        "idle" => Some(EngineSessionStatus::Idle),
+        "busy" => Some(EngineSessionStatus::Busy),
+        "retry" => Some(EngineSessionStatus::Retry {
+            attempt: value
+                .get("attempt")
+                .and_then(Value::as_u64)
+                .and_then(|attempt| u32::try_from(attempt).ok())
+                .unwrap_or(0),
+            message: text(value, "message").unwrap_or_default().to_owned(),
+            next: value.get("next").and_then(Value::as_u64),
+            action: value.get("action").and_then(parse_retry_action),
+        }),
+        _ => None,
+    }
+}
+
+fn parse_retry_action(value: &Value) -> Option<EngineRetryAction> {
+    value.as_object()?;
+    Some(EngineRetryAction {
+        reason: text(value, "reason").unwrap_or_default().to_owned(),
+        title: text(value, "title").unwrap_or_default().to_owned(),
+        message: text(value, "message").unwrap_or_default().to_owned(),
+        provider: text(value, "provider").unwrap_or_default().to_owned(),
+    })
 }
 
 fn message_updated(properties: &Value) -> EngineEvent {
@@ -509,6 +592,63 @@ mod tests {
         };
         assert!(message.has_error);
         assert_eq!(message.error_status, Some(401));
+    }
+
+    #[test]
+    fn parser_reads_a_free_tier_session_status_retry() {
+        let frame = SseFrame {
+            event: None,
+            data: r#"{"id":"evt_1","type":"session.status","properties":{"sessionID":"ses_1","status":{"type":"retry","attempt":2,"message":"AI_APICallError: Free usage limit reached","next":1763673600000,"action":{"reason":"free_tier_limit","title":"Free limit reached","message":"Subscribe to OpenCode Go","provider":"opencode"}}}}"#.to_owned(),
+        };
+        let EngineEvent::SessionStatus {
+            session_id,
+            status:
+                Some(EngineSessionStatus::Retry {
+                    attempt,
+                    message,
+                    next,
+                    action,
+                }),
+        } = parse_engine_event(&frame)
+        else {
+            panic!("expected a retry status");
+        };
+        assert_eq!(session_id.as_deref(), Some("ses_1"));
+        assert_eq!(attempt, 2);
+        assert_eq!(message, "AI_APICallError: Free usage limit reached");
+        assert_eq!(next, Some(1_763_673_600_000));
+        let action = action.expect("the free-tier action");
+        assert_eq!(action.reason, "free_tier_limit");
+        assert_eq!(action.title, "Free limit reached");
+        assert_eq!(action.message, "Subscribe to OpenCode Go");
+        assert_eq!(action.provider, "opencode");
+        assert_eq!(
+            parse_engine_event(&frame).session_id(),
+            Some("ses_1"),
+            "the pump must route the status to its own session"
+        );
+    }
+
+    #[test]
+    fn parser_reads_idle_and_busy_statuses() {
+        for (kind, expected) in [
+            ("idle", EngineSessionStatus::Idle),
+            ("busy", EngineSessionStatus::Busy),
+        ] {
+            let frame = SseFrame {
+                event: None,
+                data: format!(
+                    r#"{{"type":"session.status","properties":{{"sessionID":"ses_1","status":{{"type":"{kind}"}}}}}}"#
+                ),
+            };
+            assert_eq!(
+                parse_engine_event(&frame),
+                EngineEvent::SessionStatus {
+                    session_id: Some("ses_1".to_owned()),
+                    status: Some(expected),
+                }
+            );
+        }
     }
 
     #[test]

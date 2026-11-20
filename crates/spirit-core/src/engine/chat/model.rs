@@ -300,6 +300,37 @@ pub struct ChatPermissionPrompt {
     pub created_at: Timestamp,
 }
 
+/// Why OpenCode is retrying a turn, when it names a provider action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatRetryAction {
+    /// Stable reason such as `free_tier_limit` or `rate_limit`.
+    pub reason: String,
+    /// Short title suitable for a notice heading.
+    pub title: String,
+    /// One or two calm sentences from the provider.
+    pub message: String,
+    /// Provider id such as `opencode`.
+    pub provider: String,
+}
+
+/// One active `session.status` retry, mirrored into the safe view.
+///
+/// OpenCode can sleep for hours before its next attempt (the free-tier limit is the
+/// common case). The composer must show this instead of a permanent “Replying…” line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatRetryStatus {
+    /// 0-based attempt counter from OpenCode.
+    pub attempt: u32,
+    /// A short, redacted provider message; never raw error JSON.
+    pub message: String,
+    /// Epoch milliseconds of the next attempt, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<u64>,
+    /// Provider action such as the free-tier upgrade prompt, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ChatRetryAction>,
+}
+
 /// How the owner answers a permission prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -461,6 +492,9 @@ pub struct ChatSessionView {
     /// Permission requests OpenCode is waiting on for this session, oldest first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_permissions: Option<Vec<ChatPermissionPrompt>>,
+    /// An active `session.status` retry, when OpenCode is sleeping before another try.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<ChatRetryStatus>,
 }
 
 /// Why a session closed.
@@ -812,6 +846,7 @@ mod tests {
             last_event_at: None,
             error: None,
             pending_permissions: None,
+            retry: None,
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(!json.contains("\"url\""));
@@ -819,6 +854,27 @@ mod tests {
         assert!(!json.contains("\"token\""));
         assert!(!json.contains("\"directory\""));
         assert!(!json.contains("\"native_session_id\""));
+    }
+
+    #[test]
+    fn retry_status_serializes_its_safe_fields_only() {
+        let retry = ChatRetryStatus {
+            attempt: 2,
+            message: "Free usage limit reached".to_owned(),
+            next: Some(1_763_673_600_000),
+            action: Some(ChatRetryAction {
+                reason: "free_tier_limit".to_owned(),
+                title: "Free limit reached".to_owned(),
+                message: "Subscribe to OpenCode Go".to_owned(),
+                provider: "opencode".to_owned(),
+            }),
+        };
+        let value = serde_json::to_value(&retry).unwrap();
+        assert_eq!(value["attempt"], 2);
+        assert_eq!(value["next"], 1_763_673_600_000_u64);
+        assert_eq!(value["action"]["reason"], "free_tier_limit");
+        assert!(value.get("url").is_none());
+        assert!(value.get("token").is_none());
     }
 
     #[test]

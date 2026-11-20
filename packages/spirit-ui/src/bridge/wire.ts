@@ -1313,6 +1313,34 @@ export interface ChatUsageView {
   cost_usd: number | null;
 }
 
+/** The provider action OpenCode attaches to a retry status. */
+export interface ChatRetryAction {
+  /** Stable reason such as `free_tier_limit` or `rate_limit`. */
+  reason: string;
+  /** Short title suitable for a notice heading. */
+  title: string;
+  /** One or two calm sentences from the provider. */
+  message: string;
+  /** Provider id such as `opencode`. */
+  provider: string;
+}
+
+/**
+ * One active OpenCode `session.status` retry. OpenCode can sleep for hours before the
+ * next attempt (the free-tier limit is the common case); the chat shows this instead of
+ * a permanent “Replying…” line. `next` is epoch milliseconds.
+ */
+export interface ChatRetryStatus {
+  /** 0-based attempt counter from OpenCode. */
+  attempt: number;
+  /** Short, redacted provider message; never raw error JSON. */
+  message: string;
+  /** Epoch milliseconds of the next attempt, when reported. */
+  next?: number | null;
+  /** Provider action such as the free-tier upgrade prompt, when reported. */
+  action?: ChatRetryAction | null;
+}
+
 export interface ChatSessionView {
   session: SessionId;
   /** The actual transport location, never the requested label. */
@@ -1336,6 +1364,8 @@ export interface ChatSessionView {
   error: SpiritErrorDto | null;
   /** Permission requests the engine is waiting on, oldest first. Absent when none. */
   pending_permissions?: ChatPermissionPrompt[];
+  /** An active retry wait, absent when OpenCode is not sleeping before another try. */
+  retry?: ChatRetryStatus | null;
 }
 
 export interface ChatStartInput {

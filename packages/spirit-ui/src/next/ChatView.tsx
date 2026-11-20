@@ -5,6 +5,7 @@ import type {
   ChatModelView,
   ChatPermissionDecision,
   ChatPermissionPrompt,
+  ChatRetryStatus,
   ChatSessionState,
   ChatToolActivity,
   ChatToolStatus,
@@ -43,7 +44,8 @@ function sessionTitle(session: SessionId): string {
   return session.slice("project:".length);
 }
 
-function stateLabel(state: ChatSessionState): string {
+function stateLabel(state: ChatSessionState, retrying: boolean): string {
+  if (retrying) return "Retrying…";
   switch (state) {
     case "idle":
       return "Not started";
@@ -74,8 +76,10 @@ function composerPlaceholder(
   session: SessionId,
   state: ChatSessionState,
   missingModel: boolean,
+  retrying: boolean,
 ): string {
   if (missingModel) return "Choose a model in Settings → Engine";
+  if (retrying) return "Waiting for the provider to retry… Stop retrying to switch model";
   switch (state) {
     case "connecting":
       return session === "setup"
@@ -94,6 +98,44 @@ function composerPlaceholder(
         ? "Tell me about your server, or ask anything"
         : `Message the ${session === "global" ? "global" : "project"} orchestrator`;
   }
+}
+
+function retryTitle(retry: ChatRetryStatus): string {
+  const title = retry.action?.title.trim();
+  if (title) return title;
+  if (retry.action?.reason === "free_tier_limit") return "Free limit reached";
+  return "The provider is retrying";
+}
+
+function retryMessage(retry: ChatRetryStatus): string {
+  const actionMessage = retry.action?.message.trim();
+  if (actionMessage) return actionMessage;
+  const message = retry.message.trim();
+  if (message) return message;
+  return "OpenCode paused this turn before its next attempt.";
+}
+
+function retryDetail(retry: ChatRetryStatus): string | null {
+  if (retry.action?.reason === "free_tier_limit") {
+    return "The included free model reached its usage limit. Switch to another free model, connect a provider, or stop the retry.";
+  }
+  if (retry.action?.provider) {
+    return `The ${retry.action.provider} provider asked OpenCode to wait before trying again.`;
+  }
+  return null;
+}
+
+function retryWaitLabel(retry: ChatRetryStatus, now: number): string {
+  const attempt = retry.attempt > 0 ? `Attempt ${retry.attempt} · ` : "";
+  if (retry.next == null) return `${attempt}OpenCode is retrying automatically.`;
+  const seconds = Math.max(0, Math.ceil((retry.next - now) / 1000));
+  if (seconds === 0) return `${attempt}Retrying now…`;
+  if (seconds <= 120) return `${attempt}Retrying in ${seconds}s…`;
+  const at = new Date(retry.next);
+  const time = Number.isNaN(at.getTime())
+    ? "later"
+    : at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return `${attempt}OpenCode will retry at ${time}.`;
 }
 
 export function ChatView({
@@ -123,10 +165,20 @@ export function ChatView({
   const [newServerRequested, setNewServerRequested] = useState(false);
   const project = session.startsWith("project:") ? session.slice("project:".length) : null;
   const state = view?.state ?? "idle";
+  const retry = view?.retry ?? null;
+  const [now, setNow] = useState(() => Date.now());
+  const [modelPickerRequest, setModelPickerRequest] = useState(0);
+  const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
     void open(session, project, "local");
   }, [open, session, project]);
+
+  useEffect(() => {
+    if (retry?.next == null) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [retry?.next]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView?.({ block: "end" });
@@ -169,12 +221,34 @@ export function ChatView({
   const canRestartSetup =
     isSetup &&
     (error?.code === "not_found" || /session_lost/.test(error?.message ?? ""));
+  const canSwitchModel = models !== undefined && models.length > 0;
+  const allowModelSwitch = canSwitchModel && (Boolean(retry) || state === "error");
+
+  function requestModelPicker() {
+    if (canSwitchModel) {
+      setModelPickerRequest((value) => value + 1);
+      return;
+    }
+    onOpenEngineSettings?.();
+  }
+
+  async function stopRetrying() {
+    if (stopping) return;
+    setStopping(true);
+    try {
+      await stop(session);
+    } finally {
+      setStopping(false);
+    }
+  }
 
   // The live text itself is never aria-live. This single polite region only changes on
   // state transitions, so screen readers do not read every delta.
   const announcement =
     state === "streaming"
-      ? "Reply in progress"
+      ? retry
+        ? `Retrying: ${retryTitle(retry)}. ${retryWaitLabel(retry, now)}`
+        : "Reply in progress"
       : state === "connecting"
         ? "Connecting…"
         : state === "stopped"
@@ -250,7 +324,7 @@ export function ChatView({
             className={`nx-chat-state nx-chat-state--${state}`}
             data-testid="session-state"
           >
-            {stateLabel(state)}
+            {stateLabel(state, Boolean(retry))}
           </span>
         ) : null}
       </PageHeader>
@@ -319,6 +393,18 @@ export function ChatView({
           )}
         </div>
 
+        {retry ? (
+          <RetryNotice
+            retry={retry}
+            now={now}
+            stopping={stopping}
+            canSwitchModel={canSwitchModel}
+            onSwitchModel={requestModelPicker}
+            onConnectProvider={onOpenEngineSettings}
+            onStop={() => void stopRetrying()}
+          />
+        ) : null}
+
         <EmptyHero
           active={hero}
           title={heroTitle}
@@ -340,7 +426,7 @@ export function ChatView({
         >
           <ComposerBar
             session={session}
-            placeholder={composerPlaceholder(session, state, missingModel)}
+            placeholder={composerPlaceholder(session, state, missingModel, Boolean(retry))}
             model={view?.model ?? null}
             models={models}
             modelMissing={noModelsReported}
@@ -348,6 +434,8 @@ export function ChatView({
             streaming={state === "streaming"}
             sending={state === "connecting"}
             stopped={state === "stopped" || state === "idle"}
+            allowModelSwitch={allowModelSwitch}
+            openModelPickerRequest={modelPickerRequest}
             hero={hero}
             usage={view?.usage}
             onSend={(text) => send(session, text)}
@@ -368,7 +456,7 @@ export function ChatView({
         </EmptyHero>
       </div>
 
-      {error ? (
+      {error && !retry ? (
         <div
           className={`nx-chat__error${gate ? " nx-chat__error--gate" : ""}`}
           role="alert"
@@ -380,6 +468,24 @@ export function ChatView({
           <span>{error.message}</span>
           {error.hint ? <span>{error.hint}</span> : null}
           <div className="nx-chat__error-actions">
+            {canSwitchModel ? (
+              <button
+                type="button"
+                className="nx-btn nx-btn--quiet nx-btn--sm"
+                onClick={requestModelPicker}
+              >
+                Switch model
+              </button>
+            ) : null}
+            {onOpenEngineSettings ? (
+              <button
+                type="button"
+                className="nx-btn nx-btn--quiet nx-btn--sm"
+                onClick={onOpenEngineSettings}
+              >
+                Connect a provider
+              </button>
+            ) : null}
             {canRetry ? (
               <button
                 type="button"
@@ -515,6 +621,77 @@ function heroCopy(
       : "This project's orchestrator.",
     suggestions: ["What's running right now?", "Plan the next job", "Show what's blocked"],
   };
+}
+
+/**
+ * A calm, unmistakable inline notice for an OpenCode retry loop.
+ *
+ * The three recovery actions work without dismissing the notice first: switch model opens
+ * the composer picker, connect a provider opens Settings → Engine, and stop retrying
+ * aborts the turn and returns the composer to Ready.
+ */
+function RetryNotice({
+  retry,
+  now,
+  stopping,
+  canSwitchModel,
+  onSwitchModel,
+  onConnectProvider,
+  onStop,
+}: {
+  retry: ChatRetryStatus;
+  now: number;
+  stopping: boolean;
+  canSwitchModel: boolean;
+  onSwitchModel: () => void;
+  onConnectProvider?: () => void;
+  onStop: () => void;
+}) {
+  const titleId = useId();
+  const detail = retryDetail(retry);
+  return (
+    <section
+      className="nx-retry"
+      aria-labelledby={titleId}
+      data-testid="retry-notice"
+      data-reason={retry.action?.reason ?? "retry"}
+    >
+      <h2 className="nx-retry__title" id={titleId}>
+        <span className="nx-retry__icon" aria-hidden="true">
+          !
+        </span>
+        {retryTitle(retry)}
+      </h2>
+      <p className="nx-retry__body">{retryMessage(retry)}</p>
+      {detail ? <p className="nx-retry__detail">{detail}</p> : null}
+      <p className="nx-retry__wait">{retryWaitLabel(retry, now)}</p>
+      <div className="nx-retry__actions">
+        {canSwitchModel ? (
+          <button type="button" className="nx-btn nx-btn--sm" onClick={onSwitchModel}>
+            Switch model
+          </button>
+        ) : null}
+        {onConnectProvider ? (
+          <button
+            type="button"
+            className="nx-btn nx-btn--quiet nx-btn--sm"
+            onClick={onConnectProvider}
+          >
+            Connect a provider
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="nx-btn nx-btn--quiet nx-btn--sm"
+          onClick={onStop}
+          disabled={stopping}
+          aria-busy={stopping}
+        >
+          {stopping ? "Stopping…" : "Stop retrying"}
+        </button>
+      </div>
+    </section>
+  );
 }
 
 function Message({ session, message }: { session: SessionId; message: ChatMessageView }) {

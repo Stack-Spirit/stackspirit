@@ -127,6 +127,7 @@ enum SseScript {
     None,
     Deltas,
     Reconnect,
+    Retry,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +152,8 @@ struct FakeState {
     missing_session: bool,
     sse: SseScript,
     assistant_text: String,
+    /// `GET /session/status`, a map keyed by native session id.
+    session_status: Value,
     requests: Vec<RequestRecord>,
 }
 
@@ -170,6 +173,7 @@ impl Default for FakeState {
             missing_session: false,
             sse: SseScript::None,
             assistant_text: "Hello world".to_owned(),
+            session_status: json!({}),
             requests: Vec::new(),
         }
     }
@@ -392,6 +396,14 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<FakeState>>, stop: 
                 .collect();
             drop(state);
             write_json(&mut stream, 200, &Value::Array(sessions));
+        }
+        ("GET", "/session/status") => {
+            let status = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .session_status
+                .clone();
+            write_json(&mut stream, 200, &status);
         }
         ("POST", "/session") => {
             let id = {
@@ -665,6 +677,7 @@ fn handle_event(mut stream: TcpStream, state: Arc<Mutex<FakeState>>, stop: Arc<A
             thread::sleep(Duration::from_millis(300));
             send_recovered(&mut stream, &native)
         }
+        SseScript::Retry => send_retry(&mut stream, &native),
         SseScript::None => Ok(()),
     };
     if result.is_err() {
@@ -723,6 +736,30 @@ fn send_recovered(stream: &mut TcpStream, native: &str) -> std::io::Result<()> {
     write_sse(
         stream,
         &json!({"type": "session.idle", "properties": {"sessionID": native}}),
+    )
+}
+
+fn send_retry(stream: &mut TcpStream, native: &str) -> std::io::Result<()> {
+    write_sse(
+        stream,
+        &json!({
+            "type": "session.status",
+            "properties": {
+                "sessionID": native,
+                "status": {
+                    "type": "retry",
+                    "attempt": 2,
+                    "message": "AI_APICallError: Free usage limit reached",
+                    "next": 1763673600000_u64,
+                    "action": {
+                        "reason": "free_tier_limit",
+                        "title": "Free limit reached",
+                        "message": "Subscribe to OpenCode Go",
+                        "provider": "opencode",
+                    },
+                },
+            },
+        }),
     )
 }
 
@@ -1014,43 +1051,40 @@ async fn abort_stops_the_turn_and_late_text_is_ignored() {
     let in_flight = provider.start(&setup_input()).await.unwrap();
     assert_eq!(in_flight.state, ChatSessionState::Streaming);
 
-    let stopped = provider.stop(&SETUP).await.unwrap();
-    assert_eq!(stopped.state, ChatSessionState::Stopped);
-    assert!(stopped.error.is_none());
+    let ready = provider.stop(&SETUP).await.unwrap();
+    assert_eq!(ready.state, ChatSessionState::Ready);
+    assert!(ready.attached);
+    assert!(ready.error.is_none());
+    assert!(ready.retry.is_none());
     assert_eq!(server.abort_count(), 1);
 
-    // Drain the stop events, then prove the late POST response adds no text.
-    let closed = tokio::time::timeout(Duration::from_secs(2), async {
-        while let Ok(event) = receiver.recv().await {
-            if matches!(event, ChatEvent::Closed { .. }) {
-                return event;
-            }
-        }
-        panic!("event bus closed before the closed event");
-    })
-    .await
-    .expect("closed event");
-    assert!(matches!(
-        closed,
-        ChatEvent::Closed {
-            reason: spirit_core::engine::chat::ChatCloseReason::Stopped,
-            ..
-        }
-    ));
+    // The late POST response from the aborted turn is ignored, not re-rendered.
     tokio::time::sleep(Duration::from_millis(1100)).await;
     while let Ok(event) = receiver.try_recv() {
+        let late_text = match &event {
+            ChatEvent::Message { message, .. } => {
+                message.role == spirit_core::engine::chat::ChatRole::Assistant
+            }
+            ChatEvent::Done { .. } | ChatEvent::Delta { .. } => true,
+            _ => false,
+        };
         assert!(
-            !matches!(
-                event,
-                ChatEvent::Message { .. } | ChatEvent::Done { .. } | ChatEvent::Delta { .. }
-            ),
-            "a stopped turn must not emit late text: {event:#?}"
+            !late_text,
+            "an aborted turn must not emit late text: {event:#?}"
         );
     }
+
+    // The composer is usable immediately: the next send is accepted, not chat_busy.
+    let receipt = provider
+        .send(&SETUP, "Continue with another model")
+        .await
+        .unwrap();
+    assert!(receipt.accepted);
+    assert_eq!(receipt.message.text, vec!["Continue with another model"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn abort_unsupported_reports_stop_unconfirmed() {
+async fn abort_unsupported_reports_stop_unconfirmed_without_locking_the_composer() {
     let server = FakeEngine::with(|state| {
         state.message_delay = Duration::from_millis(600);
         state.abort_status = 404;
@@ -1060,13 +1094,90 @@ async fn abort_unsupported_reports_stop_unconfirmed() {
     provider.start(&setup_input()).await.unwrap();
     provider.send(&SETUP, "Start a long turn").await.unwrap();
     wait_until(|| server.message_started(), Duration::from_secs(2)).await;
-    let stopped = provider.stop(&SETUP).await.unwrap();
-    assert_eq!(stopped.state, ChatSessionState::Stopped);
-    let error = stopped.error.expect("an unconfirmed stop is a notice");
+    let ready = provider.stop(&SETUP).await.unwrap();
+    assert_eq!(ready.state, ChatSessionState::Ready);
+    assert!(ready.attached);
+    let error = ready.error.expect("an unconfirmed stop is a notice");
     assert_eq!(error.code, SpiritErrorCode::Conflict);
     assert!(error.message.contains("stop_unconfirmed"));
     assert!(!error.message.contains("127.0.0.1"));
     assert_eq!(server.abort_count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_surfaces_a_retry_from_the_session_status_route() {
+    let server = FakeEngine::with(|state| {
+        state.message_delay = Duration::from_millis(400);
+        state.session_status = json!({
+            "ses_fake_1": {
+                "type": "retry",
+                "attempt": 2,
+                "message": "AI_APICallError: Free usage limit reached",
+                "next": 1_763_673_600_000_u64,
+                "action": {
+                    "reason": "free_tier_limit",
+                    "title": "Free limit reached",
+                    "message": "Subscribe to OpenCode Go",
+                    "provider": "opencode",
+                },
+            },
+        });
+    });
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, _engine) = build_provider(&server, workspace.path(), false);
+    let view = provider.start(&setup_input()).await.unwrap();
+    assert_eq!(view.state, ChatSessionState::Streaming);
+    let retry = view.retry.expect("the retry must survive attach");
+    assert_eq!(retry.attempt, 2);
+    assert_eq!(retry.next, Some(1_763_673_600_000));
+    let action = retry.action.expect("the free-tier action");
+    assert_eq!(action.reason, "free_tier_limit");
+    assert_eq!(action.title, "Free limit reached");
+    assert_eq!(action.provider, "opencode");
+
+    // Stop clears the retry and returns the composer to Ready.
+    let ready = provider.stop(&SETUP).await.unwrap();
+    assert_eq!(ready.state, ChatSessionState::Ready);
+    assert!(ready.attached);
+    assert!(ready.retry.is_none());
+    assert!(ready.error.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_status_retry_over_sse_is_visible_and_stop_clears_it() {
+    let server = FakeEngine::with(|state| {
+        state.sse = SseScript::Retry;
+        state.message_delay = Duration::from_secs(3);
+    });
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, _engine) = build_provider(&server, workspace.path(), true);
+    let mut receiver = provider.subscribe();
+    provider.start(&setup_input()).await.unwrap();
+    wait_until(|| server.event_connections() >= 1, Duration::from_secs(2)).await;
+    provider.send(&SETUP, "Explain the server").await.unwrap();
+
+    let retry = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Ok(event) = receiver.recv().await {
+            if let ChatEvent::Session { session, .. } = event
+                && session.session == SETUP
+                && let Some(retry) = session.retry
+            {
+                return retry;
+            }
+        }
+        panic!("event bus closed before the retry status");
+    })
+    .await
+    .expect("the retry status event");
+    assert_eq!(retry.attempt, 2);
+    assert_eq!(
+        retry.action.as_ref().map(|action| action.reason.as_str()),
+        Some("free_tier_limit")
+    );
+
+    let ready = provider.stop(&SETUP).await.unwrap();
+    assert_eq!(ready.state, ChatSessionState::Ready);
+    assert!(ready.retry.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

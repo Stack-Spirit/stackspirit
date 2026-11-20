@@ -25,18 +25,18 @@ use crate::engine::chat::endpoint::{
     parse_workspace_path,
 };
 use crate::engine::chat::model::{
-    ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage, ChatMessageOrigin,
-    ChatModelTier, ChatModelView, ChatPermissionDecision, ChatPermissionPrompt, ChatRole,
+    ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage, ChatMessageOrigin, ChatModelTier,
+    ChatModelView, ChatPermissionDecision, ChatPermissionPrompt, ChatRetryStatus, ChatRole,
     ChatSendReceipt, ChatSessionId, ChatSessionLocation, ChatSessionState, ChatSessionView,
     ChatStartInput, ChatToolActivity, ChatToolStatus, ChatUsageView, MAX_ACTIVITY_ITEMS,
     MAX_MESSAGE_CHARS, cap_text, display_snippet, normalize_text, validate_project_name,
     validate_user_text,
 };
 use crate::engine::chat::pump::{
-    ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper,
+    ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper, retry_status,
 };
 use crate::engine::chat::sse::{
-    SseFrame, SseParser, StreamSupport, error_status, parse_engine_event,
+    SseFrame, SseParser, StreamSupport, error_status, parse_engine_event, parse_session_status,
 };
 use crate::engine::{EngineChoice, EngineStatus};
 use crate::error::{SpiritError, SpiritErrorCode};
@@ -260,8 +260,14 @@ struct SessionRecord {
     turn_completed: bool,
     /// Permission requests OpenCode is waiting on, oldest first.
     pending_permissions: Vec<ChatPermissionPrompt>,
+    /// An active `session.status` retry, when OpenCode is sleeping before another try.
+    retry: Option<ChatRetryStatus>,
     /// True while a coalesced tool-activity log refresh is queued.
     tool_refresh_queued: bool,
+    /// Identifies the in-flight background turn so a late response after Stop is ignored.
+    turn_seq: u64,
+    /// True between a Stop and the next send; late frames from the aborted turn are dropped.
+    turn_cancelled: bool,
 }
 
 impl SessionRecord {
@@ -281,7 +287,10 @@ impl SessionRecord {
             active_turn: None,
             turn_completed: false,
             pending_permissions: Vec::new(),
+            retry: None,
             tool_refresh_queued: false,
+            turn_seq: 0,
+            turn_cancelled: false,
         }
     }
 }
@@ -469,6 +478,9 @@ impl LocalChatProvider {
                 record.state = ChatSessionState::Ready;
                 record.active_turn = None;
                 record.turn_completed = false;
+                record.retry = None;
+                record.turn_cancelled = false;
+                record.turn_seq = record.turn_seq.saturating_add(1);
             }
             record.attached = true;
             record.started_at.get_or_insert(now);
@@ -484,7 +496,14 @@ impl LocalChatProvider {
         };
         let view = self.inner.clone().emit_session(view).await;
         ensure_pump(&self.inner, &endpoint);
-        Ok(view)
+        // A retry or permission that started before the UI attached must be visible now.
+        self.inner.clone().sync_permissions(&input.session).await;
+        self.inner.clone().sync_status(&input.session).await;
+        Ok(self
+            .inner
+            .current_view(&input.session)
+            .await
+            .unwrap_or(view))
     }
 
     async fn start_orchestrator(
@@ -559,6 +578,9 @@ impl LocalChatProvider {
                 record.state = ChatSessionState::Ready;
                 record.active_turn = None;
                 record.turn_completed = false;
+                record.retry = None;
+                record.turn_cancelled = false;
+                record.turn_seq = record.turn_seq.saturating_add(1);
             }
             record.attached = true;
             record.started_at.get_or_insert(now);
@@ -574,8 +596,9 @@ impl LocalChatProvider {
         };
         let view = self.inner.clone().emit_session(view).await;
         ensure_pump(&self.inner, &endpoint);
-        // A turn that was already waiting on a permission when the UI (re)attached.
+        // A turn that was already waiting on a permission or retry when the UI (re)attached.
         self.inner.clone().sync_permissions(session).await;
+        self.inner.clone().sync_status(session).await;
         Ok(self.inner.current_view(session).await.unwrap_or(view))
     }
 
@@ -628,6 +651,9 @@ impl LocalChatProvider {
                 record.state = ChatSessionState::Ready;
                 record.active_turn = None;
                 record.turn_completed = false;
+                record.retry = None;
+                record.turn_cancelled = false;
+                record.turn_seq = record.turn_seq.saturating_add(1);
             }
             record.endpoint = Some(endpoint.clone());
             record.attached = true;
@@ -644,8 +670,9 @@ impl LocalChatProvider {
         };
         let view = self.inner.clone().emit_session(view).await;
         ensure_pump(&self.inner, &endpoint);
-        // A turn that was already waiting on a permission when the UI (re)attached.
+        // A turn that was already waiting on a permission or retry when the UI (re)attached.
         self.inner.clone().sync_permissions(session).await;
+        self.inner.clone().sync_status(session).await;
         Ok(self.inner.current_view(session).await.unwrap_or(view))
     }
 
@@ -752,7 +779,7 @@ impl LocalChatProvider {
         // start with `msg`. It echoes this id in the native log, so the optimistic
         // message upserts by id instead of appearing twice.
         let user = ChatMessage::user(format!("msg_{}", Ulid::generate()), &text, now);
-        let view = {
+        let (view, turn_seq) = {
             let mut state = self.inner.state.lock().await;
             let record = state
                 .sessions
@@ -766,10 +793,13 @@ impl LocalChatProvider {
             record.endpoint = Some(endpoint.clone());
             record.state = ChatSessionState::Streaming;
             record.error = None;
+            record.retry = None;
             record.active_turn = Some(user.id.clone());
             record.turn_completed = false;
+            record.turn_cancelled = false;
+            record.turn_seq = record.turn_seq.saturating_add(1);
             record.last_event_at = Some(now);
-            self.inner.view_for(session, record)
+            (self.inner.view_for(session, record), record.turn_seq)
         };
         self.inner.clone().emit_session(view).await;
         let user_event = user.clone();
@@ -781,7 +811,14 @@ impl LocalChatProvider {
 
         let body = message_body(model.as_ref(), &text, &user.id);
         ensure_pump(&self.inner, &endpoint);
-        spawn_turn(self.inner.clone(), endpoint, native, session.clone(), body);
+        spawn_turn(
+            self.inner.clone(),
+            endpoint,
+            native,
+            session.clone(),
+            body,
+            turn_seq,
+        );
         Ok(ChatSendReceipt {
             session: session.clone(),
             message: user,
@@ -804,7 +841,12 @@ impl LocalChatProvider {
             .await
     }
 
-    /// Aborts the current turn when supported and returns the stopped view.
+    /// Aborts the current turn when supported and returns the ready view.
+    ///
+    /// Stop is a turn control, not a session teardown: it keeps the native session
+    /// attached and unlocks the composer so the owner can switch model or send again
+    /// immediately. When the engine does not confirm the abort, the view carries a
+    /// non-fatal `stop_unconfirmed` notice instead of pretending the turn stopped.
     pub async fn stop(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError> {
         let now = self.inner.clock.now();
         let (native, endpoint, streaming) = {
@@ -818,12 +860,16 @@ impl LocalChatProvider {
                 .clone()
                 .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
             let streaming = record.state == ChatSessionState::Streaming;
-            // Mark the session stopped before the abort request so a racing send cannot
-            // start a second turn while the first abort is in flight.
-            record.state = ChatSessionState::Stopped;
+            // Mark the turn cancelled before the abort request so a racing send cannot
+            // start a second turn while the first abort is in flight, and invalidate the
+            // background POST so its late response cannot overwrite the ready view.
+            record.state = ChatSessionState::Ready;
             record.attached = true;
             record.active_turn = None;
             record.turn_completed = true;
+            record.turn_cancelled = true;
+            record.turn_seq = record.turn_seq.saturating_add(1);
+            record.retry = None;
             record.pending_permissions.clear();
             record.last_event_at = Some(now);
             record.error = None;
@@ -847,12 +893,7 @@ impl LocalChatProvider {
             };
             self.inner.view_for(session, record)
         };
-        let view = self.inner.clone().emit_session(view).await;
-        self.inner
-            .clone()
-            .emit_with(|events| events.closed(session.clone(), ChatCloseReason::Stopped))
-            .await;
-        Ok(view)
+        Ok(self.inner.clone().emit_session(view).await)
     }
 
     /// Switches the setup assistant's model and returns the updated view.
@@ -993,6 +1034,7 @@ impl Inner {
             error: record.error.clone(),
             pending_permissions: (!record.pending_permissions.is_empty())
                 .then(|| record.pending_permissions.clone()),
+            retry: record.retry.clone(),
         }
     }
 
@@ -1056,6 +1098,74 @@ impl Inner {
                 return;
             }
             record.pending_permissions = found;
+            record.last_event_at = Some(now);
+            self.view_for(session, record)
+        };
+        self.emit_session(view).await;
+    }
+
+    /// Reads `GET /session/status`, keeps the entry for this session's native id and
+    /// publishes the view when the retry state changed.
+    ///
+    /// This is the attach-time fallback: a session already sleeping in a retry loop must
+    /// show its notice before the next SSE frame. An unreadable or unsupported response
+    /// is ignored instead of clearing a retry the stream already delivered.
+    async fn sync_status(self: Arc<Self>, session: &ChatSessionId) {
+        let (endpoint, native) = {
+            let state = self.state.lock().await;
+            let Some(record) = state.sessions.get(session) else {
+                return;
+            };
+            let Some(endpoint) = record.endpoint.clone() else {
+                return;
+            };
+            (endpoint, record.native_session_id.clone())
+        };
+        let Ok(response) = self
+            .request(
+                "GET",
+                endpoint,
+                "/session/status".to_owned(),
+                None,
+                SESSION_TIMEOUT,
+            )
+            .await
+        else {
+            return;
+        };
+        if !(200..300).contains(&response.status) {
+            return;
+        }
+        let Ok(retry) = parse_session_status_map(&response.body, &native) else {
+            return;
+        };
+        let now = self.clock.now();
+        let view = {
+            let mut state = self.state.lock().await;
+            let Some(record) = state.sessions.get_mut(session) else {
+                return;
+            };
+            if record.native_session_id != native
+                || matches!(
+                    record.state,
+                    ChatSessionState::Stopped | ChatSessionState::Error
+                )
+            {
+                return;
+            }
+            if retry == record.retry {
+                return;
+            }
+            let had_retry = record.retry.is_some();
+            record.retry = retry;
+            if record.retry.is_some() {
+                record.state = ChatSessionState::Streaming;
+            } else if had_retry
+                && record.active_turn.is_none()
+                && record.state == ChatSessionState::Streaming
+            {
+                record.state = ChatSessionState::Ready;
+            }
             record.last_event_at = Some(now);
             self.view_for(session, record)
         };
@@ -1461,6 +1571,7 @@ impl Inner {
             record.error = Some(error.clone());
             record.active_turn = None;
             record.turn_completed = true;
+            record.retry = None;
             record.pending_permissions.clear();
             record.last_event_at = Some(now);
             self.view_for(session, record)
@@ -1563,12 +1674,49 @@ impl Inner {
             ) {
                 return;
             }
+            // Stop already returned the ready view; a late frame from the aborted turn
+            // must not re-open the retry, add text or bring back a permission card.
+            if record.turn_cancelled {
+                return;
+            }
             record.last_event_at = Some(now);
             let mapped = record.mapper.map(&event, now);
             (session, mapped)
         };
         match mapped {
             Mapped::None => {}
+            Mapped::Retry(retry) => {
+                let view = {
+                    let mut state = self.state.lock().await;
+                    let Some(record) = state.sessions.get_mut(&session) else {
+                        return;
+                    };
+                    record.retry = Some(retry);
+                    record.state = ChatSessionState::Streaming;
+                    record.error = None;
+                    record.last_event_at = Some(now);
+                    self.view_for(&session, record)
+                };
+                self.emit_session(view).await;
+            }
+            Mapped::RetryCleared => {
+                let view = {
+                    let mut state = self.state.lock().await;
+                    let Some(record) = state.sessions.get_mut(&session) else {
+                        return;
+                    };
+                    if record.retry.take().is_none() {
+                        return;
+                    }
+                    record.error = None;
+                    record.last_event_at = Some(now);
+                    if record.active_turn.is_none() && record.state == ChatSessionState::Streaming {
+                        record.state = ChatSessionState::Ready;
+                    }
+                    self.view_for(&session, record)
+                };
+                self.emit_session(view).await;
+            }
             Mapped::Message(message) => self.emit_message(&session, message).await,
             Mapped::Delta {
                 message_id,
@@ -1670,6 +1818,8 @@ impl Inner {
             record.error = None;
             record.active_turn = None;
             record.turn_completed = true;
+            record.turn_cancelled = false;
+            record.retry = None;
             // A finished turn cannot still be waiting on a permission; clearing here
             // also removes a card whose `permission.replied` frame was missed.
             record.pending_permissions.clear();
@@ -1740,10 +1890,10 @@ impl Inner {
                 .map(|(session, _)| session.clone())
                 .collect::<Vec<_>>()
         };
-        for session in sessions {
-            self.clone().reload_session(&session).await;
+        for session in &sessions {
+            self.clone().reload_session(session).await;
             // A request raised while the stream was down still has to become visible.
-            self.clone().sync_permissions(&session).await;
+            self.clone().sync_permissions(session).await;
         }
         let now = self.clock.now();
         let views = {
@@ -1759,7 +1909,7 @@ impl Inner {
                             | ChatSessionState::Error
                     )
                 {
-                    record.state = if record.active_turn.is_some() {
+                    record.state = if record.retry.is_some() || record.active_turn.is_some() {
                         ChatSessionState::Streaming
                     } else {
                         ChatSessionState::Ready
@@ -1773,6 +1923,11 @@ impl Inner {
         };
         for view in views {
             self.clone().emit_session(view).await;
+        }
+        // The status route is authoritative for a retry that began while the stream
+        // was down; run it after the reconnect state reset so a retry wins.
+        for session in &sessions {
+            self.clone().sync_status(session).await;
         }
     }
 
@@ -1796,6 +1951,7 @@ impl Inner {
                     record.error = Some(error.clone());
                     record.active_turn = None;
                     record.turn_completed = true;
+                    record.retry = None;
                     record.last_event_at = Some(now);
                     views.push(self.view_for(session, record));
                 }
@@ -1843,6 +1999,7 @@ fn spawn_turn(
     native: String,
     session: ChatSessionId,
     body: Vec<u8>,
+    turn_seq: u64,
 ) {
     tokio::spawn(async move {
         let path = match safe_native_id(&native) {
@@ -1857,7 +2014,7 @@ fn spawn_turn(
             .request("POST", endpoint, path, Some(body), TURN_CAP)
             .await;
         inner
-            .finish_turn(&session, &native, &usage_endpoint, result)
+            .finish_turn(&session, &native, &usage_endpoint, turn_seq, result)
             .await;
     });
 }
@@ -1868,8 +2025,21 @@ impl Inner {
         session: &ChatSessionId,
         native: &str,
         endpoint: &ChatEndpoint,
+        turn_seq: u64,
         result: Result<ChatResponse, SpiritError>,
     ) {
+        // Stop (or a new send) invalidates this background POST before it can write a
+        // late assistant message or move the session out of its ready view.
+        {
+            let state = self.state.lock().await;
+            if state
+                .sessions
+                .get(session)
+                .is_none_or(|record| record.turn_seq != turn_seq)
+            {
+                return;
+            }
+        }
         let now = self.clock.now();
         let succeeded = matches!(&result, Ok(response) if (200..300).contains(&response.status));
         // The log is authoritative for tokens and cost. The engine may report usage on
@@ -1901,6 +2071,7 @@ impl Inner {
                 return;
             };
             if record.native_session_id != native
+                || record.turn_seq != turn_seq
                 || matches!(
                     record.state,
                     ChatSessionState::Stopped | ChatSessionState::Error
@@ -1970,6 +2141,8 @@ impl Inner {
                 }
             }
             record.active_turn = None;
+            record.retry = None;
+            record.turn_cancelled = false;
             record.pending_permissions.clear();
             (self.view_for(session, record), emits)
         };
@@ -2808,6 +2981,25 @@ fn parse_permissions(body: &[u8], native: &str, now: Timestamp) -> Vec<ChatPermi
         .collect()
 }
 
+/// Reads `GET /session/status` (a map keyed by native session id) and returns the
+/// retry for one session.
+///
+/// `Ok(None)` means the response is readable and the session is idle or busy;
+/// `Err(())` means the body was not a status map and the caller must keep its previous
+/// retry state.
+fn parse_session_status_map(body: &[u8], native: &str) -> Result<Option<ChatRetryStatus>, ()> {
+    let Value::Object(statuses) = serde_json::from_slice::<Value>(body).map_err(|_| ())? else {
+        return Err(());
+    };
+    let Some(status) = statuses.get(native) else {
+        return Ok(None);
+    };
+    let Some(status) = parse_session_status(status) else {
+        return Ok(None);
+    };
+    Ok(retry_status(&status))
+}
+
 fn render_parts(parts: &[Value]) -> String {
     let mut text = String::new();
     for part in parts {
@@ -3431,5 +3623,36 @@ mod tests {
         assert!(safe_native_id("../escape").is_err());
         assert!(safe_native_id("ses/a").is_err());
         assert!(safe_native_id("").is_err());
+    }
+
+    #[test]
+    fn status_map_reads_a_free_limit_retry_for_one_native_session() {
+        let body = br#"{
+          "ses_other": {"type": "retry", "attempt": 1, "message": "other", "next": 1},
+          "ses_1": {"type": "retry", "attempt": 3, "message": "AI_APICallError: Free usage limit reached", "next": 1763673600000, "action": {"reason": "free_tier_limit", "title": "Free limit reached", "message": "Subscribe to OpenCode Go", "provider": "opencode"}}
+        }"#;
+        let retry = parse_session_status_map(body, "ses_1")
+            .expect("readable status map")
+            .expect("this session retries");
+        assert_eq!(retry.attempt, 3);
+        assert_eq!(retry.next, Some(1_763_673_600_000));
+        let action = retry.action.expect("the free-tier action");
+        assert_eq!(action.reason, "free_tier_limit");
+        assert_eq!(action.title, "Free limit reached");
+        assert_eq!(action.provider, "opencode");
+        assert!(
+            parse_session_status_map(body, "ses_missing")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            parse_session_status_map(br#"{"ses_1": {"type": "idle"}}"#, "ses_1")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            parse_session_status_map(b"not-json", "ses_1").is_err(),
+            "an unreadable body must not clear a live retry"
+        );
     }
 }

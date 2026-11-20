@@ -504,6 +504,7 @@ function applyChatEvent(bridge: SpiritBridge, event: ChatEvent): void {
                 [session]: {
                   ...view,
                   state: view.error ? "error" : "ready",
+                  retry: undefined,
                 },
               }
             : current.views,
@@ -754,7 +755,14 @@ export const useConversations = create<ConversationState>((set, get) => ({
     if (!chat?.setModel) return;
     try {
       const view = await chat.setModel(session, modelId);
-      setView(session, { ...view, error: null });
+      // Choosing another model is a recovery step: a setup session that failed its
+      // last turn becomes usable again without a separate Reconnect click. A retry in
+      // flight keeps its notice until the owner stops it or the engine settles.
+      setView(session, {
+        ...view,
+        state: view.state === "error" ? "ready" : view.state,
+        error: null,
+      });
     } catch (caught) {
       patchView(session, {
         state: "error",

@@ -47,6 +47,13 @@ export interface ComposerBarProps {
   /** A turn is being accepted; the primary button shows a spinner. */
   sending?: boolean;
   stopped: boolean;
+  /**
+   * Keep the inline model picker usable while the composer is otherwise locked
+   * (a retrying turn or a recoverable error). The textarea and Send stay disabled.
+   */
+  allowModelSwitch?: boolean;
+  /** Bump this counter to open and focus the model picker from a recovery notice. */
+  openModelPickerRequest?: number;
   /** True while the card sits in the centered hero; false when docked. */
   hero?: boolean;
   usage?: ChatUsageView | null;
@@ -80,6 +87,8 @@ export function ComposerBar({
   streaming,
   sending = false,
   stopped,
+  allowModelSwitch = false,
+  openModelPickerRequest = 0,
   hero = false,
   usage,
   onSend,
@@ -95,6 +104,8 @@ export function ComposerBar({
   const textarea = useRef<HTMLTextAreaElement>(null);
   /** True while the Message field owns (or is about to regain) focus. */
   const restoreFocus = useRef(false);
+  /** True after the Stop button click, so the field regains focus when the turn ends. */
+  const stopRequested = useRef(false);
   const id = useId();
 
   useEffect(() => {
@@ -115,6 +126,13 @@ export function ComposerBar({
     if (!element || disabled || !restoreFocus.current) return;
     restoreFocus.current = false;
     if (document.activeElement === document.body) element.focus();
+  }, [disabled]);
+
+  useEffect(() => {
+    const element = textarea.current;
+    if (!element || disabled || !stopRequested.current) return;
+    stopRequested.current = false;
+    element.focus();
   }, [disabled]);
 
   async function submit() {
@@ -195,7 +213,8 @@ export function ComposerBar({
             <ModelPicker
               model={model}
               models={models}
-              disabled={disabled}
+              disabled={disabled && !allowModelSwitch}
+              openRequest={openModelPickerRequest}
               onSelect={onSelectModel}
             />
           ) : null}
@@ -235,7 +254,10 @@ export function ComposerBar({
               type="button"
               className="nx-send nx-send--stop"
               aria-label="Stop"
-              onClick={onStop}
+              onClick={() => {
+                stopRequested.current = true;
+                onStop();
+              }}
             >
               <span className="nx-send__stop" aria-hidden="true" />
             </button>
@@ -290,17 +312,30 @@ function ModelPicker({
   model,
   models,
   disabled,
+  openRequest = 0,
   onSelect,
 }: {
   model: ChatModelView | null;
   models: ChatModelView[];
   disabled: boolean;
+  openRequest?: number;
   onSelect?: (modelId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (openRequest <= 0) return;
+    // A recovery notice asks for the picker after its click handler; defer one tick so
+    // the popover can measure the trigger before it opens.
+    const timer = setTimeout(() => {
+      setOpen(true);
+      trigger.current?.focus();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [openRequest]);
 
   useEffect(() => {
     if (!open) return;

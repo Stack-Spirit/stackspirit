@@ -301,9 +301,9 @@ describe("NextShell", () => {
     const stop = vi.spyOn(bridge.chat!, "stop");
     await user.click(screen.getByRole("button", { name: "Stop" }));
     await waitFor(() => expect(stop).toHaveBeenCalledWith("global"));
-    await waitFor(() => expect(screen.getByTestId("session-state")).toHaveTextContent("Stopped"));
-    expect(composer).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Start" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("session-state")).toHaveTextContent("Ready"));
+    expect(composer).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Start" })).not.toBeInTheDocument();
   });
 
   it("shows a typed chat error and retries through Reconnect", async () => {
