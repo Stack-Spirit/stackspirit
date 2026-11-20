@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { E2E_LOCK, E2E_TIMEOUT } from "./support";
 
@@ -10,6 +10,8 @@ test.describe.configure({ lock: E2E_LOCK, timeout: E2E_TIMEOUT });
 test.use({ contextOptions: { reducedMotion: "reduce" } });
 
 const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"];
+const BRAND_GREEN = "rgb(67, 168, 90)";
+const GREEN_STRONG = "rgb(46, 127, 72)";
 
 async function expectNoWcagViolations(page: Page) {
   const results = await new AxeBuilder({ page }).withTags(WCAG_TAGS).analyze();
@@ -28,6 +30,53 @@ const url = (scenario: string, theme: "light" | "dark" = "light") =>
 async function connect(page: Page) {
   await page.getByTestId("sidebar-connect").click();
   await expect(page.getByTestId("health-card")).toBeVisible();
+}
+
+/**
+ * A focused text field must paint a visible state. The global text-entry rule
+ * removes the keyboard ring from inputs, so a field without its own calm border
+ * step would compute the same border, no shadow and no outline while focused —
+ * exactly the regression this audit has to catch.
+ */
+async function expectCalmFieldFocus(locator: Locator, theme: "light" | "dark") {
+  const resting = await locator.evaluate((el) => {
+    (el as HTMLElement).blur();
+    const style = getComputedStyle(el);
+    return {
+      border: style.borderTopColor,
+      shadow: style.boxShadow,
+      outline: style.outlineStyle,
+    };
+  });
+
+  await locator.focus();
+  await expect
+    .poll(() => locator.evaluate((el) => getComputedStyle(el).borderTopColor))
+    .not.toBe(resting.border);
+
+  const focused = await locator.evaluate((el) => {
+    const style = getComputedStyle(el);
+    return {
+      tag: el.tagName,
+      active: el === document.activeElement,
+      focusVisible: el.matches(":focus-visible"),
+      border: style.borderTopColor,
+      shadow: style.boxShadow,
+      outline: style.outlineStyle,
+      caret: style.caretColor,
+    };
+  });
+
+  expect(focused.active).toBe(true);
+  expect(focused.focusVisible).toBe(true);
+  expect(focused.border).not.toBe(resting.border);
+  expect(focused.shadow).toBe("none");
+  expect(focused.outline).toBe("none");
+  expect(focused.border).not.toContain("67, 168, 90");
+  expect(focused.border).not.toContain("46, 127, 72");
+  if (focused.tag !== "SELECT") {
+    expect(focused.caret).toBe(theme === "light" ? GREEN_STRONG : BRAND_GREEN);
+  }
 }
 
 test("welcome with no saved server meets WCAG 2.2 AA in light and dark", async ({ page }) => {
@@ -99,9 +148,6 @@ test("the Message field keeps focus on the hero dock and after a slow turn", asy
 });
 
 test("text fields keep a calm focus while buttons keep the keyboard ring", async ({ page }) => {
-  const BRAND_GREEN = "rgb(67, 168, 90)";
-  const GREEN_STRONG = "rgb(46, 127, 72)";
-
   for (const theme of ["light", "dark"] as const) {
     await page.goto(url("empty", theme));
     await page.getByRole("button", { name: /Set up with AI/ }).click();
@@ -219,6 +265,32 @@ test("text fields keep a calm focus while buttons keep the keyboard ring", async
     expect(wizard.border).not.toContain("67, 168, 90");
     expect(wizard.border).not.toContain("46, 127, 72");
     expect(wizard.caret).toBe(theme === "light" ? GREEN_STRONG : BRAND_GREEN);
+
+    // The local engine dialogs wrap their controls in a bare `.field` label.
+    // They are still text entry, so each must take the same calm border step;
+    // this is the audit that catches a field left with no focus indicator.
+    await page.goto(url("gate-d6-ready", theme));
+    await connect(page);
+    await page.getByTestId("settings-trigger").click();
+    await page.getByRole("menuitem", { name: "All settings" }).click();
+    await page.getByRole("button", { name: "Show advanced settings" }).click();
+    await expect(page.getByTestId("engine-view")).toBeVisible();
+
+    await page.getByTestId("gate-card-local").getByRole("button", { name: "Run locally" }).click();
+    const create = page.getByRole("dialog", { name: "Create local orchestrator" });
+    await expect(create).toBeVisible();
+    for (const name of ["Node", "App", "Project", "Name"]) {
+      await expectCalmFieldFocus(create.getByLabel(name, { exact: true }), theme);
+    }
+    await create.getByRole("button", { name: "Cancel" }).click();
+
+    const panel = page.getByTestId("local-orchestrator-panel");
+    await panel.getByTestId("local-orchestrator-pair").click();
+    const pair = page.getByRole("dialog", { name: "Pair a local surface" });
+    await expect(pair).toBeVisible();
+    for (const name of ["Session id", "Pair node", "Kind", "Pair app"]) {
+      await expectCalmFieldFocus(pair.getByLabel(name, { exact: true }), theme);
+    }
   }
 });
 

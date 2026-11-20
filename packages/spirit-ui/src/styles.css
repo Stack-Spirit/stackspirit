@@ -615,12 +615,43 @@ pre {
   transition: border-color 100ms ease;
 }
 
+/* Bare controls inside a classic .field label (the engine dialogs) get the
+   same surface as .input/.select. :where keeps these declarations below those
+   classes, so an explicitly styled field keeps winning. Without this, the
+   global text-entry rule above left these fields with no focus paint at all. */
+:where(.field) > :where(
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not(
+        [type="color"]
+      ),
+    select,
+    textarea
+  ) {
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--text-sm);
+  transition: border-color 100ms ease;
+}
+
 /* A calm border step instead of the global keyboard ring: a text field
    always matches :focus-visible when clicked, and the halo read as a second
    outline around the control. Keyboard users still get the ring on buttons,
    links and menu items. */
 .input:focus,
-.select:focus {
+.select:focus,
+:where(.field)
+  > :where(
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not(
+        [type="color"]
+      ),
+    select,
+    textarea
+  ):focus {
   outline: none;
   border-color: color-mix(in srgb, var(--accent) 38%, var(--border-control));
   box-shadow: none;
