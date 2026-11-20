@@ -144,6 +144,8 @@ pub async fn verify_key(state: State<'_, AppState>, provider: String) -> Command
     } else {
         state.record_key_verdict(status.clone());
     }
+    // Verification never removes the key; keep the chat model list in sync with it.
+    state.refresh_chat_models().await;
     Ok(status)
 }
 

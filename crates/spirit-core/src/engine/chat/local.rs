@@ -390,6 +390,41 @@ impl LocalChatProvider {
         self.inner.stream_support.reason()
     }
 
+    /// Re-points the setup session at the (possibly restarted) bundled engine and
+    /// broadcasts a fresh `ChatEvent::Session` carrying the current model list.
+    ///
+    /// A key change restarts the sidecar on a new port. Without this, mounted chat views
+    /// keep the stale `available_models` until the owner restarts the app. Does nothing
+    /// when no setup session has been registered.
+    pub async fn refresh_setup_models(&self) {
+        let setup = ChatSessionId::Setup;
+        if !self.inner.state.lock().await.sessions.contains_key(&setup) {
+            return;
+        }
+        // An unready or external engine still gets a fresh model list below.
+        if let Ok(port) = self.inner.engine.ensure_ready().await
+            && !matches!(
+                self.inner.engine.status().choice,
+                EngineChoice::External { .. }
+            )
+        {
+            let endpoint = ChatEndpoint::engine(port, &self.inner.workspace);
+            let attached = {
+                let mut state = self.inner.state.lock().await;
+                state.sessions.get_mut(&setup).is_some_and(|record| {
+                    record.endpoint = Some(endpoint.clone());
+                    record.attached
+                })
+            };
+            if attached {
+                ensure_pump(&self.inner, &endpoint);
+            }
+        }
+        if let Some(view) = self.inner.current_view(&setup).await {
+            self.inner.clone().emit_session(view).await;
+        }
+    }
+
     /// Lists the native engine sessions. Core-only; the renderer never receives these ids.
     pub async fn native_sessions(&self) -> Result<Vec<NativeSession>, SpiritError> {
         let endpoint = {

@@ -2537,3 +2537,27 @@ unsearchable menu is unusable. Modeled on OpenCode's model selector
 | `ss-86-fix-byok-keychain-verify-and-model-sync` | — | Enable `keyring` platform features + persistence guard, ephemeral-XDG `verify_with_secret` + smart candidate model selection, `Starting`-safe sidecar reload, `LocalChatProvider::refresh_setup_models` event broadcast, env-connected models in `usable_chat_models`, non-destructive `SettingsPage` / `EngineView` verify UX |
 | `ss-87-searchable-model-picker-and-manage-models` | `ss-86` | Searchable provider-grouped model picker popover with keyboard nav, bounded scroll, free/connected badges, and **Manage models** button in `ComposerBar.tsx` + `SettingsPage.tsx` + `theme.css` (Meadow, WCAG 2.2 AA light & dark) |
 | `ss-88-xvfb-byok-model-picker-verify` | `ss-86`, `ss-87` | Real VPS `xvfb-run` desktop boot smoke + live pinned `opencode` `1.19.5` sidecar BYOK round-trip test (key add → verify keeps key → 370+ OpenRouter models appear → search & select model → inspect `opencode.log` for zero errors/leaks → remove key) + Playwright UI E2E under `xvfb-run` |
+
+### Landed in ss-86: real keychain, isolated verify probe, live model sync
+
+- Root `Cargo.toml` now enables `keyring` features `apple-native`, `windows-native` and
+  `linux-native`. Without a feature, `keyring` 3 compiles its in-memory mock store, which
+  dropped keys the moment `OsKeychain::set` returned. A `keychain`-feature test asserts the
+  default backend is not `EntryOnly` and round-trips a secret across two `OsKeychain`
+  instances (it skips only when the container blocks the keyutils syscalls).
+- `verify_with_secret` runs its throwaway `opencode serve` with a `tempfile::tempdir()` for
+  `HOME`, the XDG dirs, `OPENCODE_CONFIG*` and the working directory, so it never touches
+  the live engine's SQLite database. The key stays in `OPENCODE_AUTH_CONTENT` for that child.
+- `select_verification_models` picks up to three active, text-capable candidates (non-reasoning
+  first, then lowest `cost.input`, then `default[provider]`). A model-specific failure
+  (400/404, `ProviderModelNotFoundError`, empty error) tries the next candidate; `Verified`
+  and `Invalid` return at once.
+- `refresh_after_provider_change` also restarts from `Starting`.
+  `LocalChatProvider::refresh_setup_models` re-points the setup session at the restarted
+  engine port and publishes a fresh `ChatEvent::Session`. `AppState::refresh_chat_models`
+  calls it, and `verify_key` now refreshes chat models too.
+- `usable_chat_models` also includes non-`opencode` providers the engine reports connected,
+  sorted `Included` first, then BYOK by popular rank, provider id and label.
+- Settings keeps a key visible after `invalid`/`unverified`, labels it `Verified`, `Saved`,
+  `Invalid key` or `Unverified`, offers `Replace key`, shows an alert for `missing`, and
+  refreshes the engine, key list and setup models after every verify.

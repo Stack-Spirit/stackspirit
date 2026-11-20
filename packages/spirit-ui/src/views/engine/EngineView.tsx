@@ -24,6 +24,8 @@ import {
   useFleetStore,
   useGates,
 } from "../../state/fleetStore";
+import { useConversations } from "../../next/conversations";
+import type { SpiritBridge } from "../../bridge/SpiritBridge";
 import { ByokForm } from "./ByokForm";
 import { EngineOnboarding } from "./EngineOnboarding";
 import { EngineStatusCard } from "./EngineStatusCard";
@@ -39,6 +41,22 @@ type GateDetails = "local" | "asif" | null;
 function upsertKey(statuses: KeyStatus[], next: KeyStatus): KeyStatus[] {
   const rest = statuses.filter((status) => status.provider !== next.provider);
   return [...rest, next].sort((left, right) => left.provider.localeCompare(right.provider));
+}
+
+/** Re-attaches an active setup chat so its model picker reflects a key change. */
+async function reattachSetupModels(bridge: SpiritBridge): Promise<void> {
+  const chat = bridge.chat;
+  if (!chat || !useConversations.getState().views.setup) return;
+  try {
+    const view = await chat.attach("setup");
+    useConversations.setState((state) => {
+      const current = state.views.setup;
+      if (!current) return {};
+      return { views: { ...state.views, setup: { ...current, ...view } } };
+    });
+  } catch {
+    // The next chat attach reads the list anyway; never fail a key change on it.
+  }
 }
 
 export function EngineView() {
@@ -229,9 +247,11 @@ export function EngineView() {
       if (!bridge) throw new Error("Engine bridge is unavailable.");
       const saved = await bridge.engine.storeKey(provider, secret);
       setKeyStatuses((current) => upsertKey(current, saved));
+      await refreshEngine();
+      await reattachSetupModels(bridge);
       return saved;
     },
-    [bridge],
+    [bridge, refreshEngine],
   );
 
   const handleVerifyKey = useCallback(
@@ -239,9 +259,11 @@ export function EngineView() {
       if (!bridge) throw new Error("Engine bridge is unavailable.");
       const checked = await bridge.engine.verifyKey(provider);
       setKeyStatuses((current) => upsertKey(current, checked));
+      await refreshEngine();
+      await reattachSetupModels(bridge);
       return checked;
     },
-    [bridge],
+    [bridge, refreshEngine],
   );
 
   const handleDeleteKey = useCallback(
@@ -249,9 +271,11 @@ export function EngineView() {
       if (!bridge) throw new Error("Engine bridge is unavailable.");
       const deleted = await bridge.engine.deleteKey(provider);
       setKeyStatuses((current) => upsertKey(current, deleted));
+      await refreshEngine();
+      await reattachSetupModels(bridge);
       return deleted;
     },
-    [bridge],
+    [bridge, refreshEngine],
   );
 
   const handleSelectExternal = useCallback(

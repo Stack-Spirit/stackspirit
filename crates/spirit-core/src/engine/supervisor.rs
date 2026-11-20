@@ -402,7 +402,10 @@ impl EngineSupervisor {
         }
         if matches!(
             self.status.state,
-            EngineState::Ready | EngineState::Degraded { .. } | EngineState::Failed { .. }
+            EngineState::Starting
+                | EngineState::Ready
+                | EngineState::Degraded { .. }
+                | EngineState::Failed { .. }
         ) {
             // The sidecar reads stored keys at spawn time. Stop first so an explicit
             // key change is not limited by the automatic restart budget.

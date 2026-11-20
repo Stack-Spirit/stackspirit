@@ -13,6 +13,7 @@ use spirit_core::connection::ConnectionManager;
 use spirit_core::engine::chat::{
     ChatEngine, ChatModelTier, ChatModelView, LocalChatProvider, StreamSupport,
 };
+use spirit_core::engine::process::providers::provider_rank;
 use spirit_core::engine::{
     EngineChoice, EnginePreferences, EnginePreferencesStore, EngineRuntime, EngineState,
     EngineStatus, EngineSupervisor, EngineSupervisorConfig, GateFeatureFlags, GateSnapshot,
@@ -202,7 +203,14 @@ impl EngineHost {
             } else if configured
                 .iter()
                 .any(|provider| provider == &runtime.provider)
+                || (runtime.provider != "opencode"
+                    && status
+                        .providers
+                        .iter()
+                        .any(|provider| provider.connected && provider.id == runtime.provider))
             {
+                // A stored key, or a non-`opencode` provider the engine reports as
+                // connected (for example through an environment variable).
                 ChatModelTier::Byok
             } else {
                 continue;
@@ -247,6 +255,17 @@ impl EngineHost {
             };
             usable.push((view, choice));
         }
+        // Deterministic order: included models first, then BYOK models by popular
+        // provider rank, provider id and label/id.
+        usable.sort_by(|(left, _), (right, _)| {
+            let tier_rank = |tier: ChatModelTier| u8::from(tier != ChatModelTier::Included);
+            tier_rank(left.tier)
+                .cmp(&tier_rank(right.tier))
+                .then_with(|| provider_rank(&left.provider).cmp(&provider_rank(&right.provider)))
+                .then_with(|| left.provider.cmp(&right.provider))
+                .then_with(|| left.label.cmp(&right.label))
+                .then_with(|| left.id.cmp(&right.id))
+        });
         usable
     }
 
@@ -624,6 +643,8 @@ impl AppState {
     /// Refreshes the chat adapter's model list after a provider key changed.
     pub(crate) async fn refresh_chat_models(&self) {
         self.chat_engine.refresh_models().await;
+        // Push the new list (and the restarted engine's port) to every mounted chat view.
+        self.chat.refresh_setup_models().await;
     }
 
     /// Records the latest verification result for a provider's stored key.

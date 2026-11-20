@@ -179,6 +179,84 @@ describe("Composer → Engine & Models", () => {
     );
   });
 
+  async function connectAnthropic(
+    user: ReturnType<typeof userEvent.setup>,
+    card: HTMLElement,
+  ) {
+    await user.type(
+      within(card).getByRole("searchbox", { name: "Search providers" }),
+      "anthropic",
+    );
+    const row = within(card).getByTestId("provider-anthropic");
+    await user.click(within(row).getByRole("button", { name: "Connect Anthropic" }));
+    await user.type(within(row).getByLabelText("API key for Anthropic"), "not-a-real-key");
+    await user.click(within(row).getByRole("button", { name: "Save key" }));
+    await within(card).findByRole("status");
+    return within(card).getByTestId("provider-anthropic");
+  }
+
+  it.each(["invalid", "unverified"] as const)(
+    "keeps the key visible with Verify, Replace and Remove after a %s verify",
+    async (state) => {
+      const { bridge, user, dialog } = await openProviderPanel();
+      const card = within(dialog).getByTestId("engine-models-settings");
+      await connectAnthropic(user, card);
+      const verdict = { provider: "anthropic", state, last_checked_at: null };
+      vi.spyOn(bridge.engine, "verifyKey").mockResolvedValue(verdict);
+      // The desktop core records the verdict, so the next key listing agrees with it.
+      vi.spyOn(bridge.engine, "keyStatus").mockResolvedValue([verdict]);
+      const row = within(card).getByTestId("provider-anthropic");
+      await user.click(within(row).getByRole("button", { name: "Verify key" }));
+      await waitFor(() =>
+        expect(within(card).getByTestId("provider-anthropic")).toHaveTextContent(
+          state === "invalid" ? "Invalid key" : "Unverified",
+        ),
+      );
+      const kept = within(card).getByTestId("provider-anthropic");
+      expect(within(kept).getByRole("button", { name: "Verify key" })).toBeInTheDocument();
+      expect(within(kept).getByRole("button", { name: "Replace Anthropic key" })).toBeInTheDocument();
+      expect(within(kept).getByRole("button", { name: "Remove Anthropic key" })).toBeInTheDocument();
+    },
+  );
+
+  it("opens an inline key form from Replace key", async () => {
+    const { user, dialog } = await openProviderPanel();
+    const card = within(dialog).getByTestId("engine-models-settings");
+    const row = await connectAnthropic(user, card);
+    await user.click(within(row).getByRole("button", { name: "Replace Anthropic key" }));
+    expect(
+      within(within(card).getByTestId("provider-anthropic")).getByLabelText("API key for Anthropic"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows an explicit alert when verify reports the key missing", async () => {
+    const { bridge, user, dialog } = await openProviderPanel();
+    const card = within(dialog).getByTestId("engine-models-settings");
+    const row = await connectAnthropic(user, card);
+    vi.spyOn(bridge.engine, "verifyKey").mockResolvedValue({
+      provider: "anthropic",
+      state: "missing",
+      last_checked_at: null,
+    });
+    await user.click(within(row).getByRole("button", { name: "Verify key" }));
+    const alert = await within(card).findByRole("alert");
+    expect(alert).toHaveTextContent(/not found in this Mac's OS keychain/);
+    expect(card).not.toHaveTextContent("still unverified");
+  });
+
+  it("refreshes engine, keys and setup models after Verify key", async () => {
+    const { bridge, user, dialog } = await openProviderPanel();
+    const card = within(dialog).getByTestId("engine-models-settings");
+    const row = await connectAnthropic(user, card);
+    const attach = vi.spyOn(bridge.chat!, "attach");
+    const keyStatus = vi.spyOn(bridge.engine, "keyStatus");
+    const status = vi.spyOn(bridge.engine, "status");
+    await user.click(within(row).getByRole("button", { name: "Verify key" }));
+    await waitFor(() => expect(attach).toHaveBeenCalledWith("setup"));
+    expect(keyStatus).toHaveBeenCalled();
+    expect(status).toHaveBeenCalled();
+  });
+
   it("groups a provider the engine reports as connected without a keychain key", async () => {
     const { dialog } = await openProviderPanel();
     const card = within(dialog).getByTestId("engine-models-settings");

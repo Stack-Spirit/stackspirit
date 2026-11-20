@@ -570,7 +570,7 @@ impl ProcessEngineRuntime {
         port: u16,
         auth_content: Option<Zeroizing<String>>,
     ) -> Result<EngineRuntimeInfo, SpiritError> {
-        let (child, info) = self.spawn_child(port, auth_content)?;
+        let (child, info) = self.spawn_child(port, auth_content, None)?;
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -582,6 +582,7 @@ impl ProcessEngineRuntime {
         &self,
         port: u16,
         auth_content: Option<Zeroizing<String>>,
+        probe_root: Option<&Path>,
     ) -> Result<(Child, EngineRuntimeInfo), SpiritError> {
         let binary = self.resolve_binary()?;
         let port = if port == 0 {
@@ -600,7 +601,45 @@ impl ProcessEngineRuntime {
         // so never inherit a credential from the desktop process environment.
         Command::env_remove(&mut command, "OPENCODE_SERVER_PASSWORD");
         Command::env_remove(&mut command, "OPENCODE_SERVER_USERNAME");
-        if let Some(app_data) = &self.private_state {
+        if let Some(root) = probe_root {
+            // A verification probe never shares the live engine's SQLite database,
+            // config or workspace: everything lives in a throwaway directory.
+            for name in PrivateEngineTree::INHERITED_CONFIG_ENV {
+                Command::env_remove(&mut command, name);
+            }
+            let config = root.join("config");
+            let config_dir = config.join("opencode");
+            for directory in [
+                root.join("home"),
+                root.join("data"),
+                root.join("state"),
+                config.clone(),
+                config_dir.clone(),
+                root.join("workspace"),
+            ] {
+                std::fs::create_dir_all(&directory).map_err(|error| {
+                    SpiritError::new(
+                        SpiritErrorCode::Engine,
+                        format!(
+                            "verification sandbox failed: {}",
+                            redact(&error.to_string())
+                        ),
+                    )
+                })?;
+            }
+            Command::env(&mut command, "HOME", root.join("home"));
+            Command::env(&mut command, "XDG_DATA_HOME", root.join("data"));
+            Command::env(&mut command, "XDG_STATE_HOME", root.join("state"));
+            Command::env(&mut command, "XDG_CONFIG_HOME", &config);
+            Command::env(
+                &mut command,
+                "OPENCODE_CONFIG",
+                config_dir.join("opencode.json"),
+            );
+            Command::env(&mut command, "OPENCODE_CONFIG_DIR", &config_dir);
+            Command::env(&mut command, "OPENCODE_DISABLE_PROJECT_CONFIG", "1");
+            command.current_dir(root.join("workspace"));
+        } else if let Some(app_data) = &self.private_state {
             let tree = PrivateEngineTree::prepare(app_data)?;
             for name in PrivateEngineTree::INHERITED_CONFIG_ENV {
                 Command::env_remove(&mut command, name);
@@ -736,18 +775,29 @@ impl ProcessEngineRuntime {
         }))
     }
 
-    fn provider_model(&self, port: u16, provider: &str) -> Option<String> {
-        self.fetch_models(port)
-            .ok()?
-            .into_iter()
-            .find(|model| model.provider == provider)
-            .map(|model| model.id)
+    fn fetch_provider_document(&self, port: u16) -> Option<Vec<u8>> {
+        for path in ["/config/providers", "/provider"] {
+            let timeout = provider_document_timeout(path);
+            if let Ok(response) = http_request(port, "GET", path, None, timeout)
+                && (200..300).contains(&response.status)
+            {
+                return Some(response.body);
+            }
+        }
+        None
     }
 
     fn verify_against_engine(&self, port: u16, provider: &str) -> KeyVerification {
-        let Some(model_id) = self.provider_model(port, provider) else {
+        let Some(document) = self.fetch_provider_document(port) else {
             return KeyVerification::Unverified;
         };
+        let candidates = select_verification_models(&document, provider);
+        verify_candidates(&candidates, |model_id| {
+            self.probe_model(port, provider, model_id)
+        })
+    }
+
+    fn probe_model(&self, port: u16, provider: &str, model_id: &str) -> ProbeOutcome {
         let response = match http_request(
             port,
             "POST",
@@ -756,17 +806,17 @@ impl ProcessEngineRuntime {
             Duration::from_secs(3),
         ) {
             Ok(response) if (200..300).contains(&response.status) => response,
-            _ => return KeyVerification::Unverified,
+            _ => return ProbeOutcome::Final(KeyVerification::Unverified),
         };
         let Ok(session) = serde_json::from_slice::<Value>(&response.body) else {
-            return KeyVerification::Unverified;
+            return ProbeOutcome::Final(KeyVerification::Unverified);
         };
         let Some(session_id) = session.get("id").and_then(Value::as_str) else {
-            return KeyVerification::Unverified;
+            return ProbeOutcome::Final(KeyVerification::Unverified);
         };
         let model_id = model_id
             .strip_prefix(&format!("{provider}/"))
-            .unwrap_or(&model_id);
+            .unwrap_or(model_id);
         let body = json!({
             "model": {
                 "providerID": provider,
@@ -790,10 +840,13 @@ impl ProcessEngineRuntime {
             // provider error in the response body. Never report Verified from the status
             // line alone.
             Ok(response) if (200..300).contains(&response.status) => {
-                classify_message_response(&response.body)
+                classify_probe_response(&response.body)
             }
-            Ok(response) if matches!(response.status, 401 | 403) => KeyVerification::Invalid,
-            Ok(_) | Err(_) => KeyVerification::Unverified,
+            Ok(response) if matches!(response.status, 401 | 403) => {
+                ProbeOutcome::Final(KeyVerification::Invalid)
+            }
+            Ok(response) if matches!(response.status, 400 | 404) => ProbeOutcome::TryNext,
+            Ok(_) | Err(_) => ProbeOutcome::Final(KeyVerification::Unverified),
         };
         let delete_path = format!("/session/{session_id}");
         let _ = http_request(port, "DELETE", &delete_path, None, Duration::from_secs(3));
@@ -804,7 +857,11 @@ impl ProcessEngineRuntime {
         let Some(auth_content) = secret_auth_content(provider, secret) else {
             return KeyVerification::Invalid;
         };
-        let (child, info) = match self.spawn_child(0, Some(auth_content)) {
+        // The sandbox outlives the child and is removed when this function returns.
+        let Ok(sandbox) = tempfile::tempdir() else {
+            return KeyVerification::Unverified;
+        };
+        let (child, info) = match self.spawn_child(0, Some(auth_content), Some(sandbox.path())) {
             Ok(spawned) => spawned,
             Err(_) => return KeyVerification::Unverified,
         };
@@ -1115,6 +1172,135 @@ fn decode_chunked(input: &[u8]) -> Result<Vec<u8>, SpiritError> {
         }
     }
     Ok(output)
+}
+
+/// The result of probing one candidate model during key verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeOutcome {
+    /// The probe reached a conclusion about the key.
+    Final(KeyVerification),
+    /// The failure was specific to the model; another candidate may succeed.
+    TryNext,
+}
+
+/// Tries candidates in order. `Verified` and `Invalid` return immediately; a model-specific
+/// failure moves to the next candidate before settling on `Unverified`.
+fn verify_candidates(
+    candidates: &[String],
+    mut probe: impl FnMut(&str) -> ProbeOutcome,
+) -> KeyVerification {
+    for model_id in candidates {
+        match probe(model_id) {
+            ProbeOutcome::Final(KeyVerification::Unverified) | ProbeOutcome::TryNext => {}
+            ProbeOutcome::Final(decided) => return decided,
+        }
+    }
+    KeyVerification::Unverified
+}
+
+fn classify_probe_response(body: &[u8]) -> ProbeOutcome {
+    match classify_message_response(body) {
+        KeyVerification::Unverified => {
+            let Ok(document) = serde_json::from_slice::<Value>(body) else {
+                return ProbeOutcome::Final(KeyVerification::Unverified);
+            };
+            let Some(error) = find_error(&document) else {
+                return ProbeOutcome::Final(KeyVerification::Unverified);
+            };
+            let model_specific = matches!(error_status(error), Some(400 | 404))
+                || error.to_string().contains("ProviderModelNotFoundError")
+                || error.as_object().is_some_and(serde_json::Map::is_empty);
+            if model_specific {
+                ProbeOutcome::TryNext
+            } else {
+                ProbeOutcome::Final(KeyVerification::Unverified)
+            }
+        }
+        decided => ProbeOutcome::Final(decided),
+    }
+}
+
+/// Picks up to three cheap, active, text-capable candidate models for a key probe.
+///
+/// Reads a `/config/providers` or `/provider` document. Deprecated and non-text models are
+/// dropped; non-reasoning models rank before reasoning ones, then lowest input cost, then id.
+/// The provider's `default` model is appended as a fallback when it is text-capable.
+#[must_use]
+pub fn select_verification_models(body: &[u8], provider: &str) -> Vec<String> {
+    let Ok(document) = serde_json::from_slice::<Value>(body) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(String, Value)> = Vec::new();
+    for key in ["providers", "all"] {
+        let Some(providers) = document.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        for item in providers {
+            if item.get("id").and_then(Value::as_str) != Some(provider) {
+                continue;
+            }
+            match item.get("models") {
+                Some(Value::Object(map)) => {
+                    entries.extend(map.iter().map(|(id, model)| (id.clone(), model.clone())));
+                }
+                Some(Value::Array(array)) => {
+                    for model in array {
+                        if let Some(id) = model.get("id").and_then(Value::as_str) {
+                            entries.push((id.to_owned(), model.clone()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let text_capable = |model: &Value| {
+        model.get("status").and_then(Value::as_str) != Some("deprecated")
+            && ["input", "output"].iter().all(|side| {
+                model
+                    .pointer(&format!("/capabilities/{side}/text"))
+                    .and_then(Value::as_bool)
+                    != Some(false)
+            })
+    };
+    let mut ranked: Vec<(bool, f64, String)> = entries
+        .iter()
+        .filter(|(_, model)| text_capable(model))
+        .map(|(id, model)| {
+            let reasoning = model
+                .pointer("/capabilities/reasoning")
+                .and_then(Value::as_bool)
+                == Some(true);
+            let cost = model
+                .pointer("/cost/input")
+                .and_then(Value::as_f64)
+                .unwrap_or(f64::MAX);
+            (reasoning, cost, id.clone())
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.total_cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    let mut chosen: Vec<String> = ranked.into_iter().map(|(_, _, id)| id).take(3).collect();
+    if chosen.len() < 3
+        && let Some(default) = document
+            .pointer(&format!("/default/{provider}"))
+            .and_then(Value::as_str)
+    {
+        let default = default
+            .strip_prefix(&format!("{provider}/"))
+            .unwrap_or(default);
+        let usable = entries
+            .iter()
+            .find(|(id, _)| id == default)
+            .is_none_or(|(_, model)| text_capable(model));
+        if usable && !chosen.iter().any(|id| id == default) {
+            chosen.push(default.to_owned());
+        }
+    }
+    chosen
 }
 
 /// Parses the engine's supported-provider document into a display-ordered catalog.
@@ -1575,6 +1761,97 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].provider, "opencode");
         assert_eq!(models[0].id, "opencode/beam-free");
+    }
+
+    const OPENROUTER_FIXTURE: &[u8] = br#"{
+        "default": { "openrouter": "zeta/default-text" },
+        "providers": [
+            { "id": "other", "models": { "x": { "cost": { "input": 0.0 } } } },
+            { "id": "openrouter", "models": {
+                "aion-labs/aion-2.0": { "capabilities": { "reasoning": true, "input": { "text": true }, "output": { "text": true } }, "cost": { "input": 0.1 } },
+                "old/deprecated-cheap": { "status": "deprecated", "cost": { "input": 0.0 } },
+                "img/image-only": { "capabilities": { "reasoning": false, "input": { "text": false }, "output": { "text": false } }, "cost": { "input": 0.0 } },
+                "cheap/text-b": { "capabilities": { "reasoning": false, "input": { "text": true }, "output": { "text": true } }, "cost": { "input": 0.05 } },
+                "cheap/text-a": { "capabilities": { "reasoning": false, "input": { "text": true }, "output": { "text": true } }, "cost": { "input": 0.05 } },
+                "mid/text": { "capabilities": { "reasoning": false }, "cost": { "input": 0.5 } }
+            } }
+        ]
+    }"#;
+
+    #[test]
+    fn select_verification_models_prefers_cheap_active_text_non_reasoning() {
+        let chosen = select_verification_models(OPENROUTER_FIXTURE, "openrouter");
+        assert_eq!(chosen, vec!["cheap/text-a", "cheap/text-b", "mid/text"]);
+        assert!(select_verification_models(OPENROUTER_FIXTURE, "missing").is_empty());
+    }
+
+    #[test]
+    fn select_verification_models_falls_back_to_a_text_capable_default() {
+        let body = br#"{
+            "default": { "p": "p/only" },
+            "all": [ { "id": "p", "models": [
+                { "id": "only", "cost": { "input": 1 } },
+                { "id": "bad", "status": "deprecated" }
+            ] } ]
+        }"#;
+        assert_eq!(select_verification_models(body, "p"), vec!["only"]);
+        let body = br#"{
+            "default": { "p": "img" },
+            "providers": [ { "id": "p", "models": { "img": { "capabilities": { "input": { "text": false } } } } } ]
+        }"#;
+        assert!(select_verification_models(body, "p").is_empty());
+    }
+
+    #[test]
+    fn verify_candidates_moves_past_model_specific_failures() {
+        let candidates: Vec<String> = ["a", "b", "c"].map(str::to_owned).to_vec();
+        let mut seen = Vec::new();
+        let result = verify_candidates(&candidates, |model| {
+            seen.push(model.to_owned());
+            match model {
+                "a" => ProbeOutcome::TryNext,
+                "b" => ProbeOutcome::Final(KeyVerification::Unverified),
+                _ => ProbeOutcome::Final(KeyVerification::Verified),
+            }
+        });
+        assert_eq!(result, KeyVerification::Verified);
+        assert_eq!(seen, vec!["a", "b", "c"]);
+        let invalid = verify_candidates(&candidates, |model| {
+            if model == "a" {
+                ProbeOutcome::Final(KeyVerification::Invalid)
+            } else {
+                panic!("must stop at the first decisive result")
+            }
+        });
+        assert_eq!(invalid, KeyVerification::Invalid);
+        assert_eq!(
+            verify_candidates(&candidates, |_| ProbeOutcome::TryNext),
+            KeyVerification::Unverified
+        );
+        assert_eq!(
+            verify_candidates(&[], |_| unreachable!()),
+            KeyVerification::Unverified
+        );
+    }
+
+    #[test]
+    fn classify_probe_response_flags_model_specific_errors() {
+        let not_found = br#"{"info":{"error":{"name":"ProviderModelNotFoundError","data":{}}}}"#;
+        assert_eq!(classify_probe_response(not_found), ProbeOutcome::TryNext);
+        let bad_request = br#"{"info":{"error":{"statusCode":404}}}"#;
+        assert_eq!(classify_probe_response(bad_request), ProbeOutcome::TryNext);
+        let empty = br#"{"info":{"error":{}}}"#;
+        assert_eq!(classify_probe_response(empty), ProbeOutcome::TryNext);
+        let rate = br#"{"info":{"error":{"statusCode":429}}}"#;
+        assert_eq!(
+            classify_probe_response(rate),
+            ProbeOutcome::Final(KeyVerification::Unverified)
+        );
+        let rejected = br#"{"info":{"error":{"statusCode":401}}}"#;
+        assert_eq!(
+            classify_probe_response(rejected),
+            ProbeOutcome::Final(KeyVerification::Invalid)
+        );
     }
 
     #[cfg(unix)]

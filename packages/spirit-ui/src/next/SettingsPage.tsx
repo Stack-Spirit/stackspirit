@@ -84,16 +84,21 @@ function savedStatus(statuses: KeyStatus[], provider: string): KeyStatus | null 
   return status && status.state !== "missing" ? status : null;
 }
 
-function keyTone(state: KeyStatus["state"]): string {
-  if (state === "saved") return "nx-chip--server";
-  if (state === "invalid") return "nx-chip--warn";
+function keyTone(status: KeyStatus): string {
+  if (status.state === "saved" && status.last_checked_at !== null) {
+    return "nx-chip--server";
+  }
+  if (status.state === "invalid") return "nx-chip--warn";
   return "nx-chip--muted";
 }
 
-function keyLabel(state: KeyStatus["state"]): string {
-  if (state === "saved") return "Saved";
-  if (state === "invalid") return "Invalid key";
-  if (state === "unverified") return "Unverified";
+/** An honest chip: only a key the engine accepted reads as Verified. */
+function keyLabel(status: KeyStatus): string {
+  if (status.state === "saved") {
+    return status.last_checked_at !== null ? "Verified" : "Saved";
+  }
+  if (status.state === "invalid") return "Invalid key";
+  if (status.state === "unverified") return "Unverified";
   return "Not saved";
 }
 
@@ -236,11 +241,20 @@ export function SettingsPage() {
       await reload();
       await refreshSetupModels(bridge);
       setEditing(null);
-      setNotice(
-        verified.state === "saved"
-          ? `${providerLabel(provider)} connected and verified. Its models are ready in the composer.`
-          : `${providerLabel(provider)} connected. The engine could not verify the key yet; its models appear only when the engine accepts it.`,
-      );
+      if (verified.state === "saved") {
+        setNotice(
+          `${providerLabel(provider)} connected and verified. Its models are ready in the composer.`,
+        );
+      } else if (verified.state === "invalid") {
+        // The key stays saved so the owner can verify, replace or remove it in place.
+        setNotice(
+          `${providerLabel(provider)} rejected this key. It is still saved; verify it again, replace it or remove it.`,
+        );
+      } else {
+        setNotice(
+          `${providerLabel(provider)} connected. The key is saved, but the engine could not verify it yet; use Verify key to retry.`,
+        );
+      }
       return true;
     } catch (saveError) {
       const message = toSpiritError(saveError).message;
@@ -258,14 +272,23 @@ export function SettingsPage() {
     setNotice(null);
     try {
       const checked = await bridge.engine.verifyKey(provider);
-      setKeys((current) => upsertKey(current, checked));
-      setNotice(
-        checked.state === "saved"
-          ? `${providerLabel(provider)} key verified.`
-          : checked.state === "invalid"
-            ? `${providerLabel(provider)} rejected this key. Replace or remove it.`
-            : `${providerLabel(provider)} is still unverified.`,
-      );
+      if (checked.state === "missing") {
+        setError(
+          `${providerLabel(provider)} key was not found in this Mac's OS keychain. Enter it again to reconnect.`,
+        );
+      } else {
+        setKeys((current) => upsertKey(current, checked));
+        setNotice(
+          checked.state === "saved"
+            ? `${providerLabel(provider)} key verified.`
+            : checked.state === "invalid"
+              ? `${providerLabel(provider)} rejected this key. Replace or remove it.`
+              : `${providerLabel(provider)} is still unverified.`,
+        );
+      }
+      await refreshEngine();
+      await reload();
+      await refreshSetupModels(bridge);
     } catch (verifyError) {
       setError(toSpiritError(verifyError).message);
     } finally {
@@ -378,8 +401,8 @@ export function SettingsPage() {
           const label = providerLabel(provider);
           return (
             <div className="nx-provider__actions" key={provider}>
-              <span className={`nx-chip ${keyTone(status.state)}`}>
-                {label}: {keyLabel(status.state)}
+              <span className={`nx-chip ${keyTone(status)}`}>
+                {label}: {keyLabel(status)}
               </span>
               <button
                 type="button"
@@ -389,6 +412,15 @@ export function SettingsPage() {
                 aria-label={`Verify ${label} key`}
               >
                 {busy === provider ? "Checking…" : "Verify key"}
+              </button>
+              <button
+                type="button"
+                className="nx-btn nx-btn--quiet nx-btn--sm"
+                onClick={() => startEditing(provider)}
+                disabled={busy === provider}
+                aria-label={`Replace ${label} key`}
+              >
+                Replace key
               </button>
               <button
                 type="button"
@@ -568,8 +600,8 @@ function ProviderItem({
             {connected ? "Connected" : "Available"}
           </span>
           {status ? (
-            <span className={`nx-chip ${keyTone(status.state)}`}>
-              {keyLabel(status.state)}
+            <span className={`nx-chip ${keyTone(status)}`}>
+              {keyLabel(status)}
             </span>
           ) : null}
         </div>
@@ -584,6 +616,16 @@ function ProviderItem({
                 disabled={busy}
               >
                 {busy ? "Checking…" : "Verify key"}
+              </button>
+              <button
+                type="button"
+                className="nx-btn nx-btn--quiet nx-btn--sm"
+                onClick={editing ? onCancel : onConnect}
+                disabled={busy}
+                aria-expanded={editing}
+                aria-label={`Replace ${provider.label} key`}
+              >
+                Replace key
               </button>
               <button
                 type="button"

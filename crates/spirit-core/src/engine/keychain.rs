@@ -492,6 +492,48 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "keychain")]
+    #[test]
+    fn engine_keychain_default_backend_persists_and_round_trips_across_instances() {
+        // Regression: `keyring` 3 has no default features and silently compiled the mock
+        // credential store, which drops secrets as soon as the entry is released.
+        assert!(
+            !matches!(
+                keyring::default::default_credential_builder().persistence(),
+                keyring::credential::CredentialPersistence::EntryOnly
+            ),
+            "keyring is using the in-memory mock backend; enable a native keychain feature"
+        );
+        let service = format!("dev.stackspirit.test.{}", ulid::Ulid::generate());
+        let provider = "roundtrip-provider";
+        let secret = SecretString::new("not-a-real-roundtrip-value");
+        let writer = OsKeychain::new(service.clone());
+        match writer.set(provider, &secret) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.class,
+                    KeychainErrorClass::Platform | KeychainErrorClass::Unavailable
+                ) =>
+            {
+                // The container's seccomp profile can block the keyutils syscalls.
+                eprintln!("skipping round-trip: platform keychain unavailable");
+                return;
+            }
+            Err(error) => panic!("unexpected keychain error: {error:?}"),
+        }
+        let reader = OsKeychain::new(service);
+        let fetched = reader.get(provider);
+        let removed = reader.delete(provider);
+        let after = reader.get(provider);
+        assert_eq!(
+            fetched.unwrap().expect("secret persisted").expose(),
+            secret.expose()
+        );
+        removed.unwrap();
+        assert!(after.unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn engine_byok_unverified_when_the_engine_is_not_running() {
         let keychain = FakeKeychain::new();

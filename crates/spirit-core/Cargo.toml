@@ -16,6 +16,7 @@ time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 ulid.workspace = true
+tempfile.workspace = true
 zeroize.workspace = true
 keyring = { workspace = true, optional = true }
 ssh-key = { version = "0.6.7", default-features = false, features = [
@@ -23,9 +24,6 @@ ssh-key = { version = "0.6.7", default-features = false, features = [
     "encryption",
     "getrandom",
 ] }
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [features]
 default = []
