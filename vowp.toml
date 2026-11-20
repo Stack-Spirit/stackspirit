@@ -22,9 +22,12 @@ ladder = ["opencode:deepseek/deepseek-flash#max"]
 on_quota = "next_then_probe_back"
 
 [profiles.planner]
-ladder = ["opencode:deepseek/deepseek-flash#max"]
+ladder = [
+    "opencode:openrouter/google/gemini-4-neon",
+    "claude-code:claude-sonnet-5-5@medium",
+    "opencode:deepseek/deepseek-flash#max",
+]
 on_quota = "next_then_probe_back"
-
 [profiles.verifier]
 ladder = ["opencode:deepseek/deepseek-flash#max"]
 on_quota = "next_then_probe_back"
