@@ -3,7 +3,10 @@
 Status: implementation contract, 2026-11-18; live-probe facts applied 2026-11-18; the
 Local `global`/`project` endpoint resolver landed 2026-11-19 (ss-61) behind the VOWP 0.5
 command gate. The setup free-model default, inline `setModel` and usage projection landed
-2026-11-19 (ss-72). Server chat remains gated.
+2026-11-19 (ss-72). A real free-model turn on 2026-11-20 proved the `msg` `messageID`
+prefix (the `msg_<ULID>` id form) and the live `tokens.total` shape (ss-74); `messageID`
+log preservation and the `message.part.*` cadence remain owner-turn unknowns. Server chat
+remains gated.
 Audience: the follow-up chat jobs named in §8, the VOWP owner, and the desktop reviewer.
 
 This document specifies how the Meadow shell's orchestrator chat moves from the preview store
@@ -24,8 +27,9 @@ The document is deliberately precise about what the current tree proves, what th
 probe of the pinned `opencode` `1.19.5` sidecar proved, and what still needs an owner model
 turn or a server endpoint. The live probe (ss-43) fetched the manifest-pinned sidecar,
 ran the repository probe in a private XDG tree, and fetched `/doc`; §2.5 records its
-answers. Do not turn an unproven delta cadence or a real-turn runtime behavior into a
-claim.
+answers. The 2026-11-20 real free-model turn recorded the `msg` `messageID` prefix (the
+`msg_<ULID>` id form) and the live token shape; do not turn an unproven delta cadence,
+user-message log preservation or other real-turn runtime behavior into a claim.
 
 Contents: §1 vocabulary and rules; §2 local engine and v1 HTTP/SSE contract; §3 server
 endpoint and SSH forward; §4 bridge types, methods and state machine; §5 security; §6
@@ -300,7 +304,7 @@ assistant still uses the bundled engine.
 - `setup`: the app creates one native session in the private setup workspace, with the
   title `StackSpirit setup`. It is local-only; no VOWP session and no server log. It may
   be resumed across app restarts from the private data dir.
-- `global`/`project` local: the target is a VOWP local orchestrator. When VOWP reports a
+- `global`/`project` local — the target is a VOWP local orchestrator. When VOWP reports a
   `native_session_id`, the app attaches to it. When VOWP reports `null`, the app lists the
   host's own sessions and continues the newest one in the orchestrator workspace
   (§4.3, ss-62). It **attaches**, never creates, and never invents a reply; an empty or
@@ -353,7 +357,9 @@ evidence for the pinned sidecar.
 | Create session | `POST /session` with `{ "title": "<TITLE>" }` | A `Session`: `{ "id", "slug", "projectID", "directory", "title", "version", "time": { "created", "updated" } }` | **Proven live**: 200; the runtime object also carried `cost`, `path` and `tokens` |
 | List sessions | `GET /session` | `Session[]` | **Proven live**: every created session was listed |
 | Get session | `GET /session/{id}` | `Session` | **Proven live** |
-| Send a turn | `POST /session/{id}/message` with `{ "messageID"?: "<USER_MESSAGE_ID>", "model"?: { "providerID", "modelID" }, "parts": [{ "type": "text", "text": "<PROMPT>" }] }` | `{ "info": AssistantMessage, "parts": Part[] }` | Request **proven** by `verify_against_engine`; body keys and response **pinned by `/doc`** (`parts` is the only required field, `messageID` and `model` are optional); a real turn and `messageID` log preservation remain **owner-turn** |
+| Send a turn | `POST /session/{id}/message` with `{ "messageID"?: "<USER_MESSAGE_ID>", "model"?: { "providerID", "modelID" }, "parts": [{ "type": "text", "text": "<PROMPT>" }] }` | `{ "info": AssistantMessage, "parts": Part[] }` | **Proven live with a real turn (2026-11-20)**: the free-model turn returned 200 `{info, parts}` with `cost: 0` and `tokens.total: 12260`, `tokens.input: 12247`, `tokens.output: 3`, `tokens.reasoning: 10`, `tokens.cache.read: 0`; `/doc` remains the schema source (`parts` is the only required field, `messageID` and `model` are optional) |
+| `messageID` prefix | `messageID` must start with `msg` | A `msg_<ULID>` id is accepted; any other prefix is rejected | **Proven live (2026-11-20)**: the real sidecar returned `HTTP 400 BadRequest` for a non-`msg` id (exact payload in §2.2.5); the assistant message carries `parentID: msg_...` |
+| `messageID` in the user log | `GET /session/{id}/message` includes the user message with the sent `messageID` | Still unproven | **Owner-turn unknown**: `/doc` accepts the field, but preservation of the *user* message in the read log is not proven. Keep the role/text/time reconciliation in §4.6 until §9 pins it |
 | Read the log | `GET /session/{id}/message` | `Array<{ "info": Message, "parts": Part[] }>` | **Proven live**: `[]` for a new session; `/doc` requires both `info` and `parts`; it is **not** a flat `Message[]`. The endpoint accepts `directory`, `workspace`, `limit` and `before` query parameters. The parser stays tolerant. |
 | Abort a turn | `POST /session/{id}/abort` | `boolean` | **Proven live**: idle abort returns 200 `true`; the session still exists afterwards |
 | Live events | `GET /event`, `Accept: text/event-stream` | SSE frames with `data: { "id", "type", "properties" }` | **Proven live**: 200 `text/event-stream`; first `server.connected`; `server.heartbeat` about every 10 s |
@@ -526,9 +532,18 @@ Reconnect:
 1. Reject if the session is not `ready` (`chat_busy` or `chat_not_started`) or the text is
    empty/too long (`invalid_input`).
 2. Trim the text, cap it at 32,000 characters, and create the user `ChatMessage` with
-   `origin: "user"`, `role: "user"`, `created_at` now and a `local:<ULID>` id. Send that
-   id as `messageID`; `/doc` accepts the field, but preservation in a real turn's log is
-   still an owner-turn unknown, so reconcile it on log backfill per §4.6.
+   `origin: "user"`, `role: "user"`, `created_at` now and a `msg_<ULID>` id. Send that
+   id as `messageID`. The prefix is mandatory: on 2026-11-20 the real bundled `1.19.5`
+   sidecar rejected any other prefix with `HTTP 400 BadRequest`:
+
+   ```json
+   {"name":"BadRequest","data":{"message":"Expected a string starting with \"msg\", got \"local:...\"\n  at [\"messageID\"]","kind":"Payload"}}
+   ```
+
+   The same request with `msg_<ULID>` returned `HTTP 200` and a real assistant message.
+   The assistant reply references the user message as `info.parentID`. Whether the user
+   message itself appears in `GET /session/{id}/message` is still an owner-turn unknown,
+   so keep the role/text/time reconciliation fallback in §4.6.
 3. Set the session `streaming` and emit a `session` event.
 4. Start (or reuse) the endpoint's event pump. If the pump cannot start within 5 s, mark
    `streaming_supported: false` and continue with the final-response path.
@@ -666,10 +681,12 @@ rm -rf "$PROBE_ROOT"
 ```
 
 Do not run `POST /session/{id}/message` in the probe. A real turn needs a model; the
-brief forbids a paid model. The request body and the `{info,parts}` response are now pinned
-by `/doc`, but `messageID` log preservation and the real `message.part.updated` payload are
-not. The owner live verification in §9 runs one free included model turn and records the
-real delta cadence, `session.idle` ordering and `messageID` preservation.
+brief forbids a paid model. The request body and the `{info,parts}` response are pinned
+by `/doc`. The 2026-11-20 real free-model turn (outside this probe) pinned the `msg`
+`messageID` prefix and the live token object; it did not establish `messageID` log
+preservation or the real `message.part.updated` payload. The owner live verification in
+§9 still runs one free included model turn and records the real delta cadence,
+`session.idle` ordering and `messageID` preservation.
 
 ### 2.5 Live probe answers and remaining owner-turn unknowns
 
@@ -688,7 +705,7 @@ document, not a runtime guess.
 | 6 | Restart persistence | With the same private XDG tree, a SIGTERM/restart (clean, no forced kill) kept all created sessions listed and retrievable. |
 | 7 | Owner isolation | The child received a private `HOME`/`XDG_*`/`TMPDIR` tree; the owner's OpenCode data, config, state and cache roots were unchanged. The private tree was removed on exit. |
 | 8 | `message.part.updated` payload | `/doc` pins cumulative `TextPart.text` and no `delta` field on the part. The pinned build has a separate `message.part.delta` with `{sessionID, messageID, partID, field, delta}`; `field == "text"` appends. The **real-turn payload and emission cadence are owner-turn unknowns**. |
-| 9 | `POST /session/{id}/message` | `/doc` pins the body keys (`agent`, `format`, `messageID`, `model`, `noReply`, `parts`, `system`, `tools`, `variant`; only `parts` required), the optional `messageID` and `model`, the 200 `{info, parts}` response, and `AssistantMessage.error` as the provider-error union. `messageID` preservation in the log and a real omitted-`model` turn are **owner-turn/server unknowns**. |
+| 9 | `POST /session/{id}/message` | `/doc` pins the body keys (`agent`, `format`, `messageID`, `model`, `noReply`, `parts`, `system`, `tools`, `variant`; only `parts` required), the optional `messageID` and `model`, the 200 `{info, parts}` response, and `AssistantMessage.error` as the provider-error union. Live 2026-11-20: the real sidecar requires a `msg` `messageID` prefix and returns HTTP 400 `BadRequest` for any other prefix (exact payload in §2.2.5); `msg_<ULID>` returned 200 `{info, parts}` with `cost: 0` and `tokens: {total: 12260, input: 12247, output: 3, reasoning: 10, cache: {read: 0, write: 0}}`. The assistant message carries `parentID: msg_...`. Preservation of the **user** message in `GET /session/{id}/message` and a real omitted-`model` turn remain **owner-turn/server unknowns**. |
 | 10 | `/doc` | Present: 200 `application/json`, OpenAPI 3.1.0, 162 paths, 479,667 bytes. It confirms the v1 paths and shapes and also lists `/api/...` paths (not proof of a v2 server). It does not document `x-opencode-directory` or `server.heartbeat`. |
 
 Still unknown without an owner model turn or a server endpoint:
@@ -698,7 +715,9 @@ Still unknown without an owner model turn or a server endpoint:
 - The real `message.part.updated` payload in a live turn. The schema is pinned; the runtime
   contents and timing are not.
 - `session.idle` ordering relative to the final `message.part.updated`.
-- `messageID` preservation in `GET /session/{id}/message`.
+- `messageID` preservation of the user message in `GET /session/{id}/message`. The `msg`
+  prefix requirement itself is proven live (2026-11-20, §2.2.5); the user-message log
+  entry is not.
 - Runtime `info.error` behavior in a real provider failure. The 200-with-error envelope is
   already proven by the key-verification path; the probe did not repeat it.
 - `POST /session/{id}/message` with an omitted `model` against a server-hosted orchestrator.
@@ -1181,13 +1200,14 @@ No type above has a `url`, `port`, `token`, `authorization`, `password`, `key_pa
 `ChatModelView.tier` marks an included free runtime model, a configured BYOK model, or an
 orchestrator-owned choice. `available_models` is the verified usable list for this
 session's engine, in the engine's order; it is not a build-time catalog copy.
-`ChatUsageView` comes from the OpenCode assistant message metadata: `input`, `output`,
-`cache.read`/`cache.write` and `cost`, or `step-finish` parts when a turn has several
-steps. `context_tokens_used` is the latest assistant turn's prompt plus completion;
-`input_tokens`/`output_tokens`/`cache_read_tokens` and `cost_usd` sum the reported
-assistant messages. A missing field stays `null`; it is never reported as zero. `turns`
-counts user messages. The usage object is omitted when no assistant message reported any
-of these values.
+`ChatUsageView` comes from the OpenCode assistant message metadata: `total`, `input`,
+`output`, `reasoning`, `cache.read`/`cache.write` and `cost`, or `step-finish` parts when
+a turn has several steps. `context_tokens_used` is the latest assistant turn's reported
+`tokens.total` when present (the live shape's 12,260 includes 10 reasoning tokens);
+otherwise it is the sum of the reported components, including reasoning. `input_tokens`,
+`output_tokens`, `cache_read_tokens` and `cost_usd` sum the reported assistant messages;
+a missing field stays `null`; it is never reported as zero. `turns` counts user messages.
+The usage object is omitted when no assistant message reported any of these values.
 
 **Setup auto-default (ss-72).** When the bundled engine is ready and no model has been
 explicitly saved, the first verified free runtime model is selected in memory and the
@@ -1516,11 +1536,12 @@ Behaviour:
 - On a `message` event: upsert by `message.id`. If `origin === "model"` and the message
   already exists, replace its `text` (a rewrite). If `message.show` is present, call
   `useShellUi.getState().openPanel(message.show)`; only app/preview messages set it.
-- Reconcile an optimistic user message: the `send` receipt uses a `local:` id. When the
-  log or a `message` event supplies the native user message with the same role, text and
-  a `created_at` within 5 s, replace the `local:` message with the native one (native id,
-  native timestamp); never show both. The core sends the local id as `messageID` when the
-  endpoint supports it, so this is usually unnecessary.
+- Reconcile an optimistic user message: the `send` receipt uses a `msg_<ULID>` id. When
+  the log or a `message` event supplies the native user message with the same role, text
+  and a `created_at` within 5 s, replace the `msg_` message with the native one
+  (native id, native timestamp); never show both. The core sends the `msg_` id as
+  `messageID` on every local turn, so this fallback normally does nothing; keep it for
+  logs that omit the user message.
 - On a `delta`: find the assistant message by `message_id`. If missing, create a shell
   with `origin: "model"`, `role: "assistant"`, `text: [""]`, `created_at: now`. Append the
   delta to the last paragraph, splitting on blank lines. If the delta would exceed the
@@ -2011,7 +2032,9 @@ model. Use one free included model turn and the setup assistant.
    (or the honest "reply appears when the turn completes" note if SSE is unsupported), and
    the reply is not labelled Preview. Record whether `message.part.delta` is emitted, the
    real `message.part.updated` payload, and the `session.idle` ordering; do not describe
-   the result as token-by-token unless it was observed.
+   the result as token-by-token unless it was observed. The `msg` `messageID` prefix and
+   the live `tokens.total` shape are already proven (2026-11-20, §2.2.5); still confirm
+   that the user message with that `msg_` id appears in `GET /session/{id}/message`.
 4. Press Stop during a long turn. Confirm `stopped`, no duplicate assistant message, and
    either a clean abort or the honest `stop_unconfirmed` note.
 5. Reload/restart the app. Confirm the setup session reattaches and the log is intact; no
@@ -2035,7 +2058,9 @@ model. Use one free included model turn and the setup assistant.
 2. Send one short message. Confirm streaming/done, then run the server-side read
    (redacted):
    `vowp --json session show <VOWP_SESSION_ID> --events 20` (or the equivalent 0.5 read).
-   Confirm the same user and assistant turn is in the VOWP log.
+   Confirm the same user and assistant turn is in the VOWP log. Record whether the turn
+   omitted `model` and whether the server accepted it; that behavior remains an
+   owner/server unknown.
 3. Disconnect the host. Confirm the chat goes to `host_disconnected`, the composer is
    disabled, and there is no local fallback or preview reply. Reconnect and confirm
    reattach/backfill without duplicates.
