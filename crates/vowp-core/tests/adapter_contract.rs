@@ -366,6 +366,94 @@ fn adapter_start_recovers_when_the_configured_binary_moved_to_path() {
 }
 
 #[test]
+fn probe_names_the_resolved_path_and_origin() {
+    let tmp = tempdir().expect("tempdir");
+    let config_dir = tmp.path().join("config");
+    let path_dir = tmp.path().join("path");
+    let configured = write_named_script(
+        &config_dir,
+        "opencode",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '2.0.28'; exit 0; fi\nexit 0\n",
+    );
+    write_named_script(
+        &path_dir,
+        "opencode",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '9.9.9'; exit 0; fi\nexit 0\n",
+    );
+
+    let configured_config = opencode_config(Some(configured.to_string_lossy().as_ref()));
+    let configured_probe = registry_with_path(&configured_config, &path_dir)
+        .get(&opencode_executor())
+        .expect("opencode is registered")
+        .probe();
+    assert!(configured_probe.ok, "{}", configured_probe.detail);
+    let configured_text = configured.to_string_lossy();
+    assert_eq!(
+        configured_probe.path.as_deref(),
+        Some(configured_text.as_ref()),
+        "the probe reports the configured path"
+    );
+    assert!(
+        configured_probe.detail.contains("resolved from config:")
+            && configured_probe.detail.contains(configured_text.as_ref()),
+        "vowp doctor receives the path and its origin: {}",
+        configured_probe.detail
+    );
+
+    let path_probe = registry_with_path(&opencode_config(None), &path_dir)
+        .get(&opencode_executor())
+        .expect("opencode is registered")
+        .probe();
+    assert!(path_probe.ok, "{}", path_probe.detail);
+    let on_path = path_dir.join("opencode");
+    assert_eq!(
+        path_probe.path.as_deref(),
+        Some(on_path.to_string_lossy().as_ref()),
+        "the probe reports the PATH path"
+    );
+    assert!(
+        path_probe.detail.contains("resolved from PATH:") && path_probe.detail.contains("9.9.9"),
+        "vowp doctor receives the version, path and origin: {}",
+        path_probe.detail
+    );
+}
+
+#[test]
+fn adapter_retries_once_when_the_configured_binary_cannot_be_spawned() {
+    let tmp = tempdir().expect("tempdir");
+    let stale_dir = tmp.path().join("stale");
+    let path_dir = tmp.path().join("path");
+    let marker = tmp.path().join("retried");
+    // The file exists and is executable, but its interpreter does not: the first spawn
+    // returns ENOENT, so the adapter must fall back to a PATH lookup and retry once.
+    let unspawnable = write_named_script(&stale_dir, "opencode", "#!/definitely/not/an/interpreter\n");
+
+    let (_, fixture, _) = write_fixtures(tmp.path());
+    write_named_script(
+        &path_dir,
+        "opencode",
+        &format!(
+            "#!/bin/sh\nprintf ran > '{}'\ncat '{}'\nexit 0\n",
+            marker.display(),
+            fixture.display()
+        ),
+    );
+
+    let config = opencode_config(Some(unspawnable.to_string_lossy().as_ref()));
+    let registry = registry_with_path(&config, &path_dir);
+    let adapter = registry.get(&opencode_executor()).expect("opencode is registered");
+
+    let cwd = tmp.path().join("cwd");
+    std::fs::create_dir_all(&cwd).expect("cwd");
+    let mut run = adapter
+        .start(start_input(&cwd, &tmp.path().join("missing.jsonl"), "0", false))
+        .expect("the locator failure is retried from PATH");
+    let summary = run.wait().expect("the retried run finishes");
+    assert_eq!(summary.outcome, RunOutcome::Ok);
+    assert!(marker.is_file(), "the PATH binary ran after the retry");
+}
+
+#[test]
 fn missing_binary_is_a_locator_error_with_the_install_hint() {
     let tmp = tempdir().expect("tempdir");
     let empty = tmp.path().join("empty");

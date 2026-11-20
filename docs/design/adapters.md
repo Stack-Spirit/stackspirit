@@ -57,21 +57,29 @@ resolves the configured value immediately before building the real adapter, and
    `$HOME/.opencode/bin/opencode` install.
 
 The resolved path is a **hint, not the only truth**. If the first start returns a locator
-failure (an `AdapterError::Unavailable` or a spawn `NotFound`), the resolver rebuilds the
-adapter with a fresh resolution from the child `PATH` and retries **exactly once**. A
-second locator failure returns `AdapterError::Unavailable` with the requested value and the
-actionable hint:
+failure (an `AdapterError::Unavailable` or a spawn `NotFound`), the resolver retries
+**exactly once** with a forced `PATH` lookup by file name. It ignores a configured
+multi-component path that is still an executable file but cannot be spawned (for example a
+missing interpreter) or that moved between resolution and spawn. A second locator failure
+returns `AdapterError::Unavailable` with the requested value and the actionable hint:
 
 ```
 harness not found: <requested>; install the harness or fix [harnesses.*].binary
 ```
 
-A locator miss is **not** a provider fault at the failed start: that path writes no
-`limit:<provider>` or `probe_back:<provider>` key and no `limits` row, and an existing
-provider mark is never cleared by the failed spawn. Genuine provider errors (auth, credits,
-quota, rate) keep their normal classification. L6's unknown-failure accounting is
-unchanged; keeping a repeated locator miss out of that streak needs the loop/session
-change noted in the fix report.
+A locator miss is **not** a provider fault. The failed start is finalised as an ended
+`Error` run with no `limit_kind`; the runner does not feed it to L6, and L1's harvest only
+calls L6 for a run with a limit kind or for an orphaned run. It therefore writes no
+`fail_streak:<provider>`, `limit:<provider>`, `probe_back:<provider>` or `limits` row, and
+an existing provider mark is never cleared by the failed spawn. L6's unknown-failure
+streak still counts runs that actually started and then ended `Error`/`Crash`; those are
+genuine provider failures. Genuine auth, credits, quota and rate signals keep their normal
+classification.
+
+`Adapter::probe` reports the resolved path in `ProbeResult.path` and appends
+`resolved from config|PATH|$HOME fallback: <path>` to `ProbeResult.detail`. `vowp doctor`
+shows that detail (and the version, when one was printed), so `harness:<name>` names the
+exact path and its origin without a CLI change.
 
 `AdapterRegistry::from_config_with_search_path` is a `#[doc(hidden)]` test seam: tests
 inject a private directory as the whole resolution `PATH` (and opencode then skips the real

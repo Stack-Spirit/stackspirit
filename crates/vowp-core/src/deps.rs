@@ -674,6 +674,17 @@ pub enum BinarySource {
     HomeFallback,
 }
 
+impl BinarySource {
+    /// Returns the short label shown after "resolved from" in a probe detail.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Path => "PATH",
+            Self::HomeFallback => "$HOME fallback",
+        }
+    }
+}
+
 /// A harness binary resolved immediately before one spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedBinary {
@@ -783,14 +794,38 @@ enum BuiltinSpec {
 }
 
 impl BuiltinSpec {
+    /// Returns the configured value, the harness default name and the HOME fallback.
+    fn config_parts(&self) -> (Option<&str>, &'static str, Option<&'static str>) {
+        match self {
+            Self::ClaudeCode(config) => (config.binary.as_deref(), "claude", None),
+            Self::Opencode(config) => (config.binary.as_deref(), "opencode", Some(".opencode/bin/opencode")),
+            Self::Acp(config) => (config.binary.as_deref(), "claude-code-acp", None),
+        }
+    }
+
     /// The configured value, or the harness default name, for error messages.
     fn requested(&self) -> String {
-        let (binary, default) = match self {
-            Self::ClaudeCode(config) => (&config.binary, "claude"),
-            Self::Opencode(config) => (&config.binary, "opencode"),
-            Self::Acp(config) => (&config.binary, "claude-code-acp"),
-        };
-        binary.clone().unwrap_or_else(|| default.to_owned())
+        let (binary, default, _) = self.config_parts();
+        binary.unwrap_or(default).to_owned()
+    }
+
+    /// Builds an adapter around one resolved path.
+    fn build_resolved(&self, resolved: &ResolvedBinary) -> Arc<dyn Adapter> {
+        let binary = Some(resolved.path.to_string_lossy().into_owned());
+        match self {
+            Self::ClaudeCode(config) => Arc::new(ClaudeCodeAdapter::new(ClaudeConfig {
+                binary,
+                ..config.clone()
+            })),
+            Self::Opencode(config) => Arc::new(OpencodeAdapter::new(OpencodeConfig {
+                binary,
+                ..config.clone()
+            })),
+            Self::Acp(config) => Arc::new(AcpAdapter::new(AcpConfig {
+                binary,
+                ..config.clone()
+            })),
+        }
     }
 
     /// Resolves the binary now and builds an adapter that will run it.
@@ -799,40 +834,32 @@ impl BuiltinSpec {
         search_path: Option<&OsStr>,
         previous: Option<&Path>,
     ) -> Result<(Arc<dyn Adapter>, ResolvedBinary), AdapterError> {
-        match self {
-            Self::ClaudeCode(config) => {
-                let resolved = resolve_or_error(config.binary.as_deref(), "claude", search_path, None, previous)?;
-                let adapter = ClaudeCodeAdapter::new(ClaudeConfig {
-                    binary: Some(resolved.path.to_string_lossy().into_owned()),
-                    ..config.clone()
-                });
-                Ok((Arc::new(adapter), resolved))
-            }
-            Self::Opencode(config) => {
-                let resolved = resolve_or_error(
-                    config.binary.as_deref(),
-                    "opencode",
-                    search_path,
-                    Some(".opencode/bin/opencode"),
-                    previous,
-                )?;
-                let adapter = OpencodeAdapter::new(OpencodeConfig {
-                    binary: Some(resolved.path.to_string_lossy().into_owned()),
-                    ..config.clone()
-                });
-                Ok((Arc::new(adapter), resolved))
-            }
-            Self::Acp(config) => {
-                let resolved =
-                    resolve_or_error(config.binary.as_deref(), "claude-code-acp", search_path, None, previous)?;
-                let adapter = AcpAdapter::new(AcpConfig {
-                    binary: Some(resolved.path.to_string_lossy().into_owned()),
-                    ..config.clone()
-                });
-                Ok((Arc::new(adapter), resolved))
-            }
-        }
+        let (configured, default_name, home_relative) = self.config_parts();
+        let resolved = resolve_or_error(configured, default_name, search_path, home_relative, previous)?;
+        Ok((self.build_resolved(&resolved), resolved))
     }
+
+    /// Rebuilds the adapter after a locator failure, searching `PATH` by file name.
+    ///
+    /// The configured multi-component path is deliberately ignored here: it may still be an
+    /// executable file that cannot be spawned (a missing interpreter) or it may have moved
+    /// between resolution and spawn. A bare configured value or the default name is used as
+    /// the lookup name, so the retry can find the harness where it actually is.
+    fn build_from_path(&self, search_path: Option<&OsStr>) -> Result<(Arc<dyn Adapter>, ResolvedBinary), AdapterError> {
+        let (configured, default_name, home_relative) = self.config_parts();
+        let name = configured
+            .and_then(|value| Path::new(value).file_name())
+            .and_then(OsStr::to_str)
+            .unwrap_or(default_name);
+        let resolved = resolve_harness_binary(Some(name), default_name, search_path, home_relative, None)
+            .ok_or_else(|| missing_binary_error(&self.requested()))?;
+        Ok((self.build_resolved(&resolved), resolved))
+    }
+}
+
+/// Builds the actionable locator error for `requested`.
+fn missing_binary_error(requested: &str) -> AdapterError {
+    AdapterError::Unavailable(format!("harness not found: {requested}; {HARNESS_BINARY_HINT}"))
 }
 
 /// Resolves a binary or returns the actionable locator error.
@@ -843,10 +870,8 @@ fn resolve_or_error(
     home_relative: Option<&str>,
     previous: Option<&Path>,
 ) -> Result<ResolvedBinary, AdapterError> {
-    resolve_harness_binary(configured, default_name, search_path, home_relative, previous).ok_or_else(|| {
-        let requested = configured.unwrap_or(default_name);
-        AdapterError::Unavailable(format!("harness not found: {requested}; {HARNESS_BINARY_HINT}"))
-    })
+    resolve_harness_binary(configured, default_name, search_path, home_relative, previous)
+        .ok_or_else(|| missing_binary_error(configured.unwrap_or(default_name)))
 }
 
 /// An adapter that resolves its binary immediately before every spawn.
@@ -888,7 +913,12 @@ impl Adapter for ResolvingAdapter {
         match self.spec.build(self.search_path.as_deref(), previous.as_deref()) {
             Ok((adapter, resolved)) => {
                 self.remember(&resolved.path);
-                adapter.probe()
+                let mut probe = adapter.probe();
+                // `vowp doctor` shows ProbeResult.detail and version, so naming the path and
+                // its origin here makes the locator visible without a CLI change.
+                probe.detail = probe_detail(&probe.detail, &resolved);
+                probe.path = Some(resolved.path.to_string_lossy().into_owned());
+                probe
             }
             Err(error) => ProbeResult {
                 ok: false,
@@ -912,8 +942,10 @@ impl Adapter for ResolvingAdapter {
         match first.start(input.clone()) {
             Ok(run) => Ok(run),
             Err(error) if is_locator_failure(&error) => {
-                let previous = self.previous();
-                let (retry, resolved) = self.spec.build(search, previous.as_deref())?;
+                // The cached path can be an executable file that fails to spawn (missing
+                // interpreter) or it can move between resolution and spawn. Retry once with
+                // a PATH lookup by file name, then report the actionable hint.
+                let (retry, resolved) = self.spec.build_from_path(search)?;
                 self.remember(&resolved.path);
                 retry
                     .start(input)
@@ -921,6 +953,16 @@ impl Adapter for ResolvingAdapter {
             }
             Err(error) => Err(error),
         }
+    }
+}
+
+/// Appends the resolved path and its origin to an adapter probe detail.
+fn probe_detail(detail: &str, resolved: &ResolvedBinary) -> String {
+    let origin = format!("resolved from {}: {}", resolved.source.label(), resolved.path.display());
+    if detail.trim().is_empty() {
+        origin
+    } else {
+        format!("{detail}; {origin}")
     }
 }
 
@@ -943,7 +985,7 @@ fn is_locator_failure(error: &AdapterError) -> bool {
 /// Converts a locator failure into the actionable install/fix error.
 fn locator_error(requested: &str, error: AdapterError) -> AdapterError {
     if is_locator_failure(&error) {
-        AdapterError::Unavailable(format!("harness not found: {requested}; {HARNESS_BINARY_HINT}"))
+        missing_binary_error(requested)
     } else {
         error
     }

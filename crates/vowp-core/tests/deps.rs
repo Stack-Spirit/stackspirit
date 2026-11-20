@@ -680,3 +680,37 @@ fn moved_harness_binary_is_recovered_without_provider_marks() {
     assert!(store.kv_prefix("limit:").unwrap().is_empty());
     assert!(store.kv_prefix("probe_back:").unwrap().is_empty());
 }
+
+#[test]
+fn repeated_locator_misses_do_not_advance_the_provider_failure_streak() {
+    let tmp = tempdir().unwrap();
+    let empty_path = tmp.path().join("empty-path");
+    fs::create_dir_all(&empty_path).unwrap();
+    let missing = tmp.path().join("moved/claude");
+    let config = session_config(tmp.path(), Some(claude_harness(&missing)));
+    let deps = session_deps(tmp.path(), &config, Some(empty_path.into_os_string()));
+    let service = SessionService::new(deps.clone());
+    let session = create_worker_session(&service, tmp.path());
+
+    for _ in 0..3 {
+        let error = service
+            .run_turn(worker_turn(&session), &CancelToken::default())
+            .expect_err("a missing binary fails every start");
+        assert_eq!(error.kind(), ErrorKind::AdapterUnavailable);
+    }
+
+    let store = deps.open_store().unwrap();
+    assert!(
+        store.kv_prefix("fail_streak:").unwrap().is_empty(),
+        "a failed start is not an L6 unknown-failure input"
+    );
+    assert!(
+        store.kv_prefix("limit:").unwrap().is_empty(),
+        "three locator misses must not mark the provider unavailable"
+    );
+    assert!(
+        store.kv_prefix("probe_back:").unwrap().is_empty(),
+        "three locator misses must not schedule a provider probe"
+    );
+    assert!(store.limit_for("claude").unwrap().is_none());
+}
