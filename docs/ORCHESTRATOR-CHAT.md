@@ -2426,3 +2426,114 @@ connect/disconnect restart; `packages/spirit-ui/src/test/next/composer.test.tsx`
 `providerSettings.test.tsx` cover the grouped picker, search, connect, verify, remove and
 secret-free errors; `apps/spirit-desktop/e2e/meadow-provider-connect.spec.ts` covers the
 light and dark flows with axe WCAG 2.2 AA.
+
+## BYOK keychain, live reload, searchable model picker & Xvfb verification (ss-85 plan)
+
+Live testing on 2026-11-20 uncovered two connected BYOK failures: (1) adding an OpenRouter
+API key and clicking **Verify key** failed and appeared to wipe the saved key, and (2) none
+of the connected provider's models appeared in the chat model selector. Inspection of
+`stackspirit`, the OpenCode reference checkout, and live probes against the pinned `opencode`
+`1.19.5` sidecar pinpointed four root causes:
+
+### Root causes
+
+1. **Silent mock keychain (`Cargo.toml` missing `keyring` platform features — primary cause of both bugs):**
+   - Root `Cargo.toml` declared `keyring = "3"` with no features. In `keyring` `3.6.3`,
+     there are **no default features**: without `apple-native`, `windows-native`, and
+     `linux-native`, the crate compiles against `keyring::mock::MockCredential`
+     (`CredentialPersistence::EntryOnly`), which keeps the password only inside the
+     transient `Entry` struct and drops it immediately when `OsKeychain::set` returns.
+   - `OsKeychain::set` still wrote the provider id to `keychain-index.json`, so
+     `key_status()` showed OpenRouter as `saved`.
+   - On sidecar restart, `keychain_auth_content` called `keychain.get("openrouter")` on a
+     fresh `Entry` and got `Ok(None)`, launching `opencode` with **no**
+     `OPENCODE_AUTH_CONTENT`. OpenRouter was therefore never connected in the engine, so
+     `/config/providers` returned only `opencode` and none of OpenRouter's 371 models
+     appeared in chat.
+   - Clicking **Verify key** called `verify_provider_key` → `keychain.get("openrouter")` →
+     `Ok(None)` → `state: "missing"`. `SettingsPage.tsx` (`upsertKey` + `savedStatus`)
+     treats `"missing"` as absent and hid OpenRouter from **Connected providers**, making
+     the key appear wiped.
+   - **Fix:** enable `keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }`
+     in root `Cargo.toml`, and add a `#[cfg(feature = "keychain")]` regression test asserting
+     `keyring::default::default_credential_builder().persistence() != CredentialPersistence::EntryOnly`
+     plus a cross-instance `OsKeychain` round-trip test.
+
+2. **OpenCode `1.19.5` auth & reload semantics (verified live against pinned `1.19.5`):**
+   - `Auth.all()` in `opencode` `1.19.5` checks `process.env.OPENCODE_AUTH_CONTENT` first
+     (`JSON.parse`); when set, it overrides `$XDG_DATA_HOME/opencode/auth.json`.
+   - `PUT /auth/{providerID}` with `{"type":"api","key":"..."}` writes plaintext
+     `$XDG_DATA_HOME/opencode/auth.json` (`0600`) and does **not** reload
+     `/config/providers` until `POST /instance/dispose` is called (live probe on `1.19.5`:
+     before `PUT`: `[('opencode', 11)]`; after `PUT` without dispose: `[('opencode', 11)]`;
+     after `POST /instance/dispose`: `[('openrouter', 371), ('opencode', 11)]`).
+   - Passing `OPENCODE_AUTH_CONTENT` at spawn time immediately exposes
+     `[('openrouter', 371), ('opencode', 11)]` on `/config/providers` and
+     `connected: ['opencode', 'openrouter']` (`source: "api"`) on `/provider` **without**
+     writing any plaintext `auth.json` to disk.
+   - **Decision:** Keep StackSpirit's zero-plaintext-on-disk contract (`OsKeychain` →
+     ephemeral child `OPENCODE_AUTH_CONTENT` → clean sidecar restart; never write
+     `auth.json` and never mix `OPENCODE_AUTH_CONTENT` with `PUT /auth/{id}`). Fix
+     `EngineSupervisor::refresh_after_provider_change` so a key change while `Starting` is
+     never skipped.
+
+3. **Verification probe isolation, model selection & non-destructive UX:**
+   - `ProcessEngineRuntime::verify_with_secret` previously spawned a second `opencode serve`
+     sharing the live engine's `private_state` (`XDG_DATA_HOME/opencode/opencode.db`) and
+     terminated it with `SIGKILL`, risking SQLite lock contention. It must instead spawn the
+     verification probe with a dedicated ephemeral `tempfile::tempdir()` XDG tree (still
+     passing the key only via `OPENCODE_AUTH_CONTENT`, never on disk).
+   - `provider_model()` previously picked the first alphabetical model ID (for OpenRouter,
+     `openrouter/aion-labs/aion-2.0`, an expensive reasoning model; `/config/providers`'s
+     `default.openrouter` is `google/gemini-3-pro-image-preview`). Verification must pick
+     up to 3 active, text-in/text-out, lowest-cost, non-reasoning-preferred candidate models
+     from `/config/providers` (with `/provider` fallback) and retry on model-specific errors
+     (400/404/`ProviderModelNotFoundError`, never on 401/403).
+   - Verification must **never** delete a saved key on `invalid` or `unverified`. In
+     `SettingsPage.tsx`, keep the provider in **Connected providers** with an honest badge
+     (`Verified` when `state === "saved" && last_checked_at !== null`, `Saved`, `Invalid key`,
+     `Unverified`), explicit status message, and `Verify key` / `Replace key` / `Remove key`
+     controls. If the keychain genuinely reports `missing`, display an explicit alert rather
+     than falling through to `"is still unverified"`.
+
+4. **Zero-restart chat model propagation (`LocalChatProvider` + `EngineHost`):**
+   - `EngineHost::usable_chat_models` must include `runtime.free` (`Included`), keychain-
+     configured providers (`Byok`), and any non-`opencode` provider the running engine
+     reports as connected (e.g. via env var), ordered `OpenCode Free` first, then connected
+     providers in `POPULAR_PROVIDER_IDS` order then alphabetically.
+   - `store_key`, `verify_key`, `delete_key`, and `restart_engine` must call
+     `state.refresh_chat_models().await`, which updates `DesktopChatEngine`'s cache **and**
+     invokes `LocalChatProvider::refresh_setup_models().await` to re-point an active setup
+     session's endpoint/SSE pump to the restarted engine port and broadcast a fresh
+     `ChatEvent::Session` on `spirit://chat`. Every mounted `ComposerBar` updates
+     immediately without an app restart, regardless of whether the change came from
+     `SettingsPage`, the composer modal, or `EngineView`.
+
+### OpenCode-inspired searchable model picker contract (ss-87)
+
+With OpenRouter connected (`371` models + `11` OpenCode Free models = `382` models), a flat
+unsearchable menu is unusable. Modeled on OpenCode's model selector
+(`packages/app/src/providers/models/select-dialog.tsx` in the OpenCode reference checkout) while keeping
+100% StackSpirit Meadow tokens and WCAG 2.2 AA contrast in light and dark:
+
+- Clicking `composer-model` opens a searchable popover above the composer with:
+  - Auto-focused search box (`Search models`, role `searchbox`, calm Meadow border-step
+    focus) filtering by model label, model id, and provider label/id, with
+    `ArrowUp`/`ArrowDown`/`Enter`/`Escape` keyboard navigation.
+  - Bounded scrollable list (`max-height` capped so 370+ models scroll cleanly inside the
+    viewport) grouped by provider: **OpenCode Free** first (with `Free` badge), then each
+    connected provider as its own named section (e.g. **OpenRouter**, **Anthropic**,
+    **OpenAI**, **DeepSeek**, ordered popular-first then alphabetical) with `Connected`
+    badge, model label + secondary model id when helpful, and checkmark (`✓`) on the active
+    selection.
+  - Sticky footer inside the picker with **Manage models** (`data-testid="composer-manage-models"`,
+    opening Settings → Engine & Models) and **Connect another provider…**
+    (`data-testid="composer-connect-provider"`).
+
+### Sequenced follow-up jobs queued by ss-85
+
+| Job | Needs | Scope |
+|---|---|---|
+| `ss-86-fix-byok-keychain-verify-and-model-sync` | — | Enable `keyring` platform features + persistence guard, ephemeral-XDG `verify_with_secret` + smart candidate model selection, `Starting`-safe sidecar reload, `LocalChatProvider::refresh_setup_models` event broadcast, env-connected models in `usable_chat_models`, non-destructive `SettingsPage` / `EngineView` verify UX |
+| `ss-87-searchable-model-picker-and-manage-models` | `ss-86` | Searchable provider-grouped model picker popover with keyboard nav, bounded scroll, free/connected badges, and **Manage models** button in `ComposerBar.tsx` + `SettingsPage.tsx` + `theme.css` (Meadow, WCAG 2.2 AA light & dark) |
+| `ss-88-xvfb-byok-model-picker-verify` | `ss-86`, `ss-87` | Real VPS `xvfb-run` desktop boot smoke + live pinned `opencode` `1.19.5` sidecar BYOK round-trip test (key add → verify keeps key → 370+ OpenRouter models appear → search & select model → inspect `opencode.log` for zero errors/leaks → remove key) + Playwright UI E2E under `xvfb-run` |

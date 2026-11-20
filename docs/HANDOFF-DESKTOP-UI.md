@@ -444,6 +444,18 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
    suite for a field with no visible focus state; the final `ss-75` gate run passed 25/25
    with axe WCAG 2.2 AA in light and dark. The text-field focus indicator is that border
    step plus the caret, not a 3:1 ring.
+9. **BYOK keychain fix, searchable model picker with Manage models, and VPS Xvfb verification
+   — planned (`ss-85`, queued as `ss-86`–`ss-88`).** Root-cause analysis in
+   `docs/ORCHESTRATOR-CHAT.md` found that root `Cargo.toml` declared `keyring = "3"` without
+   platform features (`apple-native`, `windows-native`, `linux-native`), silently compiling
+   the non-persistent mock store so saved provider keys disappeared on `verify_key` and
+   sidecar restart. `ss-86` fixes real keychain persistence, isolated ephemeral-XDG key
+   verification with smart text-model selection, non-destructive verification UX, and live
+   `ChatEvent::Session` model propagation; `ss-87` upgrades `ComposerBar.tsx`'s model menu
+   into an OpenCode-inspired searchable, provider-grouped popover with bounded scroll,
+   free/connected badges, and a **Manage models** button (Meadow tokens, WCAG 2.2 AA);
+   `ss-88` verifies the real bundled `opencode` `1.19.5` sidecar and desktop app under
+   `xvfb-run` with live `opencode.log` inspection.
 
 ## 6. Known gaps and cautions
 
