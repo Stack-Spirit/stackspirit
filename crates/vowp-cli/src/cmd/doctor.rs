@@ -11,9 +11,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
+use vowp_core::loops::l6_failover::stale_provider_marks;
 use vowp_core::schedules::ScheduleSpec;
 use vowp_core::{AdapterRegistry, CommandRunner, CommandSpec, SystemRunner};
-use vowp_protocol::{Executor, HarnessKind, ScheduleSpecKind, VowpConfig};
+use vowp_protocol::{Executor, HarnessKind, ScheduleSpecKind, Timestamp, VowpConfig};
 use vowp_store::Store;
 
 use crate::cli::{DoctorArgs, Global};
@@ -128,6 +129,7 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, _args: &DoctorArgs) -> Resul
 
     check_profiles(registry.as_ref(), config.as_ref(), &mut checks);
     check_providers(config.as_ref(), &mut checks);
+    check_provider_marks(&paths, &mut checks);
     check_systemd(&mut checks);
     check_watchdog(&mut checks);
     check_supervisor(&paths, &mut checks);
@@ -591,6 +593,94 @@ fn check_providers(config: Option<&VowpConfig>, checks: &mut Checks) {
         },
         parts.join(", "),
     );
+}
+
+/// Reports stale provider marks with their reason, age and whether the provider has
+/// finished an `ok` run since. The view is read-only: doctor never clears a mark.
+fn check_provider_marks(paths: &vowp_store::NodePaths, checks: &mut Checks) {
+    if !paths.db_path().is_file() {
+        checks.push("provider-marks", CheckStatus::Warn, "no database; run `vowp init`");
+        return;
+    }
+    let store = match Store::open_read_only(paths, None) {
+        Ok(store) => store,
+        Err(error) => {
+            checks.push("provider-marks", CheckStatus::Fail, error.to_string());
+            return;
+        }
+    };
+    let now = Timestamp::now();
+    let marks = match stale_provider_marks(&store, now) {
+        Ok(marks) => marks,
+        Err(error) => {
+            checks.push("provider-marks", CheckStatus::Fail, error.to_string());
+            return;
+        }
+    };
+    if marks.is_empty() {
+        checks.push("provider-marks", CheckStatus::Ok, "no stale provider marks");
+        return;
+    }
+    let projects = match store.list_projects() {
+        Ok(projects) => projects,
+        Err(error) => {
+            checks.push("provider-marks", CheckStatus::Fail, error.to_string());
+            return;
+        }
+    };
+    for mark in marks {
+        let served = provider_served_since(paths, &projects, &mark.provider, mark.since);
+        let mut detail = format!(
+            "{}: {}; {} old; {}",
+            mark.provider,
+            mark.reason,
+            format_age(mark.age_secs),
+            if served {
+                "an ok run has finished since"
+            } else {
+                "no ok run since"
+            }
+        );
+        if let Some(until) = mark.probe_back_until {
+            detail.push_str(&format!("; probe-back until {}", until.as_rfc3339()));
+        }
+        if let Some(park) = &mark.park {
+            detail.push_str(&format!("; park={park}"));
+        }
+        checks.push(&format!("provider-mark:{}", mark.provider), CheckStatus::Warn, detail);
+    }
+}
+
+/// Returns whether any project has a run on `provider` that ended `ok` since `since`.
+fn provider_served_since(
+    paths: &vowp_store::NodePaths,
+    projects: &[vowp_protocol::Project],
+    provider: &str,
+    since: Timestamp,
+) -> bool {
+    for project in projects
+        .iter()
+        .filter(|project| project.name.as_str() != vowp_store::RESERVED_NODE_PROJECT)
+    {
+        if let Ok(store) = Store::open_read_only(paths, Some(&project.name))
+            && store.successful_run_since(provider, since).unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Formats an age as `1h 02m`, `3m 04s` or `12s`.
+fn format_age(secs: i64) -> String {
+    let secs = secs.max(0).unsigned_abs();
+    if secs >= 3600 {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
 }
 
 /// Maps every configured provider to the harness kinds of the profile rungs that use it.

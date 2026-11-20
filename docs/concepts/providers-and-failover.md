@@ -82,7 +82,30 @@ acts on the classified event.
 
 A crash or error without a limit signal is not a provider limit. It goes through the normal L2 continue
 path: two automatic continues, then the keeper. Three consecutive crashes or errors from the same
-provider with no limit classification mark that provider `unavailable` for 15 minutes.
+provider with no limit classification mark that provider `unavailable` for 15 minutes. That row is
+temporary: an expired `unavailable` row no longer blocks the rung, and an `ok` run clears it at once.
+
+### Mark lifetimes
+
+L6 records a provider limit in two places: the global `limits` row (kind, reset, detail) and the mark
+keys `limit:<provider>`, `probe_back:<provider>`, `probe_back_until:<provider>` and `park:<provider>`.
+The marks have different lifetimes:
+
+| Mark | Lifetime |
+|---|---|
+| `quota`, `rate`, `unavailable` | While `resets_at` is in the future. |
+| probe-back | A bounded window starting at the reset (or at the mark when no reset is known): 10 minutes at first, doubling after each failed probe, capped at 60 minutes. When the deadline passes the provider becomes eligible for dispatch and for a probe even if no probe has succeeded. |
+| `credits`, `auth` | Sticky until the owner answers the inbox item. They never expire and no probe is scheduled for them. |
+| `park:<provider>` | A one-tick request; the supervisor drains it. |
+
+A run on a provider that ends `ok` clears that provider's limit row and its `limit:`, `probe_back:`,
+`probe_back_until:`, `probe_pending:` and `park:` keys: a successful turn is proof the provider works.
+A `credits` or `auth` row is never cleared this way; only `vowp inbox answer <id> resolved` resolves
+it. When choosing the next rung, an expired `unavailable` row is ignored, so a residual mark cannot
+outrank a healthy sibling rung.
+
+`vowp doctor` reports stale provider marks read-only: provider, reason, age, and whether a run has
+finished `ok` since the mark. It never clears or extends a mark.
 
 ### Quota failover, step by step
 
@@ -94,11 +117,13 @@ provider with no limit classification mark that provider `unavailable` for 15 mi
    records the target machine, probes it over SSH when it is remote, and only then detaches the source.
 5. When the reset arrives, a probe runs a tiny prompt (`Reply with the single word: ok`) on the limited
    provider in a scratch directory, with a 60-second timeout. Its cost is recorded like any other run.
-6. A successful probe deletes the limit row. Planner and keeper sessions switch back to rung 0 with a
-   capsule only when no turn is running; ordinary jobs stay where they are until their next natural
-   start, avoiding mid-run flip-flops.
+6. A successful probe deletes the limit row and its marks. Planner and keeper sessions switch back to
+   rung 0 with a capsule only when no turn is running; ordinary jobs stay where they are until their
+   next natural start, avoiding mid-run flip-flops.
 7. A failed probe updates `last_probe_at` and is retried every 15 minutes. If it reports a new reset
-   time, that replaces the old one.
+   time, that replaces the old one. The probe-back window itself grows 10 → 20 → 40 → 60 minutes, so a
+   probe that never succeeds cannot block the provider forever: when the deadline passes the rung is
+   eligible again even before a probe answers.
 
 If the target probe fails, or every remaining rung is limited, the switch aborts and the job is parked
 with an inbox notice. The session stays readable; a human can retry after fixing the provider.

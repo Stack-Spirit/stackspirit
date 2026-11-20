@@ -470,6 +470,22 @@ impl Store {
         Ok(limits)
     }
 
+    /// Lists every provider limit row regardless of expiry, ordered by provider.
+    ///
+    /// Read-only health views use this to find marks whose reset has passed but whose
+    /// bookkeeping keys are still present.
+    pub fn all_limits(&self) -> Result<Vec<Limit>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(&format!("SELECT {LIMIT_COLUMNS} FROM main.limits ORDER BY provider"))?;
+        let rows = statement.query_map([], read_limit_row)?;
+        let mut limits = Vec::new();
+        for row in rows {
+            limits.push(limit_from_row(row?)?);
+        }
+        Ok(limits)
+    }
+
     /// Records one probe of a limited provider: stamps `last_probe_at` and updates the streak.
     pub fn record_probe(&self, provider: &str, at: Timestamp, ok: bool) -> Result<(), StoreError> {
         let changed = self.conn.execute(
@@ -620,6 +636,20 @@ impl Store {
             })
             .optional()?;
         Ok(value)
+    }
+
+    /// Returns a `kv` value and the clock time it was last written, when it exists.
+    pub fn kv_entry(&self, key: &str) -> Result<Option<(String, Timestamp)>, StoreError> {
+        let raw = self
+            .conn
+            .query_row("SELECT value, updated_at FROM main.kv WHERE key = ?1", [key], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .optional()?;
+        match raw {
+            Some((value, updated_at)) => Ok(Some((value, ts_from_text(&updated_at, "kv.updated_at")?))),
+            None => Ok(None),
+        }
     }
 
     /// Inserts or replaces a `kv` value, stamping `updated_at` from the clock.
