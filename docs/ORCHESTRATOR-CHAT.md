@@ -2146,3 +2146,25 @@ Record the answers in the VOWP contract or the job report, not by guessing in co
   shapes.
 - VOWP `docs/maintainers/v0.2-spikes/app-surfaces.md` — reference for the v2 API only;
   the pinned StackSpirit engine is 1.19.5/v1.
+
+## Setup sandbox and instructions contract (ss-80)
+
+A 2026-11-20 live test showed the setup assistant running `find /` through bash (macOS
+privacy dialogs), then hanging on an `external_directory: ask` prompt that has no UI. The
+contract is now:
+
+- `PrivateEngineTree::prepare` writes `engine/config/opencode/opencode.json` (atomic,
+  mode `0600`) on every engine start. Its `permission` block is `deny` for `bash`, `edit`,
+  `write`, `read`, `glob`, `grep`, `list`, `external_directory`, `webfetch`, `websearch`,
+  `task`, `skill` and `lsp`. No rule is `ask`: the setup chat has no permission UI, so an
+  `ask` would stall the turn forever.
+- The child gets `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` pointing only at that file and
+  directory, `OPENCODE_DISABLE_PROJECT_CONFIG=1`, the private `XDG_*` roots and the setup
+  workspace as cwd. `OPENCODE_CONFIG_CONTENT` and `OPENCODE_PERMISSION` are removed from the
+  inherited environment, so no external orchestrator `opencode.json` (for example one under
+  a VOWP agent home) is loaded.
+- `workspaces/setup/AGENTS.md` (atomic, `0600`) tells the assistant it is chat-only and
+  explains the real flows: `+ Connect a new server` in the composer, `Settings -> Add
+  server` for key-auth hosts, `Form a cluster` once two or more servers are saved, and
+  never to paste passwords, keys or tokens into chat. It contains no host, path or secret.
+- Tests: `crates/spirit-core/tests/setup_sandbox.rs`.

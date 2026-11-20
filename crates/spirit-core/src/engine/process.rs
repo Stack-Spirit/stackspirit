@@ -254,7 +254,7 @@ impl EngineLogBuffer {
 
 /// The app-private tree from `docs/ORCHESTRATOR-CHAT.md` §2.1.3.
 ///
-/// All directories are created `0700` and the setup `AGENTS.md` is `0600`. The renderer
+/// All directories are created `0700`; the setup `AGENTS.md` and `opencode.json` are `0600`. The renderer
 /// never receives these paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateEngineTree {
@@ -298,15 +298,95 @@ impl PrivateEngineTree {
             create_private_directory(directory)?;
         }
         write_setup_agents(&tree.setup_workspace)?;
+        let opencode_dir = tree.opencode_config_dir();
+        create_private_directory(&opencode_dir)?;
+        write_setup_opencode_config(&opencode_dir)?;
         Ok(tree)
     }
+
+    /// The directory holding the setup engine's own `opencode.json`.
+    #[must_use]
+    pub fn opencode_config_dir(&self) -> PathBuf {
+        self.config.join("opencode")
+    }
+
+    /// The environment that pins the child to this tree, as `(name, value)` pairs.
+    ///
+    /// `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` point only at the file written by
+    /// `prepare`, and project-level config discovery is disabled, so an unrelated
+    /// orchestrator `opencode.json` is never loaded.
+    #[must_use]
+    pub fn isolated_env(&self) -> Vec<(&'static str, PathBuf)> {
+        let dir = self.opencode_config_dir();
+        vec![
+            ("XDG_DATA_HOME", self.data.clone()),
+            ("XDG_STATE_HOME", self.state.clone()),
+            ("XDG_CONFIG_HOME", self.config.clone()),
+            ("OPENCODE_CONFIG", dir.join("opencode.json")),
+            ("OPENCODE_CONFIG_DIR", dir),
+            ("OPENCODE_DISABLE_PROJECT_CONFIG", PathBuf::from("1")),
+        ]
+    }
+
+    /// Variables that could inject outside configuration and must be removed.
+    pub const INHERITED_CONFIG_ENV: [&'static str; 2] =
+        ["OPENCODE_CONFIG_CONTENT", "OPENCODE_PERMISSION"];
 }
 
 /// The setup workspace prompt. It contains no secret and no machine path.
-const SETUP_AGENTS_MD: &str = "# StackSpirit setup assistant\n\n\
-You are the StackSpirit setup assistant. Never ask for a password, token or key in chat. \
-Use the secure server card. Do not claim a server is connected until StackSpirit confirms \
-a verified key-only login. Ask one short question at a time.\n";
+const SETUP_AGENTS_MD: &str = "\
+# StackSpirit setup assistant
+
+You are the StackSpirit setup assistant. You run locally on the user's Mac with OpenCode \
+free models, or the model the user chose (their own key). You can only chat. You have no \
+shell, no file access and no web access, so never try to run commands or look at the \
+user's computer. Keep replies direct, short and practical, and ask one short question at \
+a time.
+
+## What StackSpirit can do for the user
+
+- Connect a brand-new server with a one-time password: click `+ Connect a new server` in \
+the composer bar. It opens the app-owned Secure server details card, verifies the SSH host \
+fingerprint, creates an app-owned ed25519 key in the Keychain, installs it, and can turn \
+off password login.
+- Add a server that already has SSH key auth: click `Settings -> Add server` (or `Add \
+server` on Welcome) and enter Host, User, Port, Identity file and VOWP home.
+- Add another machine or scale workers: once two or more servers are saved, open the \
+Server page or the sidebar Server `...` menu and click `Form a cluster`. A cluster has \
+1 Home and 1 or more Worker/Backup servers for pooled worker capacity, scheduled backups \
+and backup-to-Home promotion.
+
+## Rules
+
+- Never ask the user to paste a password, API key, token or private key into chat. Send \
+them to the secure card or the Settings forms above.
+- Do not claim a server is connected until StackSpirit confirms a verified key-only login.
+- If you are unsure what a button does, say so instead of guessing.
+";
+
+/// The strict permission document for the bundled setup engine. Every host-touching tool
+/// is denied; nothing is `ask`, because the setup chat has no permission prompt UI.
+const SETUP_OPENCODE_JSON: &str = r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "permission": {
+    "bash": "deny",
+    "edit": "deny",
+    "write": "deny",
+    "read": "deny",
+    "glob": "deny",
+    "grep": "deny",
+    "list": "deny",
+    "external_directory": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "task": "deny",
+    "skill": "deny",
+    "lsp": "deny"
+  }
+}
+"#;
 
 fn create_private_directory(path: &Path) -> Result<(), SpiritError> {
     std::fs::create_dir_all(path).map_err(|_| {
@@ -331,35 +411,55 @@ fn create_private_directory(path: &Path) -> Result<(), SpiritError> {
 }
 
 fn write_setup_agents(setup_workspace: &Path) -> Result<(), SpiritError> {
-    let path = setup_workspace.join("AGENTS.md");
+    write_private_file_atomic(
+        &setup_workspace.join("AGENTS.md"),
+        SETUP_AGENTS_MD.as_bytes(),
+        "the private setup workspace instructions",
+    )
+}
+
+fn write_setup_opencode_config(config_dir: &Path) -> Result<(), SpiritError> {
+    write_private_file_atomic(
+        &config_dir.join("opencode.json"),
+        SETUP_OPENCODE_JSON.as_bytes(),
+        "the private setup engine permissions",
+    )
+}
+
+/// Writes `bytes` to a sibling temp file with mode 0600, then renames it into place.
+fn write_private_file_atomic(path: &Path, bytes: &[u8], what: &str) -> Result<(), SpiritError> {
+    let fail = |action: &str| {
+        SpiritError::new(
+            SpiritErrorCode::Engine,
+            format!("could not {action} {what}"),
+        )
+        .with_hint("Check that the StackSpirit app-data directory is writable.")
+    };
+    let staged = path.with_extension("tmp");
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
-    let mut file = options.open(&path).map_err(|_| {
-        SpiritError::new(
-            SpiritErrorCode::Engine,
-            "could not write the private setup workspace instructions",
-        )
-        .with_hint("Check that the StackSpirit app-data directory is writable.")
-    })?;
-    file.write_all(SETUP_AGENTS_MD.as_bytes()).map_err(|_| {
-        SpiritError::new(
-            SpiritErrorCode::Engine,
-            "could not write the private setup workspace instructions",
-        )
-        .with_hint("Check that the StackSpirit app-data directory is writable.")
-    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&staged).map_err(|_| fail("write"))?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if written.is_err() {
+        let _ = std::fs::remove_file(&staged);
+        return Err(fail("write"));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|_| {
-            SpiritError::new(
-                SpiritErrorCode::Engine,
-                "could not secure the private setup workspace instructions",
-            )
-            .with_hint("Check the app-data directory permissions.")
-        })?;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| fail("secure"))?;
     }
-    Ok(())
+    std::fs::rename(&staged, path).map_err(|_| {
+        let _ = std::fs::remove_file(&staged);
+        fail("replace")
+    })
 }
 
 #[derive(Debug)]
@@ -495,9 +595,12 @@ impl ProcessEngineRuntime {
         Command::env_remove(&mut command, "OPENCODE_SERVER_USERNAME");
         if let Some(app_data) = &self.private_state {
             let tree = PrivateEngineTree::prepare(app_data)?;
-            Command::env(&mut command, "XDG_DATA_HOME", &tree.data);
-            Command::env(&mut command, "XDG_STATE_HOME", &tree.state);
-            Command::env(&mut command, "XDG_CONFIG_HOME", &tree.config);
+            for name in PrivateEngineTree::INHERITED_CONFIG_ENV {
+                Command::env_remove(&mut command, name);
+            }
+            for (name, value) in tree.isolated_env() {
+                Command::env(&mut command, name, value);
+            }
             command.current_dir(&tree.setup_workspace);
         }
         if let Some(auth_content) = auth_content {
