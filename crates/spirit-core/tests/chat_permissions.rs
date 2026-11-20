@@ -497,6 +497,28 @@ async fn a_pending_permission_is_surfaced_and_allow_once_resolves_the_turn() {
 }
 
 #[tokio::test]
+async fn an_idless_permission_event_reconciles_with_the_permission_list() {
+    let fake = Fake::new(|state| state.turn_with_permission = true);
+    let provider = provider(fake.port);
+    start(&provider).await;
+    let mut events = provider.subscribe();
+    provider.send(&ChatSessionId::Setup, "go").await.unwrap();
+    fake.add_permission("per_4", "ses_1", "bash", &["git status"]);
+    // The pinned event may omit the request id; the prompt still must appear.
+    fake.push_frame(json!({"type": "permission.asked", "properties": {
+        "sessionID": "ses_1", "permission": "bash"}}));
+
+    let view = next_view(&mut events, |view| view.pending_permissions.is_some()).await;
+    let pending = view.pending_permissions.clone().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, "per_4");
+    assert_eq!(pending[0].permission, "bash");
+    assert_eq!(pending[0].patterns, vec!["git status".to_owned()]);
+    // Unblock the fake turn so it can shut down cleanly.
+    lock(&fake.state).answered = Some("once".to_owned());
+}
+
+#[tokio::test]
 async fn get_permission_discovers_a_request_the_stream_missed_and_reject_replies() {
     let fake = Fake::new(|state| state.turn_with_permission = true);
     let provider = provider(fake.port);

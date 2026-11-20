@@ -1570,6 +1570,9 @@ impl Inner {
                 self.fail_session(&session, map_provider_error(status))
                     .await;
             }
+            Mapped::PermissionSync => {
+                self.clone().sync_permissions(&session).await;
+            }
             Mapped::ToolActivity => {
                 let queue = {
                     let mut state = self.state.lock().await;

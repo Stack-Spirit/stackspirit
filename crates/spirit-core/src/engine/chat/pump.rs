@@ -352,6 +352,8 @@ pub enum Mapped {
     },
     /// A tool part changed; the transport reloads the native log to render the rows.
     ToolActivity,
+    /// A permission event carried no id, so the transport reconciles with `GET /permission`.
+    PermissionSync,
     /// OpenCode is waiting on a permission. The owner answers it; nothing auto-approves.
     PermissionAsked(ChatPermissionPrompt),
     /// A permission request was answered (here or in another OpenCode client).
@@ -471,11 +473,13 @@ impl SseEventMapper {
                         .collect(),
                     created_at: now,
                 }),
-                None => Mapped::ToolActivity,
+                // The pinned event may omit the request id. The prompt is still real, so
+                // reconcile with the permission list instead of ignoring it.
+                None => Mapped::PermissionSync,
             },
             EngineEvent::PermissionReplied { id, .. } => match id {
                 Some(id) => Mapped::PermissionReplied { id: id.clone() },
-                None => Mapped::ToolActivity,
+                None => Mapped::PermissionSync,
             },
             EngineEvent::ServerConnected
             | EngineEvent::ServerHeartbeat
@@ -697,6 +701,30 @@ mod tests {
                 patterns: vec!["/tmp/x".to_owned()],
                 created_at: Timestamp::epoch(),
             })
+        );
+        assert_eq!(
+            mapper.map(
+                &EngineEvent::PermissionAsked {
+                    session_id: Some("ses_1".to_owned()),
+                    id: None,
+                    permission: "write".to_owned(),
+                    patterns: Vec::new(),
+                },
+                Timestamp::epoch()
+            ),
+            Mapped::PermissionSync,
+            "an id-less request must reconcile with GET /permission"
+        );
+        assert_eq!(
+            mapper.map(
+                &EngineEvent::PermissionReplied {
+                    session_id: Some("ses_1".to_owned()),
+                    id: None,
+                },
+                Timestamp::epoch()
+            ),
+            Mapped::PermissionSync,
+            "an id-less reply must reconcile with GET /permission"
         );
         assert_eq!(
             mapper.map(

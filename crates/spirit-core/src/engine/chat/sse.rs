@@ -356,7 +356,10 @@ fn permission_asked(properties: &Value) -> EngineEvent {
         .unwrap_or_default();
     EngineEvent::PermissionAsked {
         session_id: session_id(properties).map(str::to_owned),
-        id: text(properties, "id").map(str::to_owned),
+        id: text(properties, "requestID")
+            .or_else(|| text(properties, "permissionID"))
+            .or_else(|| text(properties, "id"))
+            .map(str::to_owned),
         permission: text(properties, "permission")
             .or_else(|| text(properties, "type"))
             .unwrap_or("permission")
