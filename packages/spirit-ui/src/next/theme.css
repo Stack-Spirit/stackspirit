@@ -65,6 +65,11 @@
   --nx-radius-sm: 8px;
   --nx-radius: 10px;
   --nx-radius-lg: 16px;
+  --nx-radius-composer: 24px;
+  /* Input focus is a calm border step, never a loud green halo. The caret
+     keeps the Meadow green just like the reference's restrained input. */
+  --nx-caret: var(--nx-green-strong);
+  --nx-focus-border: color-mix(in srgb, var(--nx-green) 36%, var(--nx-line-strong));
   --nx-head-h: 56px;
 
   /* Classic token remap */
@@ -118,6 +123,7 @@
     --nx-warn-soft: #2e2414;
     --nx-danger: #f08a80;
     --nx-danger-soft: #34191a;
+    --nx-caret: var(--nx-green);
     --nx-shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px rgb(0 0 0 / 0.28);
     --nx-shadow-pop: 0 2px 8px rgb(0 0 0 / 0.4), 0 16px 40px rgb(0 0 0 / 0.45);
     --scrim: rgb(0 0 0 / 0.55);
@@ -151,6 +157,7 @@
   --nx-warn-soft: #2e2414;
   --nx-danger: #f08a80;
   --nx-danger-soft: #34191a;
+  --nx-caret: var(--nx-green);
   --nx-shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px rgb(0 0 0 / 0.28);
   --nx-shadow-pop: 0 2px 8px rgb(0 0 0 / 0.4), 0 16px 40px rgb(0 0 0 / 0.45);
   --scrim: rgb(0 0 0 / 0.55);
@@ -160,6 +167,11 @@
   background: var(--nx-page);
   color: var(--nx-text);
   font-size: 14px;
+}
+
+/* Every Meadow text field shares the restrained Meadow caret. */
+:root[data-ui="next"] :is(input, textarea, [contenteditable="true"]) {
+  caret-color: var(--nx-caret);
 }
 
 /* ======================================================================
@@ -1360,20 +1372,27 @@ button.nx-node:focus-visible {
   flex: none;
   width: 100%;
   margin: 0;
-  border: 1px solid var(--nx-line-strong);
-  border-radius: var(--nx-radius-lg);
+  /* The stroke is an elevation hairline, not a border: focus can step the
+     hairline's tone without a second rectangle appearing around the card. */
+  border: 1px solid transparent;
+  border-radius: var(--nx-radius-composer);
   background: var(--nx-panel);
-  box-shadow: var(--nx-shadow);
+  box-shadow: 0 0 0 1px var(--nx-line-strong), var(--nx-shadow);
+  transition: box-shadow 120ms ease;
 }
 
+/* Focus is a neutral elevation step. The card keeps its calm hairline and
+   never flips to a bright Meadow border when the caret lands. */
 .nx-composer:focus-within {
-  border-color: var(--nx-green);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--nx-text) 18%, var(--nx-line-strong)),
+    var(--nx-shadow);
 }
 
 .nx-composer textarea {
   display: block;
   width: 100%;
-  min-height: 24px;
+  min-height: 36px;
   max-height: 200px;
   padding: 8px 14px 0;
   border: 0;
@@ -1384,6 +1403,19 @@ button.nx-node:focus-visible {
   line-height: 24px;
   resize: none;
   outline: none;
+  caret-color: var(--nx-caret);
+}
+
+/* The hero keeps the reference's two-line floor; docked it collapses to one. */
+.nx-hero:not(.nx-hero--docked) .nx-composer textarea {
+  min-height: 56px;
+}
+
+/* Click focus must never paint WebKit's inner ring inside the card. */
+.nx-composer textarea:focus,
+.nx-composer textarea:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 .nx-composer textarea::placeholder {
@@ -1394,9 +1426,9 @@ button.nx-node:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 40px;
+  min-height: 44px;
   margin-top: 12px;
-  padding: 0 8px 8px;
+  padding: 4px 8px 8px;
 }
 
 .nx-composer__left {
@@ -1423,8 +1455,8 @@ button.nx-node:focus-visible {
   align-items: center;
   gap: 5px;
   max-width: 100%;
-  height: 24px;
-  padding: 0 7px;
+  height: 28px;
+  padding: 0 9px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -1462,7 +1494,7 @@ button.nx-composer__start:hover {
 }
 
 .nx-model-picker {
-  max-width: 62%;
+  max-width: 66%;
   min-width: 0;
 }
 
@@ -1471,8 +1503,8 @@ button.nx-composer__start:hover {
   align-items: center;
   gap: 5px;
   max-width: 100%;
-  height: 24px;
-  padding: 0 7px;
+  height: 28px;
+  padding: 0 9px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -1482,6 +1514,7 @@ button.nx-composer__start:hover {
   font-weight: 500;
   line-height: 20px;
   cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease;
 }
 
 .nx-model-picker__trigger:hover:not(:disabled),
@@ -1532,6 +1565,7 @@ button.nx-composer__start:hover {
   background: var(--nx-btn-bg);
   color: var(--nx-btn-ink);
   cursor: pointer;
+  transition: background-color 100ms ease, filter 100ms ease;
 }
 
 .nx-send:hover:not(:disabled) {
@@ -1593,17 +1627,19 @@ button.nx-composer__start:hover {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 22px;
-  padding: 0 6px;
+  height: 20px;
+  padding: 0 8px;
   border: 0;
-  border-radius: 999px;
+  border-radius: 8px;
   background: transparent;
   color: var(--nx-muted);
   font-family: inherit;
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease;
 }
 
 .nx-context-meter:hover,
@@ -1622,19 +1658,19 @@ button.nx-composer__start:hover {
 
 .nx-context__pop {
   position: absolute;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 8px);
   left: 0;
   z-index: 40;
-  min-width: 250px;
-  padding: 10px 12px;
+  width: min(264px, calc(100vw - 24px));
+  padding: 12px;
   border: 1px solid var(--nx-line);
-  border-radius: 12px;
+  border-radius: var(--nx-radius-lg);
   background: var(--nx-panel);
   box-shadow: var(--nx-shadow-pop);
 }
 
 .nx-context__title {
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   color: var(--nx-muted);
   font-size: 12px;
   font-weight: 600;
@@ -1650,7 +1686,9 @@ button.nx-composer__start:hover {
   display: flex;
   justify-content: space-between;
   gap: 16px;
+  padding: 2px 0;
   font-size: 12px;
+  line-height: 18px;
 }
 
 .nx-context__rows dt {
@@ -1683,6 +1721,7 @@ button.nx-composer__start:hover {
   color: var(--nx-muted);
   font-size: 11px;
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -2107,17 +2146,21 @@ button.nx-composer__start:hover {
   font: inherit;
   font-size: 14px;
   font-weight: 400;
+  caret-color: var(--nx-caret);
+  transition: border-color 100ms ease;
 }
 
 .nx-field select {
   cursor: pointer;
 }
 
+/* Restrained input focus: a single calm border step, no halo and no second
+   ring. The Meadow caret carries the only green in the field. */
 .nx-field input:focus,
 .nx-field select:focus {
   outline: none;
-  border-color: var(--nx-green);
-  box-shadow: 0 0 0 3px var(--nx-accent-soft);
+  border-color: var(--nx-focus-border);
+  box-shadow: none;
 }
 
 .nx-field input[aria-invalid="true"] {
@@ -3090,12 +3133,20 @@ button.nx-node:hover {
   color: var(--nx-text);
   font: inherit;
   font-size: 13px;
+  caret-color: var(--nx-caret);
+  transition: border-color 100ms ease;
 }
 
+.nx-search::placeholder {
+  color: var(--nx-faint);
+}
+
+/* Same calm border step as the dialog fields; the typed value keeps the only
+   Meadow green through the caret. */
 .nx-search:focus {
   outline: none;
-  border-color: var(--nx-green);
-  box-shadow: 0 0 0 3px var(--nx-accent-soft);
+  border-color: var(--nx-focus-border);
+  box-shadow: none;
 }
 
 .nx-rows__list {

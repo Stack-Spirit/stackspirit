@@ -47,6 +47,8 @@ export interface ComposerBarProps {
   /** A turn is being accepted; the primary button shows a spinner. */
   sending?: boolean;
   stopped: boolean;
+  /** True while the card sits in the centered hero; false when docked. */
+  hero?: boolean;
   usage?: ChatUsageView | null;
   /** May return the acceptance promise so the primary button can show a spinner. */
   onSend: (text: string) => void | Promise<void>;
@@ -78,6 +80,7 @@ export function ComposerBar({
   streaming,
   sending = false,
   stopped,
+  hero = false,
   usage,
   onSend,
   onStop,
@@ -100,7 +103,9 @@ export function ComposerBar({
     element.style.height = "auto";
     const next = Math.min(Math.max(element.scrollHeight, 24), 200);
     element.style.height = `${next}px`;
-  }, [text]);
+    // `hero` is a dependency so the two-line hero floor collapses back to the
+    // one-line docked height when the first turn moves the card down.
+  }, [text, hero]);
 
   // A disabled control cannot keep DOM focus. When a turn starts the field is
   // disabled, so the browser moves focus to BODY; return it once the session is

@@ -72,11 +72,16 @@ test("the Message field keeps focus on the hero dock and after a slow turn", asy
   await page.goto(url("empty"));
   await page.getByRole("button", { name: /Set up with AI/ }).click();
   const message = page.getByRole("textbox", { name: "Message" });
+  // The centered hero keeps a comfortable two-line floor; docked it collapses.
+  expect(
+    await message.evaluate((el) => el.getBoundingClientRect().height),
+  ).toBeGreaterThanOrEqual(56);
   await message.fill("keep my focus");
   await page.keyboard.press("Enter");
   await expect(page.getByText(/Preview reply\./)).toBeVisible();
   await expect(page.locator(".nx-hero")).toHaveClass(/nx-hero--docked/);
   await expect(message).toBeFocused();
+  expect(await message.evaluate((el) => el.getBoundingClientRect().height)).toBe(36);
 
   await page.goto(url("chat-slow"));
   await page.getByTestId("sidebar-connect").click();
@@ -91,6 +96,130 @@ test("the Message field keeps focus on the hero dock and after a slow turn", asy
   await page.getByRole("button", { name: "Start" }).click();
   await expect(page.getByTestId("session-state")).toContainText("Ready");
   await expect(slow).toBeFocused();
+});
+
+test("text fields keep a calm focus while buttons keep the keyboard ring", async ({ page }) => {
+  const BRAND_GREEN = "rgb(67, 168, 90)";
+  const GREEN_STRONG = "rgb(46, 127, 72)";
+
+  for (const theme of ["light", "dark"] as const) {
+    await page.goto(url("empty", theme));
+    await page.getByRole("button", { name: /Set up with AI/ }).click();
+    const message = page.getByRole("textbox", { name: "Message" });
+    await message.click();
+
+    const textarea = await message.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return {
+        boxShadow: style.boxShadow,
+        outline: style.outlineStyle,
+        caret: style.caretColor,
+      };
+    });
+    // A click in WebKit is :focus-visible; the field must not paint the global
+    // double ring inside the card.
+    expect(textarea.boxShadow).toBe("none");
+    expect(textarea.outline).toBe("none");
+    expect(textarea.caret).toBe(theme === "light" ? GREEN_STRONG : BRAND_GREEN);
+
+    const card = await page.locator(".nx-composer").evaluate((el) => {
+      const style = getComputedStyle(el);
+      return {
+        shadow: style.boxShadow,
+        border: style.borderTopColor,
+        radius: style.borderRadius,
+      };
+    });
+    // The card is one neutral elevation hairline plus a soft shadow; focus
+    // steps the hairline's tone, never a bright Meadow border.
+    expect(card.radius).toBe("24px");
+    expect(card.border).toBe("rgba(0, 0, 0, 0)");
+    expect(card.shadow).toContain("0px 0px 0px 1px");
+    expect(card.shadow).not.toContain("67, 168, 90");
+    expect(card.shadow).not.toContain("46, 127, 72");
+
+    // Reference geometry: 28px borderless model pill, 32px circular send, and
+    // a 22px dock row that never shifts when usage lands.
+    expect(
+      await page.getByTestId("composer-model").evaluate((el) => el.getBoundingClientRect().height),
+    ).toBe(28);
+    expect(
+      await page.getByRole("button", { name: "Send" }).evaluate(
+        (el) => el.getBoundingClientRect().height,
+      ),
+    ).toBe(32);
+    expect(
+      await page.getByTestId("composer-dock").evaluate((el) => el.getBoundingClientRect().height),
+    ).toBe(22);
+
+    // Keyboard focus still gets the crisp ring on controls.
+    await page.keyboard.press("Tab");
+    const ring = await page.evaluate(() => {
+      const el = document.activeElement;
+      return {
+        tag: el?.tagName ?? "",
+        shadow: el ? getComputedStyle(el).boxShadow : "",
+      };
+    });
+    expect(ring.tag).toBe("BUTTON");
+    expect(ring.shadow).toContain("0px 0px 0px 4px");
+
+    // The secure-card fields use the same calm border step and green caret.
+    await page.getByTestId("composer-connect-server").click();
+    const address = page.getByLabel("Server address");
+    await address.click();
+    const field = await address.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return {
+        boxShadow: style.boxShadow,
+        border: style.borderTopColor,
+        caret: style.caretColor,
+      };
+    });
+    expect(field.boxShadow).toBe("none");
+    expect(field.border).not.toContain("67, 168, 90");
+    expect(field.border).not.toContain("46, 127, 72");
+    expect(field.caret).toBe(theme === "light" ? GREEN_STRONG : BRAND_GREEN);
+
+    // The jobs filter is a text field too and follows the same treatment.
+    await page.goto(url("busy", theme));
+    await page.getByTestId("sidebar-connect").click();
+    const sidebar = page.getByRole("navigation", { name: "Sessions" });
+    await sidebar.getByRole("button", { name: /^vowp/ }).click();
+    await sidebar.getByRole("button", { name: /^Workers/ }).click();
+    const search = page.locator(".nx-search");
+    await search.click();
+    const filter = await search.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return {
+        boxShadow: style.boxShadow,
+        border: style.borderColor,
+        caret: style.caretColor,
+      };
+    });
+    expect(filter.boxShadow).toBe("none");
+    expect(filter.border).not.toContain("67, 168, 90");
+    expect(filter.border).not.toContain("46, 127, 72");
+    expect(filter.caret).toBe(theme === "light" ? GREEN_STRONG : BRAND_GREEN);
+
+    // The classic host wizard shares `.input`; the same calm rule applies.
+    await page.goto(url("empty", theme));
+    await page.getByRole("button", { name: /Add server/ }).click();
+    const label = page.getByLabel(/^Label/);
+    await label.click();
+    const wizard = await label.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return {
+        boxShadow: style.boxShadow,
+        border: style.borderTopColor,
+        caret: style.caretColor,
+      };
+    });
+    expect(wizard.boxShadow).toBe("none");
+    expect(wizard.border).not.toContain("67, 168, 90");
+    expect(wizard.border).not.toContain("46, 127, 72");
+    expect(wizard.caret).toBe(theme === "light" ? GREEN_STRONG : BRAND_GREEN);
+  }
 });
 
 test("empty hero, inline model picker and context meter meet WCAG 2.2 AA", async ({

@@ -330,6 +330,7 @@ export function ChatView({
             streaming={state === "streaming"}
             sending={state === "connecting"}
             stopped={state === "stopped" || state === "idle"}
+            hero={hero}
             usage={view?.usage}
             onSend={(text) => send(session, text)}
             onStop={() => void stop(session)}

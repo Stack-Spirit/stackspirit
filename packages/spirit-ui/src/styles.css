@@ -149,6 +149,18 @@ pre {
   box-shadow: var(--focus-ring);
 }
 
+/* Text entry owns its focus paint. WebKit treats a pointer click in a text
+   field as :focus-visible, so the global ring would otherwise double up
+   inside the composer card and halo every form field. Buttons, links, tabs,
+   menu items and checkboxes keep the crisp ring above. */
+:where(
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+  textarea,
+  select
+):focus-visible {
+  box-shadow: none;
+}
+
 /* ---------- buttons ---------- */
 
 .btn {
@@ -600,11 +612,19 @@ pre {
   background: var(--bg);
   color: var(--text);
   font-size: var(--text-sm);
+  transition: border-color 100ms ease;
 }
 
+/* A calm border step instead of the global keyboard ring: a text field
+   always matches :focus-visible when clicked, and the halo read as a second
+   outline around the control. Keyboard users still get the ring on buttons,
+   links and menu items. */
 .input:focus,
 .select:focus {
-  border-color: var(--accent);
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border-control));
+  box-shadow: none;
+  caret-color: var(--accent-strong);
 }
 
 .input:disabled,
