@@ -25,6 +25,21 @@ with fakes did not:
 4. **Retention.** Closed-session and run-output retention are hard-coded (30 and 14 days) with no way
    to delete older material on demand.
 
+## Slice status
+
+Status of each slice in the tree. The proxy is **not** done.
+
+| Slice | Status |
+|---|---|
+| 1. Honest versioning | done (`0.5.1-dev`) |
+| 2. Native session id | done |
+| 3. Session ownership, Slice 1 (foundation) | done |
+| 3. Session ownership, Slice 2a (endpoint `owner`/`access` and `orchestrator attach`) | done |
+| 3. Session ownership, Slice 2 loopback engine proxy | **deferred** (owner decision, 2026-11-20); ownership is recorded and cooperative |
+| 3. Session ownership, Slice 3 (job ownership lifetime and takeover) | done |
+| 3. Session ownership, Slice 4 (operator and design documentation) | this documentation job |
+| 4. On-demand retention (`gc --older-than`) | done |
+
 ## Slices
 
 ### 1. Honest versioning

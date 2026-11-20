@@ -1426,7 +1426,7 @@ saturating sums across Home and those nodes. A single-machine home reports zero 
 pub fn new_lease_token() -> String;                       // two ULIDs, 160 random bits
 
 #[serde(rename_all = "snake_case")]
-pub enum SurfaceKind { Chat, Opencode, ClaudeCode, Mcp, Mirror, Api, Agent }
+pub enum SurfaceKind { Chat, Opencode, ClaudeCode, Mcp, Mirror, Api, Agent, DesktopUi }  // v0.5.1: DesktopUi (wire `desktop_ui`, store `desktop-ui`)
 
 pub struct Surface {
     pub id: SurfaceId, pub kind: SurfaceKind, pub node: NodeName, pub holder: String,
@@ -1454,6 +1454,9 @@ pub struct Lease {
     pub token: String,  // lowercase hex SHA-256; the plaintext exists only in the grant
     pub acquired_at: Timestamp, pub heartbeat_at: Timestamp,
 }
+// `Lease` is the stored row's shape and did not change in v0.5.1. The ownership mode, epoch and
+// expiry live in the same `leases` row (`owner_mode`, `owner_epoch`, `expires_at`) and are read back
+// as `SessionOwner`; the epoch is assigned by the store, never by a caller.
 pub struct SurfaceRef {
     pub surface_id: SurfaceId, pub kind: SurfaceKind, pub holder: String,
     pub node: NodeName, pub acquired_at: Timestamp, pub heartbeat_at: Timestamp,
@@ -1462,7 +1465,32 @@ pub struct LeaseStatus {
     pub held: bool, pub holder: Option<String>, pub kind: Option<SurfaceKind>,
     pub node: Option<NodeName>, pub acquired_at: Option<Timestamp>,
     pub heartbeat_at: Option<Timestamp>, pub token: Option<String>,  // only on --acquire
+    // v0.5.1, all `None` when no lease is held:
+    pub mode: Option<OwnershipMode>, pub state: Option<OwnershipState>,
+    pub epoch: Option<u64>, pub expires_at: Option<Timestamp>,
+    pub label: Option<String>, pub activity: Option<SurfaceActivity>,
 }
+
+// v0.5.1 session ownership. Design: v0.5.1/session-ownership.md.
+#[serde(rename_all = "snake_case")]
+pub enum OwnershipMode { Interactive, Job }          // default Interactive
+#[serde(rename_all = "snake_case")]
+pub enum OwnershipState { Active, Stale, Expired }   // derived at read time
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceActivity { Idle, Running, Waiting }  // default Idle
+
+/// Read projection of the `leases` row; never carries a token or password.
+pub struct SessionOwner {
+    pub session_id: SessionId, pub surface_id: Option<SurfaceId>,  // None for a job with no surface
+    pub kind: SurfaceKind, pub label: Option<String>, pub holder: String, pub node: NodeName,
+    pub mode: OwnershipMode, pub state: OwnershipState, pub activity: SurfaceActivity,
+    pub epoch: u64, pub acquired_at: Timestamp, pub heartbeat_at: Timestamp,
+    pub expires_at: Option<Timestamp>,               // set for a job owner
+}
+// `interactive`: Active while the heartbeat is younger than 60 s, else Stale.
+// `job`: Active while `expires_at` is in the future, else Expired.
+// `SessionSurfaceCard.owner: Option<SessionOwner>` is the authoritative read model;
+// `SessionSurfaceCard.active_surface` stays `None` in this release.
 pub struct TakeoverReport {
     pub previous: Option<String>, pub drained: bool, pub capsule_id: Option<CapsuleId>,
 }
@@ -2181,8 +2209,30 @@ pub struct OrchestratorEndpoint {
     pub url: Option<String>,             // loopback http://127.0.0.1:<port> only
     pub native_session_id: Option<String>,
     pub auth: Option<OrchestratorAuth>,
+    // v0.5.1 (both `#[serde(default)]`, so an older document still parses):
+    pub owner: Option<SessionOwner>,     // read from the home, also for a node-hosted record
+    pub access: EndpointAccess,          // default ReadOnly
+}
+
+#[serde(rename_all = "snake_case")]
+pub enum EndpointAccess { Owner, ReadOnly }
+
+/// Output of `vowp orchestrator attach`; printed once.
+pub struct OrchestratorAttach {
+    pub surface_id: SurfaceId,           // the DesktopUi surface the attach created
+    pub token: String,                   // one-time lease token; a secret, `[REDACTED]` in Debug
+    pub owner: SessionOwner,
+    pub endpoint: OrchestratorEndpoint,  // access: Owner
+    pub expires_at: Timestamp,           // heartbeat_at + 60 s if the attach process stops
 }
 ```
+
+`access` is `owner` only when `vowp orchestrator endpoint <name> --surface <id>` names the live
+owner's surface; every other caller, including one that names no surface, gets `read_only`.
+`vowp agent orchestrator endpoint` reports `read_only` with no `owner`. Ownership is recorded and
+cooperative: `access` tells a well-behaved client whether to write, and nothing here stops a UI that
+calls the app's HTTP API directly with the engine password. The loopback engine proxy that would
+enforce it is planned and deferred; see [`v0.5.1/session-ownership.md`](v0.5.1/session-ownership.md).
 
 `OrchestratorAuth` has a custom `Debug` that prints `password: [REDACTED]`. The password is
 present only in the explicit local endpoint document; a node-hosted or stopped orchestrator

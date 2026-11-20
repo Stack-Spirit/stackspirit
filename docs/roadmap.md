@@ -207,6 +207,15 @@ remains the latest release. The accepted scope and the per-slice job ids are in
 | 5 | Encrypted-at-rest vault mode with an age keyfile, `secret set --stdin` over SSH pipes, `secret ls --json` mode and `upgrade --encrypted`; `systemd-creds` is not implemented. | `v5-5a-vault-encrypted` | [`design/v0.5/vault-encrypted.md`](design/v0.5/vault-encrypted.md) |
 | 6 | Per-host admission against home or an online worker node, plus additive `cluster` totals in `capacity report`, `fleet status` and the snapshot. | `v5-6b-cluster-capacity` | [`concepts/capacity.md`](concepts/capacity.md#cluster-capacity) |
 
+### v0.5.1 — session ownership status (in the tree, not released)
+
+Session ownership is recorded and visible: `owner` on the session card and endpoint document, an
+`owners:` block in `vowp fleet status`, `vowp orchestrator attach` and `endpoint --surface`, and job
+ownership with an expiry and takeover. The **loopback engine proxy is deferred** and node-side
+enforcement does not exist, so ownership is cooperative for a UI that calls the app's HTTP API
+directly. No version, tag or date is promised. See [`design/v0.5.1/scope.md`](design/v0.5.1/scope.md)
+and [`concepts/home-and-surfaces.md`](concepts/home-and-surfaces.md#who-owns-a-session).
+
 ## Open follow-ups
 
 These follow-ups are drawn from the current code and the 0.3.0 known limitations. The v0.5 rows

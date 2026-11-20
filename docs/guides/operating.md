@@ -369,6 +369,58 @@ Control and `chat` return null endpoint values. A node-hosted record on the home
 run the agent command on that machine to get its local auth. These commands never open SSH, a
 tunnel, a browser or the node's files.
 
+### Who owns the orchestrator's session
+
+The endpoint document also carries `owner` (the live owner of the session, or `null`) and `access`.
+`access` is `read_only` unless you pass the live owner's surface id:
+
+```sh
+vowp orchestrator endpoint main --surface <surface-id>   # access: owner only for the live owner
+```
+
+A UI that must write attaches first. `attach` creates a `desktop-ui` surface, prints a one-time grant
+(surface id, lease token, `access`, `url` and expiry) and then **holds the lease in the foreground**,
+heartbeating until its stdin reaches end-of-file, when it releases the lease:
+
+```sh
+vowp orchestrator attach main --holder opencode-desktop --label "StackSpirit · macbook"
+vowp orchestrator attach main --holder opencode-desktop --takeover --json
+```
+
+The UI process must start `attach` as a child and keep it alive while the UI writes; closing its stdin
+releases the lease. No detached keeper exists in this release, so a UI that exits without a live
+`attach` simply has no lease. Treat the grant like a secret: the token is printed once, on stdout, and
+the hold notice goes to stderr so `--json` stays parseable. `attach` works only on a home-hosted
+orchestrator with a live app endpoint: a node-hosted orchestrator is refused, a stopped host asks you
+to run `vowp orchestrator resume <name>` first, and `--node` is not an SSH redirect.
+
+If another surface owns the session (the orchestrator's own app host normally does while it runs),
+`attach` refuses unless you pass `--takeover`, or unless that owner is stale (no heartbeat for 60
+seconds). A takeover replaces the lease, increments the owner
+epoch, writes a capsule and tells the old surface to stop; the old surface keeps following read-only.
+`vowp chat` asks before taking a live lease (`/takeover`, or `--takeover` at start) and `/follow`
+returns to read-only. A UI that only observes does not attach; it asks `endpoint` for `owner` and
+`access: read_only` and uses read routes only.
+
+To see who owns a session:
+
+```sh
+vowp fleet status          # an owners: section, one line per owned recent session
+vowp session lease <id>    # holder, kind, node, mode, state, activity, epoch, expiry
+vowp session show <id>     # an owner: block, or owner: none
+```
+
+Each `fleet status` line shows the session id, title, label, kind and mode, `holder@node`, state,
+activity and either `heartbeat <age>` (an interactive owner) or `expires in <span>` (a job). Nothing in
+these views prints a token or password. A running job is owned in `job` mode for the life of the run
+(renewed by run activity, not by the 60-second window); taking it over from a person's surface fences
+the run, writes a capsule and leaves the job `ready`.
+
+**Limits.** Ownership is recorded and cooperative: a UI that calls the app's HTTP API directly with
+the engine password is not stopped by it. The loopback engine proxy that would enforce it is **planned
+and deferred**, and there is no node-side proxy, so `vowp agent orchestrator endpoint` reports
+`read_only` with no home owner view. See [home and surfaces](../concepts/home-and-surfaces.md#who-owns-a-session).
+
 ## Migration and upgrades
 
 A v0.1 home has one `vowp.db` with project tables. v0.2 splits it into `vowp.db` plus

@@ -337,6 +337,15 @@ What v0.4 adds:
 The lease is per session, not per run. A **run fence** is separate: it keeps late frames from a
 disconnected run harmless even if the session lease has not yet moved.
 
+> **Superseded in part by v0.5.1.** The v0.5.1 ownership model extends this lease row with a mode
+> (`interactive` or `job`), an owner epoch and an expiry, so the 60-second stale window above now
+> applies to interactive owners only. A job run holds a `job`-mode owner with an expiry renewed by run
+> activity; an expired owner fences the run, and an explicit interactive takeover of a running job
+> fences it and leaves the job `ready`. A session with no owner refuses an interactive write.
+> The text above stays as the v0.4 record; the current rules are in
+> [`../v0.5.1/session-ownership.md`](../v0.5.1/session-ownership.md) and
+> [home and surfaces](../../concepts/home-and-surfaces.md#who-owns-a-session).
+
 The local app does not need the lease token in its configuration. The agent holds it; MCP tool
 calls are authorized by the agent's connection, the surface token and the home's lease check.
 
