@@ -242,7 +242,7 @@ foreground, heartbeating until stdin closes, then releases it. A UI that needs t
 that process alive as its child; there is **no detached keeper for an attached UI in this release**.
 vowp `orchestrator endpoint <name> [--surface <id>]` reports `owner` and `access`; `access` is
 `read_only` unless the caller names the live owner's surface id. The engine credential is still the
-app's own loopback password, shown only by the explicit local endpoint command with `--json`; the
+app's own loopback password, shown only by the explicit local endpoint command or attach grant with `--json`; the
 owner read model and snapshots never carry it.
 
 **Job ownership.** A worker run holds ownership in `job` mode with an expiry that run activity renews;
