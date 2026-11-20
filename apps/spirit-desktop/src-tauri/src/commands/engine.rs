@@ -91,10 +91,16 @@ pub async fn store_key(
         ));
     }
     let secret = SecretString::new(secret);
-    state
-        .engine_keychain()
-        .set(&provider, &secret)
-        .map_err(keychain_error)?;
+
+    // The core stores the key in the keychain, restarts a live bundled sidecar with
+    // its ephemeral auth document, and republishes the refreshed `/config/providers`
+    // model list. An external harness keeps its own login.
+    let status = {
+        let mut core = state.core().await;
+        core.connect_provider(&provider, &secret)
+            .await
+            .map_err(keychain_error)?
+    };
 
     // A saved BYOK key completes the local setup path even though no included model
     // is selected. Persist it so a relaunch does not show the first-run flow again.
@@ -102,28 +108,8 @@ pub async fn store_key(
     preferences.onboarding_complete = true;
     state.save_engine_preferences(&preferences)?;
 
-    // The sidecar reads stored keys at spawn time. Restart a live bundled engine so the
-    // new key is immediately usable; an external harness keeps its own login.
-    {
-        let mut core = state.core().await;
-        let status = core.engine_status();
-        if matches!(status.choice, EngineChoice::Bundled)
-            && matches!(
-                status.state,
-                EngineState::Ready | EngineState::Degraded { .. } | EngineState::Failed { .. }
-            )
-        {
-            core.stop_engine().await;
-            core.start_engine().await;
-        }
-    }
     state.apply_saved_model().await;
-
-    Ok(KeyStatus {
-        provider,
-        state: "saved".to_owned(),
-        last_checked_at: Some(Timestamp::now()),
-    })
+    Ok(status)
 }
 
 #[tauri::command]
@@ -163,19 +149,20 @@ pub async fn delete_key(state: State<'_, AppState>, provider: String) -> Command
             "choose a provider before deleting a key",
         ));
     }
-    match state.engine_keychain().delete(&provider) {
-        Ok(()) => Ok(KeyStatus {
-            provider,
-            state: "missing".to_owned(),
-            last_checked_at: Some(Timestamp::now()),
-        }),
-        Err(error) if error.class == KeychainErrorClass::NotFound => Ok(KeyStatus {
-            provider,
-            state: "missing".to_owned(),
-            last_checked_at: Some(Timestamp::now()),
-        }),
-        Err(error) => Err(keychain_error(error)),
-    }
+    let status = {
+        let mut core = state.core().await;
+        match core.disconnect_provider(&provider).await {
+            Ok(status) => status,
+            Err(error) if error.class == KeychainErrorClass::NotFound => KeyStatus {
+                provider,
+                state: "missing".to_owned(),
+                last_checked_at: Some(Timestamp::now()),
+            },
+            Err(error) => return Err(keychain_error(error)),
+        }
+    };
+    state.apply_saved_model().await;
+    Ok(status)
 }
 
 #[tauri::command]

@@ -1553,6 +1553,33 @@ button.nx-composer__start:hover {
   background: var(--nx-raised);
 }
 
+.nx-model-menu__section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+}
+
+.nx-model-menu__heading {
+  padding: 6px 9px 3px;
+  color: var(--nx-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.nx-model-menu__connect {
+  margin-top: 2px;
+  border-top: 1px solid var(--nx-line);
+  border-radius: 0 0 var(--nx-radius-sm) var(--nx-radius-sm);
+  color: var(--nx-accent);
+  font-weight: 600;
+}
+
+.nx-model-menu__connect .nx-menu__icon {
+  color: var(--nx-accent);
+}
+
 .nx-send {
   display: grid;
   flex: none;
@@ -2970,6 +2997,153 @@ button.nx-composer__start:hover {
   display: block;
   color: var(--nx-muted);
   font-size: 12px;
+}
+
+/* Settings → Engine & Models: OpenCode featured, then connected and searchable
+   provider rows. Rows use the same calm border step as the rest of Meadow. */
+.nx-providers {
+  gap: 16px;
+}
+
+.nx-provider {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius);
+  background: var(--nx-raised);
+}
+
+.nx-provider--featured {
+  border-color: color-mix(in srgb, var(--nx-green) 34%, var(--nx-line));
+  background: var(--nx-accent-soft);
+}
+
+.nx-provider__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.nx-provider__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.nx-provider__title h3,
+.nx-provider__section h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.nx-provider__meta {
+  color: var(--nx-muted);
+  font-size: 12px;
+}
+
+.nx-provider__copy,
+.nx-provider__empty {
+  margin: 0;
+  color: var(--nx-muted);
+  font-size: 13px;
+}
+
+.nx-provider__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.nx-provider__current {
+  color: var(--nx-muted);
+  font-size: 12px;
+}
+
+.nx-provider__section {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--nx-line);
+}
+
+.nx-provider__list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nx-provider-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius-sm);
+  background: var(--nx-panel);
+}
+
+.nx-provider-row__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.nx-provider-row__name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.nx-provider-row__meta {
+  color: var(--nx-muted);
+  font-size: 12px;
+}
+
+.nx-provider-row__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.nx-provider-form {
+  display: grid;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--nx-line-strong);
+}
+
+.nx-provider-form__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.nx-provider__notice,
+.nx-provider__error {
+  margin: 0;
+  font-size: 13px;
+}
+
+.nx-provider__notice {
+  color: var(--nx-ok);
+}
+
+.nx-provider__error {
+  color: var(--nx-danger);
 }
 
 .nx-advanced {

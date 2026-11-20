@@ -243,6 +243,21 @@ stats pills beside it show turns, token totals and cache reads. Every value come
 `view.usage`; the ring renders nothing unless both used tokens and a context limit are
 reported, and an absent counter is omitted rather than shown as zero.
 
+**OpenCode-first providers and models (`ss-84`).** Settings → **Engine & Models** is a
+normal settings card (not hidden under Advanced). It keeps OpenCode at the top with
+"Free models included", an optional OpenCode key, and an **OpenCode Go** key entry when
+the engine reports that provider, then lists **Connected providers** and a searchable
+**Connect a provider** catalog. The catalog comes from the running engine's `/provider`
+document (`all` + `connected`), parsed by `crates/spirit-core/src/engine/providers.rs`;
+connected providers sort first, then OpenCode and the popular list, then label. A key is
+write-only in the form and goes to the OS keychain through `bridge.engine.storeKey`.
+Saving or removing one restarts a live bundled sidecar with its ephemeral
+`OPENCODE_AUTH_CONTENT` document and republishes the refreshed `/config/providers` model
+list, so the composer sees the new models without an app restart; StackSpirit still
+never writes an engine `auth.json`. The composer picker groups models under **OpenCode
+Free** and **Connected providers**, with **+ Connect another provider…** opening this
+Settings card.
+
 **Input-surface polish (`ss-75`, `01be4b1`, `49760ff`; scope correction `b441f46`).**
 Text entry now paints one calm border step plus a Meadow caret instead of the global 4 px
 box-focus ring; buttons, links, tabs, menu items and checkboxes keep the crisp keyboard

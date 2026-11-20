@@ -1112,66 +1112,15 @@ fn decode_chunked(input: &[u8]) -> Result<Vec<u8>, SpiritError> {
     Ok(output)
 }
 
-/// Parses the engine's supported-provider document.
+/// Parses the engine's supported-provider document into a display-ordered catalog.
 ///
-/// `/provider` returns `{ "all": [ { "id", "name", ... } ] }`; `/config/providers`
-/// returns `{ "providers": [ ... ] }`. Both shapes are accepted. Only ids and display
-/// labels are retained; provider configuration, environment names and models are not
-/// exposed to the UI.
+/// `/provider` returns `{ "all": [ ... ], "connected": [ ... ] }`; `/config/providers`
+/// returns `{ "providers": [ ... ] }`. Both shapes are accepted. Only ids, display
+/// labels, connection state and model counts are retained; provider configuration,
+/// environment names and keys are not exposed to the UI.
 #[must_use]
 pub fn parse_providers(body: &[u8]) -> Vec<EngineProvider> {
-    let Ok(document) = serde_json::from_slice::<Value>(body) else {
-        return Vec::new();
-    };
-    let mut providers = Vec::new();
-    for key in ["all", "providers"] {
-        match document.get(key) {
-            Some(Value::Array(entries)) => {
-                for entry in entries {
-                    if let Some(provider) = provider_from_value(entry, None) {
-                        providers.push(provider);
-                    }
-                }
-            }
-            Some(Value::Object(entries)) => {
-                for (id, entry) in entries {
-                    if let Some(provider) = provider_from_value(entry, Some(id)) {
-                        providers.push(provider);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    providers.sort_by(|left, right| left.id.cmp(&right.id));
-    providers.dedup_by(|left, right| left.id == right.id);
-    providers
-}
-
-fn provider_from_value(entry: &Value, id_hint: Option<&String>) -> Option<EngineProvider> {
-    let id = entry
-        .get("id")
-        .and_then(Value::as_str)
-        .or(id_hint.map(String::as_str))?
-        .trim();
-    if id.is_empty() {
-        return None;
-    }
-    let label = entry
-        .get("name")
-        .and_then(Value::as_str)
-        .or_else(|| entry.get("label").and_then(Value::as_str))
-        .unwrap_or(id)
-        .trim()
-        .to_owned();
-    Some(EngineProvider {
-        id: id.to_owned(),
-        label: if label.is_empty() {
-            id.to_owned()
-        } else {
-            label
-        },
-    })
+    crate::engine::parse_provider_catalog(body).providers
 }
 
 /// Classifies an engine message response body that may carry a provider error under
@@ -1428,7 +1377,8 @@ mod tests {
         let body = br#"{"providers":[{"id":"deepseek","name":"DeepSeek"},{"id":"opencode","name":"OpenCode"}]}"#;
         let providers = parse_providers(body);
         assert_eq!(providers.len(), 2);
-        assert_eq!(providers[0].id, "deepseek");
+        assert_eq!(providers[0].id, "opencode");
+        assert!(providers.iter().all(|provider| provider.connected));
     }
 
     #[test]

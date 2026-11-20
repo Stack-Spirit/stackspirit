@@ -8,6 +8,7 @@ pub mod gate;
 pub mod keychain;
 pub mod local;
 pub mod process;
+pub mod providers;
 pub mod runtime;
 pub mod supervisor;
 
@@ -45,6 +46,7 @@ pub use process::{
     EngineBinaryLocator, EngineLogBuffer, PrivateEngineTree, ProcessEngineRuntime,
     current_target_triple, loopback_host, reserve_loopback_port, serve_args, sidecar_file_name,
 };
+pub use providers::{POPULAR_PROVIDER_IDS, ProviderCatalog, parse_provider_catalog, provider_rank};
 pub use runtime::{
     EngineHealth, EngineRuntime, EngineRuntimeInfo, FakeEngineRuntime, KeyVerification,
     RuntimeModel,
@@ -140,7 +142,8 @@ pub struct EngineStatus {
     /// Bounded, redacted engine log tail for the View logs action.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logs: Vec<String>,
-    /// Providers the running engine reports as supported. Ids and labels only.
+    /// Providers the running engine reports, grouped connected-first. Ids, labels,
+    /// connection state and model counts only; never a key or provider configuration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<EngineProvider>,
 }
@@ -164,16 +167,30 @@ impl Default for EngineStatus {
     }
 }
 
-/// One provider the bundled engine reports as supported for BYOK.
+/// One provider the bundled engine reports as supported.
 ///
-/// Only the provider id and a display label cross the local engine boundary. No key,
-/// environment variable value or provider configuration is included.
+/// Only the provider id, display label, connection state and model counts cross the
+/// local engine boundary. No key, environment variable value or provider configuration
+/// is included.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineProvider {
     /// Engine-native provider id.
     pub id: String,
     /// Display label reported by the engine, or the id when it has no name.
     pub label: String,
+    /// True when the engine lists this provider in its `connected` array (or when the
+    /// document is the configured-provider list itself).
+    #[serde(default)]
+    pub connected: bool,
+    /// Engine source class (`api`, `env`, `config`, `custom`), when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Number of models the engine reports for this provider.
+    #[serde(default)]
+    pub model_count: usize,
+    /// Number of those models whose input cost is zero.
+    #[serde(default)]
+    pub free_model_count: usize,
 }
 
 /// Whether a model is included or needs a user key.

@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::engine::runtime::{EngineRuntime, EngineRuntimeInfo, KeyVerification, RuntimeModel};
-use crate::engine::{EngineChoice, EngineState, EngineStatus, ModelChoice, SecretString};
+use crate::engine::{
+    EngineChoice, EngineState, EngineStatus, Keychain, KeychainError, ModelChoice,
+    ProviderKeyState, ProviderKeyStatus, SecretString,
+};
 use crate::error::SpiritError;
 use crate::time::{Clock, SystemClock, Timestamp};
 
@@ -328,6 +331,80 @@ impl EngineSupervisor {
         };
         self.runtime.verify_key(info.port, provider, secret).await
     }
+
+    /// Stores a provider key and refreshes the live model and provider catalogs.
+    ///
+    /// The key goes only into the supplied keychain. A live bundled sidecar is then
+    /// restarted with that keychain's ephemeral `OPENCODE_AUTH_CONTENT` environment, so
+    /// newly unlocked models appear in `/config/providers` immediately; an external
+    /// harness keeps its own login and is never restarted here.
+    pub async fn connect_provider(
+        &mut self,
+        keychain: &dyn Keychain,
+        provider: &str,
+        secret: &SecretString,
+    ) -> Result<ProviderKeyStatus, KeychainError> {
+        keychain.set(provider, secret)?;
+        self.refresh_after_provider_change().await;
+        Ok(ProviderKeyStatus::new(
+            provider,
+            ProviderKeyState::Saved,
+            Some(self.clock.now()),
+        ))
+    }
+
+    /// Removes a provider key and refreshes the live model and provider catalogs.
+    ///
+    /// Removing a key never deletes a session or touches the VPS. A live bundled
+    /// sidecar restarts without that provider in its ephemeral auth document.
+    pub async fn disconnect_provider(
+        &mut self,
+        keychain: &dyn Keychain,
+        provider: &str,
+    ) -> Result<ProviderKeyStatus, KeychainError> {
+        keychain.delete(provider)?;
+        self.refresh_after_provider_change().await;
+        Ok(ProviderKeyStatus::new(
+            provider,
+            ProviderKeyState::Missing,
+            Some(self.clock.now()),
+        ))
+    }
+
+    /// Re-reads models and providers from a healthy live engine without restarting it.
+    ///
+    /// This is used after an out-of-band auth change or when the UI explicitly refreshes.
+    /// A stopped, starting or external engine is left untouched.
+    pub async fn refresh_catalog(&mut self) -> EngineStatus {
+        if matches!(self.status.choice, EngineChoice::Bundled)
+            && let Some(info) = self.handle.clone()
+            && self.runtime.probe_health(&info).await.is_ok()
+        {
+            if let Ok(models) = self.runtime.models(info.port).await {
+                self.reconcile_selected_model(&models);
+                self.status.included_models_available = models.iter().any(|model| model.free);
+            }
+            self.status.providers = self.runtime.providers(info.port).await.unwrap_or_default();
+            self.status.state = EngineState::Ready;
+            self.status.last_error = None;
+        }
+        self.snapshot()
+    }
+
+    async fn refresh_after_provider_change(&mut self) {
+        if !matches!(self.status.choice, EngineChoice::Bundled) {
+            return;
+        }
+        if matches!(
+            self.status.state,
+            EngineState::Ready | EngineState::Degraded { .. } | EngineState::Failed { .. }
+        ) {
+            // The sidecar reads stored keys at spawn time. Stop first so an explicit
+            // key change is not limited by the automatic restart budget.
+            self.stop_runtime().await;
+            self.start().await;
+        }
+    }
 }
 
 impl Drop for EngineSupervisor {
@@ -453,10 +530,18 @@ mod tests {
             crate::engine::EngineProvider {
                 id: "deepseek".to_owned(),
                 label: "DeepSeek".to_owned(),
+                connected: false,
+                source: None,
+                model_count: 0,
+                free_model_count: 0,
             },
             crate::engine::EngineProvider {
                 id: "groq".to_owned(),
                 label: "Groq".to_owned(),
+                connected: false,
+                source: None,
+                model_count: 0,
+                free_model_count: 0,
             },
         ]));
         let mut supervisor = EngineSupervisor::new(

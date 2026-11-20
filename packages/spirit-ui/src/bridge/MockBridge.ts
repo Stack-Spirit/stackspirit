@@ -38,6 +38,7 @@ import type {
   ClusterStateView,
   ConnectionSnapshot,
   DiskView,
+  EngineProviderView,
   EngineStatus,
   ExternalHarness,
   ExternalHarnessKind,
@@ -145,6 +146,72 @@ export type MockScenario = (typeof MOCK_SCENARIOS)[number];
 
 const EPOCH = Date.parse("2026-11-14T12:00:00.000Z");
 const GIB = 1024 ** 3;
+
+/** Preview provider catalog. Ids and labels only; no key or endpoint is implied. */
+const MOCK_PROVIDER_CATALOG: EngineProviderView[] = [
+  {
+    id: "opencode",
+    label: "OpenCode",
+    connected: true,
+    source: "custom",
+    model_count: 12,
+    free_model_count: 12,
+  },
+  {
+    id: "opencode-go",
+    label: "OpenCode Go",
+    connected: false,
+    source: "custom",
+    model_count: 42,
+    free_model_count: 0,
+  },
+  { id: "anthropic", label: "Anthropic", connected: false, source: "api", model_count: 22, free_model_count: 0 },
+  { id: "deepseek", label: "DeepSeek", connected: false, source: "api", model_count: 2, free_model_count: 0 },
+  { id: "google", label: "Google", connected: false, source: "api", model_count: 19, free_model_count: 0 },
+  { id: "groq", label: "Groq", connected: false, source: "api", model_count: 12, free_model_count: 0 },
+  { id: "mistral", label: "Mistral", connected: false, source: "api", model_count: 8, free_model_count: 0 },
+  { id: "openai", label: "OpenAI", connected: false, source: "api", model_count: 114, free_model_count: 0 },
+  { id: "openrouter", label: "OpenRouter", connected: false, source: "api", model_count: 280, free_model_count: 0 },
+];
+
+/** The chat model a preview connection unlocks for a provider. */
+const MOCK_PROVIDER_MODELS: Record<string, ChatModelView> = {
+  anthropic: {
+    id: "anthropic/claude-sonnet-4-5",
+    label: "Claude Sonnet 4.5",
+    provider: "anthropic",
+    tier: "byok",
+    context_tokens: 200_000,
+  },
+  deepseek: {
+    id: "deepseek/deepseek-flash",
+    label: "DeepSeek V4.1 Flash",
+    provider: "deepseek",
+    tier: "byok",
+    context_tokens: 128_000,
+  },
+  google: {
+    id: "google/gemini-2.5-pro",
+    label: "Gemini 2.5 Pro",
+    provider: "google",
+    tier: "byok",
+    context_tokens: 1_000_000,
+  },
+  openai: {
+    id: "openai/gpt-5-mini",
+    label: "GPT-5 mini",
+    provider: "openai",
+    tier: "byok",
+    context_tokens: 400_000,
+  },
+  openrouter: {
+    id: "openrouter/auto",
+    label: "OpenRouter Auto",
+    provider: "openrouter",
+    tier: "byok",
+    context_tokens: 128_000,
+  },
+};
 const OLD_SHA = "SHA256:oldPin0000000000000000000000000000000000000";
 const NEW_SHA = "SHA256:newPin11111111111111111111111111111111111111";
 const PIN_SHA = "SHA256:mockEd25519Fingerprint000000000000000000000";
@@ -320,6 +387,7 @@ export class MockBridge implements SpiritBridge {
   private localState: MockLocalState;
   private keys = new Map<string, KeyStatus>();
   private modelChoices: ModelChoice[];
+  private providerCatalog = structuredClone(MOCK_PROVIDER_CATALOG);
   /**
    * Preview-only chat models. The first is a verified included OpenCode free model, so
    * the setup composer has an honest default; the BYOK entry demonstrates a configured
@@ -410,6 +478,7 @@ export class MockBridge implements SpiritBridge {
       included_models_available: readyEngine,
       started_at: readyEngine ? now : null,
       last_error: null,
+      providers: structuredClone(this.providerCatalog),
     };
     this.gateSnapshot = this.makeGates(this.gateMode(false));
     this.localState = this.makeLocalState();
@@ -431,6 +500,48 @@ export class MockBridge implements SpiritBridge {
 
   now(): string {
     return iso(this.nowMs);
+  }
+
+  public connectedProviderIds(): string[] {
+    return this.providerCatalog
+      .filter((provider) => provider.connected)
+      .map((provider) => provider.id);
+  }
+
+  private setProviderConnected(provider: string, connected: boolean) {
+    this.providerCatalog = this.providerCatalog.map((candidate) =>
+      candidate.id === provider ? { ...candidate, connected } : candidate,
+    );
+    this.engineStatus = {
+      ...this.engineStatus,
+      providers: structuredClone(this.providerCatalog),
+    };
+  }
+
+  private unlockProvider(provider: string) {
+    this.setProviderConnected(provider, true);
+    const view = MOCK_PROVIDER_MODELS[provider];
+    if (!view) return;
+    if (!this.chatModels.some((model) => model.id === view.id)) {
+      this.chatModels.push(clone(view));
+    }
+    if (!this.modelChoices.some((model) => model.id === view.id)) {
+      this.modelChoices.push({
+        id: view.id,
+        label: view.label,
+        provider: view.provider,
+        access: "byok",
+        context_tokens: view.context_tokens ?? null,
+        notes: "Verified with the connected provider key.",
+        verified_at: this.now(),
+      });
+    }
+  }
+
+  private lockProvider(provider: string) {
+    this.setProviderConnected(provider, false);
+    this.chatModels = this.chatModels.filter((model) => model.provider !== provider);
+    this.modelChoices = this.modelChoices.filter((model) => model.provider !== provider);
   }
 
   hostsApi = {
@@ -861,6 +972,8 @@ export class MockBridge implements SpiritBridge {
       }
       const status: KeyStatus = { provider, state: "saved", last_checked_at: this.now() };
       this.keys.set(provider, status);
+      this.unlockProvider(provider);
+      this.emit({ kind: "engine", revision: this.nextRevision(), engine: clone(this.engineStatus) });
       return clone(status);
     },
     verifyKey: async (provider: string): Promise<KeyStatus> => {
@@ -875,6 +988,8 @@ export class MockBridge implements SpiritBridge {
     deleteKey: async (provider: string): Promise<KeyStatus> => {
       const status: KeyStatus = { provider, state: "missing", last_checked_at: this.now() };
       this.keys.set(provider, status);
+      this.lockProvider(provider);
+      this.emit({ kind: "engine", revision: this.nextRevision(), engine: clone(this.engineStatus) });
       return clone(status);
     },
     keyStatus: async (): Promise<KeyStatus[]> => clone([...this.keys.values()]),

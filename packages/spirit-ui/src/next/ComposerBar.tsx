@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import type { ChatModelView, ChatUsageView, SessionId } from "../bridge/wire";
+import { groupChatModels } from "../domain/engine";
 import { ContextMeter, UsageStats } from "./ContextMeter";
 
 /**
@@ -216,6 +217,7 @@ export function ComposerBar({
               disabled={disabled && !allowModelSwitch}
               openRequest={openModelPickerRequest}
               onSelect={onSelectModel}
+              onOpenEngineSettings={onOpenEngineSettings}
             />
           ) : null}
           {showStaticModel ? (
@@ -314,12 +316,14 @@ function ModelPicker({
   disabled,
   openRequest = 0,
   onSelect,
+  onOpenEngineSettings,
 }: {
   model: ChatModelView | null;
   models: ChatModelView[];
   disabled: boolean;
   openRequest?: number;
   onSelect?: (modelId: string) => void;
+  onOpenEngineSettings?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
@@ -383,25 +387,53 @@ function ModelPicker({
           role="menu"
           aria-label="Choose a model"
         >
-          {models.map((candidate) => (
-            <button
-              key={candidate.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={candidate.id === model?.id}
-              className="nx-menu__item nx-model-menu__item"
-              onClick={() => {
-                setOpen(false);
-                onSelect?.(candidate.id);
-              }}
+          {groupChatModels(models).map((group) => (
+            <div
+              key={group.id}
+              className="nx-model-menu__section"
+              role="group"
+              aria-label={group.title}
             >
-              <span className="nx-menu__icon" aria-hidden="true">
-                {candidate.id === model?.id ? "✓" : ""}
+              <span className="nx-model-menu__heading" aria-hidden="true">
+                {group.title}
               </span>
-              <span className="nx-menu__text">{modelDisplayLabel(candidate)}</span>
-              <span className="nx-menu__meta">{tierLabel(candidate)}</span>
-            </button>
+              {group.models.map((candidate) => (
+                <button
+                  key={candidate.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={candidate.id === model?.id}
+                  className="nx-menu__item nx-model-menu__item"
+                  onClick={() => {
+                    setOpen(false);
+                    onSelect?.(candidate.id);
+                  }}
+                >
+                  <span className="nx-menu__icon" aria-hidden="true">
+                    {candidate.id === model?.id ? "✓" : ""}
+                  </span>
+                  <span className="nx-menu__text">{modelDisplayLabel(candidate)}</span>
+                  <span className="nx-menu__meta">{tierLabel(candidate)}</span>
+                </button>
+              ))}
+            </div>
           ))}
+          <button
+            type="button"
+            role="menuitem"
+            className="nx-menu__item nx-model-menu__connect"
+            data-testid="composer-connect-provider"
+            onClick={() => {
+              setOpen(false);
+              onOpenEngineSettings?.();
+            }}
+            disabled={!onOpenEngineSettings}
+          >
+            <span className="nx-menu__icon" aria-hidden="true">
+              ＋
+            </span>
+            <span className="nx-menu__text">Connect another provider…</span>
+          </button>
         </div>
       ) : null}
     </div>

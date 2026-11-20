@@ -132,6 +132,23 @@ describe("Meadow composer", () => {
     );
   });
 
+  it("groups the picker by OpenCode Free and connected providers and links to Settings", async () => {
+    const { user } = await openSetup();
+    await user.click(await screen.findByTestId("composer-model"));
+    const menu = screen.getByRole("menu", { name: "Choose a model" });
+    const free = within(menu).getByRole("group", { name: "OpenCode Free" });
+    expect(free).toHaveTextContent("DeepSeek V4.1 Flash Free");
+    const connected = within(menu).getByRole("group", { name: "Connected providers" });
+    expect(connected).toHaveTextContent("BYOK · DeepSeek V4.1 Flash");
+
+    const footer = within(menu).getByRole("menuitem", {
+      name: /Connect another provider/,
+    });
+    await user.click(footer);
+    expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
+    expect(screen.getByTestId("engine-models-settings")).toBeInTheDocument();
+  });
+
   it("renders the context ring, exact popover and compact stats pills", async () => {
     const { user } = await openSetup();
 
