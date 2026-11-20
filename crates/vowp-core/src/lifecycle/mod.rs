@@ -1,9 +1,9 @@
 //! Lifecycle classes, garbage collection, compaction and backup.
 //!
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §10 and §13.2. Classes are derived from the
-//! database (jobs, sessions, runs and host samples) and merged with the durable `catalog` rows.
-//! `vowp gc` reports by class and only `--apply` deletes the five disposable classes; production,
-//! truth, open work and secrets are never touched.
+//! database (jobs, sessions, runs, tmux windows and host samples) and merged with the durable
+//! `catalog` rows. `vowp gc` reports by class and only `--apply` deletes the six disposable
+//! classes; production, truth, open work and secrets are never touched.
 //!
 //! The nightly pass is the `gc-nightly` L9 schedule (`every 24h`, `vowp gc --apply`) that
 //! [`tick`] creates once per project. The same tick enforces the 50 MB run-output cap; the

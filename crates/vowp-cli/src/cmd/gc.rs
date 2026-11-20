@@ -96,10 +96,11 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &GcArgs) -> Result<i32, CliE
     } else {
         writeln!(
             io.out(),
-            "applied: deleted {} files, freed {} bytes, compacted {} sessions",
+            "applied: deleted {} files, freed {} bytes, compacted {} sessions, closed {} job windows",
             report.deleted_files,
             report.freed_bytes,
-            report.compacted_sessions
+            report.compacted_sessions,
+            report.closed_windows
         )?;
     }
     for error in &report.errors {

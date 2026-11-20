@@ -1,10 +1,11 @@
 //! Garbage collection: dry-run reporting by class and the guarded `--apply` pass.
 //!
 //! Spec: `docs/design/v0.2/home-and-surfaces.md` §10.2. `--apply` deletes only
-//! `closed_session`, `run_output`, `worktree`, `sample` and `cache` entries whose expiry has
-//! passed. Production, truth, open work and secrets are never deleted, even when a catalog row
-//! carries an expiry. `--older-than` shortens the closed-session and run-output windows for one
-//! explicit pass; a live lease, an active job or a running orchestrator keeps its session.
+//! `closed_session`, `run_output`, `worktree`, `job_window`, `sample` and `cache` entries whose
+//! expiry has passed. Production, truth, open work and secrets are never deleted, even when a
+//! catalog row carries an expiry. `--older-than` shortens the closed-session and run-output
+//! windows for one explicit pass; a live lease, an active job or a running orchestrator keeps its
+//! session.
 //!
 //! The run-output cap and rotation from `docs/design/architecture.md` §3 live here and in
 //! [`super::tick`]: completed run files are capped at 50 MB, gzip after one day and removed after
@@ -92,6 +93,8 @@ pub struct GcOutcome {
     pub freed_bytes: u64,
     /// Number of closed sessions compacted.
     pub compacted_sessions: u64,
+    /// Number of tagged job windows closed.
+    pub closed_windows: u64,
     /// Errors encountered while applying.
     pub errors: Vec<String>,
 }
@@ -272,6 +275,7 @@ pub fn gc_with_window(
         deleted_files: 0,
         freed_bytes: 0,
         compacted_sessions: 0,
+        closed_windows: 0,
         errors,
     };
     if !opts.apply {
@@ -360,6 +364,11 @@ pub fn gc_with_window(
                     Err(error) => report.errors.push(format!("{}: {error}", item.file.path.display())),
                 }
             }
+            ItemAction::KillWindow { session, window } => match deps.windows.kill_window(session, window) {
+                Ok(()) => report.closed_windows = report.closed_windows.saturating_add(1),
+                Err(vowp_tmux::TmuxError::WindowNotFound { .. }) => {}
+                Err(error) => report.errors.push(format!("{session}:{window}: {error}")),
+            },
             ItemAction::PruneSamples => {
                 if samples_pruned {
                     continue;
@@ -418,6 +427,7 @@ fn collectable(item: &ClassifiedItem, now: Timestamp, open_runs: Option<&BTreeSe
         ItemAction::DeleteFile
             | ItemAction::CompactSession(_)
             | ItemAction::RemoveWorktree { .. }
+            | ItemAction::KillWindow { .. }
             | ItemAction::PruneSamples
     );
     if !action_removes || item.expires_at.is_none_or(|expires_at| now < expires_at) {

@@ -517,6 +517,7 @@ pub enum JobState {
 }
 impl JobState {
     pub fn is_terminal(&self) -> bool;      // Done | Replanned | Cancelled   (Failed and Parked are NOT terminal)
+    pub fn needs_window(&self) -> bool;     // false for Done | Failed | Parked | Replanned | Cancelled
     pub fn holds_lock(&self) -> bool;       // Running | Stalled | Gating | Reviewing | Fixing | Merging  (ownership + worktree)
     pub fn as_str(&self) -> &'static str;
 }
@@ -1603,7 +1604,7 @@ in `vowp session lease`.
 #[serde(rename_all = "snake_case")]
 pub enum CatalogClass {
     Production, Truth, OpenWork, Secrets, ClosedSession,
-    RunOutput, Worktree, Sample, Cache,
+    RunOutput, Worktree, JobWindow, Sample, Cache,
 }
 pub struct CatalogEntry {
     pub id: String, pub path: String, pub class: CatalogClass,

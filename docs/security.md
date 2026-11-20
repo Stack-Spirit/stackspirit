@@ -637,7 +637,8 @@ Named test: `bundle_result_manifest_and_run_row_carry_no_absolute_path_or_secret
 ## Lifecycle and backup
 
 - `production`, `truth`, `open_work` and `secrets` are never auto-deleted. `vowp gc --apply` only
-  collects `closed_session`, `run_output`, `worktree`, `sample` and expired `cache` entries.
+  collects `closed_session`, `run_output`, `worktree`, `job_window`, `sample` and expired `cache`
+  entries.
 - A backup includes the global database, every project database, the session content and the catalog,
   with a manifest of SHA-256 hashes and row counts. It **never** includes secrets, encrypted or not;
   restore them with `vowp secret set`.

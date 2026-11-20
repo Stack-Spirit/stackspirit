@@ -45,6 +45,13 @@ pub(crate) enum ItemAction {
         /// Worktree directory.
         worktree: PathBuf,
     },
+    /// Close one tagged tmux window.
+    KillWindow {
+        /// Private tmux session that holds the window.
+        session: String,
+        /// Exact window name.
+        window: String,
+    },
     /// Prune the expired `host_samples` rows selected by the same cutoffs.
     PruneSamples,
 }
@@ -121,6 +128,7 @@ pub fn class_name(class: CatalogClass) -> &'static str {
         CatalogClass::ClosedSession => "closed_session",
         CatalogClass::RunOutput => "run_output",
         CatalogClass::Worktree => "worktree",
+        CatalogClass::JobWindow => "job_window",
         CatalogClass::Sample => "sample",
         CatalogClass::Cache => "cache",
     }
@@ -137,11 +145,12 @@ pub fn parse_class(text: &str) -> Result<CatalogClass, CoreError> {
         "closed_session" => Ok(CatalogClass::ClosedSession),
         "run_output" => Ok(CatalogClass::RunOutput),
         "worktree" => Ok(CatalogClass::Worktree),
+        "job_window" => Ok(CatalogClass::JobWindow),
         "sample" => Ok(CatalogClass::Sample),
         "cache" => Ok(CatalogClass::Cache),
         other => Err(CoreError::Invalid(format!(
             "unknown lifecycle class {other:?}; expected production, truth, open_work, secrets, \
-             closed_session, run_output, worktree, sample or cache"
+             closed_session, run_output, worktree, job_window, sample or cache"
         ))),
     }
 }
@@ -164,8 +173,9 @@ pub(crate) fn class_rank(class: CatalogClass) -> u8 {
         CatalogClass::ClosedSession => 4,
         CatalogClass::RunOutput => 5,
         CatalogClass::Worktree => 6,
-        CatalogClass::Sample => 7,
-        CatalogClass::Cache => 8,
+        CatalogClass::JobWindow => 7,
+        CatalogClass::Sample => 8,
+        CatalogClass::Cache => 9,
     }
 }
 
@@ -191,6 +201,7 @@ pub(crate) fn classify_items(
     let mut classifier = Classifier::new(deps, store, now, retention);
     classifier.add_node_files()?;
     classifier.add_projects()?;
+    classifier.add_job_windows();
     classifier.add_sessions()?;
     classifier.add_run_output()?;
     classifier.add_cache()?;
@@ -256,7 +267,7 @@ impl<'a> Classifier<'a> {
         expires_at: Option<Timestamp>,
         action: ItemAction,
     ) {
-        if class != CatalogClass::Sample && !path.exists() {
+        if !matches!(class, CatalogClass::Sample | CatalogClass::JobWindow) && !path.exists() {
             return;
         }
         let key = path.to_string_lossy().into_owned();
@@ -453,6 +464,60 @@ impl<'a> Classifier<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Adds tagged `job-<id>` windows whose job is missing or no longer active.
+    ///
+    /// Listing the tmux session is best effort: a home without tmux, a foreign server or a
+    /// window race must not make garbage collection fail. The kill itself also refuses an
+    /// untagged window, so a foreign window that happens to carry a job-like name is safe.
+    fn add_job_windows(&mut self) {
+        let projects: Vec<ProjectName> = self.projects.keys().cloned().collect();
+        for project in projects {
+            let session = vowp_tmux::session_name_for_project(project.as_str());
+            let windows = match self.deps.windows.list_windows(&session) {
+                Ok(windows) => windows,
+                Err(error) => {
+                    self.deps.log.log(
+                        vowp_protocol::Level::Warn,
+                        "lifecycle",
+                        &format!("cannot list tmux windows for {session}: {error}"),
+                    );
+                    continue;
+                }
+            };
+            for window in windows {
+                if !window.tagged {
+                    continue;
+                }
+                let Some(raw_id) = window.name.strip_prefix("job-") else {
+                    continue;
+                };
+                let Ok(job_id) = JobId::parse(raw_id) else {
+                    continue;
+                };
+                let state = self.jobs.get(&job_id).copied();
+                if state.is_some_and(|state| state.needs_window()) {
+                    continue;
+                }
+                let reason = match state {
+                    Some(state) => format!("job {job_id} is {}", job_state_name(state)),
+                    None => format!("job {job_id} no longer exists"),
+                };
+                self.push(
+                    PathBuf::from(format!("tmux/{session}/{}", window.name)),
+                    CatalogClass::JobWindow,
+                    Some(project.clone()),
+                    0,
+                    reason,
+                    Some(self.now),
+                    ItemAction::KillWindow {
+                        session: session.clone(),
+                        window: window.name,
+                    },
+                );
+            }
+        }
     }
 
     /// Adds the database, WAL and lock paths of one project.
@@ -949,6 +1014,7 @@ fn stronger_action(left: &ItemAction, right: &ItemAction) -> ItemAction {
             ItemAction::RemoveWorktree { .. } => 3,
             ItemAction::CompactSession(_) => 4,
             ItemAction::DeleteFile => 5,
+            ItemAction::KillWindow { .. } => 6,
         }
     }
     if rank(right) > rank(left) {
@@ -964,6 +1030,7 @@ fn default_catalog_expiry(class: CatalogClass, created_at: Timestamp, retention:
         CatalogClass::ClosedSession => Some(created_at.plus(retention.closed_session)),
         CatalogClass::RunOutput => Some(created_at.plus(retention.run_output)),
         CatalogClass::Worktree => Some(created_at.plus(FAILED_WORKTREE_RETENTION)),
+        CatalogClass::JobWindow => Some(created_at),
         CatalogClass::Sample => Some(created_at.plus(SAMPLE_FULL_RETENTION)),
         CatalogClass::Cache => Some(created_at.plus(CACHE_RETENTION)),
         CatalogClass::Production | CatalogClass::Truth | CatalogClass::OpenWork | CatalogClass::Secrets => None,

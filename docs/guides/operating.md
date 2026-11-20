@@ -258,6 +258,7 @@ Every file VOWP creates belongs to a lifecycle class:
 | `closed_session` | Full log and blobs of a closed session. Kept 30 days, then compacted to capsule + summary. |
 | `run_output` | `runs/*.jsonl`, `*.stderr`. 14 days; gzip after 1 day. |
 | `worktree` | Merged jobs removed after merge; failed or cancelled jobs kept 7 days, branch kept. |
+| `job_window` | Tagged `job-<id>` tmux windows whose job is done, cancelled, failed, parked or replanned. Listed by `gc`; `--apply` closes them. |
 | `sample` | Host samples: 24 h full rate, 30 days as 1-minute averages. |
 | `cache` | Control snapshot cache and `tmp/`. Disposable. |
 
@@ -272,8 +273,9 @@ vowp gc --older-than 7d --class closed_session --apply
 `vowp gc` is a dry run by default: it lists files per class, bytes and a sample of paths, plus the
 files and bytes an `--apply` would collect now, and changes nothing. `--apply` deletes only
 `closed_session` (after writing a final capsule and `summary.md`), `run_output`, `worktree`, `sample`
-and expired `cache` entries. It never deletes production, truth, open work or secrets. The nightly
-`gc-nightly` schedule runs `vowp gc --apply` once per day per project.
+and expired `cache` entries, and closes `job_window` entries. It never deletes production, truth,
+open work or secrets. The nightly `gc-nightly` schedule runs `vowp gc --apply` once per day per
+project, so it closes orphan job windows too.
 
 `--older-than <duration>` shortens the window for `closed_session` and `run_output` only, for one
 explicit pass; it does not change the defaults or the nightly schedule. Durations are a positive whole

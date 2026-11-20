@@ -476,7 +476,7 @@ vowp gc [--apply] [--class <class>] [--older-than <duration>] [--now <RFC3339>]
 ```
 
 Dry run by default: lists files per lifecycle class (`production`, `truth`, `open_work`,
-`secrets`, `closed_sessions`, `run_output`, `worktrees`, `samples`, `cache`), the bytes they
+`secrets`, `closed_sessions`, `run_output`, `worktrees`, `job_window`, `samples`, `cache`), the bytes they
 occupy and how many of those bytes an `--apply` would free now. `--apply` deletes only the
 eligible classes; production, truth, open work and secrets are never touched. A nightly
 `gc-nightly` schedule runs `--apply` by default. `--now` is a test clock override.

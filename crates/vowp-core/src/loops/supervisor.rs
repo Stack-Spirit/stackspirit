@@ -543,7 +543,8 @@ impl Supervisor {
     fn step_reconcile(&mut self, _now: Timestamp) -> Result<String, CoreError> {
         let (open, active) = self.open_runs_snapshot()?;
         let count = reconcile::orphaned_runs(&self.deps, &self.store, &open, &active)?;
-        Ok(format!("{count} orphaned run(s)"))
+        let closed = reconcile::stale_job_windows(&self.deps, &self.store, &self.project)?;
+        Ok(format!("{count} orphaned run(s); {closed} stale job window(s)"))
     }
 
     /// Returns whether `<home>/drain` asks this project to admit no new work.
@@ -1689,6 +1690,7 @@ impl Supervisor {
         })?;
         self.transitions.push((job.id.clone(), from, JobState::Failed));
         self.repeat_guards.remove(&job.id);
+        reconcile::close_job_window(&self.deps, &self.project, &job.id);
         let decision = dispatch::create_decision_job(&self.deps, &self.store, job)?;
         self.apply_with(&decision.id, JobEvent::NeedsSatisfied, None, Vec::new(), None)?;
         let failed = self.store.require_job(&job.id)?;
@@ -1838,6 +1840,11 @@ impl Supervisor {
         let mut findings = findings;
         for effect in applied.effects.clone() {
             self.execute_effect(job_id, &effect, choice.as_ref(), &mut findings)?;
+        }
+        // The state row is durable before the view goes; a crash in between leaves the window
+        // for the reconcile step or startup to close on the next pass.
+        if !applied.to.needs_window() {
+            reconcile::close_job_window(&self.deps, &self.project, job_id);
         }
         Ok(applied)
     }

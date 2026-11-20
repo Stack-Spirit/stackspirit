@@ -40,7 +40,9 @@ All time from `Clock`.
 1. **Reconcile open runs.** For every `runs` row with `ended_at IS NULL` owned by this node: if no live runner thread has it **and** its
    `pid` is not alive (`kill(pid,0)` equivalent via `/proc/<pid>` existence check; no `unsafe`) → the supervisor restarted or the child
    vanished. Kill the process group if the pid is alive but unowned (orphan), finalise the run with `outcome=crash`, `detail="orphaned at supervisor start"`,
-   and let step 2 handle it like any crash. Also free `workers` rows whose `run_id` is gone.
+   and let step 2 handle it like any crash. Also free `workers` rows whose `run_id` is gone. Then close every tagged `job-<id>` window whose job is
+   missing or no longer active (see §2, “Job windows”); this retries a close that failed after the state change. Startup runs the same close pass
+   before it recreates the fixed layout.
 2. **Harvest finished runs.** For each run finished since the last tick (runner thread reported, or step 1): write `ended_at/exit_code/outcome/cost/...`
    (cost from `RunSummary`), append a `ledger` `cost` row (`usd`, tokens, `cost_source`), classify `outcome`:
    - `ok` → role-specific follow-up (§3, §5): worker run ok but no valid report ⇒ `JobEvent::RunEndedNoReport`; report present ⇒ `ReportReady`.
@@ -118,6 +120,17 @@ Events are `JobEvent` variants (crates/vowp-graph.md §3). `Exhausted(x)` means 
 | T35 | running | `RunRateLimited{until}` | — | running | `DelayRun{purpose: Continue, until}` (no counter changes; the run that hit the 429 does **not** consume `continues`; the caller stores `kv['delay:<job>']=until` and L1 starts the continue run when `now >= until`) |
 
 Terminal states: `done`, `replanned`, `cancelled`. **Any (state,event) pair not listed returns `GraphError::InvalidTransition`**; in particular no event leaves a terminal state.
+
+### Job windows
+
+Dispatch opens one tagged tmux window `job-<id>` running `vowp __window job <id>` (§3). The window is a view, not
+part of the job: whenever a transition records `done`, `cancelled`, `failed`, `parked` or `replanned`, L1 closes
+that exact tagged window after the state row is committed. Closing is best effort — a tmux failure is logged and
+never fails the tick — and idempotent: an already-missing window is success. A crash between the state write and
+the close is repaired by the next L1 reconcile pass and by startup, which close tagged `job-<id>` windows whose
+job is missing or in one of those five states. Only the exact name this tool creates is considered, and the
+window manager refuses untagged windows, so `board`, `supervisor`, `planner`, `keeper`, `inbox` and any foreign
+window are never touched. `vowp gc` reports the leftovers as the `job_window` class and `--apply` closes them.
 `NeedsSatisfied` is only emitted by L1 step 4; `Retry` on a non-`failed` job is invalid. The CLI `vowp job retry` therefore maps by state: `failed` → `Retry` (T32), `parked` → `Resolved` (T31), `stalled` → `KeeperRestart` (T11); any other state exits 4.
 Differences from the design summary §6.3: D1 (`gating`, `cancelled`), D5 (fix jobs on the original branch, no verify of their own), and `fixing → gating` (T22) instead of `fixing → reviewing`: the fix must pass the cheap
 command gates again before another verifier is spent (recorded as D17 in decisions.md).
