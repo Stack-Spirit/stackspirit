@@ -1,7 +1,7 @@
 # Handoff: StackSpirit desktop UI redesign (Meadow shell)
 
 Read this first if you are picking up the desktop UI, the brand, or the next integration
-steps. Last updated 2026-11-19. It records the decisions the owner made in the design
+steps. Last updated 2026-11-20. It records the decisions the owner made in the design
 sessions, what is real versus preview, and what to do next. `AGENTS.md` still applies
 (Rust core owns host/SSH/VOWP logic, UI calls go through `SpiritBridge`, no secrets).
 
@@ -189,6 +189,15 @@ verification script `ss-47`, `76b48ac`). The **non-streaming final message is re
 reply arrives as one complete assistant message, not token by token. Do not call it
 streaming until the owner verification records the cadence.
 
+Outgoing user turns now use a `msg_<ULID>` id (`ss-74`/`ss-76`, `9d365ce`): the real
+bundled `1.19.5` sidecar rejects any other prefix with HTTP 400 `BadRequest`, so a
+`local:` id fails the turn. The fakes enforce the same prefix, so a regression fails in
+tests rather than only in a live turn. The UI marks the turn from a `chat.send` receipt as
+an explicit renderer-only optimistic message and replaces it with the native one (`ss-78`,
+`c89fcec`); it no longer keys on the retired `local:` prefix. The full id and reconciliation
+contract is in `docs/ORCHESTRATOR-CHAT.md` §2.2.5 and §4.6; the live `tokens.total` shape
+is recorded in §2.3; the payloads are not duplicated here.
+
 The setup assistant now respects a saved profile (`ss-70`). With at least one saved
 server, **Chat with the setup assistant** on the Connect prompt (or the sidebar's
 **Setup assistant** row) opens the same local setup chat directly: no Connect is
@@ -233,6 +242,18 @@ Below the card, `.nx-composer-dock` always reserves 22 px. `ContextMeter.tsx` dr
 stats pills beside it show turns, token totals and cache reads. Every value comes from
 `view.usage`; the ring renders nothing unless both used tokens and a context limit are
 reported, and an absent counter is omitted rather than shown as zero.
+
+**Input-surface polish (`ss-75`, `01be4b1`, `49760ff`; scope correction `b441f46`).**
+Text entry now paints one calm border step plus a Meadow caret instead of the global 4 px
+box-focus ring; buttons, links, tabs, menu items and checkboxes keep the crisp keyboard
+ring. The composer card's `:focus-within` is a neutral elevation step, not a brand-green
+border, and the card keeps the `ss-73` geometry: 24 px radius, a 28 px borderless model
+pill, a 32×32 circular send/stop, a 22 px dock, and a 56 px hero / 36 px docked textarea
+floor. Playwright audits the text fields, including the Create and Pair local-orchestrator
+dialogs, and fails the suite for a text field with no visible focus state; the final
+`ss-75` gate run passed **25/25** with axe WCAG 2.2 AA in light and dark. The honest
+limit: a text field's focus indicator is that border step plus the caret, not a ring — do
+not read it as a 3:1 non-text-contrast focus ring.
 
 Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 - Assistant replies in the `MockBridge` preview scenarios, and the agent opening the
@@ -415,15 +436,26 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
    and stats pills read `view.usage` and stay hidden until the engine reports both used tokens
    and a limit. Component tests cover all five cases and the Meadow e2e specs remain axe WCAG 2.2
    AA green in light and dark.
+8. **Input-surface polish — landed (`ss-75`, `01be4b1`, `49760ff`).** Text entry now takes a
+   calm border step and a Meadow caret instead of the global box ring, while buttons, links,
+   tabs, menu items and checkboxes keep the keyboard ring; the composer card keeps the `ss-73`
+   geometry and steps to a neutral `:focus-within` tone. The Playwright focus audit covers
+   the text fields, including the Create and Pair local-orchestrator dialogs, and fails the
+   suite for a field with no visible focus state; the final `ss-75` gate run passed 25/25
+   with axe WCAG 2.2 AA in light and dark. The text-field focus indicator is that border
+   step plus the caret, not a 3:1 ring.
 
 ## 6. Known gaps and cautions
 
-- e2e status (updated 2026-11-19): the Meadow desktop suite passed **23/23** in the
+- e2e status (updated 2026-11-20): the Meadow desktop suite passed **23/23** in the
   `ss-73` run (2.3 m, zero failed, skipped or flaky, no waivers). That includes the new
   empty-hero/inline-model/context-meter axe case in both light and dark. The specs are
   `next-shell`, `meadow-flows`, `meadow-bridge-flows`, `meadow-cluster`, `sessions-asif`,
   `local-orchestrator-gated` and `local-orchestrator-ready`. The earlier `ss-56`
   (`a80775e`) run recorded 18/18 before the composer work and before the cluster spec.
+  The final `ss-75` run then passed **25/25** with axe WCAG 2.2 AA in light and dark,
+  including the new focus audit for text fields and the Create and Pair
+  local-orchestrator dialogs.
 - **Cluster product gaps.** `ClusterHealth` carries no last-backup timestamp, so freshness
   is shown as the backup policy's maximum age at promotion, not an observed backup time.
   Promotion requires the old Home to answer `vowp down --drain`, so it cannot rescue an
@@ -442,8 +474,11 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
   the v1 health/session/message/abort/SSE surface. The owner-run check and checklist are
   `scripts/verify-orchestrator-chat.mjs` (`ss-47`, `76b48ac`); `--check` fails closed when
   the sidecar or lock is absent (a fresh checkout must run
-  `node scripts/fetch-engine.mjs` first), and `--checklist` prints the §9 steps. No owner
-  model turn has been recorded, so the streaming cadence and the Server-mirroring half
+  `node scripts/fetch-engine.mjs` first), and `--checklist` prints the §9 steps. A direct
+  2026-11-20 free-model turn proved the `msg` prefix and the live `tokens.total` shape
+  (`docs/ORCHESTRATOR-CHAT.md` §2.2.5, §2.3). **No owner run of
+  `scripts/verify-orchestrator-chat.mjs`** has been recorded, so the `message.part.*`
+  cadence, `session.idle` ordering, user-message log preservation and the Server half
   remain unverified.
 - The Password login and Server secrets cards now have Playwright coverage in
   `meadow-bridge-flows.spec.ts` (`ss-53`, `6f2a568`), including the three password-login
