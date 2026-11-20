@@ -131,29 +131,44 @@ fn cli_binary() -> PathBuf {
 
 /// Resolves or builds the CLI binary exactly once.
 fn resolve_cli_binary() -> PathBuf {
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vowp") {
-        return PathBuf::from(path);
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vowp").map(PathBuf::from)
+        && path.is_file()
+    {
+        return path;
     }
-    let current = std::env::current_exe().expect("current test executable");
-    let profile = current
-        .parent()
-        .and_then(Path::parent)
-        .expect("target profile directory");
-    let binary = profile.join(if cfg!(windows) { "vowp.exe" } else { "vowp" });
-    if binary.is_file() {
-        return binary;
+    let root = workspace_root();
+    let target = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            if dir.is_absolute() { dir } else { root.join(dir) }
+        }
+        None => root.join("target"),
+    };
+    let name = format!("vowp{}", std::env::consts::EXE_SUFFIX);
+    let mut candidates: Vec<PathBuf> = ["debug", "release"]
+        .iter()
+        .map(|profile| target.join(profile).join(&name))
+        .collect();
+    if let Ok(current) = std::env::current_exe()
+        && let Some(profile) = current.parent().and_then(Path::parent)
+    {
+        candidates.push(profile.join(&name));
     }
-    let target = profile.parent().expect("target directory");
+    if let Some(found) = candidates.iter().find(|path| path.is_file()) {
+        return found.clone();
+    }
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
-        .current_dir(workspace_root())
+        .current_dir(&root)
         .args(["build", "--quiet", "-p", "vowp-cli", "--bin", "vowp", "--target-dir"])
-        .arg(target)
+        .arg(&target)
         .status()
         .unwrap_or_else(|error| panic!("build vowp CLI: {error}"));
     assert!(status.success(), "cargo build -p vowp-cli --bin vowp failed");
-    assert!(binary.is_file(), "CLI binary missing at {}", binary.display());
-    binary
+    if let Some(found) = candidates.iter().find(|path| path.is_file()) {
+        return found.clone();
+    }
+    panic!("CLI binary missing at {}", candidates[0].display());
 }
 
 /// Finds the workspace root from the package manifest directory.

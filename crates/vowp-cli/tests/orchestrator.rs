@@ -1890,20 +1890,47 @@ fn orchestrator_card_contains_no_path_or_secret() {
     assert_eq!(info.card.project.as_ref(), Some(env.project_name()));
 }
 
-/// Returns the built `vowp` binary next to the test harness.
+/// Returns the built `vowp` binary, resolving from `CARGO_BIN_EXE_vowp` or the workspace
+/// target directory so the lookup works regardless of Cargo's test-binary layout.
 fn vowp_binary() -> std::path::PathBuf {
-    let exe = std::env::current_exe().expect("test executable");
-    let candidate = exe
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("target directory")
-        .join("vowp");
-    assert!(
-        candidate.is_file(),
-        "build the vowp binary first; missing {}",
-        candidate.display()
-    );
-    candidate
+    if let Some(path) = option_env!("CARGO_BIN_EXE_vowp").map(std::path::PathBuf::from)
+        && path.is_file()
+    {
+        return path;
+    }
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => {
+            let dir = std::path::PathBuf::from(dir);
+            if dir.is_absolute() { dir } else { manifest.join(dir) }
+        }
+        None => manifest.join("target"),
+    };
+    let name = format!("vowp{}", std::env::consts::EXE_SUFFIX);
+    let mut candidates: Vec<std::path::PathBuf> = ["debug", "release"]
+        .iter()
+        .map(|profile| target.join(profile).join(&name))
+        .collect();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent().and_then(std::path::Path::parent)
+    {
+        candidates.push(dir.join(&name));
+    }
+    if let Some(found) = candidates.iter().find(|path| path.is_file()) {
+        return found.clone();
+    }
+    static BUILD: std::sync::Once = std::sync::Once::new();
+    BUILD.call_once(|| {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let _ = std::process::Command::new(cargo)
+            .args(["build", "--quiet", "--bin", "vowp"])
+            .current_dir(&manifest)
+            .status();
+    });
+    if let Some(found) = candidates.iter().find(|path| path.is_file()) {
+        return found.clone();
+    }
+    panic!("build the vowp binary first; missing {}", candidates[0].display());
 }
 
 #[test]
