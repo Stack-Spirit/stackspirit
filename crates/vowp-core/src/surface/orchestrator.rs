@@ -24,20 +24,21 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use vowp_adapters::proc::{Signal, signal_group};
 use vowp_protocol::{
-    AgentFrame, CapsuleTrigger, EventType, ExecutorRef, JoinInstructions, Lease, Level, NewSession, NodeName,
-    NodePresence, NodeStatus, OrchestratorApp, OrchestratorCard, OrchestratorCommand, OrchestratorEndpoint,
-    OrchestratorError, OrchestratorLocation, OrchestratorNodeState, OrchestratorResult, Project, ProjectName,
-    SessionId, SessionRole, Surface, SurfaceId, SurfaceKind, Timestamp,
+    AgentFrame, CapsuleTrigger, EndpointAccess, EventType, ExecutorRef, JoinInstructions, Lease, Level, NewSession,
+    NodeName, NodePresence, NodeStatus, OrchestratorApp, OrchestratorAttach, OrchestratorCard, OrchestratorCommand,
+    OrchestratorEndpoint, OrchestratorError, OrchestratorLocation, OrchestratorNodeState, OrchestratorResult,
+    OwnershipMode, Project, ProjectName, SessionId, SessionRole, Surface, SurfaceId, SurfaceKind, Timestamp,
 };
 use vowp_store::session_log::SessionLog;
 use vowp_store::{Store, StoreError, hash_lease_token};
 
 use super::claude_remote::ClaudeRemoteHost;
-use super::lease::{AcquireLease, LeaseGuard};
+use super::lease::{AcquireLease, LeaseGuard, STALE_AFTER};
 use super::mirror::{self, MirrorCursor};
 use super::native::{AppHandle, AppHost, HostRequest, process_alive, write_private_json};
 use super::opencode_host::OpencodeHost;
 use crate::CoreError;
+use crate::agent::dispatch;
 use crate::deps::Deps;
 use crate::session::service::SessionService;
 
@@ -412,6 +413,33 @@ enum CommandDelivery {
     Applied,
     /// The command is durably queued for a live gateway; the state is still `starting`.
     Queued,
+}
+
+/// A held attach: the lease heartbeat plus the one-time grant.
+///
+/// The caller keeps this alive while the attach process runs. Dropping it, or calling
+/// [`AttachGuard::release`], releases the session. There is no detached keeper.
+pub struct AttachGuard {
+    lease: LeaseGuard,
+    grant: OrchestratorAttach,
+}
+
+impl AttachGuard {
+    /// Returns the grant. It carries the lease token: never log it or put it in an error.
+    pub fn grant(&self) -> &OrchestratorAttach {
+        &self.grant
+    }
+
+    /// Releases the lease and stops the heartbeat.
+    pub fn release(self) -> Result<(), CoreError> {
+        self.lease.release()
+    }
+}
+
+impl std::fmt::Debug for AttachGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachGuard").field("grant", &self.grant).finish()
+    }
 }
 
 /// The orchestrator manager.
@@ -970,13 +998,41 @@ impl Orchestrator {
     /// app host's private 0600 state; a stopped host, or one with no loopback endpoint,
     /// leaves them `None` rather than guessing. Every failure names the orchestrator and
     /// the failure class, never a path, port, password, token or pair link.
-    pub fn endpoint(&self, name: &str) -> Result<OrchestratorEndpoint, CoreError> {
+    ///
+    /// `owner` is read from the project-scoped store at the injected clock's `now`, for a
+    /// node-hosted record too. `access` is [`EndpointAccess::Owner`] only when `surface` is
+    /// the live owner's surface id; no caller identity, another surface, a stale or expired
+    /// owner, or no owner all read as [`EndpointAccess::ReadOnly`]. Recorded ownership is
+    /// cooperative: a UI that talks to the app's HTTP API directly is not stopped by it.
+    pub fn endpoint(&self, name: &str, surface: Option<&SurfaceId>) -> Result<OrchestratorEndpoint, CoreError> {
+        let (mut endpoint, project) = self.endpoint_base(name)?;
+        let now = self.deps.clock.now();
+        let store = self
+            .scoped_deps(project.as_ref())?
+            .open_store()
+            .map_err(|_| owner_unreadable(name))?;
+        let record = store
+            .ownership(&endpoint.session_id)
+            .map_err(|_| owner_unreadable(name))?;
+        if let Some(record) = record {
+            let live = record.is_live_at(now);
+            if live && surface.is_some() && surface == record.lease.surface_id.as_ref() {
+                endpoint.access = EndpointAccess::Owner;
+            }
+            endpoint.owner = Some(record.to_owner(now));
+        }
+        Ok(endpoint)
+    }
+
+    /// Builds the endpoint document without the owner view, and the orchestrator's project.
+    fn endpoint_base(&self, name: &str) -> Result<(OrchestratorEndpoint, Option<ProjectName>), CoreError> {
         validate_name(name)?;
         let dir = self.dir(name);
         let state =
             read_endpoint_state(name, &dir)?.ok_or_else(|| CoreError::NotFound(format!("orchestrator {name}")))?;
         let remote = self.state_is_remote(&state)?;
         let info = self.info_from_dir(state, dir);
+        let project = info.card.project.clone();
         let location = if remote {
             OrchestratorLocation::Node
         } else {
@@ -992,26 +1048,131 @@ impl Orchestrator {
             url: None,
             native_session_id: None,
             auth: None,
+            owner: None,
+            access: EndpointAccess::ReadOnly,
         };
         if remote {
-            return Ok(endpoint);
+            return Ok((endpoint, project));
         }
         let Some(handle) = info.host.as_ref() else {
-            return Ok(endpoint);
+            return Ok((endpoint, project));
         };
         let Some(host) = self.host_for(info.card.app)? else {
-            return Ok(endpoint);
+            return Ok((endpoint, project));
         };
         let Some(parts) = host
             .endpoint(handle)
             .map_err(|_| CoreError::Invalid(format!("orchestrator {name}: the app endpoint state is not readable")))?
         else {
-            return Ok(endpoint);
+            return Ok((endpoint, project));
         };
         endpoint.url = Some(parts.url);
         endpoint.native_session_id = parts.native_session_id;
         endpoint.auth = parts.auth;
-        Ok(endpoint)
+        Ok((endpoint, project))
+    }
+
+    /// Attaches a desktop UI to one home-hosted orchestrator and returns the held grant.
+    ///
+    /// This is the writer path. It creates a [`SurfaceKind::DesktopUi`] surface for `holder`
+    /// and acquires the session lease through [`LeaseGuard::acquire`], so a live interactive
+    /// owner needs `takeover` and a stale one is replaced. A job owner that is expired, or
+    /// live with `takeover`, is fenced first through [`dispatch::fence_job_owner`]: the run
+    /// closes through `lose`, the job stays `ready` and the owner row is released. A live job
+    /// takeover then records the capsule and the one note with [`dispatch::record_takeover`];
+    /// an interactive takeover already wrote its note.
+    ///
+    /// A node-hosted orchestrator is refused (the home cannot heartbeat a node-local engine),
+    /// and so is a stopped or corrupt host whose endpoint is unavailable. The returned
+    /// [`AttachGuard`] owns the heartbeat; the caller keeps it alive while the attach process
+    /// runs and releases or drops it to give the session up. No keeper is started.
+    pub fn attach(
+        &self,
+        name: &str,
+        holder: &str,
+        label: Option<&str>,
+        takeover: bool,
+    ) -> Result<AttachGuard, CoreError> {
+        let (mut endpoint, project) = self.endpoint_base(name)?;
+        if endpoint.location == OrchestratorLocation::Node {
+            return Err(CoreError::Refused(format!(
+                "orchestrator {name} runs on a node; the home cannot heartbeat a node-local engine, so it cannot be attached from here"
+            )));
+        }
+        if endpoint.url.is_none() || endpoint.auth.is_none() {
+            return Err(CoreError::Refused(format!(
+                "orchestrator {name} has no live app endpoint to attach to; run `vowp orchestrator resume {name}` first"
+            )));
+        }
+        let holder = holder.trim();
+        if holder.is_empty() {
+            return Err(CoreError::Invalid("an attach needs a non-empty holder name".to_owned()));
+        }
+        let session = endpoint.session_id.clone();
+        let scoped = self.scoped_deps(project.as_ref())?;
+        let store = scoped.open_store()?;
+        let now = self.deps.clock.now();
+        let surface = Surface {
+            id: SurfaceId::new(),
+            kind: SurfaceKind::DesktopUi,
+            node: self.deps.node.clone(),
+            holder: holder.to_owned(),
+            app: Some(app_name(endpoint.app).to_owned()),
+            cwd: None,
+            metadata: serde_json::json!({"orchestrator": name}),
+            created_at: now,
+            last_seen_at: now,
+        };
+        let surface_id = surface.id.clone();
+
+        let mut job_takeover_from = None;
+        if let Some(record) = store.ownership(&session)?
+            && record.mode == OwnershipMode::Job
+        {
+            let live = record.is_live_at(now);
+            if !live || takeover {
+                dispatch::fence_job_owner(&scoped, &store, &session, holder, now)?;
+                if live {
+                    job_takeover_from = Some(record.lease.holder);
+                }
+            }
+        }
+        let guard = LeaseGuard::acquire(
+            &scoped,
+            &store,
+            &AcquireLease {
+                session: session.clone(),
+                surface,
+                takeover,
+            },
+        )?;
+        if let Some(previous) = job_takeover_from
+            && let Err(error) = dispatch::record_takeover(&scoped, &store, &session, &previous, holder, now)
+        {
+            // The lease already moved; a failed note must not drop the grant.
+            self.deps.log.log(
+                Level::Warn,
+                "orchestrator",
+                &format!("attach to {name}: could not record the takeover note: {error}"),
+            );
+        }
+        if let Some(label) = label {
+            // Dropping the guard releases the row, so a bad label leaves no owner behind.
+            store.set_surface_label(&surface_id, Some(label))?;
+        }
+        let owner = store
+            .session_owner(&session, now)?
+            .ok_or_else(|| CoreError::Invalid(format!("orchestrator {name}: the attach did not record an owner")))?;
+        endpoint.owner = Some(owner.clone());
+        endpoint.access = EndpointAccess::Owner;
+        let grant = OrchestratorAttach {
+            surface_id,
+            token: guard.token().to_owned(),
+            expires_at: owner.heartbeat_at.plus(STALE_AFTER),
+            owner,
+            endpoint,
+        };
+        Ok(AttachGuard { lease: guard, grant })
     }
 
     /// Stops one orchestrator's host and releases its lease. The session stays.
@@ -2258,6 +2419,11 @@ fn read_state(dir: &Path) -> Result<Option<StateFile>, CoreError> {
             source,
         }),
     }
+}
+
+/// The path-free failure for an owner view that cannot be read.
+fn owner_unreadable(name: &str) -> CoreError {
+    CoreError::Invalid(format!("orchestrator {name}: the session owner could not be read"))
 }
 
 /// Reads one endpoint's state file, naming the orchestrator and never a path.

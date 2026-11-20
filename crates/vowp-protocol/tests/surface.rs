@@ -11,8 +11,9 @@ use vowp_protocol::agent::surface::{
 use vowp_protocol::event::{AssistantMessage, EventBody};
 use vowp_protocol::ids::{NodeName, SessionId};
 use vowp_protocol::surface::{
-    JoinInstructions, OrchestratorApp, OrchestratorAuth, OrchestratorCard, OrchestratorEndpoint, OrchestratorLocation,
-    OrchestratorNodeState, SurfaceId,
+    EndpointAccess, JoinInstructions, OrchestratorApp, OrchestratorAttach, OrchestratorAuth, OrchestratorCard,
+    OrchestratorEndpoint, OrchestratorLocation, OrchestratorNodeState, OwnershipMode, OwnershipState, SessionOwner,
+    SurfaceActivity, SurfaceId, SurfaceKind,
 };
 use vowp_protocol::time::Timestamp;
 
@@ -260,6 +261,8 @@ fn orchestrator_endpoint_round_trips_home_and_node_documents() {
             username: "opencode".to_owned(),
             password: password.clone(),
         }),
+        owner: None,
+        access: EndpointAccess::ReadOnly,
     };
     let node = OrchestratorEndpoint {
         name: "mac-main".to_owned(),
@@ -271,6 +274,8 @@ fn orchestrator_endpoint_round_trips_home_and_node_documents() {
         url: None,
         native_session_id: None,
         auth: None,
+        owner: None,
+        access: EndpointAccess::ReadOnly,
     };
 
     for (endpoint, location) in [(&home, "home"), (&node, "node")] {
@@ -331,11 +336,19 @@ fn orchestrator_endpoint_schema_is_exported_and_auth_debug_redacts_the_password(
         url: Some("http://127.0.0.1:1234".to_owned()),
         native_session_id: None,
         auth: Some(auth),
+        owner: None,
+        access: EndpointAccess::ReadOnly,
     };
     let debug = format!("{endpoint:?}");
     assert!(!debug.contains(&password), "endpoint debug never carries the password");
 
-    for name in ["OrchestratorLocation", "OrchestratorAuth", "OrchestratorEndpoint"] {
+    for name in [
+        "OrchestratorLocation",
+        "OrchestratorAuth",
+        "OrchestratorEndpoint",
+        "EndpointAccess",
+        "OrchestratorAttach",
+    ] {
         let schema = schema_for_name(name).unwrap_or_else(|| panic!("{name} is exported"));
         assert_eq!(schema["title"], name, "{name} schema title");
     }
@@ -363,6 +376,8 @@ fn orchestrator_endpoint_schema_is_exported_and_auth_debug_redacts_the_password(
         "url",
         "native_session_id",
         "auth",
+        "owner",
+        "access",
     ] {
         assert!(
             properties.contains_key(field),
@@ -504,4 +519,127 @@ fn default_surface_labels_are_clean_and_name_the_node() {
         default_surface_label(SurfaceKind::DesktopUi, "  ", &node),
         "Desktop UI · macbook"
     );
+}
+
+/// A fixed owner for the attach fixtures.
+fn desktop_owner(session: &SessionId, surface: &SurfaceId) -> SessionOwner {
+    SessionOwner {
+        session_id: session.clone(),
+        surface_id: Some(surface.clone()),
+        kind: SurfaceKind::DesktopUi,
+        label: Some("StackSpirit".to_owned()),
+        holder: "opencode-desktop".to_owned(),
+        node: NodeName::parse("home-1").expect("node name"),
+        mode: OwnershipMode::Interactive,
+        state: OwnershipState::Active,
+        activity: SurfaceActivity::Idle,
+        epoch: 3,
+        acquired_at: at(),
+        heartbeat_at: at(),
+        expires_at: None,
+    }
+}
+
+#[test]
+fn endpoint_access_wire_strings_default_and_display() {
+    assert_eq!(EndpointAccess::default(), EndpointAccess::ReadOnly);
+    for (access, wire) in [
+        (EndpointAccess::Owner, "owner"),
+        (EndpointAccess::ReadOnly, "read_only"),
+    ] {
+        assert_eq!(access.as_str(), wire);
+        assert_eq!(access.to_string(), wire);
+        assert_eq!(serde_json::to_value(access).expect("access JSON"), json!(wire));
+        let back: EndpointAccess = serde_json::from_value(json!(wire)).expect("access back");
+        assert_eq!(back, access);
+    }
+    serde_json::from_value::<EndpointAccess>(json!("writer")).expect_err("an unknown access is refused");
+}
+
+#[test]
+fn an_endpoint_document_without_owner_or_access_still_parses() {
+    // The v0.5.0 document shape: no `owner`, no `access`.
+    let old = json!({
+        "name": "main",
+        "app": "opencode",
+        "session_id": SessionId::new(),
+        "location": "home",
+        "node": null,
+        "state": "running",
+        "url": "http://127.0.0.1:1234",
+        "native_session_id": null,
+        "auth": null
+    });
+    let endpoint: OrchestratorEndpoint = serde_json::from_value(old).expect("an old document parses");
+    assert!(endpoint.owner.is_none());
+    assert_eq!(endpoint.access, EndpointAccess::ReadOnly);
+}
+
+#[test]
+fn orchestrator_attach_round_trips_with_expiry_and_owner() {
+    let session = SessionId::new();
+    let surface = SurfaceId::new();
+    let owner = desktop_owner(&session, &surface);
+    let endpoint = OrchestratorEndpoint {
+        name: "main".to_owned(),
+        app: OrchestratorApp::Opencode,
+        session_id: session,
+        location: OrchestratorLocation::Home,
+        node: None,
+        state: OrchestratorNodeState::Running,
+        url: Some("http://127.0.0.1:1234".to_owned()),
+        native_session_id: None,
+        auth: None,
+        owner: Some(owner.clone()),
+        access: EndpointAccess::Owner,
+    };
+    let attach = OrchestratorAttach {
+        surface_id: surface,
+        token: "t".repeat(52),
+        owner,
+        endpoint,
+        expires_at: at().plus(std::time::Duration::from_secs(60)),
+    };
+    let value = serde_json::to_value(&attach).expect("attach JSON");
+    assert_eq!(value["token"], "t".repeat(52));
+    assert_eq!(value["endpoint"]["access"], "owner");
+    assert_eq!(value["owner"]["kind"], "desktop_ui");
+    assert_eq!(
+        value["expires_at"],
+        at().plus(std::time::Duration::from_secs(60)).as_rfc3339()
+    );
+    let back: OrchestratorAttach = serde_json::from_value(value).expect("attach back");
+    assert_eq!(back, attach);
+}
+
+#[test]
+fn orchestrator_attach_debug_redacts_the_token() {
+    let session = SessionId::new();
+    let surface = SurfaceId::new();
+    // Assemble the marker at runtime so no secret-shaped literal is committed.
+    let token = format!("attach-token-{}", "Q".repeat(24));
+    let owner = desktop_owner(&session, &surface);
+    let attach = OrchestratorAttach {
+        surface_id: surface,
+        token: token.clone(),
+        endpoint: OrchestratorEndpoint {
+            name: "main".to_owned(),
+            app: OrchestratorApp::Opencode,
+            session_id: session,
+            location: OrchestratorLocation::Home,
+            node: None,
+            state: OrchestratorNodeState::Running,
+            url: None,
+            native_session_id: None,
+            auth: None,
+            owner: Some(owner.clone()),
+            access: EndpointAccess::Owner,
+        },
+        owner,
+        expires_at: at(),
+    };
+    let debug = format!("{attach:?}");
+    assert!(debug.contains("[REDACTED]"), "debug redacts the token: {debug}");
+    assert!(!debug.contains(&token), "debug never carries the token: {debug}");
+    assert!(debug.contains("opencode-desktop"), "the rest stays readable: {debug}");
 }

@@ -4683,6 +4683,50 @@ fn write_private_file(path: &Path, bytes: &[u8]) {
 }
 
 #[test]
+fn agent_endpoint_reports_read_only_without_a_home_owner_view() {
+    let home = TempDir::new().expect("agent home");
+    let state_dir = home.path().join(".vowp-agent");
+    ls_create_private_dir(&state_dir);
+    let session = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("session");
+    let name = "readonly";
+    let dir = OrchestratorHost::dir(&state_dir, name).expect("orchestrator dir");
+    ls_create_private_dir(&dir);
+    let config = OrchestratorConfig {
+        name: name.to_owned(),
+        app: OrchestratorApp::Opencode,
+        project: None,
+        session: Some(session.clone()),
+        surface: Some(SurfaceId("01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned())),
+        command: Some("opencode".to_owned()),
+        args: vec!["serve".to_owned()],
+        working_dir: Some(home.path().display().to_string()),
+        service_json: None,
+    };
+    let config_path = OrchestratorHost::config_path(&state_dir, name).expect("config path");
+    write_private_file(&config_path, &serde_json::to_vec(&config).expect("config JSON"));
+
+    let envs = [("VOWP_AGENT_HOME", state_dir.display().to_string())];
+    let (code, stdout, stderr) = run_binary_with(
+        home.path(),
+        &["--json", "agent", "orchestrator", "endpoint", name],
+        &envs,
+    );
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("endpoint JSON");
+    assert_eq!(value["session_id"], session.as_str());
+    assert!(
+        value["owner"].is_null(),
+        "the agent never reports a home owner: {value}"
+    );
+    assert_eq!(value["access"], "read_only", "{value}");
+
+    // There is no attach on the node.
+    let (code, _stdout, stderr) = run_binary_with(home.path(), &["agent", "orchestrator", "attach", name], &envs);
+    assert_ne!(code, 0, "the agent has no attach command");
+    assert!(!stderr.is_empty());
+}
+
+#[test]
 fn agent_orchestrator_endpoint_json_returns_local_auth_and_ls_stays_clean() {
     let home = TempDir::new().expect("agent home");
     let state_dir = home.path().join(".vowp-agent");
@@ -4748,6 +4792,9 @@ fn agent_orchestrator_endpoint_json_returns_local_auth_and_ls_stays_clean() {
     assert_eq!(value["auth"]["scheme"], "Basic");
     assert_eq!(value["auth"]["username"], "opencode");
     assert_eq!(value["auth"]["password"], password);
+    // The agent cannot see the home database: no owner view, and never write access.
+    assert!(value["owner"].is_null(), "the agent has no home owner view: {value}");
+    assert_eq!(value["access"], "read_only", "{value}");
 
     let (code, _stdout, stderr) = run_binary_with(home.path(), &["agent", "orchestrator", "endpoint", "ghost"], &envs);
     assert_eq!(code, 3, "an unknown local name is not found: {stderr}");

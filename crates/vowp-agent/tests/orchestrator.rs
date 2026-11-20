@@ -2126,6 +2126,11 @@ fn agent_orchestrator_endpoint_reads_a_live_0600_service_file() {
     assert_eq!(endpoint.state, OrchestratorNodeState::Running);
     assert_eq!(endpoint.url.as_deref(), Some("http://127.0.0.1:54321"));
     assert!(
+        endpoint.owner.is_none(),
+        "the agent cannot see the home owner: {endpoint:?}"
+    );
+    assert_eq!(endpoint.access, vowp_protocol::EndpointAccess::ReadOnly);
+    assert!(
         endpoint.native_session_id.is_none(),
         "the agent does not learn the desktop app's native session id"
     );

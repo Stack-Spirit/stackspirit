@@ -17,8 +17,8 @@ use vowp_adapters::proc::{Signal, process_alive, signal_group};
 use vowp_core::CoreError;
 use vowp_core::surface::orchestrator::{KEEPER_PID_FILE, NewOrchestrator, Orchestrator, OrchestratorInfo};
 use vowp_protocol::{
-    Executor, ExecutorRef, OrchestratorApp, OrchestratorCard, OrchestratorEndpoint, OrchestratorLocation, ProjectName,
-    VowpConfig,
+    Executor, ExecutorRef, OrchestratorApp, OrchestratorAttach, OrchestratorCard, OrchestratorEndpoint,
+    OrchestratorLocation, ProjectName, SurfaceId, VowpConfig,
 };
 use vowp_store::NodePaths;
 
@@ -60,10 +60,41 @@ pub enum OrchestratorCommand {
     #[command(
         after_help = "For `orchestrator endpoint`, --node is not an SSH redirect: the command inspects this home and never opens SSH or a node's files."
     )]
-    Endpoint(OrchestratorNameArgs),
+    Endpoint(OrchestratorEndpointArgs),
+    /// Attach a desktop UI as the session owner, then hold the lease until stdin closes.
+    #[command(
+        after_help = "Prints the one-time grant, then heartbeats the lease until stdin reaches end-of-file and releases it. Keep this process (as a child of the UI) alive while the UI writes. Recorded ownership is cooperative: it does not stop a UI that calls the app's HTTP API directly. --node is not an SSH redirect; attach works only on a home-hosted orchestrator."
+    )]
+    Attach(OrchestratorAttachArgs),
     /// Hidden: keep one orchestrator's lease alive after the CLI exits.
     #[command(name = "__keepalive", hide = true)]
     KeepAlive(OrchestratorNameArgs),
+}
+
+/// Arguments for `vowp orchestrator endpoint`.
+#[derive(Debug, Clone, Args)]
+pub struct OrchestratorEndpointArgs {
+    /// Orchestrator name.
+    pub name: String,
+    /// The caller's surface id; `access: owner` is reported only for the live owner surface.
+    #[arg(long = "surface", value_name = "ID")]
+    pub surface: Option<String>,
+}
+
+/// Arguments for `vowp orchestrator attach`.
+#[derive(Debug, Clone, Args)]
+pub struct OrchestratorAttachArgs {
+    /// Orchestrator name.
+    pub name: String,
+    /// Holder name shown to other surfaces, for example `opencode-desktop`.
+    #[arg(long, value_name = "NAME")]
+    pub holder: String,
+    /// Friendly surface label, for example `StackSpirit · macbook`.
+    #[arg(long, value_name = "LABEL")]
+    pub label: Option<String>,
+    /// Take the session over from a live owner.
+    #[arg(long)]
+    pub takeover: bool,
 }
 
 /// Arguments for `vowp orchestrator move`.
@@ -124,7 +155,7 @@ impl OrchestratorArgs {
                 args.node = node;
                 None
             }
-            OrchestratorCommand::Endpoint(_) => None,
+            OrchestratorCommand::Endpoint(_) | OrchestratorCommand::Attach(_) => None,
             _ => node,
         }
     }
@@ -146,7 +177,8 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &OrchestratorArgs) -> Result
         OrchestratorCommand::Move(args) => move_orchestrator(ctx, io, &orchestrator, args),
         OrchestratorCommand::Stop(args) => stop(ctx, io, &orchestrator, &args.name),
         OrchestratorCommand::Resume(args) => resume(ctx, io, &orchestrator, &args.name),
-        OrchestratorCommand::Endpoint(args) => endpoint(ctx, io, &orchestrator, &args.name),
+        OrchestratorCommand::Endpoint(args) => endpoint(ctx, io, &orchestrator, args),
+        OrchestratorCommand::Attach(args) => attach(ctx, io, &orchestrator, args),
         OrchestratorCommand::KeepAlive(args) => {
             orchestrator.keep_alive(&args.name)?;
             Ok(0)
@@ -288,14 +320,82 @@ fn resume(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator, name: 
 /// SSH, a socket or a node's files. A node-hosted card is metadata only, and the human
 /// output points the owner at the agent machine's own command. JSON carries the local auth
 /// material only when the home itself hosts a live endpoint.
-fn endpoint(ctx: &Ctx, io: &mut dyn IoStreams, orchestrator: &Orchestrator, name: &str) -> Result<i32, CliError> {
-    let endpoint = orchestrator.endpoint(name).map_err(map_orchestrator_error)?;
+fn endpoint(
+    ctx: &Ctx,
+    io: &mut dyn IoStreams,
+    orchestrator: &Orchestrator,
+    args: &OrchestratorEndpointArgs,
+) -> Result<i32, CliError> {
+    let surface = match args.surface.as_deref() {
+        Some(value) => Some(parse_surface_id(value)?),
+        None => None,
+    };
+    let endpoint = orchestrator
+        .endpoint(&args.name, surface.as_ref())
+        .map_err(map_orchestrator_error)?;
     if ctx.json() {
         print_json(io, &endpoint)?;
         return Ok(0);
     }
     print_endpoint(io, &endpoint)?;
     Ok(0)
+}
+
+/// Parses `--surface`, which is a 26-character ULID.
+fn parse_surface_id(value: &str) -> Result<SurfaceId, CliError> {
+    let value = value.trim();
+    if value.len() != 26 || !value.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(CliError::Invalid(
+            "--surface takes a 26-character surface id".to_owned(),
+        ));
+    }
+    Ok(SurfaceId(value.to_owned()))
+}
+
+/// Runs `orchestrator attach`.
+///
+/// Prints the grant on stdout, the hold notice on stderr (so `--json` stays parseable), then
+/// blocks until stdin reaches end-of-file and releases the lease. There is no detached
+/// keeper: the lease lives exactly as long as this process. The token is never logged and
+/// never part of an error.
+fn attach(
+    ctx: &Ctx,
+    io: &mut dyn IoStreams,
+    orchestrator: &Orchestrator,
+    args: &OrchestratorAttachArgs,
+) -> Result<i32, CliError> {
+    let guard = orchestrator
+        .attach(&args.name, &args.holder, args.label.as_deref(), args.takeover)
+        .map_err(map_orchestrator_error)?;
+    if ctx.json() {
+        print_json(io, guard.grant())?;
+    } else {
+        print_attach(io, guard.grant())?;
+    }
+    io.out().flush()?;
+    writeln!(io.err(), "attach: holding ownership; close stdin to release")?;
+    writeln!(
+        io.err(),
+        "warning: closing stdin releases the session; the UI loses write access"
+    )?;
+    io.err().flush()?;
+    // Block until the parent closes stdin. Read errors end the hold the same way.
+    let _ = std::io::copy(io.input(), &mut std::io::sink());
+    guard.release().map_err(map_orchestrator_error)?;
+    writeln!(io.err(), "attach: released")?;
+    Ok(0)
+}
+
+/// Prints one attach grant as a compact block. The token is the one-time lease token; the
+/// engine password stays in `--json`.
+fn print_attach(io: &mut dyn IoStreams, grant: &OrchestratorAttach) -> Result<(), CliError> {
+    writeln!(io.out(), "surface: {}", grant.surface_id)?;
+    writeln!(io.out(), "holder: {}", grant.owner.holder)?;
+    writeln!(io.out(), "token: {}", grant.token)?;
+    writeln!(io.out(), "access: {}", grant.endpoint.access)?;
+    writeln!(io.out(), "url: {}", grant.endpoint.url.as_deref().unwrap_or("-"))?;
+    writeln!(io.out(), "expires: {}", grant.expires_at)?;
+    Ok(())
 }
 
 /// Prints one endpoint as a compact key/value block without its password.
@@ -334,6 +434,22 @@ fn print_endpoint(io: &mut dyn IoStreams, endpoint: &OrchestratorEndpoint) -> Re
         )?,
         None => writeln!(io.out(), "auth: -")?,
     }
+    match &endpoint.owner {
+        Some(owner) => writeln!(
+            io.out(),
+            "owner: {} ({}) holder {} node {} mode {} state {} activity {} epoch {}",
+            owner.label.as_deref().unwrap_or("-"),
+            owner.kind.store_name(),
+            owner.holder,
+            owner.node,
+            owner.mode,
+            owner.state,
+            owner.activity,
+            owner.epoch
+        )?,
+        None => writeln!(io.out(), "owner: -")?,
+    }
+    writeln!(io.out(), "access: {}", endpoint.access)?;
     if endpoint.location == OrchestratorLocation::Node {
         writeln!(
             io.out(),

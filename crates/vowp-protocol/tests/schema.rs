@@ -91,6 +91,8 @@ const LISTED_TYPES: &[&str] = &[
     "OrchestratorLocation",
     "OrchestratorAuth",
     "OrchestratorEndpoint",
+    "EndpointAccess",
+    "OrchestratorAttach",
     "JoinInstructions",
     "Snapshot",
     "SupervisorSnapshot",

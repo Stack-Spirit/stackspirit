@@ -52,6 +52,7 @@ python3 docs/reference/check-reference.py
 | `CostRow` | [cost-row.md](cost-row.md) |
 | `CostTotal` | [cost-total.md](cost-total.md) |
 | `Edge` | [edge.md](edge.md) |
+| `EndpointAccess` | [endpoint-access.md](endpoint-access.md) |
 | `EventEnvelope` | [event-envelope.md](event-envelope.md) |
 | `EventPage` | [event-page.md](event-page.md) |
 | `Evidence` | [evidence.md](evidence.md) |
@@ -93,6 +94,7 @@ python3 docs/reference/check-reference.py
 | `NodePage` | [node-page.md](node-page.md) |
 | `NodePresence` | [node-presence.md](node-presence.md) |
 | `NodeStatus` | [node-status.md](node-status.md) |
+| `OrchestratorAttach` | [orchestrator-attach.md](orchestrator-attach.md) |
 | `OrchestratorAuth` | [orchestrator-auth.md](orchestrator-auth.md) |
 | `OrchestratorCard` | [orchestrator-card.md](orchestrator-card.md) |
 | `OrchestratorCommand` | [orchestrator-command.md](orchestrator-command.md) |

@@ -2355,3 +2355,264 @@ fn orchestrator_endpoint_redacts_a_corrupt_private_file_error() {
         assert!(!text.contains(forbidden), "the error leaked a forbidden value: {text}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// `vowp orchestrator attach` and the owner/access view of `endpoint`
+// ---------------------------------------------------------------------------
+
+/// Writes a live home-hosted orchestrator bound to a real session in the test project.
+fn live_attach_target(env: &TestEnv, name: &str, password: &str) -> SessionId {
+    let session = vowp_core::session::service::SessionService::new(deps(env))
+        .create_session(vowp_protocol::NewSession {
+            project: Some(env.project_name().clone()),
+            job_id: None,
+            role: SessionRole::Orchestrator,
+            title: format!("orchestrator {name}"),
+            cwd: PathBuf::from("."),
+            parent: None,
+            executor: None,
+        })
+        .expect("session");
+    let (dir, _unused) = write_endpoint_state(env, name, None);
+    let mut state = read_json(&state_path(&dir));
+    state["session_id"] = serde_json::json!(session);
+    state["project"] = serde_json::json!(env.project_name());
+    std::fs::write(state_path(&dir), serde_json::to_vec(&state).expect("state JSON")).expect("orchestrator.json");
+    std::fs::set_permissions(state_path(&dir), std::fs::Permissions::from_mode(0o600)).expect("state mode");
+    write_endpoint_host(&dir, 45901);
+    write_endpoint_service(&dir, "http://127.0.0.1:45901", 45901, password);
+    session
+}
+
+fn lease_row(env: &TestEnv, session: &SessionId) -> Option<vowp_store::repo_surfaces::OwnerRecord> {
+    env.store().ownership(session).expect("ownership")
+}
+
+#[test]
+fn orchestrator_attach_json_prints_a_clean_grant_and_the_notice_goes_to_stderr() {
+    let env = TestEnv::new();
+    let password = endpoint_password("attach-json");
+    let session = live_attach_target(&env, "main", &password);
+
+    // The in-process stdin is empty, so the hold ends at once and releases the lease.
+    let (code, stdout, stderr) = env.run(&[
+        "--json",
+        "orchestrator",
+        "attach",
+        "main",
+        "--holder",
+        "opencode-desktop",
+        "--label",
+        "StackSpirit · macbook",
+    ]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let value: Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("stdout is not JSON: {error}: {stdout}"));
+    let token = value["token"].as_str().expect("token");
+    assert_eq!(token.len(), 52);
+    assert_eq!(value["owner"]["kind"], "desktop_ui");
+    assert_eq!(value["owner"]["holder"], "opencode-desktop");
+    assert_eq!(value["owner"]["label"], "StackSpirit · macbook");
+    assert_eq!(value["endpoint"]["access"], "owner");
+    assert_eq!(value["endpoint"]["url"], "http://127.0.0.1:45901");
+    assert_eq!(
+        value["endpoint"]["auth"]["password"], password,
+        "the JSON path keeps the password"
+    );
+    assert!(value["expires_at"].is_string() && value["surface_id"].is_string());
+    assert!(
+        stderr.contains("attach: holding ownership; close stdin to release"),
+        "the hold notice is on stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("closing stdin releases"),
+        "the warning is on stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("holding ownership"),
+        "stdout stays JSON only: {stdout}"
+    );
+    assert!(
+        !stderr.contains(token) && !stderr.contains(&password),
+        "stderr never carries a secret"
+    );
+    assert!(lease_row(&env, &session).is_none(), "EOF on stdin released the lease");
+}
+
+#[test]
+fn orchestrator_attach_human_block_has_the_grant_fields_and_no_password() {
+    let env = TestEnv::new();
+    let password = endpoint_password("attach-human");
+    live_attach_target(&env, "main", &password);
+    let (code, stdout, stderr) = env.run(&["orchestrator", "attach", "main", "--holder", "ui"]);
+    assert_eq!(code, 0, "{stderr}");
+    for key in [
+        "surface: ",
+        "holder: ui",
+        "token: ",
+        "access: owner",
+        "url: http://127.0.0.1:45901",
+        "expires: ",
+    ] {
+        assert!(stdout.contains(key), "missing {key:?}: {stdout}");
+    }
+    assert!(
+        !stdout.contains(&password),
+        "the human block never prints the password: {stdout}"
+    );
+    assert!(!stderr.contains(&password));
+}
+
+#[test]
+fn orchestrator_attach_refuses_node_hosted_stopped_and_live_owner() {
+    let env = TestEnv::new();
+    let password = endpoint_password("attach-refuse");
+    let node = env.agent_node("mac-studio");
+    write_endpoint_state(&env, "mac-main", Some(node));
+    let (code, stdout, stderr) = env.run(&["orchestrator", "attach", "mac-main", "--holder", "ui"]);
+    assert_ne!(code, 0, "a node-hosted orchestrator is refused: {stdout}");
+    assert!(stderr.contains("mac-main") && stderr.contains("node"), "{stderr}");
+
+    let (dir, _session) = write_endpoint_state(&env, "stopped", None);
+    let mut state = read_json(&state_path(&dir));
+    state["state"] = serde_json::json!("stopped");
+    std::fs::write(state_path(&dir), serde_json::to_vec(&state).expect("state JSON")).expect("orchestrator.json");
+    let (code, _stdout, stderr) = env.run(&["orchestrator", "attach", "stopped", "--holder", "ui"]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("vowp orchestrator resume stopped"), "{stderr}");
+
+    let session = live_attach_target(&env, "main", &password);
+    let core = Orchestrator::new(deps(&env));
+    let held = core.attach("main", "first-ui", None, false).expect("first attach");
+    let (code, _stdout, stderr) = env.run(&["orchestrator", "attach", "main", "--holder", "second-ui"]);
+    assert_ne!(code, 0, "a live owner refuses an attach without --takeover");
+    assert!(stderr.contains("first-ui"), "{stderr}");
+    assert!(!stderr.contains(&password) && !stderr.contains(&held.grant().token));
+    let (code, _stdout, stderr) = env.run(&["orchestrator", "attach", "main", "--holder", "second-ui", "--takeover"]);
+    assert_eq!(code, 0, "{stderr}");
+    drop(held);
+    let _ = session;
+}
+
+#[test]
+fn orchestrator_endpoint_reports_owner_and_access_for_a_surface() {
+    let env = TestEnv::new();
+    let password = endpoint_password("endpoint-owner");
+    let session = live_attach_target(&env, "main", &password);
+    let core = Orchestrator::new(deps(&env));
+    let guard = core
+        .attach("main", "opencode-desktop", Some("StackSpirit"), false)
+        .expect("attach");
+    let surface = guard.grant().surface_id.to_string();
+
+    let (code, value, stderr) = env.run_json(&["orchestrator", "endpoint", "main"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["access"], "read_only", "no caller identity is read-only");
+    assert_eq!(value["owner"]["holder"], "opencode-desktop");
+    assert_eq!(value["owner"]["session_id"], session.as_str());
+    let (code, value, stderr) = env.run_json(&["orchestrator", "endpoint", "main", "--surface", &surface]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["access"], "owner");
+
+    let (code, text, stderr) = env.run(&["orchestrator", "endpoint", "main", "--surface", &surface]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(text.contains("access: owner"), "{text}");
+    assert!(
+        text.contains("owner: StackSpirit (desktop-ui) holder opencode-desktop"),
+        "{text}"
+    );
+    assert!(text.contains("mode interactive state active"), "{text}");
+    assert!(
+        !text.contains(&password),
+        "the human output carries no password: {text}"
+    );
+
+    let (code, text, _stderr) = env.run(&["orchestrator", "endpoint", "main", "--surface", "not-an-id"]);
+    assert_eq!(code, 2, "a malformed surface id is invalid input: {text}");
+    drop(guard);
+}
+
+#[test]
+fn attach_holds_the_lease_until_stdin_closes_and_then_releases_it() {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let env = TestEnv::new();
+    let password = endpoint_password("attach-hold");
+    let session = live_attach_target(&env, "main", &password);
+    let mut child = Command::new(vowp_binary())
+        .args([
+            "--home",
+            &env.home_path().display().to_string(),
+            "--project",
+            &env.project_path().display().to_string(),
+            "--json",
+            "orchestrator",
+            "attach",
+            "main",
+            "--holder",
+            "ui-child",
+        ])
+        .env("NO_COLOR", "1")
+        .env_remove("VOWP_HOME")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn vowp orchestrator attach");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+    // The grant is one pretty-printed JSON document; the process keeps stdout open, so parse
+    // exactly one value instead of reading to end-of-file.
+    let grant: Value = serde_json::Deserializer::from_reader(&mut stdout)
+        .into_iter::<Value>()
+        .next()
+        .expect("a grant document")
+        .expect("the grant is JSON");
+    let token = grant["token"].as_str().expect("token").to_owned();
+
+    // While stdin is open the lease is held and belongs to this grant.
+    let held = lease_row(&env, &session).expect("the attach process holds the lease");
+    assert_eq!(held.lease.token, hash_lease_token(&token));
+    assert_eq!(held.lease.holder, "ui-child");
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        child.try_wait().expect("try_wait").is_none(),
+        "the process keeps running while stdin is open"
+    );
+    assert!(lease_row(&env, &session).is_some());
+
+    drop(child.stdin.take()); // EOF
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the attach process did not exit after stdin closed"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "attach exits 0 after release: {status:?}");
+    let mut rest = String::new();
+    stdout.read_to_string(&mut rest).expect("rest of stdout");
+    assert!(rest.trim().is_empty(), "stdout carries only the grant: {rest:?}");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut stderr)
+        .expect("stderr");
+    assert!(
+        stderr.contains("attach: holding ownership; close stdin to release"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(&token) && !stderr.contains(&password));
+    assert!(
+        lease_row(&env, &session).is_none(),
+        "closing stdin released the lease row"
+    );
+}

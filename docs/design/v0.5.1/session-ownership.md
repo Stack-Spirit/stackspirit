@@ -40,7 +40,9 @@ commands are marked **proposed**; they do not exist yet.
   asking surface may write. The enforcement point for a UI that keeps using the app's HTTP API is a
   **loopback VOWP engine proxy** carrying a per-surface token; the raw engine password stays on the
   machine that runs the app. Without the proxy, the first release is *recorded and cooperative*, not
-  hard-enforced; §6 asks the owner to choose the scope.
+  hard-enforced. The owner chose that scope on 2026-11-20 (§6 Q1): the endpoint and attach land first
+  and the proxy is deferred, so this release does **not** hard-enforce ownership against a UI that
+  talks to the app's HTTP API directly.
 - **Worker jobs are the same rule with a different lifetime.** A job run holds ownership in `job` mode
   for the life of the run, not for the 60-second interactive stale window. The run's existing
   `RunState`/assignment traffic renews it; expiry fences the run. An interactive takeover of a running
@@ -429,8 +431,10 @@ Rules:
   reads the node's private files. Its `owner` is the home's owner when the agent command can see it;
   otherwise `None` plus `read_only`. The node-side proxy is a separate open question (§6).
 
-`vowp orchestrator attach` (proposed) is the writer path; `vowp orchestrator endpoint` remains the
-metadata/read path. `vowp agent orchestrator endpoint` keeps its current shape and gains only the
+`vowp orchestrator attach` (landed in slice 2a, 2026-11-20) is the writer path;
+`vowp orchestrator endpoint [--surface <id>]` remains the metadata/read path. In 2a `url` and `auth`
+still describe the raw engine (the proxy mode above is deferred), so `access` is advice to a
+well-behaved client, not enforcement. `vowp agent orchestrator endpoint` keeps its current shape and gains only the
 additive fields it can fill locally.
 
 ### 2.6 Read-only and takeover
@@ -841,6 +845,16 @@ The migration tests build real v7 temporary homes; no test touches the real `~/.
 
 **Size:** L.
 
+**Status (2026-11-20): split.** Slice **2a** lands the endpoint owner/access read model
+(`owner`, `access`, `vowp orchestrator endpoint --surface`) and `vowp orchestrator attach`
+(`OrchestratorAttach` grant, a `DesktopUi` surface, the existing lease token, fencing of a job owner
+through `dispatch::fence_job_owner`). `attach` holds the lease and heartbeats until stdin reaches EOF;
+there is no detached keeper and no `--detach` while §6 Q8 is open. The loopback engine proxy, the proxy
+token, the `auth: null` mode and the `engine_proxy` tests are **deferred** to a later job; a node-hosted
+orchestrator cannot be attached from the home and node enforcement stays a follow-up. Until the proxy
+lands, recorded ownership is cooperative: a UI that calls the app's HTTP API directly is not stopped.
+The proxy and keeper items in the lists below are the deferred part.
+
 **Owns**
 
 - `crates/vowp-protocol/src/surface.rs` (endpoint types; sequential after slice 1)
@@ -951,6 +965,9 @@ v0.5.1 slice status; regenerate the CLI page; do not claim hard node enforcement
 ## 6. Open questions for the owner
 
 1. **Is the proxy in v0.5.1, or is recorded/cooperative ownership enough for the first ship?**
+   **Owner answer (2026-11-20): proxy deferred.** Land the endpoint and attach read/write path now
+   (slice 2a); recorded ownership stays cooperative for a UI that talks to the app's HTTP API
+   directly, and the docs say so. The proxy is a later job.
    Recording ownership and filling the endpoint/card/fleet is small. Hard read-only enforcement for a
    UI that keeps using the app's HTTP API requires the loopback proxy, and the OpenCode window remains
    a raw bypass unless it is launched through the proxy. Recommendation: land slice 1 and the
@@ -994,7 +1011,10 @@ v0.5.1 slice status; regenerate the CLI page; do not claim hard node enforcement
     `Orchestrator`, or no role and no `job_id`) with no owner; a local
     planner/keeper/worker/verifier session keeps the old pass. This is a behavior change, so confirm
     it.
-13. **Is the new command called `orchestrator attach` or `orchestrator claim`?** Recommendation:
+13. **Is the new command called `orchestrator attach` or `orchestrator claim`?**
+    **Owner answer (2026-11-20): `attach`.** `vowp orchestrator attach <name>` creates the `DesktopUi`
+    surface, returns the one-time grant and is the writer path; `vowp orchestrator endpoint` stays the
+    metadata/read path. Recommendation:
     `attach`, because it creates a surface and returns an attach grant; `claim` sounds like a one-time
     ownership grab. Decide before slice 2 because the command name is in the CLI contract.
 

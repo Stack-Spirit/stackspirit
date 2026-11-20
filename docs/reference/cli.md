@@ -142,6 +142,7 @@ python3 docs/reference/check-reference.py
 | [`vowp orchestrator stop`](#vowp-orchestrator-stop) | Stop an orchestrator's host and release its lease |
 | [`vowp orchestrator resume`](#vowp-orchestrator-resume) | Start an orchestrator's host again |
 | [`vowp orchestrator endpoint`](#vowp-orchestrator-endpoint) | Show the typed discovery document a local UI client uses to connect |
+| [`vowp orchestrator attach`](#vowp-orchestrator-attach) | Attach a desktop UI as the session owner, then hold the lease until stdin closes |
 | [`vowp orchestrator __keepalive`](#vowp-orchestrator-__keepalive) | Hidden: keep one orchestrator's lease alive after the CLI exits |
 | [`vowp migrate`](#vowp-migrate) | Migrate a v0.1 home to the v0.2 layout |
 | [`vowp mcp`](#vowp-mcp) | Run the stdio MCP server or the Mac-side proxy |
@@ -2864,6 +2865,7 @@ Commands:
   stop      Stop an orchestrator's host and release its lease
   resume    Start an orchestrator's host again
   endpoint  Show the typed discovery document a local UI client uses to connect
+  attach    Attach a desktop UI as the session owner, then hold the lease until stdin closes
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
@@ -2995,6 +2997,7 @@ Arguments:
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
+      --surface <ID>         The caller's surface id; `access: owner` is reported only for the live owner surface
       --node <NAME>          Run the command on that node over ssh
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
@@ -3004,6 +3007,32 @@ Options:
   -h, --help                 Print help
 
 For `orchestrator endpoint`, --node is not an SSH redirect: the command inspects this home and never opens SSH or a node's files.
+```
+
+#### `vowp orchestrator attach`
+
+```text
+Attach a desktop UI as the session owner, then hold the lease until stdin closes
+
+Usage: vowp orchestrator attach [OPTIONS] --holder <NAME> <NAME>
+
+Arguments:
+  <NAME>  Orchestrator name
+
+Options:
+      --holder <NAME>        Holder name shown to other surfaces, for example `opencode-desktop`
+      --json                 Print one machine-readable JSON document on stdout
+      --label <LABEL>        Friendly surface label, for example `StackSpirit · macbook`
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --takeover             Take the session over from a live owner
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+
+Prints the one-time grant, then heartbeats the lease until stdin reaches end-of-file and releases it. Keep this process (as a child of the UI) alive while the UI writes. Recorded ownership is cooperative: it does not stop a UI that calls the app's HTTP API directly. --node is not an SSH redirect; attach works only on a home-hosted orchestrator.
 ```
 
 #### `vowp orchestrator __keepalive`

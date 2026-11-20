@@ -27,8 +27,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use vowp_protocol::{
-    NodeName, OrchestratorApp, OrchestratorAuth, OrchestratorCommand, OrchestratorEndpoint, OrchestratorError,
-    OrchestratorLocation, OrchestratorNodeState, OrchestratorResult, ProjectName, SessionId, SurfaceId, Timestamp,
+    EndpointAccess, NodeName, OrchestratorApp, OrchestratorAuth, OrchestratorCommand, OrchestratorEndpoint,
+    OrchestratorError, OrchestratorLocation, OrchestratorNodeState, OrchestratorResult, ProjectName, SessionId,
+    SurfaceId, Timestamp,
 };
 
 use crate::client::validate_surface_id;
@@ -442,6 +443,9 @@ impl OrchestratorHost {
             url: None,
             native_session_id: None,
             auth: None,
+            // The agent cannot see the home database, so it never reports an owner.
+            owner: None,
+            access: EndpointAccess::ReadOnly,
         };
         if live.is_none() || config.app != OrchestratorApp::Opencode {
             return Ok(endpoint);

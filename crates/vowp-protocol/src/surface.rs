@@ -687,6 +687,76 @@ pub struct OrchestratorEndpoint {
     /// Local auth material, only for a live local endpoint.
     #[serde(default)]
     pub auth: Option<OrchestratorAuth>,
+    /// Who owns the orchestrator's session at the time of the request, when anyone does.
+    ///
+    /// Read from the home, so it is reported even for a node-hosted record. Old readers
+    /// ignore it; a document without it reads as `None`.
+    #[serde(default)]
+    pub owner: Option<SessionOwner>,
+    /// Whether the caller may write: [`EndpointAccess::Owner`] only for the live owner surface.
+    #[serde(default)]
+    pub access: EndpointAccess,
+}
+
+/// What the caller of an orchestrator endpoint may do with the session.
+///
+/// Recorded ownership is cooperative: a UI that talks to the app's HTTP API directly is not
+/// stopped by it. This value tells a well-behaved client whether to write or stay read-only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointAccess {
+    /// The caller is the live owner surface and may write.
+    Owner,
+    /// Any other caller, including one that named no surface.
+    #[default]
+    ReadOnly,
+}
+
+impl EndpointAccess {
+    /// Returns the stable wire string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::ReadOnly => "read_only",
+        }
+    }
+}
+
+impl fmt::Display for EndpointAccess {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The grant `vowp orchestrator attach` returns after it creates a desktop-UI surface.
+///
+/// `token` is the surface's lease token, shown once. The custom [`fmt::Debug`] redacts it.
+/// An attach grant never goes into a card, snapshot, log or error. `expires_at` is when the
+/// lease goes stale if the attach process stops heartbeating (`heartbeat_at` plus 60 s).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OrchestratorAttach {
+    /// The desktop-UI surface the attach created.
+    pub surface_id: SurfaceId,
+    /// One-time lease token; a secret.
+    pub token: String,
+    /// The owner the attach produced.
+    pub owner: SessionOwner,
+    /// The endpoint document, with `access` set to the owner.
+    pub endpoint: OrchestratorEndpoint,
+    /// When the lease is stale if the attach process stops.
+    pub expires_at: Timestamp,
+}
+
+impl fmt::Debug for OrchestratorAttach {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OrchestratorAttach")
+            .field("surface_id", &self.surface_id)
+            .field("token", &"[REDACTED]")
+            .field("owner", &self.owner)
+            .field("endpoint", &self.endpoint)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// One home -> agent orchestrator command.
