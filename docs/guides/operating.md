@@ -388,11 +388,11 @@ vowp orchestrator attach main --holder opencode-desktop --takeover --json
 ```
 
 The UI process must start `attach` as a child and keep it alive while the UI writes; closing its stdin
-releases the lease. No detached keeper exists in this release, so a UI that exits without a live
-`attach` simply has no lease. Treat the grant like a secret: the token is printed once, on stdout, and
-the hold notice goes to stderr so `--json` stays parseable. `attach` works only on a home-hosted
-orchestrator with a live app endpoint: a node-hosted orchestrator is refused, a stopped host asks you
-to run `vowp orchestrator resume <name>` first, and `--node` is not an SSH redirect.
+releases the lease. No detached keeper exists for an attached UI in this release, so a UI that exits
+without a live `attach` simply has no lease. Treat the grant like a secret: the token is printed once,
+on stdout, and the hold notice goes to stderr so `--json` stays parseable. `attach` works only on a
+home-hosted orchestrator with a live app endpoint: a node-hosted orchestrator is refused, a stopped
+host asks you to run `vowp orchestrator resume <name>` first, and `--node` is not an SSH redirect.
 
 If another surface owns the session (the orchestrator's own app host normally does while it runs),
 `attach` refuses unless you pass `--takeover`, or unless that owner is stale (no heartbeat for 60
