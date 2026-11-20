@@ -14,6 +14,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -397,25 +398,65 @@ fn insert_resume_capsule(env: &TestEnv, session: &str, at_seq: u64) {
 }
 
 /// Returns the built `vowp` binary, including when this file runs as a lib unit test.
+///
+/// Integration tests get `CARGO_BIN_EXE_vowp`. The same file is also included as a
+/// library unit-test module, where Cargo does not set it and the test executable can sit
+/// in a build-script directory (`target/debug/build/vowp-cli/<hash>/out`), so the target
+/// directory comes from the manifest first and every candidate is checked before use.
 fn vowp_binary() -> PathBuf {
-    if let Some(path) = option_env!("CARGO_BIN_EXE_vowp") {
-        let path = PathBuf::from(path);
+    if let Some(path) = option_env!("CARGO_BIN_EXE_vowp").map(PathBuf::from) {
         if path.is_file() {
             return path;
         }
     }
-    let exe = std::env::current_exe().expect("current test executable");
-    let candidate = exe
-        .parent()
-        .and_then(Path::parent)
-        .map(|dir| dir.join("vowp"))
-        .expect("target directory");
-    assert!(
-        candidate.is_file(),
+    let target = vowp_target_dir();
+    let name = vowp_exe_name();
+    let mut candidates: Vec<PathBuf> = ["debug", "release"]
+        .iter()
+        .map(|profile| target.join(profile).join(&name))
+        .collect();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent().and_then(Path::parent) {
+            candidates.push(dir.join(&name));
+        }
+    }
+    if let Some(found) = candidates.iter().find(|path| path.is_file()) {
+        return found.clone();
+    }
+    static BUILD: Once = Once::new();
+    BUILD.call_once(|| {
+        // `cargo test --lib` does not rebuild the binary the test runs. Build it once so
+        // the tests always exercise the code compiled from this checkout.
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let _ = Command::new(cargo)
+            .args(["build", "--bin", "vowp"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .status();
+    });
+    if let Some(found) = candidates.iter().find(|path| path.is_file()) {
+        return found.clone();
+    }
+    panic!(
         "vowp binary not found at {}; run `cargo build --bin vowp` first",
-        candidate.display()
+        candidates[0].display()
     );
-    candidate
+}
+
+/// The target directory Cargo used for this checkout.
+fn vowp_target_dir() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            if dir.is_absolute() { dir } else { manifest.join(dir) }
+        }
+        None => manifest.join("target"),
+    }
+}
+
+/// The host binary name.
+fn vowp_exe_name() -> String {
+    format!("vowp{}", std::env::consts::EXE_SUFFIX)
 }
 
 /// A temporary control machine with a fake `ssh` that answers the routed calls.
