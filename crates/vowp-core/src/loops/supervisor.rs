@@ -18,9 +18,9 @@ use vowp_graph::{
 };
 use vowp_protocol::{
     ActiveState, CancelToken, GateResult, InboxId, InboxItem, InboxKind, InboxState, Job, JobId, JobKind, JobState,
-    LedgerEntry, LedgerKind, Level, LimitRowKind, LoopBounds, NewSession, Node, NodeFile, ParkedReason, Profile,
-    ProjectEntry, ProjectName, ProjectState, Run, RunId, RunPurpose, SessionId, SessionRole, SessionState, Timestamp,
-    VowpConfig, Worker, WorkerKind, WorkerState,
+    LedgerEntry, LedgerKind, Level, LimitRowKind, LoopBounds, NewSession, Node, NodeFile, OnCreditsExhausted,
+    ParkedReason, Profile, ProjectEntry, ProjectName, ProjectState, Run, RunId, RunPurpose, SessionId, SessionRole,
+    SessionState, Timestamp, VowpConfig, Worker, WorkerKind, WorkerState,
 };
 use vowp_store::{CrossDbReconcile, JobFilter, MigrationReport, Store};
 
@@ -608,10 +608,16 @@ impl Supervisor {
                 self.mark_run_harvested(&run.id)?;
                 continue;
             }
+            // L6 owns the credits/auth policy; this direct park is only the backstop
+            // for the default `park`. With the explicit `next` opt-in L6 has already
+            // switched the session or queued its own no-healthy-rung park request,
+            // which this step applied above, so parking here would undo the owner's
+            // choice and duplicate the notice (loops.md §8.3).
             if matches!(
                 run.limit_kind,
                 Some(vowp_protocol::LimitKind::Credits) | Some(vowp_protocol::LimitKind::Auth)
             ) && let Some(provider) = super::l6_failover::provider_of(&run)
+                && self.credits_policy(&provider) == OnCreditsExhausted::Park
             {
                 let reason = if run.limit_kind == Some(vowp_protocol::LimitKind::Credits) {
                     ParkedReason::Credits
@@ -741,6 +747,20 @@ impl Supervisor {
             )?;
         }
         Ok(parked)
+    }
+
+    /// Returns the effective credits/auth policy for a provider.
+    ///
+    /// Both limit kinds share the one `[providers.<name>].on_credits_exhausted`
+    /// setting. A provider with no table, or a table without the key, uses the
+    /// documented `park` default.
+    fn credits_policy(&self, provider: &str) -> OnCreditsExhausted {
+        self.deps
+            .config
+            .providers
+            .get(provider)
+            .map(|config| config.on_credits_exhausted)
+            .unwrap_or_default()
     }
 
     /// Returns the provider of a job's current rung.

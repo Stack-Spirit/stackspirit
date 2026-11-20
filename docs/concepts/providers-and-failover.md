@@ -142,6 +142,13 @@ default because it cannot spend on a provider the owner did not choose for that 
 budget declaration: set `on_credits_exhausted = "next"` only when rung 2 is explicitly configured for
 that profile and you accept its cost.
 
+The policy decision belongs to L6, at the moment the run ends. Harvest in L1 is only the backstop for
+the default `park`: it applies a pending `park:<provider>` request first, then parks the provider itself
+only when the effective policy is `park`. With `next`, harvest leaves the job alone, because the session
+has already moved or L6's no-healthy-rung fallback has already parked it. That is why the opt-in is not
+undone on the next tick, and why the fallback opens exactly one notice instead of a second provider-wide
+park. Harvest does not choose a new action; it only gates this backstop on the recorded policy.
+
 The limit row is written for both policies, so `vowp status`, the ledger and `vowp cost` show why the
 rung changed. `vowp inbox answer <id> resolved` removes a parked provider's limit row and returns its
 jobs to `ready`; with `next` the affected session has already moved and the sticky `credits` or `auth`
