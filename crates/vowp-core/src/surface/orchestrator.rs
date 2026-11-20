@@ -1005,7 +1005,7 @@ impl Orchestrator {
     /// owner, or no owner all read as [`EndpointAccess::ReadOnly`]. Recorded ownership is
     /// cooperative: a UI that talks to the app's HTTP API directly is not stopped by it.
     pub fn endpoint(&self, name: &str, surface: Option<&SurfaceId>) -> Result<OrchestratorEndpoint, CoreError> {
-        let (mut endpoint, project) = self.endpoint_base(name)?;
+        let (mut endpoint, project) = self.endpoint_base(name, false)?;
         let now = self.deps.clock.now();
         let store = self
             .scoped_deps(project.as_ref())?
@@ -1025,11 +1025,26 @@ impl Orchestrator {
     }
 
     /// Builds the endpoint document without the owner view, and the orchestrator's project.
-    fn endpoint_base(&self, name: &str) -> Result<(OrchestratorEndpoint, Option<ProjectName>), CoreError> {
+    ///
+    /// `for_attach` turns a corrupt local record or service file into the typed attach
+    /// refusal that suggests `vowp orchestrator resume`; the read path keeps its existing
+    /// error text and classes.
+    fn endpoint_base(
+        &self,
+        name: &str,
+        for_attach: bool,
+    ) -> Result<(OrchestratorEndpoint, Option<ProjectName>), CoreError> {
         validate_name(name)?;
         let dir = self.dir(name);
-        let state =
-            read_endpoint_state(name, &dir)?.ok_or_else(|| CoreError::NotFound(format!("orchestrator {name}")))?;
+        let state = read_endpoint_state(name, &dir)
+            .map_err(|error| {
+                if for_attach {
+                    attach_endpoint_unavailable(name)
+                } else {
+                    error
+                }
+            })?
+            .ok_or_else(|| CoreError::NotFound(format!("orchestrator {name}")))?;
         let remote = self.state_is_remote(&state)?;
         let info = self.info_from_dir(state, dir);
         let project = info.card.project.clone();
@@ -1060,9 +1075,13 @@ impl Orchestrator {
         let Some(host) = self.host_for(info.card.app)? else {
             return Ok((endpoint, project));
         };
-        let Some(parts) = host
-            .endpoint(handle)
-            .map_err(|_| CoreError::Invalid(format!("orchestrator {name}: the app endpoint state is not readable")))?
+        let Some(parts) = host.endpoint(handle).map_err(|_| {
+            if for_attach {
+                attach_endpoint_unavailable(name)
+            } else {
+                CoreError::Invalid(format!("orchestrator {name}: the app endpoint state is not readable"))
+            }
+        })?
         else {
             return Ok((endpoint, project));
         };
@@ -1093,7 +1112,7 @@ impl Orchestrator {
         label: Option<&str>,
         takeover: bool,
     ) -> Result<AttachGuard, CoreError> {
-        let (mut endpoint, project) = self.endpoint_base(name)?;
+        let (mut endpoint, project) = self.endpoint_base(name, true)?;
         if endpoint.location == OrchestratorLocation::Node {
             return Err(CoreError::Refused(format!(
                 "orchestrator {name} runs on a node; the home cannot heartbeat a node-local engine, so it cannot be attached from here"
@@ -2424,6 +2443,16 @@ fn read_state(dir: &Path) -> Result<Option<StateFile>, CoreError> {
 /// The path-free failure for an owner view that cannot be read.
 fn owner_unreadable(name: &str) -> CoreError {
     CoreError::Invalid(format!("orchestrator {name}: the session owner could not be read"))
+}
+
+/// The typed refusal for an attach whose local endpoint record or service file is unusable.
+///
+/// It names the orchestrator, leaks no path or password, and tells the owner how to rebuild
+/// the local endpoint.
+fn attach_endpoint_unavailable(name: &str) -> CoreError {
+    CoreError::Refused(format!(
+        "orchestrator {name} has no usable app endpoint to attach to; run `vowp orchestrator resume {name}` first"
+    ))
 }
 
 /// Reads one endpoint's state file, naming the orchestrator and never a path.

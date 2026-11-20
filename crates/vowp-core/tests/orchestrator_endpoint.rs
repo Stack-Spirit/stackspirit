@@ -897,6 +897,45 @@ fn attach_refuses_a_node_hosted_orchestrator() {
 }
 
 #[test]
+fn attach_refuses_a_corrupt_service_file_with_resume_guidance() {
+    let fixture = Fixture::new();
+    let session = create_session(&fixture);
+    let dir = write_orchestrator_for(
+        &fixture.deps,
+        "corrupt",
+        None,
+        OrchestratorNodeState::Running,
+        Some(PROJECT),
+        &session,
+    );
+    write_live_host(&dir, 43888);
+    let path = dir.join(".opencode/state/opencode/service.json");
+    if let Some(parent) = path.parent() {
+        create_private_dir(parent);
+    }
+    write_private(&path, b"{\"url\":\"http://127.0.0.1:43888\",\"password\":");
+    let error = manager(&fixture)
+        .attach("corrupt", "ui-one", None, false)
+        .expect_err("a corrupt service file has no usable endpoint");
+    let CoreError::Refused(text) = error else {
+        panic!("expected Refused, got {error:?}");
+    };
+    assert!(text.contains("orchestrator corrupt"), "names the orchestrator: {text}");
+    assert!(
+        text.contains("vowp orchestrator resume corrupt"),
+        "suggests resume: {text}"
+    );
+    for forbidden in [dir.display().to_string(), "service.json".to_owned(), "43888".to_owned()] {
+        assert!(!text.contains(&forbidden), "the refusal leaked {forbidden:?}: {text}");
+    }
+    let store = project_store(&fixture);
+    assert!(
+        store.ownership(&session).expect("ownership").is_none(),
+        "a corrupt endpoint creates no owner"
+    );
+}
+
+#[test]
 fn attach_refuses_a_stopped_host_and_a_bad_label_leaves_no_owner() {
     let fixture = Fixture::new();
     let session = create_session(&fixture);
