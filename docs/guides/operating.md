@@ -371,8 +371,9 @@ tunnel, a browser or the node's files.
 
 ### Who owns the orchestrator's session
 
-The endpoint document also carries `owner` (the recorded owner of the session, whether active, stale or expired, or `null`) and `access`.
-`access` is `read_only` unless you pass the live owner's surface id:
+The endpoint document also carries `owner` (the recorded owner of the session, active, stale or
+expired, or `null`) and `access`. `access` is `read_only` unless you pass the live owner's surface
+id:
 
 ```sh
 vowp orchestrator endpoint main --surface <surface-id>   # access: owner only for the live owner
@@ -411,10 +412,10 @@ vowp session show <id>     # an owner: block, or owner: none
 ```
 
 Each `fleet status` line shows the session id, title, label, kind and mode, `holder@node`, state,
-activity and either `heartbeat <age>` (an interactive owner) or `expires in <span>` / `expired` (a job). Nothing in
-these views prints a token or password. A running job is owned in `job` mode for the life of the run
-(renewed by run activity, not by the 60-second window); taking it over from a person's surface fences
-the run, writes a capsule and leaves the job `ready`.
+activity and, for an interactive owner, `heartbeat <age>`; a job shows `expires in <span>` or
+`expired`. Nothing in these views prints a token or password. A running job is owned in `job` mode
+for the life of the run (renewed by run activity, not by the 60-second window); taking it over from
+a person's surface fences the run, writes a capsule and leaves the job `ready`.
 
 **Limits.** Ownership is recorded and cooperative: a UI that calls the app's HTTP API directly with
 the engine password is not stopped by it. The loopback engine proxy that would enforce it is **planned
