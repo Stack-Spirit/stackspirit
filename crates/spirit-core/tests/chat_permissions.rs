@@ -380,7 +380,23 @@ async fn tool_parts_become_compact_redacted_rows_in_the_log_and_the_turn() {
     start(&provider).await;
     let mut events = provider.subscribe();
     provider.send(&ChatSessionId::Setup, "go").await.unwrap();
-    next_view(&mut events, |view| view.state == ChatSessionState::Ready).await;
+    // Wait for the assistant message itself, not just a Ready view: the pump's
+    // `server.connected` handshake can emit a stale Ready snapshot early.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let event = tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            events.recv(),
+        )
+        .await
+        .expect("timed out waiting for the assistant message")
+        .expect("event bus closed");
+        if let ChatEvent::Message { message, .. } = event
+            && message.id == "msg_assistant"
+        {
+            break;
+        }
+    }
 
     let page = provider
         .log(&ChatSessionId::Setup, &ChatLogQuery::default())
