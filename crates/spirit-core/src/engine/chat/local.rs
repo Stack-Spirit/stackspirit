@@ -2304,7 +2304,7 @@ fn read_sse(endpoint: &ChatEndpoint, sender: mpsc::Sender<SseSignal>, cancel: Ar
         let _ = sender.blocking_send(SseSignal::Failed);
         return;
     };
-    let Some(remainder) = sse_headers(&mut stream) else {
+    let Some((chunked, remainder)) = sse_headers(&mut stream) else {
         let _ = sender.blocking_send(SseSignal::Failed);
         return;
     };
@@ -2314,8 +2314,13 @@ fn read_sse(endpoint: &ChatEndpoint, sender: mpsc::Sender<SseSignal>, cancel: Ar
     if stream.set_read_timeout(Some(SSE_READ_TIMEOUT)).is_err() {
         return;
     }
+    let mut decoder = chunked.then(ChunkedStreamDecoder::new);
     let mut parser = SseParser::new();
-    let mut frames = parser.push(&remainder);
+    let initial = match decoder.as_mut() {
+        Some(decoder) => decoder.push(&remainder),
+        None => remainder,
+    };
+    let mut frames = parser.push(&initial);
     for frame in frames.drain(..) {
         if sender.blocking_send(SseSignal::Frame(frame)).is_err() {
             return;
@@ -2338,7 +2343,11 @@ fn read_sse(endpoint: &ChatEndpoint, sender: mpsc::Sender<SseSignal>, cancel: Ar
             }
             Ok(read) => {
                 idle = Duration::ZERO;
-                for frame in parser.push(&buffer[..read]) {
+                let decoded = match decoder.as_mut() {
+                    Some(decoder) => decoder.push(&buffer[..read]),
+                    None => buffer[..read].to_vec(),
+                };
+                for frame in parser.push(&decoded) {
                     if sender.blocking_send(SseSignal::Frame(frame)).is_err() {
                         return;
                     }
@@ -2357,6 +2366,80 @@ fn read_sse(endpoint: &ChatEndpoint, sender: mpsc::Sender<SseSignal>, cancel: Ar
             }
             Err(_) => return,
         }
+    }
+}
+
+/// Incremental HTTP/1.1 `Transfer-Encoding: chunked` decoder for SSE streams.
+///
+/// OpenCode serves `/event` with chunked transfer encoding; stripping chunk framing before
+/// feeding [`SseParser`] prevents `\r\n<hex>\r\n` boundaries from splitting JSON lines.
+struct ChunkedStreamDecoder {
+    buf: Vec<u8>,
+    remaining: Option<usize>,
+    expect_crlf: bool,
+    done: bool,
+}
+
+impl ChunkedStreamDecoder {
+    fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            remaining: None,
+            expect_crlf: false,
+            done: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> Vec<u8> {
+        if self.done {
+            return Vec::new();
+        }
+        self.buf.extend_from_slice(bytes);
+        let mut out = Vec::new();
+        loop {
+            if self.expect_crlf {
+                if self.buf.len() < 2 {
+                    break;
+                }
+                if self.buf.starts_with(b"\r\n") {
+                    self.buf.drain(..2);
+                } else if self.buf.starts_with(b"\n") {
+                    self.buf.drain(..1);
+                }
+                self.expect_crlf = false;
+            }
+            if let Some(rem) = self.remaining {
+                let take = rem.min(self.buf.len());
+                if take == 0 {
+                    break;
+                }
+                out.extend_from_slice(&self.buf[..take]);
+                self.buf.drain(..take);
+                if take == rem {
+                    self.remaining = None;
+                    self.expect_crlf = true;
+                } else {
+                    self.remaining = Some(rem - take);
+                }
+                continue;
+            }
+            let Some(pos) = self.buf.windows(2).position(|w| w == b"\r\n") else {
+                break;
+            };
+            let line = String::from_utf8_lossy(&self.buf[..pos]).into_owned();
+            self.buf.drain(..pos + 2);
+            let hex = line.split(';').next().unwrap_or("").trim();
+            let Ok(size) = usize::from_str_radix(hex, 16) else {
+                self.done = true;
+                break;
+            };
+            if size == 0 {
+                self.done = true;
+                break;
+            }
+            self.remaining = Some(size);
+        }
+        out
     }
 }
 
@@ -2415,13 +2498,14 @@ fn connect_sse(endpoint: &ChatEndpoint) -> Option<TcpStream> {
     Some(stream)
 }
 
-fn sse_headers(stream: &mut TcpStream) -> Option<Vec<u8>> {
+fn sse_headers(stream: &mut TcpStream) -> Option<(bool, Vec<u8>)> {
     let mut raw = Vec::new();
     let mut chunk = [0_u8; 4 * 1024];
     loop {
         let boundary = raw.windows(4).position(|window| window == b"\r\n\r\n");
         if let Some(boundary) = boundary {
-            let status = String::from_utf8_lossy(&raw[..boundary])
+            let head = String::from_utf8_lossy(&raw[..boundary]);
+            let status = head
                 .lines()
                 .next()
                 .and_then(|line| line.split_whitespace().nth(1))
@@ -2429,7 +2513,11 @@ fn sse_headers(stream: &mut TcpStream) -> Option<Vec<u8>> {
             if !matches!(status, Some(200..=299)) {
                 return None;
             }
-            return Some(raw[boundary + 4..].to_vec());
+            let chunked = head.lines().any(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.starts_with("transfer-encoding:") && lower.contains("chunked")
+            });
+            return Some((chunked, raw[boundary + 4..].to_vec()));
         }
         if raw.len() > 64 * 1024 {
             return None;

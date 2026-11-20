@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use spirit_core::SpiritCore;
 use spirit_core::connection::ConnectionManager;
-use spirit_core::engine::chat::{ChatEngine, ChatModelTier, ChatModelView, LocalChatProvider};
+use spirit_core::engine::chat::{
+    ChatEngine, ChatModelTier, ChatModelView, LocalChatProvider, StreamSupport,
+};
 use spirit_core::engine::{
     EngineChoice, EnginePreferences, EnginePreferencesStore, EngineRuntime, EngineState,
     EngineStatus, EngineSupervisor, EngineSupervisorConfig, GateFeatureFlags, GateSnapshot,
@@ -553,7 +555,10 @@ impl AppState {
         // private tree creates; it never spawns an engine and never receives a key.
         let setup_workspace = PrivateEngineTree::prepare(&app_data_dir)?.setup_workspace;
         let chat_engine = Arc::new(DesktopChatEngine::new(engine.clone()));
-        let chat = Arc::new(LocalChatProvider::new(chat_engine.clone(), setup_workspace));
+        let chat = Arc::new(
+            LocalChatProvider::new(chat_engine.clone(), setup_workspace)
+                .with_stream_support(StreamSupport::Pinned),
+        );
 
         Ok((
             Self {
