@@ -574,8 +574,9 @@ event.
 | The port is reserved by binding `127.0.0.1:0` and dropping the listener | **Proven** | `reserve_loopback_port` |
 | Health is `GET /global/health` with `healthy: true` | **Proven live** | `ProcessEngineRuntime::health`, fake engine, and the probe: 200 with `healthy: true` and `version: "1.19.5"` |
 | `POST /session` with `{}` creates a session | **Proven live** | `verify_against_engine` and the probe (`{"title":"<TITLE>"}`); the live response was a `Session` |
-| `POST /session/{id}/message` accepts `{ model, parts }` | **Proven at request level; body pinned by `/doc`** | `verify_against_engine`; `/doc`: `parts` is the only required body field, `messageID` and `model` are optional, response is `{info,parts}` |
-| `messageID` is accepted on the message request and preserved in the log | **Accepted by schema; log preservation owner-turn** | `/doc` request body; the probe ran no model turn. Keep the role/text/time reconciliation in §4.6 until §9 pins it |
+| `POST /session/{id}/message` accepts `{ model, parts }` | **Proven live with a real turn (2026-11-20)** | `verify_against_engine` and the live turn: 200 `{info, parts}` on a free model with `cost: 0` and `tokens.total: 12260` (`input 12247`, `output 3`, `reasoning 10`, `cache.read 0`). `/doc` remains the schema source: `parts` is the only required body field; `messageID` and `model` are optional |
+| `messageID` must start with `msg` | **Proven live (2026-11-20)** | The real sidecar returned `HTTP 400 BadRequest` for a non-`msg` id (exact payload in §2.2.5); `msg_<ULID>` was accepted on the live turn and the assistant message carries `parentID: msg_...` |
+| The user message with the sent `messageID` is preserved in `GET /session/{id}/message` | **Owner-turn unknown** | `/doc` accepts the field, but the live turn did not pin the *user*-message log entry. Keep the role/text/time reconciliation in §4.6 until §9 pins it |
 | `DELETE /session/{id}` exists | **Proven** | key-verification cleanup |
 | A provider error can arrive in an HTTP 200 body (`info.error.statusCode`) | **Proven** | `classify_message_response`; `/doc` types `AssistantMessage.error` as the provider-error union |
 | The child is killed on stop/drop; no orphan | **Proven** | process tests |
