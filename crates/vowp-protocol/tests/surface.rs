@@ -409,3 +409,99 @@ fn unknown_surface_frame_type_is_rejected() {
         "error names the state: {bad_state}"
     );
 }
+
+#[test]
+fn surface_kind_desktop_ui_round_trips_as_desktop_ui() {
+    use vowp_protocol::surface::SurfaceKind;
+
+    let value = serde_json::to_value(SurfaceKind::DesktopUi).expect("kind JSON");
+    assert_eq!(value, json!("desktop_ui"));
+    let back: SurfaceKind = serde_json::from_value(json!("desktop_ui")).expect("kind back");
+    assert_eq!(back, SurfaceKind::DesktopUi);
+    assert_eq!(SurfaceKind::DesktopUi.store_name(), "desktop-ui");
+    assert_eq!(SurfaceKind::ClaudeCode.store_name(), "claude-code");
+    assert!(
+        serde_json::from_value::<SurfaceKind>(json!("desktop-ui")).is_err(),
+        "the hyphenated spelling is the store/CLI name, not a wire value"
+    );
+}
+
+#[test]
+fn lease_owner_fields_default_for_an_old_document() {
+    use vowp_protocol::surface::{LeaseStatus, OwnershipMode, OwnershipState, SessionOwner, SurfaceActivity};
+
+    let old = json!({
+        "held": true,
+        "holder": "laptop",
+        "kind": "chat",
+        "node": "home",
+        "acquired_at": "2023-11-14T22:13:20Z",
+        "heartbeat_at": "2023-11-14T22:13:20Z",
+        "token": null
+    });
+    let status: LeaseStatus = serde_json::from_value(old).expect("old LeaseStatus parses");
+    assert_eq!(status.mode, None);
+    assert_eq!(status.state, None);
+    assert_eq!(status.epoch, None);
+    assert_eq!(status.expires_at, None);
+    assert_eq!(status.label, None);
+    assert_eq!(status.activity, None);
+
+    let session = SessionId::new();
+    let owner: SessionOwner = serde_json::from_value(json!({
+        "session_id": session.to_string(),
+        "surface_id": null,
+        "kind": "agent",
+        "holder": "agent",
+        "node": "mac",
+        "acquired_at": "2023-11-14T22:13:20Z",
+        "heartbeat_at": "2023-11-14T22:13:20Z"
+    }))
+    .expect("an owner document with only the required fields parses");
+    assert_eq!(owner.mode, OwnershipMode::Interactive);
+    assert_eq!(owner.state, OwnershipState::Active);
+    assert_eq!(owner.activity, SurfaceActivity::Idle);
+    assert_eq!(owner.epoch, 0);
+    assert_eq!(owner.label, None);
+    assert_eq!(owner.expires_at, None);
+}
+
+#[test]
+fn ownership_enums_use_snake_case_wire_names() {
+    use vowp_protocol::surface::{OwnershipMode, OwnershipState, SurfaceActivity};
+
+    assert_eq!(serde_json::to_value(OwnershipMode::Job).expect("mode"), json!("job"));
+    assert_eq!(
+        serde_json::to_value(OwnershipState::Expired).expect("state"),
+        json!("expired")
+    );
+    assert_eq!(
+        serde_json::to_value(SurfaceActivity::Waiting).expect("activity"),
+        json!("waiting")
+    );
+    assert_eq!(OwnershipMode::Interactive.to_string(), "interactive");
+    assert_eq!(SurfaceActivity::Running.to_string(), "running");
+}
+
+#[test]
+fn default_surface_labels_are_clean_and_name_the_node() {
+    use vowp_protocol::surface::{SurfaceKind, default_surface_label};
+
+    let node = NodeName::parse("macbook").expect("node");
+    assert_eq!(
+        default_surface_label(SurfaceKind::Opencode, "main", &node),
+        "OpenCode · macbook"
+    );
+    assert_eq!(
+        default_surface_label(SurfaceKind::ClaudeCode, "main", &node),
+        "Claude Code · macbook"
+    );
+    assert_eq!(
+        default_surface_label(SurfaceKind::DesktopUi, "StackSpirit", &node),
+        "StackSpirit · macbook"
+    );
+    assert_eq!(
+        default_surface_label(SurfaceKind::DesktopUi, "  ", &node),
+        "Desktop UI · macbook"
+    );
+}

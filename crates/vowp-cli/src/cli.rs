@@ -1530,6 +1530,20 @@ pub enum SurfaceCommand {
     Revoke(SurfaceRevokeArgs),
     /// Rotate a surface token, keeping the old token for a ten-minute overlap.
     Rotate(SurfaceRotateArgs),
+    /// Save a friendly name for a surface.
+    Rename(SurfaceRenameArgs),
+}
+
+/// Arguments for `vowp surface rename`.
+#[derive(Debug, Clone, Args)]
+pub struct SurfaceRenameArgs {
+    /// Surface id.
+    pub id: String,
+    /// New friendly name, for example `Kitchen laptop`.
+    pub label: Option<String>,
+    /// Restore the default name (`<kind name> · <node>`).
+    #[arg(long)]
+    pub clear: bool,
 }
 
 /// Arguments for `vowp surface pair`.
@@ -1551,6 +1565,9 @@ pub struct SurfacePairArgs {
     /// Revoke this surface and create the replacement pending surface in one transaction.
     #[arg(long, value_name = "SURFACE-ID")]
     pub replace: Option<String>,
+    /// Friendly saved name for the surface (default: `<kind name> · <node>`).
+    #[arg(long, value_name = "LABEL")]
+    pub label: Option<String>,
 }
 
 /// Arguments for `vowp surface ls`.

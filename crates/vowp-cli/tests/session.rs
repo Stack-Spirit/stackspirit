@@ -2591,6 +2591,22 @@ fn session_import_same_id_keeps_the_bundle_id_and_refuses_a_second_import() {
     );
 }
 
+/// Makes sure the interactive session has an owner and returns the token to present.
+///
+/// A person's session with no owner refuses a write, so a test that used to pass a made-up
+/// token now acquires a real lease first. A session that is already owned keeps `lease`.
+fn ensure_owner(env: &common::TestEnv, id: &str, lease: &str) -> String {
+    let (code, stdout, stderr) = env.run(&["--json", "session", "lease", id]);
+    assert_eq!(code, 0, "{stderr}");
+    let status: serde_json::Value = serde_json::from_str(&stdout).expect("lease status JSON");
+    if status["held"] == true {
+        return lease.to_owned();
+    }
+    let (code, stdout, stderr) = env.run(&["session", "lease", id, "--acquire", "chat", "--holder", "test-surface"]);
+    assert_eq!(code, 0, "{stderr}");
+    stdout.trim().to_owned()
+}
+
 /// The executor every remote-exec CLI test uses.
 const REMOTE_EXECUTOR: &str = "opencode:deepseek/deepseek-flash#max";
 
@@ -2607,6 +2623,7 @@ fn begin_remote_turn_with_cwd(
     prompt: &str,
     cwd: Option<&Path>,
 ) -> (TurnGrant, std::path::PathBuf) {
+    let lease = &ensure_owner(env, id, lease);
     let request_path = env.project_path().join("turn-request.json");
     let mut request = serde_json::json!({
         "lease": lease,
@@ -3014,8 +3031,10 @@ fn lease_token_never_in_argv_or_logs() {
     let env = common::TestEnv::new();
     configure(&env);
     let id = create(&env);
-    let token = "lease-token-4f9c2b7d-never-log";
-    let (grant, grant_path) = begin_remote_turn(&env, &id, token, "keep the token private");
+    // The session needs a real owner, so the token the grant carries is the one to hunt for.
+    let (grant, grant_path) = begin_remote_turn(&env, &id, "lease-token-4f9c2b7d-never-log", "keep the token private");
+    let token = grant.lease_token.as_str();
+    assert!(token.len() >= 52, "a real lease token, not the placeholder: {token}");
     let fixture = ssh_fixture(&env, FORWARDING_SSH);
     let mode = std::fs::metadata(&grant_path).expect("grant").permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "the grant file is not mode 0600");
@@ -3209,7 +3228,8 @@ fn takeover_attempt(env: &common::TestEnv) -> Option<(Option<i32>, String)> {
             holder: "laptop".to_owned(),
             token: surface_token.clone(),
             acquired_at: initial_at,
-            heartbeat_at: initial_at,
+            // A live owner: a stale heartbeat would (correctly) refuse the turn.
+            heartbeat_at: Timestamp::now(),
         })
         .expect("initial lease");
     drop(store);
@@ -4098,4 +4118,62 @@ fn session_watch_follow_imports_a_line_appended_after_startup() {
         cursor["offset"].as_u64(),
         Some(std::fs::metadata(&path).expect("metadata").len())
     );
+}
+
+#[test]
+fn session_show_and_ls_report_the_owner() {
+    let env = common::TestEnv::new();
+    let id = create(&env);
+    let other = create(&env);
+
+    let (code, human, stderr) = env.run(&["session", "show", &id]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(human.contains("owner: none"), "{human}");
+
+    let (code, token, stderr) = env.run(&[
+        "session",
+        "lease",
+        &id,
+        "--acquire",
+        "desktop-ui",
+        "--holder",
+        "StackSpirit",
+        "--label",
+        "Desk UI",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let token = token.trim().to_owned();
+
+    let (code, human, stderr) = env.run(&["session", "show", &id]);
+    assert_eq!(code, 0, "{stderr}");
+    for expected in [
+        "owner:\n",
+        "  name: Desk UI",
+        "  holder: StackSpirit",
+        "  kind: desktop-ui",
+        "  mode: interactive",
+        "  state: active",
+        "  activity: idle",
+        "  epoch: 1",
+    ] {
+        assert!(human.contains(expected), "{expected:?} missing from:\n{human}");
+    }
+    assert!(!human.contains(&token), "show must not print the token");
+
+    let (code, value, stderr) = env.run_json(&["session", "show", &id]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["owner"]["kind"], "desktop_ui");
+    assert_eq!(value["owner"]["epoch"], 1);
+    assert!(!value.to_string().contains(&token));
+    let (_, value, _) = env.run_json(&["session", "show", &other]);
+    assert!(value["owner"].is_null(), "an unowned session shows a null owner");
+
+    let (code, listing, stderr) = env.run(&["session", "ls"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(listing.contains("OWNER"), "{listing}");
+    let owned_row = listing.lines().find(|line| line.contains(&id)).expect("owned row");
+    assert!(owned_row.contains("Desk UI [active/idle]"), "{owned_row}");
+    let free_row = listing.lines().find(|line| line.contains(&other)).expect("free row");
+    assert!(!free_row.contains("[active"), "{free_row}");
+    assert!(!listing.contains(&token));
 }

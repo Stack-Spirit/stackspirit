@@ -160,6 +160,14 @@ name = "status"
 path = "crates/vowp-cli/tests/status.rs"
 
 [[test]]
+name = "surface"
+path = "crates/vowp-cli/tests/surface.rs"
+
+[[test]]
+name = "surface_lease"
+path = "crates/vowp-cli/tests/surface_lease.rs"
+
+[[test]]
 name = "tmux_isolation"
 path = "crates/vowp-cli/tests/tmux_isolation.rs"
 

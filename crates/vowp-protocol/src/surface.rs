@@ -67,6 +67,52 @@ pub enum SurfaceKind {
     Api,
     /// A v0.4 local surface attached through a `vowp agent`.
     Agent,
+    /// A desktop UI that talks to an orchestrator's app engine itself.
+    ///
+    /// Wire spelling `desktop_ui`; the store and the CLI spell it `desktop-ui`.
+    DesktopUi,
+}
+
+impl SurfaceKind {
+    /// Returns the human-facing name used in saved surface labels and owner views.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Chat => "VOWP Chat",
+            Self::Opencode => "OpenCode",
+            Self::ClaudeCode => "Claude Code",
+            Self::Mcp => "MCP",
+            Self::Mirror => "Mirror",
+            Self::Api => "API",
+            Self::Agent => "Agent",
+            Self::DesktopUi => "Desktop UI",
+        }
+    }
+
+    /// Returns the hyphenated store and CLI spelling (`claude-code`, `desktop-ui`).
+    pub fn store_name(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Opencode => "opencode",
+            Self::ClaudeCode => "claude-code",
+            Self::Mcp => "mcp",
+            Self::Mirror => "mirror",
+            Self::Api => "api",
+            Self::Agent => "agent",
+            Self::DesktopUi => "desktop-ui",
+        }
+    }
+}
+
+/// Returns the clean human label a surface gets when nobody named it.
+///
+/// The label is `"<name> · <node>"`: a desktop UI uses its holder name (for example
+/// `StackSpirit`) when one is set, every other kind uses [`SurfaceKind::display_name`].
+pub fn default_surface_label(kind: SurfaceKind, holder: &str, node: &NodeName) -> String {
+    let name = match kind {
+        SurfaceKind::DesktopUi if !holder.trim().is_empty() => holder.trim(),
+        other => other.display_name(),
+    };
+    format!("{name} · {node}")
 }
 
 /// A registered surface.
@@ -113,6 +159,132 @@ pub struct Lease {
     pub heartbeat_at: Timestamp,
 }
 
+/// How an owner holds a session: as a person's surface or as a worker job run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnershipMode {
+    /// A person's surface; liveness is its heartbeat.
+    #[default]
+    Interactive,
+    /// A worker-node job run; liveness is the run's `expires_at`.
+    Job,
+}
+
+impl OwnershipMode {
+    /// Returns the stable wire and store string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::Job => "job",
+        }
+    }
+}
+
+impl fmt::Display for OwnershipMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Liveness of an owner, derived at read time from its mode and timestamps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnershipState {
+    /// An interactive heartbeat younger than 60 seconds, or an unexpired job.
+    #[default]
+    Active,
+    /// An interactive owner whose heartbeat is 60 seconds old or older.
+    Stale,
+    /// A job owner whose `expires_at` has passed.
+    Expired,
+}
+
+impl OwnershipState {
+    /// Returns the stable wire string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Stale => "stale",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+impl fmt::Display for OwnershipState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What the owner of a session is doing right now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceActivity {
+    /// No turn is running.
+    #[default]
+    Idle,
+    /// A turn or run is in progress.
+    Running,
+    /// The session is blocked, waiting for an answer or a limit to clear.
+    Waiting,
+}
+
+impl SurfaceActivity {
+    /// Returns the stable wire string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+        }
+    }
+}
+
+impl fmt::Display for SurfaceActivity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The read projection of a session's ownership record (its one `leases` row).
+///
+/// It never carries a lease token, a token hash, or an engine password.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionOwner {
+    /// Session the owner holds.
+    pub session_id: SessionId,
+    /// Surface instance id; `None` for a job run with no paired surface.
+    pub surface_id: Option<SurfaceId>,
+    /// Kind of client that owns the session.
+    pub kind: SurfaceKind,
+    /// Friendly saved surface name, for example `"StackSpirit · macbook"`.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Human-visible holder name.
+    pub holder: String,
+    /// Node the owner runs on.
+    pub node: NodeName,
+    /// Interactive surface or job run.
+    #[serde(default)]
+    pub mode: OwnershipMode,
+    /// Liveness at the time the projection was built.
+    #[serde(default)]
+    pub state: OwnershipState,
+    /// Whether the session is idle, running or waiting.
+    #[serde(default)]
+    pub activity: SurfaceActivity,
+    /// Monotonic counter the store bumps on every acquire or takeover.
+    #[serde(default)]
+    pub epoch: u64,
+    /// When the owner acquired the session.
+    pub acquired_at: Timestamp,
+    /// Last heartbeat.
+    pub heartbeat_at: Timestamp,
+    /// Expiry of a job owner; `None` for an interactive owner.
+    #[serde(default)]
+    pub expires_at: Option<Timestamp>,
+}
+
 /// A compact reference to the surface that holds a lease.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SurfaceRef {
@@ -147,6 +319,24 @@ pub struct LeaseStatus {
     pub heartbeat_at: Option<Timestamp>,
     /// The token, set only in the response to `--acquire`.
     pub token: Option<String>,
+    /// Interactive surface or job run, when held.
+    #[serde(default)]
+    pub mode: Option<OwnershipMode>,
+    /// Liveness of the owner, when held.
+    #[serde(default)]
+    pub state: Option<OwnershipState>,
+    /// Owner epoch, when held.
+    #[serde(default)]
+    pub epoch: Option<u64>,
+    /// Expiry of a job owner, when held in job mode.
+    #[serde(default)]
+    pub expires_at: Option<Timestamp>,
+    /// Friendly saved surface name, when held and known.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Whether the session is idle, running or waiting, when held.
+    #[serde(default)]
+    pub activity: Option<SurfaceActivity>,
 }
 
 /// Output of `vowp session takeover`.

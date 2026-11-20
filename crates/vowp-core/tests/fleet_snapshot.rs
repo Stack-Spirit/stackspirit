@@ -17,6 +17,7 @@ use vowp_protocol::{
     RunPurpose, RunRole, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, SecretName, Session, SessionId, SessionRole, SessionState,
     Snapshot, TargetMode, Timestamp, Tokens,
 };
+use vowp_protocol::{Lease, OwnershipMode, OwnershipState, SurfaceActivity, SurfaceId, SurfaceKind};
 use vowp_store::{NodePaths, StateChange, Store};
 use vowp_tmux::fake::FakeWindows;
 
@@ -1402,4 +1403,171 @@ fn supervisor_card_reports_l1_fail_streak() {
         snapshot.supervisor.fail_streak, 3,
         "the card mirrors loops['l1-supervisor'].fail_streak"
     );
+}
+
+/// Inserts one owned session and returns its id.
+fn owned_session(fixture: &Fixture, role: SessionRole, state: SessionState) -> SessionId {
+    let id = SessionId::new();
+    let now = fixture.clock.now();
+    fixture
+        .store
+        .upsert_session(&Session {
+            id: id.clone(),
+            project: Some(fixture.alpha.clone()),
+            job_id: None,
+            role: Some(role),
+            title: "owned session".to_owned(),
+            parent_session_id: None,
+            node: NodeName::parse("local").expect("node"),
+            cwd: "/srv/vowp".to_owned(),
+            state,
+            executor: None,
+            last_seq: 0,
+            last_capsule_id: None,
+            log_bytes: 0,
+            created_at: now.minus(Duration::from_secs(60)),
+            updated_at: now.minus(Duration::from_secs(5)),
+        })
+        .expect("session");
+    id
+}
+
+/// Registers a surface and takes the lease for it; returns the plaintext token.
+fn own(fixture: &Fixture, session: &SessionId, kind: SurfaceKind, holder: &str, heartbeat_age_secs: u64) -> String {
+    let now = fixture.clock.now();
+    let surface = vowp_protocol::Surface {
+        id: SurfaceId::new(),
+        kind,
+        node: NodeName::parse("local").expect("node"),
+        holder: holder.to_owned(),
+        app: None,
+        cwd: None,
+        metadata: serde_json::json!({}),
+        created_at: now,
+        last_seen_at: now,
+    };
+    fixture.store.upsert_surface(&surface).expect("surface");
+    let token = vowp_core::surface::new_lease_token();
+    fixture
+        .store
+        .take_lease(&Lease {
+            session_id: session.clone(),
+            surface_id: Some(surface.id),
+            surface_kind: kind,
+            node: NodeName::parse("local").expect("node"),
+            holder: holder.to_owned(),
+            token: token.clone(),
+            acquired_at: now.minus(Duration::from_secs(heartbeat_age_secs)),
+            heartbeat_at: now.minus(Duration::from_secs(heartbeat_age_secs)),
+        })
+        .expect("lease");
+    token
+}
+
+fn card_owner(snapshot: &Snapshot, session: &SessionId) -> Option<vowp_protocol::SessionOwner> {
+    snapshot
+        .sessions
+        .iter()
+        .find(|card| card.id == *session)
+        .expect("session card")
+        .owner
+        .clone()
+}
+
+#[test]
+fn session_card_reports_the_live_interactive_owner() {
+    let fixture = Fixture::new();
+    let session = owned_session(&fixture, SessionRole::Orchestrator, SessionState::Idle);
+    own(&fixture, &session, SurfaceKind::DesktopUi, "StackSpirit", 4);
+    let snapshot = fixture.snapshot();
+    let owner = card_owner(&snapshot, &session).expect("owner on the card");
+    assert_eq!(owner.kind, SurfaceKind::DesktopUi);
+    assert_eq!(owner.holder, "StackSpirit");
+    assert_eq!(owner.mode, OwnershipMode::Interactive);
+    assert_eq!(owner.state, OwnershipState::Active);
+    assert_eq!(owner.epoch, 1);
+    assert!(owner.surface_id.is_some());
+    let card = snapshot.sessions.iter().find(|card| card.id == session).expect("card");
+    assert_eq!(card.active_surface, None, "active_surface stays null for compatibility");
+}
+
+#[test]
+fn session_card_reports_a_job_owner_with_no_surface_id() {
+    let fixture = Fixture::new();
+    let session = owned_session(&fixture, SessionRole::Worker, SessionState::Running);
+    let now = fixture.clock.now();
+    fixture
+        .store
+        .take_ownership(
+            &Lease {
+                session_id: session.clone(),
+                surface_id: None,
+                surface_kind: SurfaceKind::Agent,
+                node: NodeName::parse("local").expect("node"),
+                holder: "agent".to_owned(),
+                token: vowp_core::surface::new_lease_token(),
+                acquired_at: now,
+                heartbeat_at: now,
+            },
+            OwnershipMode::Job,
+            Some(now.plus(Duration::from_secs(600))),
+        )
+        .expect("job owner");
+    let owner = card_owner(&fixture.snapshot(), &session).expect("job owner");
+    assert_eq!(owner.surface_id, None);
+    assert_eq!(owner.mode, OwnershipMode::Job);
+    assert_eq!(owner.state, OwnershipState::Active);
+    assert_eq!(owner.activity, SurfaceActivity::Running);
+    assert_eq!(owner.expires_at, Some(now.plus(Duration::from_secs(600))));
+}
+
+#[test]
+fn session_card_shows_a_stale_owner_before_the_sweep() {
+    let fixture = Fixture::new();
+    let session = owned_session(&fixture, SessionRole::User, SessionState::Idle);
+    own(&fixture, &session, SurfaceKind::Chat, "laptop", 90);
+    let owner = card_owner(&fixture.snapshot(), &session).expect("stale owner is still shown");
+    assert_eq!(owner.state, OwnershipState::Stale);
+    assert!(fixture.store.lease(&session).expect("lease").is_some(), "no sweep ran");
+}
+
+#[test]
+fn snapshot_owner_never_contains_a_token_or_password() {
+    let fixture = Fixture::new();
+    let session = owned_session(&fixture, SessionRole::User, SessionState::Idle);
+    let token = own(&fixture, &session, SurfaceKind::DesktopUi, "ui", 1);
+    let hash = vowp_store::hash_lease_token(&token);
+    let snapshot = fixture.snapshot();
+    let text = serde_json::to_string(&snapshot).expect("snapshot json");
+    assert!(!text.contains(&token), "the plaintext token is in the snapshot");
+    assert!(!text.contains(&hash), "the token hash is in the snapshot");
+    let owner = serde_json::to_value(card_owner(&snapshot, &session).expect("owner")).expect("owner json");
+    for key in owner.as_object().expect("object").keys() {
+        assert!(
+            !key.contains("token") && !key.contains("password") && !key.contains("hash"),
+            "unexpected owner key {key}"
+        );
+    }
+}
+
+#[test]
+fn snapshot_owner_reports_label_and_activity() {
+    let fixture = Fixture::new();
+    let idle = owned_session(&fixture, SessionRole::Orchestrator, SessionState::Idle);
+    own(&fixture, &idle, SurfaceKind::Opencode, "main", 2);
+    let running = owned_session(&fixture, SessionRole::Orchestrator, SessionState::Running);
+    own(&fixture, &running, SurfaceKind::ClaudeCode, "cc", 2);
+    let waiting = owned_session(&fixture, SessionRole::Orchestrator, SessionState::Blocked);
+    let token = own(&fixture, &waiting, SurfaceKind::DesktopUi, "StackSpirit", 2);
+    let _ = token;
+    let snapshot = fixture.snapshot();
+    let idle_owner = card_owner(&snapshot, &idle).expect("idle");
+    assert_eq!(idle_owner.label.as_deref(), Some("OpenCode · local"));
+    assert_eq!(idle_owner.activity, SurfaceActivity::Idle);
+    let running_owner = card_owner(&snapshot, &running).expect("running");
+    assert_eq!(running_owner.label.as_deref(), Some("Claude Code · local"));
+    assert_eq!(running_owner.activity, SurfaceActivity::Running);
+    let waiting_owner = card_owner(&snapshot, &waiting).expect("waiting");
+    assert_eq!(waiting_owner.label.as_deref(), Some("StackSpirit · local"));
+    assert_eq!(waiting_owner.activity, SurfaceActivity::Waiting);
 }

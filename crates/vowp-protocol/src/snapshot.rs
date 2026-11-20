@@ -16,7 +16,7 @@ use crate::inbox::InboxKind;
 use crate::job::{JobKind, JobState};
 use crate::limit::Limit;
 use crate::session::SessionState;
-use crate::surface::{OrchestratorCard, SurfaceRef};
+use crate::surface::{OrchestratorCard, SessionOwner, SurfaceRef};
 use crate::time::Timestamp;
 
 /// Format marker written into every snapshot.
@@ -220,6 +220,12 @@ pub struct SessionSurfaceCard {
     pub node: NodeName,
     /// The surface that holds the lease, when one is live.
     pub active_surface: Option<SurfaceRef>,
+    /// The session's owner (its one lease row), including stale and job owners.
+    ///
+    /// Authoritative; `active_surface` stays `null` for compatibility with older readers.
+    /// Never carries a token or a password.
+    #[serde(default)]
+    pub owner: Option<SessionOwner>,
     /// Time of the newest event.
     pub last_event_at: Timestamp,
 }

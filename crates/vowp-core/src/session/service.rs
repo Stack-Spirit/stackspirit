@@ -206,8 +206,16 @@ impl SessionService {
             return Err(CoreError::Invalid("session is closed; no further turns".to_owned()));
         }
         self.check_cwd(&session.cwd)?;
-        // A live lease must match VOWP_LEASE_TOKEN.
-        crate::surface::check_lease(&self.deps, &store, &req.session_id)?;
+        // A live owner must match VOWP_LEASE_TOKEN. A supervisor-internal probe or capsule
+        // run is not a person's write: it may run on a session nobody owns, but never over
+        // another surface's live ownership.
+        let internal = matches!(
+            req.role,
+            vowp_protocol::RunRole::Probe | vowp_protocol::RunRole::Capsule
+        );
+        if !(internal && store.ownership(&req.session_id)?.is_none()) {
+            crate::surface::check_lease(&self.deps, &store, &req.session_id)?;
+        }
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }

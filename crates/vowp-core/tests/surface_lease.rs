@@ -13,7 +13,11 @@ use support::fake_git::FakeGit;
 use tempfile::{TempDir, tempdir};
 use vowp_core::session::remote::{IngestGrant, IngestSession};
 use vowp_core::session::service::SessionService;
-use vowp_core::surface::lease::{AcquireLease, HEARTBEAT_INTERVAL, LeaseGuard, STALE_AFTER, check_lease_with};
+use vowp_core::surface::lease::{
+    AcquireLease, HEARTBEAT_INTERVAL, LeaseGuard, STALE_AFTER, TakeoverConfirmation, check_lease_with,
+    revocation_ack_for, takeover_confirmation,
+};
+use vowp_core::surface::takeover::takeover_confirmed;
 use vowp_core::{AdapterRegistry, CoreError, Deps};
 use vowp_protocol::{
     Actor, AssistantMessage, AttachAction, Clock, Cost, EventBody, EventSource, EventType, Executor, FakeClock,
@@ -405,7 +409,10 @@ fn lease_revoked_is_pushed_within_2s() {
             last_seq,
         } => {
             assert_eq!(by, "phone");
-            assert_eq!(reason, "session taken over");
+            assert!(
+                reason.starts_with("ownership_conflict: session taken over by"),
+                "the revocation is the ownership_conflict stop notice: {reason}"
+            );
             assert_eq!(*at, ts());
             assert!(*last_seq >= 1, "last_seq names the last appended event");
         }
@@ -534,8 +541,10 @@ fn takeover_before_first_executor_writes_note_only() {
         })
         .collect();
     assert!(
-        notes.iter().any(|note| note.starts_with("taken over by phone at ")),
-        "the note records the takeover: {notes:?}"
+        notes
+            .iter()
+            .any(|note| note.starts_with("taken over by phone at ") && note.contains("from laptop")),
+        "the note records the old and new holder: {notes:?}"
     );
 }
 
@@ -594,8 +603,8 @@ fn lease_check_rejects_wrong_token() {
     let guard = acquire(&deps, &store, &session, &target).expect("lease");
     assert!(check_lease_with(&store, &session, Some(guard.token())).is_ok());
     assert!(
-        check_lease_with(&store, &session, None).is_ok(),
-        "None means no lease required"
+        check_lease_with(&store, &session, None).is_err(),
+        "no token against an owned session is the read-only refusal"
     );
 
     let error = check_lease_with(&store, &session, Some("wrong-token")).expect_err("wrong token");
@@ -952,4 +961,312 @@ fn takeover_notice_is_the_exact_spec_text() {
         vowp_core::surface::takeover::notice("phone", at, 0),
         "Taken over by phone at 14:05. This surface is now read-only (follow mode)."
     );
+}
+
+/// Creates a session with an explicit role and no job.
+fn create_with_role(service: &SessionService, tmp: &TempDir, role: SessionRole) -> SessionId {
+    service
+        .create_session(NewSession {
+            project: None,
+            job_id: None,
+            role,
+            title: "ownership".to_owned(),
+            cwd: tmp.path().join("project"),
+            parent: None,
+            executor: None,
+        })
+        .expect("create session")
+}
+
+fn note_texts(deps: &Deps, session: &SessionId) -> Vec<String> {
+    read_events(deps, session)
+        .iter()
+        .filter_map(|event| match event.body() {
+            Ok(EventBody::Note(note)) => Some(note.text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn desktop_ui_takeover_invalidates_the_previous_token_immediately() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_with_role(&service, &tmp, SessionRole::Orchestrator);
+    let store = deps.open_store().expect("store");
+    let host = surface(SurfaceKind::Opencode, "main", ts());
+    let guard = acquire(&deps, &store, &session, &host).expect("host lease");
+    let host_token = guard.token().to_owned();
+    assert!(check_lease_with(&store, &session, Some(&host_token)).is_ok());
+
+    let ui = surface(SurfaceKind::DesktopUi, "StackSpirit", clock.now());
+    vowp_core::takeover(&deps, &store, &session, &ui, clock.now()).expect("takeover");
+    let error = check_lease_with(&store, &session, Some(&host_token)).expect_err("old token is dead");
+    assert!(matches!(error, CoreError::Refused(text) if text.contains("StackSpirit")));
+    let owner = store.session_owner(&session, clock.now()).expect("owner").expect("row");
+    assert_eq!(owner.kind, SurfaceKind::DesktopUi);
+    assert_eq!(owner.epoch, 2, "acquire was epoch 1, the takeover epoch 2");
+    std::mem::forget(guard);
+}
+
+#[test]
+fn read_only_surface_refuses_a_turn_and_an_ingest_line() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_with_role(&service, &tmp, SessionRole::User);
+    let store = deps.open_store().expect("store");
+    let guard = acquire(&deps, &store, &session, &surface(SurfaceKind::Chat, "laptop", ts())).expect("lease");
+    let old_token = guard.token().to_owned();
+    vowp_core::takeover(
+        &deps,
+        &store,
+        &session,
+        &surface(SurfaceKind::DesktopUi, "ui", ts()),
+        ts(),
+    )
+    .expect("takeover");
+
+    let turn = vowp_core::session::remote::begin_turn(
+        &deps,
+        &store,
+        &vowp_core::session::remote::BeginTurn {
+            session: session.clone(),
+            lease: old_token.clone(),
+            executor: vowp_protocol::ExecutorRef {
+                executor: opencode(),
+                node: None,
+            },
+            purpose: RunPurpose::Continue,
+            node: local(),
+            cwd: None,
+            prompt: "hello".to_owned(),
+        },
+    );
+    assert!(
+        matches!(turn, Err(CoreError::Refused(_))),
+        "a read-only surface cannot start a turn"
+    );
+
+    let before = read_events(&deps, &session).len();
+    let ack = revocation_ack_for(&store, &session, &old_token, 0)
+        .expect("ack")
+        .expect("revoked");
+    assert!(
+        matches!(ack, IngestAck::LeaseRevoked { .. }),
+        "an ingest line gets the stop notice"
+    );
+    assert_eq!(read_events(&deps, &session).len(), before, "nothing was appended");
+    std::mem::forget(guard);
+}
+
+#[test]
+fn user_or_orchestrator_session_without_an_owner_refuses_a_write() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let store = deps.open_store().expect("store");
+    for role in [SessionRole::User, SessionRole::Orchestrator] {
+        let session = create_with_role(&service, &tmp, role);
+        let error = check_lease_with(&store, &session, Some("any-token")).expect_err("no owner");
+        assert!(
+            matches!(&error, CoreError::Refused(text) if text.contains("no owner")),
+            "{role:?}: {error:?}"
+        );
+        assert!(check_lease_with(&store, &session, None).is_err());
+    }
+}
+
+#[test]
+fn planner_and_keeper_sessions_without_an_owner_still_run_on_the_home() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let store = deps.open_store().expect("store");
+    for role in [
+        SessionRole::Planner,
+        SessionRole::Keeper,
+        SessionRole::Worker,
+        SessionRole::Verifier,
+    ] {
+        let session = create_with_role(&service, &tmp, role);
+        assert!(
+            check_lease_with(&store, &session, None).is_ok(),
+            "{role:?} passes with no owner"
+        );
+    }
+}
+
+#[test]
+fn stale_interactive_owner_is_refused_before_the_sweep() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_with_role(&service, &tmp, SessionRole::User);
+    let store = deps.open_store().expect("store");
+    let guard = acquire(&deps, &store, &session, &surface(SurfaceKind::Chat, "laptop", ts())).expect("lease");
+    let token = guard.token().to_owned();
+    // The heartbeat thread is real-time; the fake clock moves past the stale window without a sweep.
+    clock.advance(STALE_AFTER + Duration::from_secs(1));
+    let error = check_lease_with(&store, &session, Some(&token)).expect_err("stale owner");
+    assert!(
+        matches!(&error, CoreError::Refused(text) if text.contains("stale")),
+        "{error:?}"
+    );
+    assert!(
+        store.lease(&session).expect("lease").is_some(),
+        "the row is still there: no sweep ran"
+    );
+    let owner = store.session_owner(&session, clock.now()).expect("owner").expect("row");
+    assert_eq!(owner.state, vowp_protocol::OwnershipState::Stale);
+    std::mem::forget(guard);
+}
+
+#[test]
+fn takeover_writes_one_note_with_the_new_epoch() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_with_role(&service, &tmp, SessionRole::User);
+    let store = deps.open_store().expect("store");
+    let guard = acquire(&deps, &store, &session, &surface(SurfaceKind::Chat, "laptop", ts())).expect("lease");
+    let before = note_texts(&deps, &session)
+        .iter()
+        .filter(|text| text.contains("taken over"))
+        .count();
+    vowp_core::takeover(
+        &deps,
+        &store,
+        &session,
+        &surface(SurfaceKind::DesktopUi, "StackSpirit", ts()),
+        ts(),
+    )
+    .expect("takeover");
+    let notes: Vec<String> = note_texts(&deps, &session)
+        .into_iter()
+        .filter(|text| text.contains("taken over"))
+        .collect();
+    assert_eq!(notes.len(), before + 1, "exactly one takeover note: {notes:?}");
+    let note = notes.last().expect("note");
+    assert!(note.contains("owner epoch 2"), "the note names the new epoch: {note}");
+    assert!(note.contains("StackSpirit"), "the note names the new owner: {note}");
+    assert!(note.contains("from laptop"), "the note names the old holder: {note}");
+    assert!(
+        note.contains("mode interactive"),
+        "the note names the ownership mode: {note}"
+    );
+    std::mem::forget(guard);
+}
+
+#[test]
+fn released_interactive_session_has_no_owner_and_refuses_a_write() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_with_role(&service, &tmp, SessionRole::Orchestrator);
+    let store = deps.open_store().expect("store");
+    let guard = acquire(&deps, &store, &session, &surface(SurfaceKind::Opencode, "main", ts())).expect("lease");
+    let token = guard.token().to_owned();
+    assert!(check_lease_with(&store, &session, Some(&token)).is_ok());
+    guard.release().expect("release");
+    assert!(store.session_owner(&session, ts()).expect("owner").is_none());
+    let error = check_lease_with(&store, &session, Some(&token)).expect_err("released");
+    assert!(matches!(error, CoreError::Refused(text) if text.contains("no owner")));
+}
+
+#[test]
+fn takeover_idle_is_one_confirmation_and_running_requires_extra_confirmation() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_with_role(&service, &tmp, SessionRole::User);
+    let store = deps.open_store().expect("store");
+    assert_eq!(
+        takeover_confirmation(&store, &session, ts()).expect("none"),
+        TakeoverConfirmation::NotNeeded
+    );
+    let guard = acquire(&deps, &store, &session, &surface(SurfaceKind::Chat, "laptop", ts())).expect("lease");
+    assert_eq!(
+        takeover_confirmation(&store, &session, ts()).expect("idle"),
+        TakeoverConfirmation::Single
+    );
+
+    store
+        .set_session_state(&session, SessionState::Running, None)
+        .expect("running");
+    assert_eq!(
+        takeover_confirmation(&store, &session, ts()).expect("running"),
+        TakeoverConfirmation::Extra
+    );
+    let target = surface(SurfaceKind::DesktopUi, "ui", ts());
+    let error = takeover_confirmed(&deps, &store, &session, &target, ts(), false).expect_err("needs extra");
+    assert!(
+        matches!(&error, CoreError::Refused(text) if text.contains("running a turn")),
+        "{error:?}"
+    );
+    assert_eq!(
+        store.session_owner(&session, ts()).expect("owner").expect("row").holder,
+        "laptop",
+        "a refused takeover changes nothing"
+    );
+    takeover_confirmed(&deps, &store, &session, &target, ts(), true).expect("confirmed twice");
+    assert_eq!(
+        store.session_owner(&session, ts()).expect("owner").expect("row").holder,
+        "ui"
+    );
+
+    // Idle: one confirmation (the call itself) is enough.
+    store
+        .set_session_state(&session, SessionState::Idle, None)
+        .expect("idle");
+    let other = surface(SurfaceKind::Chat, "phone", ts());
+    takeover_confirmed(&deps, &store, &session, &other, ts(), false).expect("idle takeover");
+    std::mem::forget(guard);
+}
+
+#[test]
+fn takeover_sends_a_stop_notice_to_the_old_surface() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_with_role(&service, &tmp, SessionRole::User);
+    let store = deps.open_store().expect("store");
+    let guard = acquire(&deps, &store, &session, &surface(SurfaceKind::Chat, "laptop", ts())).expect("lease");
+    let old_token = guard.token().to_owned();
+    assert!(
+        revocation_ack_for(&store, &session, &old_token, 3)
+            .expect("ack")
+            .is_none()
+    );
+    let ui = surface(SurfaceKind::DesktopUi, "StackSpirit", ts());
+    store.upsert_surface(&ui).expect("surface");
+    store.set_surface_label(&ui.id, Some("Desk UI")).expect("label");
+    vowp_core::takeover(&deps, &store, &session, &ui, ts()).expect("takeover");
+    match revocation_ack_for(&store, &session, &old_token, 3).expect("ack") {
+        Some(IngestAck::LeaseRevoked {
+            reason, by, last_seq, ..
+        }) => {
+            assert!(reason.starts_with("ownership_conflict:"), "{reason}");
+            assert!(reason.contains("Desk UI"), "the notice names the new owner: {reason}");
+            assert!(
+                reason.contains("mode interactive"),
+                "the notice names the mode: {reason}"
+            );
+            assert!(reason.contains("stop writing"), "{reason}");
+            assert_eq!(by, "StackSpirit");
+            assert_eq!(last_seq, 3);
+        }
+        other => panic!("expected a stop notice, got {other:?}"),
+    }
+    std::mem::forget(guard);
 }

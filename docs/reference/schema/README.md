@@ -101,6 +101,8 @@ python3 docs/reference/check-reference.py
 | `OrchestratorLocation` | [orchestrator-location.md](orchestrator-location.md) |
 | `OrchestratorNodeState` | [orchestrator-node-state.md](orchestrator-node-state.md) |
 | `OrchestratorResult` | [orchestrator-result.md](orchestrator-result.md) |
+| `OwnershipMode` | [ownership-mode.md](ownership-mode.md) |
+| `OwnershipState` | [ownership-state.md](ownership-state.md) |
 | `Page` | [page.md](page.md) |
 | `PathRef` | [path-ref.md](path-ref.md) |
 | `Placement` | [placement.md](placement.md) |
@@ -127,12 +129,14 @@ python3 docs/reference/check-reference.py
 | `SecretRequest` | [secret-request.md](secret-request.md) |
 | `Session` | [session.md](session.md) |
 | `SessionDetail` | [session-detail.md](session-detail.md) |
+| `SessionOwner` | [session-owner.md](session-owner.md) |
 | `SessionPage` | [session-page.md](session-page.md) |
 | `SessionSurfaceCard` | [session-surface-card.md](session-surface-card.md) |
 | `SessionSwitchRequest` | [session-switch-request.md](session-switch-request.md) |
 | `Snapshot` | [snapshot.md](snapshot.md) |
 | `SupervisorSnapshot` | [supervisor-snapshot.md](supervisor-snapshot.md) |
 | `Surface` | [surface.md](surface.md) |
+| `SurfaceActivity` | [surface-activity.md](surface-activity.md) |
 | `SurfaceAttach` | [surface-attach.md](surface-attach.md) |
 | `SurfaceDetach` | [surface-detach.md](surface-detach.md) |
 | `SurfaceEvent` | [surface-event.md](surface-event.md) |

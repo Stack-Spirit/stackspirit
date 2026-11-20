@@ -252,8 +252,8 @@ printed; the streaming ones print one JSON object per line.
 vowp session turn-begin <session> --executor <exec> --purpose <p> --node <n> --request <file|->
 vowp __exec --grant <file> [--spool-dir <dir>]
 vowp session ingest <session> --run <run-id> [--replay] [--json]
-vowp session lease <session> [--acquire <kind> --holder <h> --node <n>] [--json]
-vowp session takeover <session> --kind <kind> --holder <h> --node <n> [--json]
+vowp session lease <session> [--acquire <kind> --holder <h> --node <n> --label <l>] [--json]
+vowp session takeover <session> --kind <kind> --holder <h> --node <n> [--label <l>] [--json]
 vowp session dir-export <session> [--max-bytes <n>]
 ```
 
@@ -268,6 +268,24 @@ export: it prints one `vowp-asif-export-stream-v1` envelope line (`format`, `ses
 it, and pipes `RemoteLine` JSON lines into `session ingest`; `ingest` assigns `seq`, is idempotent by
 event id and acknowledges each event. The lease token is never on argv or in `ps`; the grant file is
 mode 0600. `session lease` prints the token only on acquire. Full protocol: `sessions.md` §9.
+
+`<kind>` is `chat`, `opencode`, `claude-code`, `mcp`, `mirror`, `api`, `agent` or `desktop-ui`. Without
+`--acquire`, `session lease` prints the owner: `held by <holder> (<kind>) on <node> since <t>
+(heartbeat <t>); mode <interactive|job> state <active|stale|expired> activity <idle|running|waiting>
+epoch <n>` (plus `expires <t>` for a job); `--json` is a `LeaseStatus` with `mode`, `state`, `activity`,
+`epoch`, `expires_at` and `label`. Every acquire or takeover bumps the epoch. A takeover of a live owner
+that is mid-turn needs a second confirmation from whoever asks the person: the plumbing command itself
+never asks (chat and the tests call it mid-turn), so the gate lives in the callers — MCP
+`session_resume {takeover:true}` refuses a running owner until `confirm_running:true` is added, and
+`vowp_core::surface::takeover::takeover_confirmed` is the API for UIs; an idle owner needs one
+confirmation. A takeover appends one `note` ending in the `ownership_conflict` stop
+notice (new owner, epoch), which the old surface's ingest writer receives as `LeaseRevoked`.
+
+An interactive session (`user` or `orchestrator` role, or no role and no job) with no owner row
+refuses a write (`session has no owner; acquire one`); local planner/keeper/worker/verifier sessions
+keep running without an owner. `session show` prints an `owner:` block (name, holder, kind, node,
+mode, state, activity, epoch, heartbeat, expiry) or `owner: none`, and its JSON gains `owner`;
+`session ls` adds an `OWNER` column (`<name> [<state>/<activity>]`).
 
 ## 5. Inbox, cost, nodes, loops, schedules, release
 
@@ -357,6 +375,11 @@ requires SSH and `--cached` never opens a connection. The JSON wrapper is
 `{"snapshot":{…},"source":"local|remote|cache","fetched_at":"…","stale":false}`. `queue` rows
 include `waiting_reason`; `inbox --json` prints `[InboxItem]` with the full body (the snapshot's own
 inbox cards omit it); `capacity` is an alias of `capacity show`.
+
+`fleet status` lists an `owners:` section after the inbox line, one row per recent session that has
+an owner row: session id, title, label, kind (mode), `holder@node`, state, activity and `heartbeat <age>` or
+`expires in <span>`. `sessions[].owner` carries the same data in `--json`; no token or password is ever
+printed.
 
 `fleet status` adds one `cluster:` line when at least one online agent worker node is present:
 the online worker count, pooled busy and target workers, available and total RAM, CPU cores and
@@ -1005,6 +1028,14 @@ active token's 12-character display prefix; `OVERLAP` is `-`, an old token's ove
 `PENDING <deadline>` for an undelivered rotation. No token or hash is ever printed. The id index
 is `<home>/surfaces.json` (0600) because the v4 store read model returns one surface by id; the
 ids are not secrets and the state/scopes/expiry always come from the store.
+
+### `vowp surface rename <id> <label> | --clear`
+
+Saves a friendly name for a surface (1-80 printable characters), shown as the owner `label` on
+`session show`, `fleet status` and MCP `session_resume`. `--clear` restores the default
+`<kind name> · <node>` (for example `OpenCode · macbook`). `surface pair --label <l>` names a surface at
+creation, and `surface ls` shows a `LABEL` column and a `label` JSON member. The name lives in
+`vowp.db`; there is no second store.
 
 ### `vowp surface revoke <id> [--yes]`
 

@@ -389,10 +389,16 @@ fn session_cards(store: &Store, now: Timestamp, redactor: &Redactor) -> Result<V
             .then_with(|| right.id.cmp(&left.id))
     });
     sessions.truncate(200);
+    // One query for every owner, keyed by session; the card carries the projection, never a token.
+    let mut owners: std::collections::HashMap<_, _> = store
+        .list_session_owners(now)?
+        .into_iter()
+        .map(|owner| (owner.session_id.clone(), owner))
+        .collect();
     Ok(sessions
         .into_iter()
         .map(|session| SessionSurfaceCard {
-            id: session.id,
+            id: session.id.clone(),
             project: session.project,
             job_id: session.job_id,
             role: session.role,
@@ -401,6 +407,11 @@ fn session_cards(store: &Store, now: Timestamp, redactor: &Redactor) -> Result<V
             executor: session.executor.as_ref().map(ToString::to_string),
             node: session.node,
             active_surface: None,
+            owner: owners.remove(&session.id).map(|mut owner| {
+                owner.holder = full_title(redactor, &owner.holder);
+                owner.label = owner.label.map(|label| full_title(redactor, &label));
+                owner
+            }),
             last_event_at: session.updated_at,
         })
         .collect())

@@ -1575,7 +1575,19 @@ pub struct SessionSurfaceCard {
     pub id: SessionId, pub project: Option<ProjectName>, pub job_id: Option<JobId>,
     pub role: Option<SessionRole>, pub title: String, pub state: SessionState,
     pub executor: Option<String>, pub node: NodeName,
-    pub active_surface: Option<SurfaceRef>, pub last_event_at: Timestamp,
+    pub active_surface: Option<SurfaceRef>,
+    #[serde(default)] pub owner: Option<SessionOwner>,   // v0.5.1; authoritative owner view
+    pub last_event_at: Timestamp,
+}
+pub enum OwnershipMode { Interactive, Job }              // snake_case
+pub enum OwnershipState { Active, Stale, Expired }       // derived at read time
+pub enum SurfaceActivity { Idle, Running, Waiting }      // from the session state
+pub struct SessionOwner {                                // never carries a token or password
+    pub session_id: SessionId, pub surface_id: Option<SurfaceId>, pub kind: SurfaceKind,
+    pub label: Option<String>, pub holder: String, pub node: NodeName,
+    pub mode: OwnershipMode, pub state: OwnershipState, pub activity: SurfaceActivity,
+    pub epoch: u64, pub acquired_at: Timestamp, pub heartbeat_at: Timestamp,
+    pub expires_at: Option<Timestamp>,
 }
 pub struct ProjectSnapshot {
     pub name: ProjectName, pub path: String, pub state: ProjectState, pub weight: u8,
@@ -1595,7 +1607,8 @@ pub struct Snapshot {
 
 The snapshot is derived. In this build the capacity card's `measured` is `null` and
 `running.runs` is populated from the open runs, while its p90 RAM/CPU fields stay zero; a session
-card's `active_surface` is `null`. `vowp capacity show` is the measured report and the lease is live
+card's `active_surface` is `null` and its `owner` is the session's lease row as a `SessionOwner`
+(stale and job owners included; `null` when nobody owns it). `vowp capacity show` is the measured report and the lease is live
 in `vowp session lease`.
 
 ### 16.4 Lifecycle catalog (`catalog`)

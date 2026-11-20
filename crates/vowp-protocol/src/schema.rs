@@ -53,7 +53,8 @@ use crate::snapshot::{
 use crate::surface::{
     IngestAck, JoinInstructions, Lease, LeaseStatus, OrchestratorAuth, OrchestratorCard, OrchestratorCommand,
     OrchestratorEndpoint, OrchestratorError, OrchestratorLocation, OrchestratorNodeState, OrchestratorResult,
-    RemoteEvent, RemoteLine, Surface, SurfaceRef, TakeoverReport, TurnGrant,
+    OwnershipMode, OwnershipState, RemoteEvent, RemoteLine, SessionOwner, Surface, SurfaceActivity, SurfaceRef,
+    TakeoverReport, TurnGrant,
 };
 use crate::vault::{SecretInfo, SecretRequest};
 
@@ -110,6 +111,10 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("Surface", schema_value::<Surface>());
     schemas.insert("Lease", schema_value::<Lease>());
     schemas.insert("SurfaceRef", schema_value::<SurfaceRef>());
+    schemas.insert("SessionOwner", schema_value::<SessionOwner>());
+    schemas.insert("OwnershipMode", schema_value::<OwnershipMode>());
+    schemas.insert("OwnershipState", schema_value::<OwnershipState>());
+    schemas.insert("SurfaceActivity", schema_value::<SurfaceActivity>());
     schemas.insert("LeaseStatus", schema_value::<LeaseStatus>());
     schemas.insert("TakeoverReport", schema_value::<TakeoverReport>());
     schemas.insert("RemoteEvent", schema_value::<RemoteEvent>());

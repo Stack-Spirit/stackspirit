@@ -167,6 +167,7 @@ python3 docs/reference/check-reference.py
 | [`vowp surface ls`](#vowp-surface-ls) | List surfaces, their scopes and token expiry |
 | [`vowp surface revoke`](#vowp-surface-revoke) | Revoke a surface and every token it holds |
 | [`vowp surface rotate`](#vowp-surface-rotate) | Rotate a surface token, keeping the old token for a ten-minute overlap |
+| [`vowp surface rename`](#vowp-surface-rename) | Save a friendly name for a surface |
 | [`vowp offload`](#vowp-offload) | Show the effective offload policy or the offload read model |
 | [`vowp offload policy`](#vowp-offload-policy) | Show the effective offload policy |
 | [`vowp offload status`](#vowp-offload-status) | Show nodes, live assignments and waiting jobs |
@@ -1175,6 +1176,7 @@ Options:
       --node <NAME>          Node the surface runs on
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --label <LABEL>        Friendly saved name for the surface (default: `<kind name> · <node>`)
       --no-color             Disable colour even when stdout is a terminal
   -q, --quiet                Suppress non-essential human output
   -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
@@ -1198,6 +1200,7 @@ Options:
       --node <NAME>          Node the new surface runs on
       --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --label <LABEL>        Friendly saved name for the new surface
       --no-color             Disable colour even when stdout is a terminal
   -q, --quiet                Suppress non-essential human output
   -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
@@ -3435,6 +3438,7 @@ Commands:
   ls      List surfaces, their scopes and token expiry
   revoke  Revoke a surface and every token it holds
   rotate  Rotate a surface token, keeping the old token for a ten-minute overlap
+  rename  Save a friendly name for a surface
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
@@ -3465,6 +3469,7 @@ Options:
       --project <NAME|PATH>   Project name or path; defaults to the nearest ancestor with `vowp.toml`
       --home <DIR>            Node home (default `$VOWP_HOME`, else `~/.vowp`)
       --replace <SURFACE-ID>  Revoke this surface and create the replacement pending surface in one transaction
+      --label <LABEL>         Friendly saved name for the surface (default: `<kind name> · <node>`)
       --no-color              Disable colour even when stdout is a terminal
   -q, --quiet                 Suppress non-essential human output
   -v, --verbose...            Increase log verbosity (`-v`, `-vv`)
@@ -3538,6 +3543,29 @@ Options:
   -h, --help                 Print help
 
 For this command --node <name> names the node the surface runs on, not an SSH redirect.
+```
+
+#### `vowp surface rename`
+
+```text
+Save a friendly name for a surface
+
+Usage: vowp surface rename [OPTIONS] <ID> [LABEL]
+
+Arguments:
+  <ID>     Surface id
+  [LABEL]  New friendly name, for example `Kitchen laptop`
+
+Options:
+      --clear                Restore the default name (`<kind name> · <node>`)
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
 ```
 
 ### `vowp offload`
