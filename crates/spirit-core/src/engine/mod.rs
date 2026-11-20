@@ -166,14 +166,43 @@ impl Default for EngineStatus {
 
 /// One provider the bundled engine reports as supported for BYOK.
 ///
-/// Only the provider id and a display label cross the local engine boundary. No key,
-/// environment variable value or provider configuration is included.
+/// Only the id, display label, connection state, engine source class and model counts
+/// cross the local engine boundary. No key, environment variable value or provider
+/// configuration is included.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineProvider {
     /// Engine-native provider id.
     pub id: String,
     /// Display label reported by the engine, or the id when it has no name.
     pub label: String,
+    /// True when the engine reports this provider as connected (OpenCode auth, an
+    /// environment variable or a StackSpirit keychain key).
+    #[serde(default)]
+    pub connected: bool,
+    /// Engine source class (`api`, `env`, `config`, `custom`), when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Number of models the engine reports for this provider.
+    #[serde(default)]
+    pub model_count: usize,
+    /// Number of those models that cost nothing to use.
+    #[serde(default)]
+    pub free_model_count: usize,
+}
+
+impl EngineProvider {
+    /// A provider row with only an id and label (not connected, no counts).
+    #[must_use]
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            connected: false,
+            source: None,
+            model_count: 0,
+            free_model_count: 0,
+        }
+    }
 }
 
 /// Whether a model is included or needs a user key.

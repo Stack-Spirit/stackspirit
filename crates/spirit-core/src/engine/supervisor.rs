@@ -362,7 +362,12 @@ impl EngineSupervisor {
         keychain: &dyn Keychain,
         provider: &str,
     ) -> Result<ProviderKeyStatus, KeychainError> {
-        keychain.delete(provider)?;
+        match keychain.delete(provider) {
+            Ok(()) => {}
+            // Removing an already-missing key is idempotent.
+            Err(error) if error.class == crate::engine::KeychainErrorClass::NotFound => {}
+            Err(error) => return Err(error),
+        }
         self.refresh_after_provider_change().await;
         Ok(ProviderKeyStatus::new(
             provider,
@@ -527,14 +532,8 @@ mod tests {
     #[tokio::test]
     async fn engine_start_exposes_the_runtime_provider_list_for_byok() {
         let runtime = Arc::new(FakeEngineRuntime::new().with_providers(vec![
-            crate::engine::EngineProvider {
-                id: "deepseek".to_owned(),
-                label: "DeepSeek".to_owned(),
-            },
-            crate::engine::EngineProvider {
-                id: "groq".to_owned(),
-                label: "Groq".to_owned(),
-            },
+            crate::engine::EngineProvider::new("deepseek", "DeepSeek"),
+            crate::engine::EngineProvider::new("groq", "Groq"),
         ]));
         let mut supervisor = EngineSupervisor::new(
             runtime,

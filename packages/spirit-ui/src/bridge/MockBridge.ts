@@ -38,6 +38,7 @@ import type {
   ClusterStateView,
   ConnectionSnapshot,
   DiskView,
+  EngineProvider,
   EngineStatus,
   ExternalHarness,
   ExternalHarnessKind,
@@ -319,6 +320,10 @@ export class MockBridge implements SpiritBridge {
   private localCalls: MockLocalCall[] = [];
   private localState: MockLocalState;
   private keys = new Map<string, KeyStatus>();
+  /** Providers whose preview key was typed as an invalid one; verification rejects it. */
+  private invalidKeys = new Set<string>();
+  /** Chat model ids a preview key connect added, so removing the key drops them. */
+  private unlockedChatModels = new Map<string, string[]>();
   private modelChoices: ModelChoice[];
   /**
    * Preview-only chat models. The first is a verified included OpenCode free model, so
@@ -399,6 +404,7 @@ export class MockBridge implements SpiritBridge {
     const readyEngine =
       this.scenario === "engine-ready" ||
       this.scenario === "fresh" ||
+      this.scenario === "empty" ||
       this.scenario.startsWith("gate-d6-");
     this.engineStatus = {
       choice: { type: "bundled" },
@@ -410,6 +416,7 @@ export class MockBridge implements SpiritBridge {
       included_models_available: readyEngine,
       started_at: readyEngine ? now : null,
       last_error: null,
+      providers: readyEngine ? this.providerCatalog() : undefined,
     };
     this.gateSnapshot = this.makeGates(this.gateMode(false));
     this.localState = this.makeLocalState();
@@ -845,6 +852,63 @@ export class MockBridge implements SpiritBridge {
     rawDocument: async (): Promise<RawDocument | null> => (this.raw ? clone(this.raw) : null),
   };
 
+  /** Preview provider catalog; `connected` follows the preview keychain. */
+  private providerCatalog(): EngineProvider[] {
+    const catalog: Array<[string, string, number, number]> = [
+      ["opencode", "OpenCode", 2, 2],
+      ["opencode-go", "OpenCode Go", 0, 0],
+      ["anthropic", "Anthropic", 0, 0],
+      ["openai", "OpenAI", 0, 0],
+      ["google", "Google", 0, 0],
+      ["openrouter", "OpenRouter", 0, 0],
+      ["deepseek", "DeepSeek", 0, 0],
+    ];
+    return catalog.map(([id, label, free, total]) => {
+      const keyed = this.keys.get(id);
+      const unlocked = this.unlockedChatModels.get(id)?.length ?? 0;
+      return {
+        id,
+        label,
+        // Google is preview-connected through an environment variable, the way the
+        // real engine reports a provider that has no StackSpirit keychain key.
+        connected:
+          id === "opencode" ||
+          id === "google" ||
+          (keyed !== undefined && keyed.state !== "missing"),
+        source: id === "google" ? "env" : id === "opencode" || keyed ? "api" : undefined,
+        model_count: total + unlocked,
+        free_model_count: free,
+      };
+    });
+  }
+
+  private unlockPreviewModels(provider: string): void {
+    if (this.unlockedChatModels.has(provider) || provider === "opencode") return;
+    const id = `${provider}/preview-model`;
+    if (this.chatModels.some((model) => model.id === id)) return;
+    this.chatModels.push({
+      id,
+      label: `${provider} preview model`,
+      provider,
+      tier: "byok",
+      context_tokens: 128_000,
+    });
+    this.unlockedChatModels.set(provider, [id]);
+  }
+
+  private lockPreviewModels(provider: string): void {
+    const ids = this.unlockedChatModels.get(provider) ?? [];
+    this.chatModels = this.chatModels.filter((model) => !ids.includes(model.id));
+    this.unlockedChatModels.delete(provider);
+  }
+
+  /** A real engine restarts on a key change; the preview republishes its catalog. */
+  private publishProviderChange(): void {
+    if (this.engineStatus.state.state !== "ready") return;
+    this.engineStatus = { ...this.engineStatus, providers: this.providerCatalog() };
+    this.emit({ kind: "engine", revision: this.nextRevision(), engine: clone(this.engineStatus) });
+  }
+
   engineApi = {
     status: async (): Promise<EngineStatus> => clone(this.engineStatus),
     models: async (): Promise<ModelChoice[]> => clone(this.modelChoices),
@@ -861,20 +925,26 @@ export class MockBridge implements SpiritBridge {
       }
       const status: KeyStatus = { provider, state: "saved", last_checked_at: this.now() };
       this.keys.set(provider, status);
+      if (secret.toLowerCase().includes("invalid")) this.invalidKeys.add(provider);
+      else this.invalidKeys.delete(provider);
+      this.unlockPreviewModels(provider);
+      this.publishProviderChange();
       return clone(status);
     },
     verifyKey: async (provider: string): Promise<KeyStatus> => {
-      const status: KeyStatus = {
-        provider,
-        state: "unverified",
-        last_checked_at: this.now(),
-      };
+      const state: KeyStatus["state"] = this.invalidKeys.has(provider)
+        ? "invalid"
+        : "unverified";
+      const status: KeyStatus = { provider, state, last_checked_at: this.now() };
       this.keys.set(provider, status);
       return clone(status);
     },
     deleteKey: async (provider: string): Promise<KeyStatus> => {
       const status: KeyStatus = { provider, state: "missing", last_checked_at: this.now() };
       this.keys.set(provider, status);
+      this.invalidKeys.delete(provider);
+      this.lockPreviewModels(provider);
+      this.publishProviderChange();
       return clone(status);
     },
     keyStatus: async (): Promise<KeyStatus[]> => clone([...this.keys.values()]),
@@ -884,6 +954,7 @@ export class MockBridge implements SpiritBridge {
         ...this.engineStatus,
         choice: { type: "external", kind, path },
         state: { state: "stopped" },
+        providers: undefined,
       };
       this.emit({ kind: "engine", revision: this.nextRevision(), engine: clone(this.engineStatus) });
       return clone(this.engineStatus);
@@ -900,6 +971,7 @@ export class MockBridge implements SpiritBridge {
         included_models_available: true,
         last_error: null,
         started_at: this.now(),
+        providers: this.providerCatalog(),
       };
       this.emit({ kind: "engine", revision: this.nextRevision(), engine: clone(this.engineStatus) });
       return clone(this.engineStatus);
@@ -1336,8 +1408,23 @@ export class MockBridge implements SpiritBridge {
           "Call chat.start first.",
         );
       }
+      // Like the real engine adapter, attach re-reads the usable models so a key that
+      // was just connected or removed shows up in the composer picker.
+      const current = this.chatSessions.get(session);
+      const models = this.chatModels.map((model) => clone(model));
+      const stillUsable = models.some((model) => model.id === current?.model?.id);
       return clone(
-        this.updateChatView(session, { state: "ready", attached: true, error: null }),
+        this.updateChatView(session, {
+          state: "ready",
+          attached: true,
+          error: null,
+          ...(session === "setup"
+            ? {
+                available_models: models,
+                model: stillUsable ? current?.model : (models[0] ?? null),
+              }
+            : {}),
+        }),
       );
     },
     send: async (input: ChatSendInput): Promise<ChatSendReceipt> => {

@@ -262,6 +262,20 @@ export type EngineState =
   | { state: "degraded"; detail: string }
   | { state: "failed"; detail: string };
 
+/**
+ * One provider the running engine reports. `connected` is the engine's own fact
+ * (OpenCode auth, an environment variable or a keychain key); `source` is its source
+ * class. No key, endpoint or configuration is carried.
+ */
+export interface EngineProvider {
+  id: string;
+  label: string;
+  connected?: boolean;
+  source?: string;
+  model_count?: number;
+  free_model_count?: number;
+}
+
 export interface EngineStatus {
   choice: EngineChoice;
   state: EngineState;
@@ -272,6 +286,8 @@ export interface EngineStatus {
   included_models_available: boolean;
   started_at: Timestamp | null;
   last_error: string | null;
+  /** The running engine's provider catalog; absent while it is stopped. */
+  providers?: EngineProvider[];
 }
 
 export type LocalAgentState =

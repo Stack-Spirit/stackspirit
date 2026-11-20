@@ -6,9 +6,8 @@
 //! together, orders connected and popular providers first, and never exposes provider
 //! configuration, environment values or keys.
 //!
-//! Only the id and display label of each row cross the bridge today
-//! (`EngineProvider`); the richer [`ProviderEntry`] stays inside the core for tests
-//! and follow-up wiring.
+//! Each row crosses the bridge as an `EngineProvider`: id, label, the engine's
+//! connected fact, source class and model counts. Nothing else leaves the core.
 
 use std::collections::HashSet;
 
@@ -141,6 +140,10 @@ impl ProviderCatalog {
             .map(|provider| EngineProvider {
                 id: provider.id.clone(),
                 label: provider.label.clone(),
+                connected: provider.connected,
+                source: provider.source.clone(),
+                model_count: provider.model_count,
+                free_model_count: provider.free_model_count,
             })
             .collect()
     }
@@ -314,6 +317,10 @@ mod tests {
         let bridged = catalog.engine_providers();
         assert_eq!(bridged[0].id, "opencode");
         assert_eq!(bridged[0].label, "OpenCode");
+        assert!(bridged[0].connected);
+        assert_eq!(bridged[0].model_count, 2);
+        assert_eq!(bridged[0].free_model_count, 1);
+        assert!(!bridged.iter().find(|p| p.id == "openai").unwrap().connected);
     }
 
     #[test]

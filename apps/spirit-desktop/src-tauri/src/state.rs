@@ -2,6 +2,7 @@
 //! only owns paths, the active client, the one host connection, the shared engine
 //! handles and the one chat service.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -18,6 +19,7 @@ use spirit_core::engine::{
 };
 use spirit_core::error::{SpiritError, SpiritErrorCode};
 use spirit_core::host::{HostProfile, HostStore, JsonHostStore};
+use spirit_core::service::KeyStatus;
 use spirit_core::ssh::{CommandRunner, SshOptions, SystemCommandRunner};
 use spirit_core::time::Timestamp;
 use spirit_core::vowp::{CommandLocalAgent, LocalAgentClient, SshVowpClient, VowpClient};
@@ -339,6 +341,19 @@ impl DesktopChatEngine {
         cache.available_models = available;
     }
 
+    /// Re-reads the usable models from a ready engine so the chat model list reflects a
+    /// key that was just connected or removed. It never starts the engine.
+    async fn refresh_models(&self) {
+        let status = self.engine.core.lock().await.engine_status();
+        if !matches!(status.state, EngineState::Ready) || status.port.is_none() {
+            self.remember(None, Vec::new());
+            return;
+        }
+        let usable = self.engine.usable_chat_models(&status).await;
+        let selected = status.selected_model.as_ref().map(chat_model_view);
+        self.remember(selected, usable.into_iter().map(|(view, _)| view).collect());
+    }
+
     fn cached(&self) -> std::sync::MutexGuard<'_, ChatModelCache> {
         self.cache
             .lock()
@@ -467,6 +482,10 @@ pub struct AppState {
     engine: EngineHost,
     engine_keychain: Arc<dyn Keychain>,
     chat: Arc<LocalChatProvider>,
+    chat_engine: Arc<DesktopChatEngine>,
+    /// Last verification result per provider, so `key_status` does not report a key
+    /// that failed verification as plain `saved`. Cleared when the key changes.
+    key_verdicts: Mutex<HashMap<String, KeyStatus>>,
     local_agent: Arc<dyn LocalAgentClient>,
     gate_cache: HostGateCache,
     connection: ConnectionManager,
@@ -513,7 +532,9 @@ impl AppState {
         let preferences: Arc<dyn EnginePreferencesStore> =
             Arc::new(JsonEnginePreferences::new(app_data_dir.join("engine.json")));
         let saved = preferences.load().unwrap_or_default();
-        let mut core = SpiritCore::desktop(hosts.clone(), supervisor, KEYCHAIN_SERVICE);
+        // The core shares the indexed OS keychain so its connect/disconnect path and the
+        // sidecar's key source read and write the same entries.
+        let mut core = SpiritCore::new(hosts.clone(), supervisor).with_keychain(keychain.clone());
         core.select_engine(saved.choice.clone());
         core.set_gates(default_gate_snapshot());
         let events = core.subscribe();
@@ -531,10 +552,8 @@ impl AppState {
         // The chat provider shares the engine host and uses the setup workspace the
         // private tree creates; it never spawns an engine and never receives a key.
         let setup_workspace = PrivateEngineTree::prepare(&app_data_dir)?.setup_workspace;
-        let chat = Arc::new(LocalChatProvider::new(
-            Arc::new(DesktopChatEngine::new(engine.clone())),
-            setup_workspace,
-        ));
+        let chat_engine = Arc::new(DesktopChatEngine::new(engine.clone()));
+        let chat = Arc::new(LocalChatProvider::new(chat_engine.clone(), setup_workspace));
 
         Ok((
             Self {
@@ -548,6 +567,8 @@ impl AppState {
                 engine,
                 engine_keychain: keychain,
                 chat,
+                chat_engine,
+                key_verdicts: Mutex::new(HashMap::new()),
                 local_agent,
                 gate_cache: HostGateCache::new(),
                 connection,
@@ -593,6 +614,36 @@ impl AppState {
 
     pub(crate) fn engine_runtime(&self) -> Arc<dyn EngineRuntime> {
         self.engine.runtime.clone()
+    }
+
+    /// Refreshes the chat adapter's model list after a provider key changed.
+    pub(crate) async fn refresh_chat_models(&self) {
+        self.chat_engine.refresh_models().await;
+    }
+
+    /// Records the latest verification result for a provider's stored key.
+    pub(crate) fn record_key_verdict(&self, status: KeyStatus) {
+        self.key_verdicts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(status.provider.clone(), status);
+    }
+
+    /// Forgets the verification result when a key is replaced or removed.
+    pub(crate) fn clear_key_verdict(&self, provider: &str) {
+        self.key_verdicts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(provider);
+    }
+
+    /// The last verification result for a provider, if the key is still the same one.
+    pub(crate) fn key_verdict(&self, provider: &str) -> Option<KeyStatus> {
+        self.key_verdicts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(provider)
+            .cloned()
     }
 
     pub(crate) fn engine_keychain(&self) -> &dyn Keychain {

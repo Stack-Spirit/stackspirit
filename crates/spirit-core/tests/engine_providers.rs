@@ -349,3 +349,61 @@ async fn connecting_a_provider_unlocks_its_models_without_an_app_restart() {
     );
     assert_eq!(runtime.spawn_count(), 3);
 }
+
+#[tokio::test]
+async fn the_core_connect_path_the_desktop_commands_call_refreshes_models_and_status() {
+    use spirit_core::SpiritCore;
+    use spirit_core::host::InMemoryHostStore;
+
+    let keychain = Arc::new(FakeKeychain::new());
+    let runtime = Arc::new(KeychainRuntime::new(keychain.clone()));
+    let supervisor = EngineSupervisor::new(runtime.clone(), supervisor_config());
+    let mut core = SpiritCore::new(Arc::new(InMemoryHostStore::new()), supervisor)
+        .with_keychain(keychain.clone());
+    let mut events = core.subscribe();
+
+    let started = core.start_engine().await;
+    let opencode = started
+        .providers
+        .iter()
+        .find(|provider| provider.id == "opencode")
+        .unwrap();
+    assert!(opencode.connected, "the engine's connected fact must cross");
+    assert!(
+        !started
+            .providers
+            .iter()
+            .find(|provider| provider.id == "deepseek")
+            .unwrap()
+            .connected
+    );
+
+    let secret = SecretString::new("not-a-real-provider-key");
+    let saved = core.connect_provider("deepseek", &secret).await.unwrap();
+    assert_eq!(saved.state, "saved");
+    assert_eq!(runtime.spawn_count(), 2);
+    assert!(
+        keychain
+            .list()
+            .unwrap()
+            .iter()
+            .any(|provider| provider == "deepseek")
+    );
+    let json = serde_json::to_string(&core.engine_status()).unwrap();
+    assert!(!json.contains("not-a-real-provider-key"));
+    // Starting and the connect restart each published an engine event.
+    let mut published = 0;
+    while events.try_recv().is_ok() {
+        published += 1;
+    }
+    assert!(published >= 2, "connect must publish the refreshed status");
+
+    let removed = core.disconnect_provider("deepseek").await.unwrap();
+    assert_eq!(removed.state, "missing");
+    assert!(keychain.list().unwrap().is_empty());
+    // Removing a key that is already gone stays idempotent.
+    assert_eq!(
+        core.disconnect_provider("deepseek").await.unwrap().state,
+        "missing"
+    );
+}

@@ -4,16 +4,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MockBridge } from "../../bridge/MockBridge";
 import { NextShell } from "../../next/NextShell";
-import { resetConversations } from "../../next/conversations";
+import { resetConversations, useConversations } from "../../next/conversations";
 import { resetShellUi } from "../../next/shellUi";
 import { resetFleetStore, useFleetStore } from "../../state/fleetStore";
 
 const bridges: MockBridge[] = [];
 
-async function openProviderPanel() {
+async function openProviderPanel(scenario: "empty" | "stopped" = "empty") {
   resetFleetStore();
   resetConversations();
   const bridge = new MockBridge("empty");
+  // "empty" has a ready preview engine; a stopped one has no live catalog to show.
+  if (scenario === "stopped") await bridge.engine.selectExternal("opencode", "/usr/bin/opencode");
   bridges.push(bridge);
   const rendered = render(<NextShell bridge={bridge} />);
   await waitFor(() => expect(useFleetStore.getState().hostsLoaded).toBe(true));
@@ -126,5 +128,74 @@ describe("Composer → Engine & Models", () => {
 
     expect(await within(card).findByRole("alert")).toHaveTextContent("keychain unavailable");
     expect(container.innerHTML).not.toContain(secret);
+  });
+
+  it("keeps a key that fails verification invalid after Save key", async () => {
+    const { user, dialog } = await openProviderPanel();
+    const card = within(dialog).getByTestId("engine-models-settings");
+    await user.type(
+      within(card).getByRole("searchbox", { name: "Search providers" }),
+      "openai",
+    );
+    const row = within(card).getByTestId("provider-openai");
+    await user.click(within(row).getByRole("button", { name: "Connect OpenAI" }));
+    await user.type(within(row).getByLabelText("API key for OpenAI"), "invalid-key-value");
+    await user.click(within(row).getByRole("button", { name: "Save key" }));
+
+    await within(card).findByRole("status");
+    await waitFor(() =>
+      expect(within(card).getByTestId("provider-openai")).toHaveTextContent("Invalid key"),
+    );
+  });
+
+  it("updates the composer model picker right after Save key and Remove key", async () => {
+    const { user, dialog } = await openProviderPanel();
+    const card = within(dialog).getByTestId("engine-models-settings");
+    await user.type(
+      within(card).getByRole("searchbox", { name: "Search providers" }),
+      "anthropic",
+    );
+    const row = within(card).getByTestId("provider-anthropic");
+    await user.click(within(row).getByRole("button", { name: "Connect Anthropic" }));
+    await user.type(within(row).getByLabelText("API key for Anthropic"), "not-a-real-key");
+    await user.click(within(row).getByRole("button", { name: "Save key" }));
+    await within(card).findByRole("status");
+
+    await waitFor(() =>
+      expect(
+        useConversations.getState().views.setup?.available_models?.map((m) => m.id),
+      ).toContain("anthropic/preview-model"),
+    );
+
+    await user.click(
+      await within(card).findByRole("button", { name: "Remove Anthropic key" }),
+    );
+    const confirm = screen.getByRole("dialog", { name: "Remove provider key?" });
+    await user.click(within(confirm).getByRole("button", { name: "Remove key" }));
+    await waitFor(() =>
+      expect(
+        useConversations.getState().views.setup?.available_models?.map((m) => m.id),
+      ).not.toContain("anthropic/preview-model"),
+    );
+  });
+
+  it("groups a provider the engine reports as connected without a keychain key", async () => {
+    const { dialog } = await openProviderPanel();
+    const card = within(dialog).getByTestId("engine-models-settings");
+    const section = within(card).getByRole("list", { name: "Connected providers" });
+    const google = within(section).getByTestId("provider-google");
+    expect(google).toHaveTextContent("Connected");
+    expect(google).toHaveTextContent("Connected outside the keychain");
+    expect(
+      within(card).getByRole("list", { name: "Available providers" }),
+    ).not.toHaveTextContent("Google");
+  });
+
+  it("says the engine is stopped instead of inventing providers", async () => {
+    const { dialog } = await openProviderPanel("stopped");
+    const card = within(dialog).getByTestId("engine-models-settings");
+    expect(within(card).getByText(/engine is stopped/i)).toBeInTheDocument();
+    expect(within(card).getByRole("searchbox", { name: "Search providers" })).toBeDisabled();
+    expect(within(card).queryByTestId("provider-anthropic")).not.toBeInTheDocument();
   });
 });

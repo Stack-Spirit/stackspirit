@@ -310,6 +310,45 @@ impl SpiritCore {
         self.connection.publish_engine(self.engine.status());
     }
 
+    /// Stores a provider key and refreshes the live engine's models and providers.
+    ///
+    /// This is the production connect path: the key goes only into the core's
+    /// keychain, a live bundled sidecar restarts with the new ephemeral auth document,
+    /// and the refreshed catalog is published. The value is never returned.
+    pub async fn connect_provider(
+        &mut self,
+        provider: &str,
+        secret: &SecretString,
+    ) -> Result<KeyStatus, KeychainError> {
+        let status = self
+            .engine
+            .connect_provider(self.keychain.as_ref(), provider, secret)
+            .await?;
+        self.connection.publish_engine(self.engine.status());
+        Ok(KeyStatus {
+            provider: status.provider,
+            state: "saved".to_owned(),
+            last_checked_at: status.last_checked_at,
+        })
+    }
+
+    /// Removes a provider key and refreshes the live engine's models and providers.
+    pub async fn disconnect_provider(
+        &mut self,
+        provider: &str,
+    ) -> Result<KeyStatus, KeychainError> {
+        let status = self
+            .engine
+            .disconnect_provider(self.keychain.as_ref(), provider)
+            .await?;
+        self.connection.publish_engine(self.engine.status());
+        Ok(KeyStatus {
+            provider: status.provider,
+            state: "missing".to_owned(),
+            last_checked_at: status.last_checked_at,
+        })
+    }
+
     /// Stores a provider key in the local keychain. The value is never returned.
     pub fn store_key(
         &self,

@@ -2363,9 +2363,11 @@ questions:
 - `GET /config/providers` returns the configured-provider document. Its rows are all
   connected, and this is the preferred model catalog read (the precedence in §2.1.2 is
   unchanged).
-- Only the provider id and display label cross the bridge today (`EngineProvider`). The
-  richer `ProviderEntry` (connected flag, source class, model and free-model counts) stays
-  in core; no provider configuration, environment value or key is serialized.
+- Each row crosses the bridge as `EngineProvider`: id, label, the engine's `connected` fact,
+  its `source` class and `model_count` / `free_model_count`. The renderer groups Connected
+  vs Available from that fact, so a provider connected through OpenCode auth or an
+  environment variable shows as connected. No provider configuration, environment value or
+  key is serialized. A stopped engine reports no rows and the panel says so.
 
 Connecting and removing keys:
 
@@ -2373,9 +2375,11 @@ Connecting and removing keys:
   restarts a live bundled sidecar so its spawn-time `OPENCODE_AUTH_CONTENT` document already
   contains the new provider. `disconnect_provider` deletes it and restarts the same way.
   `refresh_catalog` re-reads models and providers from a healthy live engine without a
-  restart. The desktop `store_key` command keeps its existing restart path; the renderer's
-  remove flow calls `engine.restart()` after `deleteKey` because that command only touches
-  the keychain.
+  restart. `SpiritCore::connect_provider` / `disconnect_provider` wrap them and publish the
+  engine event; the desktop `store_key` and `delete_key` commands call exactly those, then
+  refresh the chat adapter's model list. `key_status` keeps the last `verify_key` result
+  per provider (cleared when the key changes), so an invalid key is not reported as
+  plain `saved`.
 - StackSpirit still never writes an engine `auth.json`, never logs the key, and never puts
   it in a bridge DTO, notice or error.
 - Removing a key drops that provider's models from the refreshed list. A key that fails
@@ -2386,10 +2390,13 @@ UI contract:
 
 - The composer picker groups the verified chat models into **OpenCode Free** (`tier:
   included`) and **Connected providers** (every other tier). Empty groups are omitted.
-- The picker footer **+ Connect another provider…** opens the **Engine & Models** panel.
+- After Save key / Remove key the panel re-attaches the setup session so the composer
+  picker shows the new model list immediately.
+- **Settings → Engine & Models** hosts the panel; the picker footer
+  **+ Connect another provider…** opens the same panel in a dialog.
   OpenCode is featured with its free-model note; the panel then shows connected providers
-  and a searchable catalog. Connectivity is derived honestly from the keychain status plus
-  the engine's configured models: a provider configured outside the keychain is labelled
+  and a searchable catalog. A provider the engine reports as connected without a keychain
+  key is labelled
   "Connected outside the keychain", never given a fake key state.
 - Key fields are write-only, cleared before the save call returns, and error copy is
   scrubbed of the typed value.

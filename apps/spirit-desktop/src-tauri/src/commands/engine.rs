@@ -5,9 +5,9 @@
 use std::path::PathBuf;
 
 use spirit_core::engine::{
-    EngineChoice, EngineState, EngineStatus, ExternalHarness, ExternalHarnessKind,
-    KeychainErrorClass, ModelChoice, PathHarnessProbe, ProviderKeyState, ProviderKeyStatus,
-    SecretString, scan_external_harnesses, verify_provider_key,
+    EngineChoice, EngineState, EngineStatus, ExternalHarness, ExternalHarnessKind, ModelChoice,
+    PathHarnessProbe, ProviderKeyState, ProviderKeyStatus, SecretString, scan_external_harnesses,
+    verify_provider_key,
 };
 use spirit_core::error::{SpiritError, SpiritErrorCode};
 use spirit_core::service::KeyStatus;
@@ -91,10 +91,15 @@ pub async fn store_key(
         ));
     }
     let secret = SecretString::new(secret);
-    state
-        .engine_keychain()
-        .set(&provider, &secret)
+    // The core's connect path writes the keychain and restarts a live bundled sidecar
+    // with the new ephemeral auth document; an external harness keeps its own login.
+    let saved = state
+        .core()
+        .await
+        .connect_provider(&provider, &secret)
+        .await
         .map_err(keychain_error)?;
+    state.clear_key_verdict(&provider);
 
     // A saved BYOK key completes the local setup path even though no included model
     // is selected. Persist it so a relaunch does not show the first-run flow again.
@@ -102,28 +107,10 @@ pub async fn store_key(
     preferences.onboarding_complete = true;
     state.save_engine_preferences(&preferences)?;
 
-    // The sidecar reads stored keys at spawn time. Restart a live bundled engine so the
-    // new key is immediately usable; an external harness keeps its own login.
-    {
-        let mut core = state.core().await;
-        let status = core.engine_status();
-        if matches!(status.choice, EngineChoice::Bundled)
-            && matches!(
-                status.state,
-                EngineState::Ready | EngineState::Degraded { .. } | EngineState::Failed { .. }
-            )
-        {
-            core.stop_engine().await;
-            core.start_engine().await;
-        }
-    }
     state.apply_saved_model().await;
+    state.refresh_chat_models().await;
 
-    Ok(KeyStatus {
-        provider,
-        state: "saved".to_owned(),
-        last_checked_at: Some(Timestamp::now()),
-    })
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -151,7 +138,13 @@ pub async fn verify_key(state: State<'_, AppState>, provider: String) -> Command
     )
     .await
     .map_err(keychain_error)?;
-    Ok(to_key_status(status))
+    let status = to_key_status(status);
+    if status.state == "missing" {
+        state.clear_key_verdict(&provider);
+    } else {
+        state.record_key_verdict(status.clone());
+    }
+    Ok(status)
 }
 
 #[tauri::command]
@@ -163,19 +156,16 @@ pub async fn delete_key(state: State<'_, AppState>, provider: String) -> Command
             "choose a provider before deleting a key",
         ));
     }
-    match state.engine_keychain().delete(&provider) {
-        Ok(()) => Ok(KeyStatus {
-            provider,
-            state: "missing".to_owned(),
-            last_checked_at: Some(Timestamp::now()),
-        }),
-        Err(error) if error.class == KeychainErrorClass::NotFound => Ok(KeyStatus {
-            provider,
-            state: "missing".to_owned(),
-            last_checked_at: Some(Timestamp::now()),
-        }),
-        Err(error) => Err(keychain_error(error)),
-    }
+    let removed = state
+        .core()
+        .await
+        .disconnect_provider(&provider)
+        .await
+        .map_err(keychain_error)?;
+    state.clear_key_verdict(&provider);
+    state.apply_saved_model().await;
+    state.refresh_chat_models().await;
+    Ok(removed)
 }
 
 #[tauri::command]
@@ -183,10 +173,14 @@ pub async fn key_status(state: State<'_, AppState>) -> CommandResult<Vec<KeyStat
     let providers = state.engine_keychain().list().map_err(keychain_error)?;
     Ok(providers
         .into_iter()
-        .map(|provider| KeyStatus {
-            provider,
-            state: "saved".to_owned(),
-            last_checked_at: None,
+        .map(|provider| {
+            // Keep a failed or inconclusive verification visible; only a key that has
+            // not been checked since it was saved reads as plain `saved`.
+            state.key_verdict(&provider).unwrap_or(KeyStatus {
+                provider,
+                state: "saved".to_owned(),
+                last_checked_at: None,
+            })
         })
         .collect())
 }
@@ -265,6 +259,7 @@ pub async fn restart_engine(state: State<'_, AppState>) -> CommandResult<EngineS
         core.start_engine().await;
     }
     state.apply_saved_model().await;
+    state.refresh_chat_models().await;
     let status = state.core().await.engine_status();
     Ok(state.engine_status_with_preferences(status))
 }

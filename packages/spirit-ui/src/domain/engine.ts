@@ -1,4 +1,5 @@
 import type {
+  EngineProvider,
   EngineStatus,
   ExternalHarness,
   GateSnapshot,
@@ -72,11 +73,7 @@ export function modelNotes(provider: string, notes: string): string {
   return notes.replace(/\bopencode\b/gi, "StackSpirit Engine");
 }
 
-/** One provider entry reported by the bundled engine, structurally typed. */
-export interface EngineProvider {
-  id: string;
-  label: string;
-}
+export type { EngineProvider };
 
 const FALLBACK_PROVIDER_IDS = [
   "deepseek",

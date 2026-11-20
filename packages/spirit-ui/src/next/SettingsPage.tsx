@@ -1,37 +1,24 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
-import type { EngineStatus, KeyStatus, ModelChoice } from "../bridge/wire";
+import type { SpiritBridge } from "../bridge/SpiritBridge";
+import type { EngineProvider, EngineStatus, KeyStatus, ModelChoice } from "../bridge/wire";
 import { toSpiritError } from "../bridge/errors";
 import { Button } from "../components/Button";
 import { Modal } from "../components/Modal";
 import { useEngine, useFleetStore } from "../state/fleetStore";
+import { useConversations } from "./conversations";
 
-/**
- * The connect dialog's provider rows. The engine's `/provider` document is the live
- * catalog; the fallback list keeps the panel useful before the engine starts. Only
- * ids and labels are shown — never a key, endpoint or provider configuration.
- */
-const FALLBACK_PROVIDERS: ReadonlyArray<{ id: string; label: string }> = [
-  { id: "opencode", label: "OpenCode" },
-  { id: "opencode-go", label: "OpenCode Go" },
-  { id: "anthropic", label: "Anthropic" },
-  { id: "openai", label: "OpenAI" },
-  { id: "google", label: "Google" },
-  { id: "openrouter", label: "OpenRouter" },
-  { id: "deepseek", label: "DeepSeek" },
-  { id: "xai", label: "xAI" },
-  { id: "groq", label: "Groq" },
-  { id: "mistral", label: "Mistral" },
-  { id: "ollama", label: "Ollama" },
-];
-
-const KNOWN_LABELS: Record<string, string> = Object.fromEntries(
-  FALLBACK_PROVIDERS.map((provider) => [provider.id, provider.label]),
-);
+/** Display names for the two OpenCode providers the featured block always shows. */
+const KNOWN_LABELS: Record<string, string> = {
+  opencode: "OpenCode",
+  "opencode-go": "OpenCode Go",
+};
 
 interface ProviderRow {
   id: string;
   label: string;
+  /** The engine's own connected fact, or a key in this Mac's keychain. */
+  connected: boolean;
   modelCount: number;
   freeModelCount: number;
 }
@@ -47,21 +34,44 @@ function providerLabel(id: string): string {
   );
 }
 
-/** Reads the engine-supplied provider rows structurally; older bridges omit them. */
-function catalogFromStatus(status: EngineStatus | null): Array<{ id: string; label: string }> {
-  const raw = (status as { providers?: unknown } | null)?.providers;
+/**
+ * The running engine's provider catalog. A stopped engine reports none, and the panel
+ * says so instead of inventing rows.
+ */
+function catalogFromStatus(status: EngineStatus | null): EngineProvider[] {
+  const raw = status?.providers;
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((entry) => {
-    if (!entry || typeof entry !== "object") return [];
-    const { id, label } = entry as { id?: unknown; label?: unknown };
-    if (typeof id !== "string" || !id.trim()) return [];
+    if (!entry || typeof entry.id !== "string" || !entry.id.trim()) return [];
+    const id = entry.id.trim();
     return [
       {
-        id: id.trim(),
-        label: typeof label === "string" && label.trim() ? label.trim() : providerLabel(id),
+        ...entry,
+        id,
+        label:
+          typeof entry.label === "string" && entry.label.trim()
+            ? entry.label.trim()
+            : providerLabel(id),
       },
     ];
   });
+}
+
+async function refreshSetupModels(bridge: SpiritBridge): Promise<void> {
+  // The chat adapter caches its usable models; re-attaching the setup session makes it
+  // re-read them, so the composer picker reflects a key that was just saved or removed.
+  const chat = bridge.chat;
+  if (!chat || !useConversations.getState().views.setup) return;
+  try {
+    const view = await chat.attach("setup");
+    useConversations.setState((state) => {
+      const current = state.views.setup;
+      if (!current) return {};
+      return { views: { ...state.views, setup: { ...current, ...view } } };
+    });
+  } catch {
+    // The next chat attach reads the list anyway; never fail a key change on it.
+  }
 }
 
 function upsertKey(statuses: KeyStatus[], next: KeyStatus): KeyStatus[] {
@@ -156,10 +166,6 @@ export function SettingsPage() {
     };
   }, [bridge, engineState]);
 
-  const catalog = new Map<string, { id: string; label: string }>();
-  for (const provider of FALLBACK_PROVIDERS) catalog.set(provider.id, provider);
-  for (const provider of catalogFromStatus(engine)) catalog.set(provider.id, provider);
-
   const counts = new Map<string, { total: number; free: number }>();
   for (const model of models) {
     const count = counts.get(model.provider) ?? { total: 0, free: 0 };
@@ -171,21 +177,26 @@ export function SettingsPage() {
   const keyed = new Set(
     keys.filter((status) => status.state !== "missing").map((status) => status.provider),
   );
-  const modeled = new Set(models.map((model) => model.provider));
-  const connected = (provider: string): boolean =>
-    provider === "opencode" || keyed.has(provider) || modeled.has(provider);
-
-  const rows: ProviderRow[] = [...catalog.values()].map((provider) => {
+  const rows: ProviderRow[] = catalogFromStatus(engine).map((provider) => {
     const count = counts.get(provider.id);
     return {
-      ...provider,
-      modelCount: count?.total ?? 0,
-      freeModelCount: count?.free ?? 0,
+      id: provider.id,
+      label: provider.label,
+      connected: provider.connected === true || keyed.has(provider.id),
+      modelCount: Math.max(provider.model_count ?? 0, count?.total ?? 0),
+      freeModelCount: Math.max(provider.free_model_count ?? 0, count?.free ?? 0),
     };
   });
-  const featured = rows.find((provider) => provider.id === "opencode") ?? {
+  const connected = (provider: string): boolean =>
+    provider === "opencode" ||
+    keyed.has(provider) ||
+    rows.some((row) => row.id === provider && row.connected);
+  const catalogReady = rows.length > 0;
+
+  const featured: ProviderRow = rows.find((provider) => provider.id === "opencode") ?? {
     id: "opencode",
     label: "OpenCode",
+    connected: true,
     modelCount: 0,
     freeModelCount: 0,
   };
@@ -200,8 +211,8 @@ export function SettingsPage() {
         provider.id.toLowerCase().includes(needle) ||
         provider.label.toLowerCase().includes(needle)),
   );
-  const connectedRows = searchable.filter((provider) => connected(provider.id));
-  const availableRows = searchable.filter((provider) => !connected(provider.id));
+  const connectedRows = searchable.filter((provider) => provider.connected);
+  const availableRows = searchable.filter((provider) => !provider.connected);
 
   async function save(provider: string, secret: string): Promise<boolean> {
     if (!bridge) return false;
@@ -223,6 +234,7 @@ export function SettingsPage() {
       setKeys((current) => upsertKey(current, verified));
       await refreshEngine();
       await reload();
+      await refreshSetupModels(bridge);
       setEditing(null);
       setNotice(
         verified.state === "saved"
@@ -272,18 +284,12 @@ export function SettingsPage() {
       setKeys((current) => upsertKey(current, removed));
       setPendingRemove(null);
       setNotice(`${providerLabel(provider)} key removed.`);
-      // The desktop's delete path only touches the keychain; a live bundled sidecar
-      // keeps its spawn-time auth until it restarts. Refresh it so the removed
-      // provider's models disappear from the composer without an app restart. A
-      // stopped engine is left stopped.
-      const wasLive =
-        engineState === "ready" ||
-        engineState === "degraded" ||
-        engineState === "failed";
+      // The core's disconnect path already restarts a live bundled engine; refresh the
+      // shell, this panel and the composer's model list from it.
       try {
-        if (wasLive) await bridge.engine.restart();
         await refreshEngine();
         await reload();
+        await refreshSetupModels(bridge);
       } catch {
         setNotice(
           `${providerLabel(provider)} key removed. Restart the engine to refresh its model list.`,
@@ -454,13 +460,13 @@ export function SettingsPage() {
             value={query}
             placeholder="Search providers"
             aria-label="Search providers"
-            disabled={rows.length === 0}
+            disabled={!catalogReady}
             onChange={(event) => setQuery(event.target.value)}
           />
         </label>
-        {rows.length === 0 ? (
+        {!catalogReady ? (
           <p className="nx-provider__empty">
-            Start the StackSpirit Engine to load the live provider catalog.
+            The StackSpirit Engine is stopped. Start it to load the live provider catalog.
           </p>
         ) : availableRows.length > 0 ? (
           <ul className="nx-provider__list" aria-label="Available providers">
@@ -552,7 +558,7 @@ function ProviderItem({
   onSave: (provider: string, secret: string) => Promise<boolean>;
   onCancel: () => void;
 }) {
-  const connected = status !== null || provider.modelCount > 0;
+  const connected = provider.connected;
   return (
     <li className="nx-provider-row" data-testid={`provider-${provider.id}`}>
       <div className="nx-provider-row__head">

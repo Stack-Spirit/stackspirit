@@ -69,6 +69,18 @@ for (const theme of THEMES) {
     await expect(key).toHaveCount(0);
     await expectNoWcagViolations(page);
 
+    // The composer picker shows the newly unlocked model without re-opening the chat.
+    await dialog.getByRole("button", { name: "Close dialog" }).click();
+    await model.click();
+    await expect(
+      page
+        .getByRole("menu", { name: "Choose a model" })
+        .getByRole("group", { name: "Connected providers" }),
+    ).toContainText("anthropic preview model");
+    await page.keyboard.press("Escape");
+    await model.click();
+    await page.getByTestId("composer-connect-provider").click();
+
     // Removing the key refreshes the live list through the mock engine's restart path.
     await card.getByRole("button", { name: "Remove Anthropic key" }).click();
     const confirm = page.getByRole("dialog", { name: "Remove provider key?" });
@@ -77,8 +89,27 @@ for (const theme of THEMES) {
     await expect(card.getByTestId("provider-anthropic")).toContainText("Available");
     await expectNoWcagViolations(page);
 
-    // Closing the panel returns to the grouped composer picker.
+    // Closing the panel returns to the picker, which dropped the removed key's model.
     await dialog.getByRole("button", { name: "Close dialog" }).click();
-    await expect(model).toBeVisible();
+    await model.click();
+    await expect(page.getByRole("menu", { name: "Choose a model" })).not.toContainText(
+      "anthropic preview model",
+    );
+  });
+}
+
+for (const theme of THEMES) {
+  test(`Settings shows the Engine & Models panel (${theme})`, async ({ page }) => {
+    await page.goto(`/?theme=${theme}`);
+    await expect(page.getByTestId("next-shell")).toBeVisible();
+    await page.getByTestId("settings-trigger").click();
+    await page.getByRole("menuitem", { name: "All settings" }).click();
+    await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
+
+    const card = page.getByTestId("engine-models-settings");
+    await expect(card.getByTestId("provider-opencode")).toContainText("Free models included");
+    // A provider the engine reports as connected outside the keychain is grouped as such.
+    await expect(card.getByTestId("provider-google")).toContainText("Connected outside the keychain");
+    await expectNoWcagViolations(page);
   });
 }
