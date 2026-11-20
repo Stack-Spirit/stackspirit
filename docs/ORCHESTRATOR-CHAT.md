@@ -2350,3 +2350,53 @@ contract is now:
   server` for key-auth hosts, `Form a cluster` once two or more servers are saved, and
   never to paste passwords, keys or tokens into chat. It contains no host, path or secret.
 - Tests: `crates/spirit-core/tests/setup_sandbox.rs`.
+
+## Provider catalog and connect contract (ss-84)
+
+The provider list and the model catalog are separate reads, and they answer different
+questions:
+
+- `GET /provider` returns `{ "all": [...], "connected": [...] }`. `crates/spirit-core/src/engine/process/providers.rs`
+  parses it into a display-ordered catalog: connected providers first, then the OpenCode /
+  OpenCode Go / popular ring, then label. Duplicate ids keep the connected row. An optional
+  `connected` array is respected; when it is absent no row is invented as connected.
+- `GET /config/providers` returns the configured-provider document. Its rows are all
+  connected, and this is the preferred model catalog read (the precedence in §2.1.2 is
+  unchanged).
+- Only the provider id and display label cross the bridge today (`EngineProvider`). The
+  richer `ProviderEntry` (connected flag, source class, model and free-model counts) stays
+  in core; no provider configuration, environment value or key is serialized.
+
+Connecting and removing keys:
+
+- `EngineSupervisor::connect_provider` stores the key through the supplied `Keychain` and
+  restarts a live bundled sidecar so its spawn-time `OPENCODE_AUTH_CONTENT` document already
+  contains the new provider. `disconnect_provider` deletes it and restarts the same way.
+  `refresh_catalog` re-reads models and providers from a healthy live engine without a
+  restart. The desktop `store_key` command keeps its existing restart path; the renderer's
+  remove flow calls `engine.restart()` after `deleteKey` because that command only touches
+  the keychain.
+- StackSpirit still never writes an engine `auth.json`, never logs the key, and never puts
+  it in a bridge DTO, notice or error.
+- Removing a key drops that provider's models from the refreshed list. A key that fails
+  verification stays in the keychain and is reported as invalid/unverified; it is never
+  silently deleted.
+
+UI contract:
+
+- The composer picker groups the verified chat models into **OpenCode Free** (`tier:
+  included`) and **Connected providers** (every other tier). Empty groups are omitted.
+- The picker footer **+ Connect another provider…** opens the **Engine & Models** panel.
+  OpenCode is featured with its free-model note; the panel then shows connected providers
+  and a searchable catalog. Connectivity is derived honestly from the keychain status plus
+  the engine's configured models: a provider configured outside the keychain is labelled
+  "Connected outside the keychain", never given a fake key state.
+- Key fields are write-only, cleared before the save call returns, and error copy is
+  scrubbed of the typed value.
+
+Tests: `crates/spirit-core/src/engine/providers.rs` and
+`crates/spirit-core/tests/engine_providers.rs` cover grouping, dedup, search and the
+connect/disconnect restart; `packages/spirit-ui/src/test/next/composer.test.tsx` and
+`providerSettings.test.tsx` cover the grouped picker, search, connect, verify, remove and
+secret-free errors; `apps/spirit-desktop/e2e/meadow-provider-connect.spec.ts` covers the
+light and dark flows with axe WCAG 2.2 AA.

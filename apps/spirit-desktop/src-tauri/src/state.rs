@@ -513,8 +513,7 @@ impl AppState {
         let preferences: Arc<dyn EnginePreferencesStore> =
             Arc::new(JsonEnginePreferences::new(app_data_dir.join("engine.json")));
         let saved = preferences.load().unwrap_or_default();
-        let mut core = SpiritCore::desktop(hosts.clone(), supervisor, KEYCHAIN_SERVICE)
-            .with_keychain(keychain.clone());
+        let mut core = SpiritCore::desktop(hosts.clone(), supervisor, KEYCHAIN_SERVICE);
         core.select_engine(saved.choice.clone());
         core.set_gates(default_gate_snapshot());
         let events = core.subscribe();

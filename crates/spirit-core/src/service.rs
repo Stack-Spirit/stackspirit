@@ -13,7 +13,7 @@ use crate::engine::local::{
 };
 use crate::engine::{
     EngineChoice, EngineStatus, EngineSupervisor, Keychain, KeychainError, ModelChoice,
-    ProviderKeyState, ProviderKeyStatus, SecretString,
+    SecretString,
 };
 use crate::error::{SpiritError, SpiritErrorCode};
 use crate::host::{HostId, HostKeyPin, HostProfile, HostProfilePatch, HostStore, NewHostProfile};
@@ -324,38 +324,7 @@ impl SpiritCore {
         })
     }
 
-    /// Stores a provider key and makes its models available to the live engine.
-    ///
-    /// This is the connect path used by Settings → Engine & Models. The key goes only
-    /// into the local keychain; a bundled sidecar is restarted with its ephemeral auth
-    /// document so the refreshed `/config/providers` list includes the provider.
-    pub async fn connect_provider(
-        &mut self,
-        provider: &str,
-        secret: &SecretString,
-    ) -> Result<KeyStatus, KeychainError> {
-        let status = self
-            .engine
-            .connect_provider(self.keychain.as_ref(), provider, secret)
-            .await?;
-        self.connection.publish_engine(self.engine.status());
-        Ok(key_status_from_provider(status))
-    }
-
-    /// Deletes a provider key and refreshes the live engine catalog.
-    pub async fn disconnect_provider(
-        &mut self,
-        provider: &str,
-    ) -> Result<KeyStatus, KeychainError> {
-        let status = self
-            .engine
-            .disconnect_provider(self.keychain.as_ref(), provider)
-            .await?;
-        self.connection.publish_engine(self.engine.status());
-        Ok(key_status_from_provider(status))
-    }
-
-    /// Deletes a provider key without refreshing an engine (legacy synchronous path).
+    /// Deletes a provider key.
     pub fn delete_key(&self, provider: &str) -> Result<KeyStatus, KeychainError> {
         self.keychain.delete(provider)?;
         Ok(KeyStatus {
@@ -377,13 +346,6 @@ impl SpiritCore {
                 last_checked_at: None,
             })
             .collect())
-    }
-
-    /// Re-reads the live engine's model and provider catalogs.
-    pub async fn refresh_engine_catalog(&mut self) -> EngineStatus {
-        let status = self.engine.refresh_catalog().await;
-        self.connection.publish_engine(status.clone());
-        status
     }
 
     /// Returns the current gate snapshot.
@@ -741,20 +703,6 @@ impl SpiritCore {
         input: &crate::host::HostProbeInput,
     ) -> crate::host::HostProbe {
         crate::host::probe_host(runner, input).await
-    }
-}
-
-fn key_status_from_provider(status: ProviderKeyStatus) -> KeyStatus {
-    KeyStatus {
-        provider: status.provider,
-        state: match status.state {
-            ProviderKeyState::Missing => "missing",
-            ProviderKeyState::Saved => "saved",
-            ProviderKeyState::Invalid => "invalid",
-            ProviderKeyState::Unverified => "unverified",
-        }
-        .to_owned(),
-        last_checked_at: status.last_checked_at,
     }
 }
 

@@ -1,5 +1,4 @@
 import type {
-  ChatModelView,
   EngineStatus,
   ExternalHarness,
   GateSnapshot,
@@ -77,10 +76,6 @@ export function modelNotes(provider: string, notes: string): string {
 export interface EngineProvider {
   id: string;
   label: string;
-  connected: boolean;
-  source: string | null;
-  model_count: number;
-  free_model_count: number;
 }
 
 const FALLBACK_PROVIDER_IDS = [
@@ -105,93 +100,15 @@ export function engineProviders(status: EngineStatus | null): EngineProvider[] {
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((entry) => {
     if (!entry || typeof entry !== "object") return [];
-    const { id, label, connected, source, model_count, free_model_count } = entry as {
-      id?: unknown;
-      label?: unknown;
-      connected?: unknown;
-      source?: unknown;
-      model_count?: unknown;
-      free_model_count?: unknown;
-    };
+    const { id, label } = entry as { id?: unknown; label?: unknown };
     if (typeof id !== "string" || !id.trim()) return [];
     return [
       {
         id: id.trim(),
         label: typeof label === "string" && label.trim() ? label.trim() : providerLabel(id),
-        connected: connected === true,
-        source: typeof source === "string" && source.trim() ? source.trim() : null,
-        model_count:
-          typeof model_count === "number" && Number.isFinite(model_count) && model_count > 0
-            ? Math.trunc(model_count)
-            : 0,
-        free_model_count:
-          typeof free_model_count === "number" &&
-          Number.isFinite(free_model_count) &&
-          free_model_count > 0
-            ? Math.trunc(free_model_count)
-            : 0,
       },
     ];
   });
-}
-
-/**
- * The Settings → Engine & Models grouping. OpenCode stays featured at the top;
- * every other provider is grouped by connection state and filtered by one search
- * across its id and display label. The search never hides a connected provider the
- * owner already has unless the query genuinely does not match it.
- */
-export function providerGroups(
-  providers: EngineProvider[],
-  query = "",
-): {
-  opencode: EngineProvider | null;
-  opencodeGo: EngineProvider | null;
-  connected: EngineProvider[];
-  available: EngineProvider[];
-} {
-  const opencode = providers.find((provider) => provider.id === "opencode") ?? null;
-  const opencodeGo = providers.find((provider) => provider.id === "opencode-go") ?? null;
-  const needle = query.trim().toLowerCase();
-  const matches = providers.filter(
-    (provider) =>
-      provider.id !== "opencode" &&
-      provider.id !== "opencode-go" &&
-      (needle === "" ||
-        provider.id.toLowerCase().includes(needle) ||
-        provider.label.toLowerCase().includes(needle)),
-  );
-  return {
-    opencode,
-    opencodeGo,
-    connected: matches.filter((provider) => provider.connected),
-    available: matches.filter((provider) => !provider.connected),
-  };
-}
-
-/** One section in the composer model picker. */
-export interface ChatModelGroup {
-  id: "included" | "connected";
-  title: string;
-  models: ChatModelView[];
-}
-
-/**
- * Groups the verified chat model list the way the composer shows it: the bundled
- * free models first under "OpenCode Free", then every provider-owned choice under
- * "Connected providers". Empty groups are omitted, never rendered as a blank heading.
- */
-export function groupChatModels(models: ChatModelView[]): ChatModelGroup[] {
-  const included = models.filter((model) => model.tier === "included");
-  const connected = models.filter((model) => model.tier !== "included");
-  return [
-    ...(included.length > 0
-      ? [{ id: "included" as const, title: "OpenCode Free", models: included }]
-      : []),
-    ...(connected.length > 0
-      ? [{ id: "connected" as const, title: "Connected providers", models: connected }]
-      : []),
-  ];
 }
 
 /**

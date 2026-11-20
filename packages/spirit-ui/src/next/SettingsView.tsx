@@ -2,8 +2,7 @@ import { useState } from "react";
 
 import { EngineView } from "../views/engine/EngineView";
 import { HostManager } from "../views/hosts/HostManager";
-import { useConnection, useFleetStore } from "../state/fleetStore";
-import { EngineModelsSettings } from "./EngineModelsSettings";
+import { useConnection, useEngine, useFleetStore } from "../state/fleetStore";
 import { PageHeader } from "./PageHeader";
 import { SecretStore } from "./SecretStore";
 import { ServerSecurityCard } from "./ServerSecurity";
@@ -28,10 +27,12 @@ export function SettingsView({
   onOpenRaw,
   initialAdvanced = false,
 }: SettingsViewProps) {
+  const engine = useEngine();
   const openSessions = useFleetStore((state) => state.openSessions);
   const sessionsAvailable = useFleetStore((state) => Boolean(state.bridge?.sessions));
   const connected = useConnection().state === "connected";
   const [advanced, setAdvanced] = useState(initialAdvanced);
+  const model = engine?.selected_model?.label ?? engine?.selected_model?.id ?? "No model selected";
 
   return (
     <section className="nx-main" aria-label="Settings">
@@ -55,7 +56,16 @@ export function SettingsView({
             </div>
           </div>
 
-          <EngineModelsSettings />
+          <div className="nx-settings__card">
+            <h2>AI model</h2>
+            <div className="nx-settings__row">
+              <span>
+                StackSpirit Engine
+                <small>Used for the setup assistant and local sessions.</small>
+              </span>
+              <span className="nx-chip nx-chip--server">◇ {model}</span>
+            </div>
+          </div>
 
           <ServerSecurityCard />
 

@@ -21,21 +21,34 @@ async function expectNoWcagViolations(page: Page) {
   ).toEqual([]);
 }
 
-async function openSettings(page: Page, theme: "light" | "dark") {
-  await page.goto(`/?theme=${theme}`);
-  await expect(page.getByTestId("next-shell")).toBeVisible();
-  await page.getByTestId("settings-trigger").click();
-  await page.getByRole("menuitem", { name: "All settings" }).click();
-  await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
-}
+const url = (theme: "light" | "dark") => `/?scenario=empty&theme=${theme}`;
 
 for (const theme of THEMES) {
   test(`OpenCode-first provider connect and grouped model picker (${theme})`, async ({
     page,
   }) => {
-    await openSettings(page, theme);
-    const card = page.getByTestId("engine-models-settings");
-    await expect(card.getByRole("heading", { name: "Engine & Models" })).toBeVisible();
+    await page.goto(url(theme));
+    await page.getByRole("button", { name: /Set up with AI/ }).click();
+
+    const model = page.getByTestId("composer-model");
+    await expect(model).toContainText("OpenCode free");
+    await model.click();
+    const menu = page.getByRole("menu", { name: "Choose a model" });
+    await expect(menu.getByRole("group", { name: "OpenCode Free" })).toContainText(
+      "OpenCode free",
+    );
+    await expect(menu.getByRole("group", { name: "Connected providers" })).toContainText(
+      "BYOK · DeepSeek V4.1 Flash",
+    );
+    await expect(menu.getByTestId("composer-connect-provider")).toContainText(
+      "Connect another provider…",
+    );
+    await expectNoWcagViolations(page);
+
+    await menu.getByTestId("composer-connect-provider").click();
+    const dialog = page.getByRole("dialog", { name: "Engine & Models" });
+    await expect(dialog).toBeVisible();
+    const card = dialog.getByTestId("engine-models-settings");
     await expect(card.getByTestId("provider-opencode")).toContainText(
       "Free models included",
     );
@@ -56,29 +69,16 @@ for (const theme of THEMES) {
     await expect(key).toHaveCount(0);
     await expectNoWcagViolations(page);
 
-    // Return to the setup composer: the mock bridge refreshed its model list on
-    // connect, so the newly unlocked provider appears without an app restart.
-    await page.getByRole("button", { name: /Setup assistant/ }).click();
-    const model = page.getByTestId("composer-model");
-    await expect(model).toContainText("OpenCode free");
-    await model.click();
-    const menu = page.getByRole("menu", { name: "Choose a model" });
-    await expect(menu.getByRole("group", { name: "OpenCode Free" })).toContainText(
-      "OpenCode free",
-    );
-    await expect(menu.getByRole("group", { name: "Connected providers" })).toContainText(
-      "BYOK · Claude Sonnet 4.5",
-    );
-    await expect(menu.getByTestId("composer-connect-provider")).toContainText(
-      "Connect another provider…",
-    );
+    // Removing the key refreshes the live list through the mock engine's restart path.
+    await card.getByRole("button", { name: "Remove Anthropic key" }).click();
+    const confirm = page.getByRole("dialog", { name: "Remove provider key?" });
+    await confirm.getByRole("button", { name: "Remove key" }).click();
+    await expect(card.getByRole("status")).toContainText("Anthropic key removed");
+    await expect(card.getByTestId("provider-anthropic")).toContainText("Available");
     await expectNoWcagViolations(page);
 
-    // The footer link goes straight back to Settings → Engine & Models.
-    await menu.getByTestId("composer-connect-provider").click();
-    await expect(
-      page.getByRole("heading", { name: "Engine & Models" }),
-    ).toBeVisible();
-    await expectNoWcagViolations(page);
+    // Closing the panel returns to the grouped composer picker.
+    await dialog.getByRole("button", { name: "Close dialog" }).click();
+    await expect(model).toBeVisible();
   });
 }

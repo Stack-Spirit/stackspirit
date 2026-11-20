@@ -530,18 +530,10 @@ mod tests {
             crate::engine::EngineProvider {
                 id: "deepseek".to_owned(),
                 label: "DeepSeek".to_owned(),
-                connected: false,
-                source: None,
-                model_count: 0,
-                free_model_count: 0,
             },
             crate::engine::EngineProvider {
                 id: "groq".to_owned(),
                 label: "Groq".to_owned(),
-                connected: false,
-                source: None,
-                model_count: 0,
-                free_model_count: 0,
             },
         ]));
         let mut supervisor = EngineSupervisor::new(

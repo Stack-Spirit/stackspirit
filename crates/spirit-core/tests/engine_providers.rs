@@ -4,10 +4,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use spirit_core::engine::process::parse_providers;
+use spirit_core::engine::process::providers::{
+    ProviderCatalog, parse_provider_catalog, provider_rank,
+};
 use spirit_core::engine::{
     EngineHealth, EngineProvider, EngineRuntime, EngineRuntimeInfo, EngineState, EngineSupervisor,
-    EngineSupervisorConfig, FakeKeychain, KeyVerification, Keychain, ProviderCatalog,
-    ProviderKeyState, RuntimeModel, SecretString, parse_provider_catalog,
+    EngineSupervisorConfig, FakeKeychain, KeyVerification, Keychain, ProviderKeyState,
+    RuntimeModel, SecretString,
 };
 
 const PROVIDER_DOCUMENT: &str = r#"{
@@ -72,6 +76,27 @@ fn provider_catalog_groups_connected_and_available_with_opencode_first() {
     );
     assert_eq!(catalog.search("opencode").len(), 2);
     assert_eq!(catalog.search("  ").len(), catalog.len());
+    assert_eq!(provider_rank("opencode"), 0);
+    assert_eq!(provider_rank("zed"), usize::MAX);
+
+    // Only the id and label cross the bridge, in the same display order.
+    let bridged = catalog.engine_providers();
+    let ids: Vec<&str> = bridged
+        .iter()
+        .map(|provider| provider.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "opencode",
+            "opencode-go",
+            "anthropic",
+            "openai",
+            "deepseek",
+            "zed"
+        ]
+    );
+    assert_eq!(bridged[0].label, "OpenCode");
 }
 
 #[test]
@@ -83,6 +108,27 @@ fn provider_catalog_marks_every_configured_provider_as_connected() {
     assert!(catalog.available().is_empty());
 }
 
+#[test]
+fn the_engine_process_parser_keeps_the_display_order() {
+    let providers = parse_providers(PROVIDER_DOCUMENT.as_bytes());
+    let ids: Vec<&str> = providers
+        .iter()
+        .map(|provider| provider.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "opencode",
+            "opencode-go",
+            "anthropic",
+            "openai",
+            "deepseek",
+            "zed"
+        ]
+    );
+    assert!(providers.iter().all(|provider| !provider.label.is_empty()));
+}
+
 #[derive(Debug, Default)]
 struct RuntimeCounters {
     spawns: usize,
@@ -90,7 +136,7 @@ struct RuntimeCounters {
 }
 
 /// A runtime that mirrors the bundled sidecar: stored keys unlock that provider's
-/// models and mark it connected on the next spawn, exactly like
+/// models and change the model list on the next spawn, exactly like
 /// `OPENCODE_AUTH_CONTENT` does for the real child.
 struct KeychainRuntime {
     keychain: Arc<FakeKeychain>,
@@ -102,7 +148,7 @@ impl KeychainRuntime {
     fn new(keychain: Arc<FakeKeychain>) -> Self {
         Self {
             keychain,
-            providers: catalog().providers,
+            providers: catalog().engine_providers(),
             counters: Mutex::new(RuntimeCounters::default()),
         }
     }
@@ -187,16 +233,7 @@ impl EngineRuntime for KeychainRuntime {
         &self,
         _port: u16,
     ) -> Result<Vec<EngineProvider>, spirit_core::error::SpiritError> {
-        Ok(ProviderCatalog::new(
-            self.providers
-                .iter()
-                .map(|provider| EngineProvider {
-                    connected: provider.connected || self.configured(&provider.id),
-                    ..provider.clone()
-                })
-                .collect(),
-        )
-        .providers)
+        Ok(self.providers.clone())
     }
 
     async fn verify_key(
@@ -219,6 +256,35 @@ fn supervisor_config() -> EngineSupervisorConfig {
 }
 
 #[tokio::test]
+async fn refresh_catalog_rereads_a_live_engine_without_respawning_it() {
+    let keychain = Arc::new(FakeKeychain::new());
+    let runtime = Arc::new(KeychainRuntime::new(keychain.clone()));
+    let mut supervisor = EngineSupervisor::new(runtime.clone(), supervisor_config());
+
+    assert!(matches!(supervisor.start().await.state, EngineState::Ready));
+    assert_eq!(runtime.spawn_count(), 1);
+
+    let refreshed = supervisor.refresh_catalog().await;
+    assert!(matches!(refreshed.state, EngineState::Ready));
+    assert_eq!(runtime.spawn_count(), 1, "refresh must not respawn");
+    assert_eq!(
+        refreshed
+            .providers
+            .iter()
+            .map(|provider| provider.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "opencode",
+            "opencode-go",
+            "anthropic",
+            "openai",
+            "deepseek",
+            "zed"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn connecting_a_provider_unlocks_its_models_without_an_app_restart() {
     let keychain = Arc::new(FakeKeychain::new());
     let runtime = Arc::new(KeychainRuntime::new(keychain.clone()));
@@ -228,17 +294,20 @@ async fn connecting_a_provider_unlocks_its_models_without_an_app_restart() {
     assert!(matches!(started.state, EngineState::Ready));
     assert_eq!(runtime.spawn_count(), 1);
     assert_eq!(supervisor.runtime_models().await.len(), 1);
-    assert!(
+    assert_eq!(
         started
             .providers
             .iter()
-            .any(|provider| provider.id == "opencode" && provider.connected)
-    );
-    assert!(
-        !started
-            .providers
-            .iter()
-            .any(|provider| provider.id == "deepseek" && provider.connected)
+            .map(|provider| provider.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "opencode",
+            "opencode-go",
+            "anthropic",
+            "openai",
+            "deepseek",
+            "zed"
+        ]
     );
 
     let secret = SecretString::new("not-a-real-provider-key");
@@ -251,13 +320,6 @@ async fn connecting_a_provider_unlocks_its_models_without_an_app_restart() {
 
     let refreshed = supervisor.status();
     assert!(matches!(refreshed.state, EngineState::Ready));
-    assert!(
-        refreshed
-            .providers
-            .iter()
-            .any(|provider| provider.id == "deepseek" && provider.connected),
-        "the live provider list must mark the provider connected: {refreshed:?}"
-    );
     let models = supervisor.runtime_models().await;
     assert!(
         models
@@ -285,11 +347,5 @@ async fn connecting_a_provider_unlocks_its_models_without_an_app_restart() {
             .any(|model| model.id == "deepseek/deepseek-flash"),
         "removing the key must drop the unlocked model list"
     );
-    assert!(
-        !supervisor
-            .status()
-            .providers
-            .iter()
-            .any(|provider| provider.id == "deepseek" && provider.connected)
-    );
+    assert_eq!(runtime.spawn_count(), 3);
 }

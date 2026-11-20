@@ -8,8 +8,9 @@ import {
 } from "react";
 
 import type { ChatModelView, ChatUsageView, SessionId } from "../bridge/wire";
-import { groupChatModels } from "../domain/engine";
+import { Modal } from "../components/Modal";
 import { ContextMeter, UsageStats } from "./ContextMeter";
+import { SettingsPage } from "./SettingsPage";
 
 /**
  * How a model is named in the composer. Included free models are labelled with the
@@ -29,6 +30,30 @@ function tierLabel(model: ChatModelView): string {
   if (model.tier === "byok") return "BYOK";
   if (model.tier === "orchestrator") return "Orchestrator";
   return model.provider;
+}
+
+interface ChatModelGroup {
+  id: "included" | "connected";
+  title: string;
+  models: ChatModelView[];
+}
+
+/**
+ * Groups the verified chat model list the way the composer shows it: the bundled
+ * free models first under "OpenCode Free", then every provider-owned choice under
+ * "Connected providers". Empty groups are omitted, never rendered as a blank heading.
+ */
+export function groupChatModels(models: ChatModelView[]): ChatModelGroup[] {
+  const included = models.filter((model) => model.tier === "included");
+  const connected = models.filter((model) => model.tier !== "included");
+  return [
+    ...(included.length > 0
+      ? [{ id: "included" as const, title: "OpenCode Free", models: included }]
+      : []),
+    ...(connected.length > 0
+      ? [{ id: "connected" as const, title: "Connected providers", models: connected }]
+      : []),
+  ];
 }
 
 export interface ComposerBarProps {
@@ -102,6 +127,7 @@ export function ComposerBar({
 }: ComposerBarProps) {
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [providerSettingsOpen, setProviderSettingsOpen] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   /** True while the Message field owns (or is about to regain) focus. */
   const restoreFocus = useRef(false);
@@ -217,7 +243,7 @@ export function ComposerBar({
               disabled={disabled && !allowModelSwitch}
               openRequest={openModelPickerRequest}
               onSelect={onSelectModel}
-              onOpenEngineSettings={onOpenEngineSettings}
+              onConnectProvider={() => setProviderSettingsOpen(true)}
             />
           ) : null}
           {showStaticModel ? (
@@ -296,6 +322,15 @@ export function ComposerBar({
         </div>
       </form>
       <ComposerDock usage={usage} />
+      {providerSettingsOpen ? (
+        <Modal
+          open
+          title="Engine & Models"
+          onClose={() => setProviderSettingsOpen(false)}
+        >
+          <SettingsPage />
+        </Modal>
+      ) : null}
     </div>
   );
 }
@@ -316,14 +351,14 @@ function ModelPicker({
   disabled,
   openRequest = 0,
   onSelect,
-  onOpenEngineSettings,
+  onConnectProvider,
 }: {
   model: ChatModelView | null;
   models: ChatModelView[];
   disabled: boolean;
   openRequest?: number;
   onSelect?: (modelId: string) => void;
-  onOpenEngineSettings?: () => void;
+  onConnectProvider?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
@@ -425,9 +460,9 @@ function ModelPicker({
             data-testid="composer-connect-provider"
             onClick={() => {
               setOpen(false);
-              onOpenEngineSettings?.();
+              onConnectProvider?.();
             }}
-            disabled={!onOpenEngineSettings}
+            disabled={!onConnectProvider}
           >
             <span className="nx-menu__icon" aria-hidden="true">
               ＋

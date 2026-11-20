@@ -3002,6 +3002,7 @@ button.nx-composer__start:hover {
 /* Settings → Engine & Models: OpenCode featured, then connected and searchable
    provider rows. Rows use the same calm border step as the rest of Meadow. */
 .nx-providers {
+  display: grid;
   gap: 16px;
 }
 

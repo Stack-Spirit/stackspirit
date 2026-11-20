@@ -2,12 +2,16 @@
 //!
 //! `/provider` returns the full supported-provider catalog plus the ids the engine is
 //! currently connected to. `/config/providers` returns only the configured providers.
-//! This module keeps the two facts together, orders connected and popular providers
-//! first, and never exposes provider configuration, environment values or keys.
+//! This module keeps the connection fact, the engine source class and model counts
+//! together, orders connected and popular providers first, and never exposes provider
+//! configuration, environment values or keys.
+//!
+//! Only the id and display label of each row cross the bridge today
+//! (`EngineProvider`); the richer [`ProviderEntry`] stays inside the core for tests
+//! and follow-up wiring.
 
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::engine::EngineProvider;
@@ -26,17 +30,39 @@ pub const POPULAR_PROVIDER_IDS: [&str; 8] = [
     "vercel",
 ];
 
+/// One provider row from the engine's catalog.
+///
+/// The label is safe to display. `source` is the engine's own source class (`api`,
+/// `env`, `config`, `custom`), never a configuration value. Counts describe how many
+/// models the engine reports and how many of them cost nothing to use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderEntry {
+    /// Engine-native provider id.
+    pub id: String,
+    /// Display label reported by the engine, or the id when it has no name.
+    pub label: String,
+    /// True when the engine lists this provider as connected, or when this is the
+    /// configured-provider document itself.
+    pub connected: bool,
+    /// Engine source class (`api`, `env`, `config`, `custom`), when reported.
+    pub source: Option<String>,
+    /// Number of models the engine reports for this provider.
+    pub model_count: usize,
+    /// Number of those models whose input cost is zero.
+    pub free_model_count: usize,
+}
+
 /// A deduplicated, grouped provider catalog.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderCatalog {
     /// Providers in display order: connected first, then the popular order, then label.
-    pub providers: Vec<EngineProvider>,
+    pub providers: Vec<ProviderEntry>,
 }
 
 impl ProviderCatalog {
     /// Builds a grouped catalog from parsed provider rows.
     #[must_use]
-    pub fn new(mut providers: Vec<EngineProvider>) -> Self {
+    pub fn new(mut providers: Vec<ProviderEntry>) -> Self {
         providers.sort_by(|left, right| {
             right
                 .connected
@@ -67,7 +93,7 @@ impl ProviderCatalog {
 
     /// Connected providers in display order.
     #[must_use]
-    pub fn connected(&self) -> Vec<&EngineProvider> {
+    pub fn connected(&self) -> Vec<&ProviderEntry> {
         self.providers
             .iter()
             .filter(|provider| provider.connected)
@@ -76,7 +102,7 @@ impl ProviderCatalog {
 
     /// Providers that are in the catalog but not connected yet, in display order.
     #[must_use]
-    pub fn available(&self) -> Vec<&EngineProvider> {
+    pub fn available(&self) -> Vec<&ProviderEntry> {
         self.providers
             .iter()
             .filter(|provider| !provider.connected)
@@ -85,7 +111,7 @@ impl ProviderCatalog {
 
     /// The bundled free provider, when the engine reports it.
     #[must_use]
-    pub fn opencode(&self) -> Option<&EngineProvider> {
+    pub fn opencode(&self) -> Option<&ProviderEntry> {
         self.providers
             .iter()
             .find(|provider| provider.id == "opencode")
@@ -95,7 +121,7 @@ impl ProviderCatalog {
     ///
     /// An empty or whitespace-only query returns every provider in display order.
     #[must_use]
-    pub fn search(&self, query: &str) -> Vec<&EngineProvider> {
+    pub fn search(&self, query: &str) -> Vec<&ProviderEntry> {
         let query = query.trim().to_ascii_lowercase();
         self.providers
             .iter()
@@ -103,6 +129,18 @@ impl ProviderCatalog {
                 query.is_empty()
                     || provider.id.to_ascii_lowercase().contains(&query)
                     || provider.label.to_ascii_lowercase().contains(&query)
+            })
+            .collect()
+    }
+
+    /// The display-ordered rows the bridge's `EngineProvider` carries.
+    #[must_use]
+    pub fn engine_providers(&self) -> Vec<EngineProvider> {
+        self.providers
+            .iter()
+            .map(|provider| EngineProvider {
+                id: provider.id.clone(),
+                label: provider.label.clone(),
             })
             .collect()
     }
@@ -170,7 +208,7 @@ fn provider_from_value(
     id_hint: Option<&String>,
     connected: Option<&HashSet<&str>>,
     config_shaped: bool,
-) -> Option<EngineProvider> {
+) -> Option<ProviderEntry> {
     let id = entry
         .get("id")
         .and_then(Value::as_str)
@@ -193,7 +231,7 @@ fn provider_from_value(
         .filter(|source| !source.is_empty())
         .map(str::to_owned);
     let (model_count, free_model_count) = model_counts(entry.get("models"));
-    Some(EngineProvider {
+    Some(ProviderEntry {
         id: id.to_owned(),
         label: if label.is_empty() {
             id.to_owned()
@@ -273,6 +311,9 @@ mod tests {
         assert_eq!(opencode.free_model_count, 1);
         assert_eq!(opencode.model_count, 2);
         assert_eq!(catalog.search("DEEP").len(), 1);
+        let bridged = catalog.engine_providers();
+        assert_eq!(bridged[0].id, "opencode");
+        assert_eq!(bridged[0].label, "OpenCode");
     }
 
     #[test]
@@ -292,5 +333,25 @@ mod tests {
                 .iter()
                 .any(|provider| provider.id == "groq")
         );
+    }
+
+    #[test]
+    fn an_unconnected_duplicate_never_replaces_a_connected_row() {
+        let body = br#"{
+          "connected": ["deepseek"],
+          "all": [
+            {"id": "deepseek", "name": "DeepSeek API"},
+            {"id": "deepseek", "name": "DeepSeek Copy"}
+          ]
+        }"#;
+        let catalog = parse_provider_catalog(body);
+        assert_eq!(catalog.len(), 1);
+        assert!(catalog.providers[0].connected);
+    }
+
+    #[test]
+    fn malformed_documents_yield_an_empty_catalog() {
+        assert!(parse_provider_catalog(b"not json").is_empty());
+        assert!(parse_provider_catalog(br#"{"all": "nope"}"#).is_empty());
     }
 }

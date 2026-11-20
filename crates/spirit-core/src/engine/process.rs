@@ -24,6 +24,11 @@ use crate::engine::runtime::{
 use crate::engine::{EngineProvider, Keychain, SecretString};
 use crate::error::{SpiritError, SpiritErrorCode, redact};
 
+// The catalog parser lives in a sibling file that this module declares, so the engine
+// provider document can be grouped without changing the `engine` module root.
+#[path = "providers.rs"]
+pub mod providers;
+
 /// The only host a bundled engine may listen on.
 pub const LOOPBACK_HOST: &str = "127.0.0.1";
 
@@ -1115,12 +1120,12 @@ fn decode_chunked(input: &[u8]) -> Result<Vec<u8>, SpiritError> {
 /// Parses the engine's supported-provider document into a display-ordered catalog.
 ///
 /// `/provider` returns `{ "all": [ ... ], "connected": [ ... ] }`; `/config/providers`
-/// returns `{ "providers": [ ... ] }`. Both shapes are accepted. Only ids, display
-/// labels, connection state and model counts are retained; provider configuration,
-/// environment names and keys are not exposed to the UI.
+/// returns `{ "providers": [ ... ] }`. Both shapes are accepted. Connected and popular
+/// providers come first. Only ids and display labels cross the bridge; provider
+/// configuration, environment names, model details and keys stay in the core.
 #[must_use]
 pub fn parse_providers(body: &[u8]) -> Vec<EngineProvider> {
-    crate::engine::parse_provider_catalog(body).providers
+    providers::parse_provider_catalog(body).engine_providers()
 }
 
 /// Classifies an engine message response body that may carry a provider error under
@@ -1376,9 +1381,12 @@ mod tests {
     fn engine_provider_parser_accepts_the_config_providers_shape() {
         let body = br#"{"providers":[{"id":"deepseek","name":"DeepSeek"},{"id":"opencode","name":"OpenCode"}]}"#;
         let providers = parse_providers(body);
-        assert_eq!(providers.len(), 2);
-        assert_eq!(providers[0].id, "opencode");
-        assert!(providers.iter().all(|provider| provider.connected));
+        let ids: Vec<&str> = providers
+            .iter()
+            .map(|provider| provider.id.as_str())
+            .collect();
+        assert_eq!(ids, ["opencode", "deepseek"]);
+        assert_eq!(providers[0].label, "OpenCode");
     }
 
     #[test]

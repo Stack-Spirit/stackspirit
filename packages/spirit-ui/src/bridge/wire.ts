@@ -262,16 +262,6 @@ export type EngineState =
   | { state: "degraded"; detail: string }
   | { state: "failed"; detail: string };
 
-/** One provider row reported by the running engine. Ids and counts only, never a key. */
-export interface EngineProviderView {
-  id: string;
-  label: string;
-  connected: boolean;
-  source: string | null;
-  model_count: number;
-  free_model_count: number;
-}
-
 export interface EngineStatus {
   choice: EngineChoice;
   state: EngineState;
@@ -282,8 +272,6 @@ export interface EngineStatus {
   included_models_available: boolean;
   started_at: Timestamp | null;
   last_error: string | null;
-  /** Connected + available catalog; omitted by older bridges. */
-  providers?: EngineProviderView[];
 }
 
 export type LocalAgentState =

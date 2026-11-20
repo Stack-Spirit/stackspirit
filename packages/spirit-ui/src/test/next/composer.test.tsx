@@ -145,8 +145,8 @@ describe("Meadow composer", () => {
       name: /Connect another provider/,
     });
     await user.click(footer);
-    expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
-    expect(screen.getByTestId("engine-models-settings")).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "Engine & Models" });
+    expect(within(dialog).getByTestId("engine-models-settings")).toBeInTheDocument();
   });
 
   it("renders the context ring, exact popover and compact stats pills", async () => {
