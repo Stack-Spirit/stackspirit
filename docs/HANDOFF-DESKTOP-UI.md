@@ -234,18 +234,6 @@ stats pills beside it show turns, token totals and cache reads. Every value come
 `view.usage`; the ring renders nothing unless both used tokens and a context limit are
 reported, and an absent counter is omitted rather than shown as zero.
 
-**Composer and input focus polish (`ss-75`).** Text entry no longer paints the
-global `--focus-ring`: WebKit matches `:focus-visible` on a click in a text field,
-so the ring doubled inside the composer card and haloed every field. Meadow text
-fields now keep one calm border step (`--nx-focus-border`) and a Meadow caret
-(`--nx-caret`), while buttons, links, tabs and menu items keep the crisp keyboard
-ring. The composer draws its stroke as an elevation hairline and uses a neutral
-focus step, never a green border. It follows the reference card's 24 px radius,
-28 px borderless model pill, 32×32 circular send/stop and 22 px dock, with a
-56 px two-line floor in the hero that collapses to 36 px when docked.
-`next-shell.spec.ts` asserts the computed focus, caret and geometry in light and
-dark.
-
 Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
 - Assistant replies in the `MockBridge` preview scenarios, and the agent opening the
   details panel. Every preview assistant message starts with `Preview reply.` and carries
@@ -430,13 +418,12 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
 
 ## 6. Known gaps and cautions
 
-- e2e status (updated 2026-11-20): the Meadow desktop suite passed **25/25** in the
-  `ss-75` run (4.6 m, zero failed, skipped or flaky, no waivers). That includes the new
-  text-field focus/geometry case plus the empty-hero/inline-model/context-meter axe case
-  in both light and dark. The specs are `next-shell`, `meadow-flows`,
-  `meadow-bridge-flows`, `meadow-cluster`, `sessions-asif`, `local-orchestrator-gated`
-  and `local-orchestrator-ready`. The earlier `ss-73` run recorded 23/23 after the
-  composer work and the `ss-56` (`a80775e`) run recorded 18/18 before it.
+- e2e status (updated 2026-11-19): the Meadow desktop suite passed **23/23** in the
+  `ss-73` run (2.3 m, zero failed, skipped or flaky, no waivers). That includes the new
+  empty-hero/inline-model/context-meter axe case in both light and dark. The specs are
+  `next-shell`, `meadow-flows`, `meadow-bridge-flows`, `meadow-cluster`, `sessions-asif`,
+  `local-orchestrator-gated` and `local-orchestrator-ready`. The earlier `ss-56`
+  (`a80775e`) run recorded 18/18 before the composer work and before the cluster spec.
 - **Cluster product gaps.** `ClusterHealth` carries no last-backup timestamp, so freshness
   is shown as the backup policy's maximum age at promotion, not an observed backup time.
   Promotion requires the old Home to answer `vowp down --drain`, so it cannot rescue an
