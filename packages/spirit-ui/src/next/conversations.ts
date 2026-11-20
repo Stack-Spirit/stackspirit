@@ -517,15 +517,21 @@ function applyChatEvent(bridge: SpiritBridge, event: ChatEvent): void {
       break;
     case "closed": {
       if (event.reason === "stopped") {
-        patchView(session, { state: "stopped", attached: false, error: null });
-      } else {
+        // The pinned core reports a user Stop as a `closed`/`stopped` notice, but the
+        // native session stays attached and is reusable. End the turn in place; the
+        // stop action re-attaches to the same session for the next one.
         const current = useConversations.getState().views[session];
-        patchView(session, {
-          state: "error",
-          attached: false,
-          error: current?.error ?? closedError(event.reason),
-        });
+        if (current && (current.state === "streaming" || current.state === "stopped")) {
+          patchView(session, { state: "ready", retry: undefined });
+        }
+        break;
       }
+      const current = useConversations.getState().views[session];
+      patchView(session, {
+        state: "error",
+        attached: false,
+        error: current?.error ?? closedError(event.reason),
+      });
       break;
     }
   }
@@ -739,7 +745,28 @@ export const useConversations = create<ConversationState>((set, get) => ({
     if (!chat) return;
     try {
       const view = await chat.stop(session);
-      setView(session, { ...view });
+      if (view.state !== "stopped") {
+        setView(session, { ...view, retry: undefined });
+        return;
+      }
+      // Stop is a turn control: the core aborts the turn and keeps the native session
+      // attached, but the wire still reports the legacy `stopped` view. Re-attach the
+      // same session so it is ready and the composer accepts another turn immediately;
+      // an unconfirmed abort keeps its honest notice.
+      try {
+        const attached = await chat.attach(session);
+        setView(session, {
+          ...attached,
+          error: view.error ?? attached.error ?? null,
+          retry: undefined,
+        });
+      } catch (caught) {
+        setView(session, {
+          ...view,
+          error: toSpiritError(caught),
+          retry: undefined,
+        });
+      }
     } catch (caught) {
       patchView(session, {
         state: "error",

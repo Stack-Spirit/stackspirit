@@ -25,12 +25,12 @@ use crate::engine::chat::endpoint::{
     parse_workspace_path,
 };
 use crate::engine::chat::model::{
-    ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage, ChatMessageOrigin, ChatModelTier,
-    ChatModelView, ChatPermissionDecision, ChatPermissionPrompt, ChatRetryStatus, ChatRole,
-    ChatSendReceipt, ChatSessionId, ChatSessionLocation, ChatSessionState, ChatSessionView,
-    ChatStartInput, ChatToolActivity, ChatToolStatus, ChatUsageView, MAX_ACTIVITY_ITEMS,
-    MAX_MESSAGE_CHARS, cap_text, display_snippet, normalize_text, validate_project_name,
-    validate_user_text,
+    ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage, ChatMessageOrigin,
+    ChatModelTier, ChatModelView, ChatPermissionDecision, ChatPermissionPrompt, ChatRetryStatus,
+    ChatRole, ChatSendReceipt, ChatSessionId, ChatSessionLocation, ChatSessionState,
+    ChatSessionView, ChatStartInput, ChatToolActivity, ChatToolStatus, ChatUsageView,
+    MAX_ACTIVITY_ITEMS, MAX_MESSAGE_CHARS, cap_text, display_snippet, normalize_text,
+    validate_project_name, validate_user_text,
 };
 use crate::engine::chat::pump::{
     ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper, retry_status,
@@ -841,12 +841,17 @@ impl LocalChatProvider {
             .await
     }
 
-    /// Aborts the current turn when supported and returns the ready view.
+    /// Aborts the current turn when supported and returns the stopped view.
     ///
-    /// Stop is a turn control, not a session teardown: it keeps the native session
-    /// attached and unlocks the composer so the owner can switch model or send again
-    /// immediately. When the engine does not confirm the abort, the view carries a
-    /// non-fatal `stop_unconfirmed` notice instead of pretending the turn stopped.
+    /// Stop is a turn control, not a session teardown: the native session stays attached,
+    /// `active_turn`, `retry` and `pending_permissions` are cleared, and the background
+    /// turn is invalidated so no late text can reopen it. The view keeps reporting
+    /// [`ChatSessionState::Stopped`] (the documented "the owner stopped the turn" state)
+    /// and the legacy `closed`/`stopped` notice; clients re-attach to the same native
+    /// session for the next turn, so the composer is usable without a Start click.
+    ///
+    /// When the engine does not confirm the abort, the view carries a non-fatal
+    /// `stop_unconfirmed` notice instead of pretending the turn stopped.
     pub async fn stop(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError> {
         let now = self.inner.clock.now();
         let (native, endpoint, streaming) = {
@@ -862,8 +867,8 @@ impl LocalChatProvider {
             let streaming = record.state == ChatSessionState::Streaming;
             // Mark the turn cancelled before the abort request so a racing send cannot
             // start a second turn while the first abort is in flight, and invalidate the
-            // background POST so its late response cannot overwrite the ready view.
-            record.state = ChatSessionState::Ready;
+            // background POST so its late response cannot overwrite the stopped view.
+            record.state = ChatSessionState::Stopped;
             record.attached = true;
             record.active_turn = None;
             record.turn_completed = true;
@@ -893,7 +898,15 @@ impl LocalChatProvider {
             };
             self.inner.view_for(session, record)
         };
-        Ok(self.inner.clone().emit_session(view).await)
+        let view = self.inner.clone().emit_session(view).await;
+        // The pinned 1.19.5 contract emits this notice on Stop, and existing clients
+        // (and tests) rely on it. The session record stays attached, so a client that
+        // wants another turn re-attaches; a real teardown uses the other close reasons.
+        self.inner
+            .clone()
+            .emit_with(|events| events.closed(session.clone(), ChatCloseReason::Stopped))
+            .await;
+        Ok(view)
     }
 
     /// Switches the setup assistant's model and returns the updated view.

@@ -1,4 +1,4 @@
-//! Hermetic tests for live tool activity and permission prompts.
+//! Hermetic tests for live tool activity, permission prompts, retry status and Stop.
 //!
 //! A fake loopback OpenCode serves the v1 HTTP/SSE routes this feature touches. Its turn
 //! request blocks until the permission is answered, which is exactly the hang the owner
@@ -19,7 +19,7 @@ use tokio::sync::broadcast::Receiver;
 
 use spirit_core::engine::EngineStatus;
 use spirit_core::engine::chat::{
-    ChatEngine, ChatEvent, ChatLogQuery, ChatPermissionDecision, ChatSessionId,
+    ChatCloseReason, ChatEngine, ChatEvent, ChatLogQuery, ChatPermissionDecision, ChatSessionId,
     ChatSessionLocation, ChatSessionState, ChatSessionView, ChatStartInput, ChatToolStatus,
     LocalChatProvider, StreamSupport,
 };
@@ -54,7 +54,6 @@ impl ChatEngine for Engine {
     }
 }
 
-#[derive(Default)]
 struct State {
     log: Vec<Value>,
     /// Pending permission requests, as `GET /permission` lists them.
@@ -69,6 +68,32 @@ struct State {
     answered: Option<String>,
     turn_with_permission: bool,
     turn_started: bool,
+    /// `GET /session/status`, a map keyed by native session id. Empty unless a test
+    /// wants a retry that started before the UI attached.
+    session_status: Value,
+    /// How long `POST /session/{id}/message` blocks, so Stop has a live turn to abort.
+    turn_delay: Option<Duration>,
+    /// Abort requests the fake answered.
+    abort_count: usize,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            log: Vec::new(),
+            permissions: Vec::new(),
+            frames: Vec::new(),
+            replies: Vec::new(),
+            legacy_only: false,
+            no_reply_route: false,
+            answered: None,
+            turn_with_permission: false,
+            turn_started: false,
+            session_status: json!({}),
+            turn_delay: None,
+            abort_count: 0,
+        }
+    }
 }
 
 struct Fake {
@@ -115,6 +140,14 @@ impl Fake {
 
     fn replies(&self) -> Vec<(String, String)> {
         lock(&self.state).replies.clone()
+    }
+
+    fn message_started(&self) -> bool {
+        lock(&self.state).turn_started
+    }
+
+    fn abort_count(&self) -> usize {
+        lock(&self.state).abort_count
     }
 
     fn push_frame(&self, frame: Value) {
@@ -230,6 +263,14 @@ fn handle(mut stream: TcpStream, state: &Arc<Mutex<State>>, stop: &Arc<AtomicBoo
             respond(&mut stream, 200, &Value::Array(log));
         }
         ("POST", "/session/ses_1/message") => turn(&mut stream, state, stop),
+        ("GET", "/session/status") => {
+            let status = lock(state).session_status.clone();
+            respond(&mut stream, 200, &status);
+        }
+        ("POST", "/session/ses_1/abort") => {
+            lock(state).abort_count += 1;
+            respond(&mut stream, 200, &json!(true));
+        }
         ("GET", "/permission") => {
             let list = lock(state).permissions.clone();
             respond(&mut stream, 200, &Value::Array(list));
@@ -278,11 +319,20 @@ fn answer(state: &mut State, id: &str, reply: &str) {
 }
 
 fn turn(stream: &mut TcpStream, state: &Arc<Mutex<State>>, stop: &Arc<AtomicBool>) {
-    let blocking = {
+    let (blocking, delay) = {
         let mut guard = lock(state);
         guard.turn_started = true;
-        guard.turn_with_permission
+        (guard.turn_with_permission, guard.turn_delay)
     };
+    if let Some(delay) = delay {
+        let deadline = Instant::now() + delay;
+        while Instant::now() < deadline {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     if blocking {
         let deadline = Instant::now() + Duration::from_secs(8);
         while lock(state).answered.is_none() && Instant::now() < deadline {
@@ -686,4 +736,127 @@ async fn a_reply_for_a_request_that_is_already_gone_is_a_harmless_refresh() {
         fake.replies().is_empty(),
         "nothing may be sent for an unknown request"
     );
+}
+
+/// The exact `session.status` retry the owner hit on `opencode/beam-free`.
+fn free_limit_retry() -> Value {
+    json!({
+        "type": "retry",
+        "attempt": 2,
+        "message": "AI_APICallError: Free usage limit reached",
+        "next": 1_763_673_600_000_u64,
+        "action": {
+            "reason": "free_tier_limit",
+            "title": "Free limit reached",
+            "message": "Subscribe to OpenCode Go",
+            "provider": "opencode",
+        },
+    })
+}
+
+async fn wait_for_turn_started(fake: &Fake) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !fake.message_started() {
+        assert!(Instant::now() < deadline, "the fake turn never started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_retry_from_the_session_status_route_is_visible_on_start() {
+    let fake = Fake::new(|state| {
+        state.session_status = json!({"ses_1": free_limit_retry()});
+    });
+    let provider = provider(fake.port);
+    // The status route is read while attaching, so a session already sleeping in a
+    // retry loop shows the notice before the next SSE frame.
+    let view = start(&provider).await;
+    assert_eq!(view.state, ChatSessionState::Streaming);
+    let wire = serde_json::to_string(&view).unwrap();
+    assert!(!wire.contains("127.0.0.1"));
+    let retry = view.retry.expect("the retry must survive attach");
+    assert_eq!(retry.attempt, 2);
+    assert_eq!(retry.next, Some(1_763_673_600_000));
+    assert!(retry.message.contains("Free usage limit reached"));
+    let action = retry.action.expect("the free-tier action");
+    assert_eq!(action.reason, "free_tier_limit");
+    assert_eq!(action.title, "Free limit reached");
+    assert_eq!(action.provider, "opencode");
+
+    let stopped = provider.stop(&ChatSessionId::Setup).await.unwrap();
+    assert_eq!(stopped.state, ChatSessionState::Stopped);
+    assert!(stopped.attached);
+    assert!(stopped.retry.is_none());
+    assert!(stopped.error.is_none());
+}
+
+#[tokio::test]
+async fn a_session_status_retry_over_sse_is_visible_and_stop_clears_it() {
+    let fake = Fake::new(|state| state.turn_delay = Some(Duration::from_secs(3)));
+    let provider = provider(fake.port);
+    start(&provider).await;
+    let mut events = provider.subscribe();
+    provider.send(&ChatSessionId::Setup, "go").await.unwrap();
+    fake.push_frame(json!({
+        "type": "session.status",
+        "properties": {"sessionID": "ses_1", "status": free_limit_retry()},
+    }));
+
+    let view = next_view(&mut events, |view| view.retry.is_some()).await;
+    let retry = view.retry.expect("the retry event");
+    assert_eq!(retry.attempt, 2);
+    assert_eq!(
+        retry.action.as_ref().map(|action| action.reason.as_str()),
+        Some("free_tier_limit")
+    );
+    assert_eq!(view.state, ChatSessionState::Streaming);
+
+    let stopped = provider.stop(&ChatSessionId::Setup).await.unwrap();
+    assert_eq!(stopped.state, ChatSessionState::Stopped);
+    assert!(stopped.retry.is_none());
+}
+
+#[tokio::test]
+async fn stop_aborts_the_turn_and_attach_returns_ready_for_the_next_send() {
+    let fake = Fake::new(|state| state.turn_delay = Some(Duration::from_millis(800)));
+    let provider = provider(fake.port);
+    start(&provider).await;
+    let mut events = provider.subscribe();
+    provider
+        .send(&ChatSessionId::Setup, "Start a long turn")
+        .await
+        .unwrap();
+    wait_for_turn_started(&fake).await;
+
+    let stopped = provider.stop(&ChatSessionId::Setup).await.unwrap();
+    assert_eq!(stopped.state, ChatSessionState::Stopped);
+    assert!(stopped.attached);
+    assert!(stopped.error.is_none());
+    assert!(stopped.retry.is_none());
+    assert_eq!(fake.abort_count(), 1);
+
+    // The legacy notices still fire, so existing clients see the same Stop shape.
+    let reason = loop {
+        let event = tokio::time::timeout(Duration::from_secs(8), events.recv())
+            .await
+            .expect("timed out waiting for the stop notice")
+            .expect("event bus closed");
+        if let ChatEvent::Closed { reason, .. } = event {
+            break reason;
+        }
+    };
+    assert_eq!(reason, ChatCloseReason::Stopped);
+
+    // Stop only aborts the turn. The same native session re-attaches ready, so the
+    // owner can switch model or send again without a Start click.
+    let ready = provider.attach(&ChatSessionId::Setup).await.unwrap();
+    assert_eq!(ready.state, ChatSessionState::Ready);
+    assert!(ready.attached);
+    assert!(ready.retry.is_none());
+    let receipt = provider
+        .send(&ChatSessionId::Setup, "Continue with another model")
+        .await
+        .unwrap();
+    assert!(receipt.accepted);
+    assert_eq!(receipt.message.text, vec!["Continue with another model"]);
 }

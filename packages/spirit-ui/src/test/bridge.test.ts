@@ -264,8 +264,10 @@ describe("MockBridge chat", () => {
     ).rejects.toMatchObject({ code: "invalid_input" });
 
     const stopped = await chat.stop("setup");
-    expect(stopped).toMatchObject({ state: "ready", attached: true, retry: undefined });
-    expect(events.some((event) => event.kind === "closed")).toBe(false);
+    expect(stopped).toMatchObject({ state: "stopped", attached: false });
+    expect(
+      events.some((event) => event.kind === "closed" && event.reason === "stopped"),
+    ).toBe(true);
 
     const eventCount = events.length;
     await vi.advanceTimersByTimeAsync(1_000);

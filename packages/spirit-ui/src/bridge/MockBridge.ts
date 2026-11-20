@@ -1409,17 +1409,23 @@ export class MockBridge implements SpiritBridge {
         );
       }
       this.clearChatTimers(session);
-      // Stop is a turn control, not a session teardown. Keep the session attached and
-      // return Ready so the owner can switch model or send again immediately.
-      return clone(
-        this.updateChatView(session, {
-          state: "ready",
-          attached: true,
-          error: null,
-          retry: undefined,
-          pending_permissions: undefined,
-        }),
-      );
+      // The pinned core contract: Stop aborts the turn, clears the retry/permissions and
+      // reports the stopped view plus a `closed` notice. The stored session survives, so
+      // `attach` returns it ready and the owner can send again without a Start click.
+      const stopped = this.updateChatView(session, {
+        state: "stopped",
+        attached: false,
+        error: null,
+        retry: undefined,
+        pending_permissions: undefined,
+      });
+      this.emitChat({
+        kind: "closed",
+        revision: this.nextRevision(),
+        session,
+        reason: "stopped",
+      });
+      return clone(stopped);
     },
     replyPermission: async (
       session: SessionId,
