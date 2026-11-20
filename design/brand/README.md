@@ -60,6 +60,12 @@ Desktop app icons (macOS tile, `.icns`, `.ico` and the PNG sizes Tauri lists):
 python3 -I design/brand/tools/app_icon.py design/brand/mark apps/spirit-desktop/src-tauri/icons
 ```
 
+Profile / social avatar (full-bleed 1024×1024 Meadow light gradient, circle-crop safe for Gmail, X, GitHub, etc.):
+
+```sh
+python3 -I design/brand/tools/avatar_icon.py design/brand/mark
+```
+
 The desktop favicons are copies of `mark/icon-32.png` and `mark/icon-16.png` in
 `apps/spirit-desktop/public/`. The UI uses `mark/stackspirit-mark-master.png`, copied to
 `packages/spirit-ui/src/next/assets/spirit-mark.png`.
@@ -70,8 +76,8 @@ The desktop favicons are copies of `mark/icon-32.png` and `mark/icon-16.png` in
 |---|---|
 | `spirit-logos.html`, `mark.html` | The two pages |
 | `gen/` | Generated images: round 1 `a*`/`b*` (no references), round 2 `r2-*`, round 3 `r3-*` |
-| `mark/` | Chosen mark: master PNG, grid JSON/SVG/PNG, icons |
-| `tools/` | Trace, export, icon and master scripts (Python 3, Pillow, NumPy) |
+| `mark/` | Chosen mark: master PNG, grid JSON/SVG/PNG, icons, `avatar-1024.png` (profile/social) |
+| `tools/` | Trace, export, icon, master and avatar scripts (Python 3, Pillow, NumPy) |
 
 Image generation cost so far: 11 images at 200,000 North Noir tokens each
 (about $4.40).
