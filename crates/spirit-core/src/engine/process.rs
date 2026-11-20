@@ -574,7 +574,7 @@ impl ProcessEngineRuntime {
 
     fn fetch_models(&self, port: u16) -> Result<Vec<RuntimeModel>, SpiritError> {
         let mut last_error = None;
-        for path in ["/provider", "/config/providers"] {
+        for path in ["/config/providers", "/provider"] {
             let timeout = provider_document_timeout(path);
             match http_request(port, "GET", path, None, timeout) {
                 Ok(response) if (200..300).contains(&response.status) => {
@@ -1120,11 +1120,19 @@ fn error_status(value: &Value) -> Option<u16> {
 }
 
 /// Parses `opencode` provider/model documents without depending on optional fields.
+///
+/// When a `/provider` document carries a `connected` provider id array, only models from
+/// connected providers are returned from `all` so disconnected catalog entries (such as
+/// `opencode-go/*`) are never offered as usable runtime models.
 #[must_use]
 pub fn parse_models(body: &[u8]) -> Vec<RuntimeModel> {
     let Ok(document) = serde_json::from_slice::<Value>(body) else {
         return Vec::new();
     };
+    let connected: Option<std::collections::HashSet<&str>> = document
+        .get("connected")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect());
     let mut models = Vec::new();
     for key in ["all", "providers"] {
         let Some(providers) = document.get(key).and_then(Value::as_array) else {
@@ -1134,6 +1142,12 @@ pub fn parse_models(body: &[u8]) -> Vec<RuntimeModel> {
             let Some(provider_id) = provider.get("id").and_then(Value::as_str) else {
                 continue;
             };
+            if key == "all"
+                && let Some(connected) = connected.as_ref()
+                && !connected.contains(provider_id)
+            {
+                continue;
+            }
             let Some(entries) = provider.get("models") else {
                 continue;
             };
@@ -1473,6 +1487,31 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         assert!(models[0].free);
         runtime.shutdown(&info).await.unwrap();
         assert!(!process_alive(pid), "shutdown must reap the engine process");
+    }
+
+    #[test]
+    fn parse_models_filters_disconnected_providers_when_connected_list_is_present() {
+        let body = br#"{
+            "connected": ["opencode"],
+            "all": [
+                {
+                    "id": "opencode-go",
+                    "models": {
+                        "beam-free": { "name": "Beam Free", "cost": { "input": 0, "output": 0 } }
+                    }
+                },
+                {
+                    "id": "opencode",
+                    "models": {
+                        "beam-free": { "name": "Beam Free", "cost": { "input": 0, "output": 0 } }
+                    }
+                }
+            ]
+        }"#;
+        let models = parse_models(body);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].provider, "opencode");
+        assert_eq!(models[0].id, "opencode/beam-free");
     }
 
     #[cfg(unix)]
