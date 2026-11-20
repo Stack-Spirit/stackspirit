@@ -826,7 +826,10 @@ pub fn provider_of(run: &Run) -> Option<String> {
         .or_else(|| run.executor.as_ref().map(Executor::provider))
 }
 
-/// Finds the newest session of `role` for a project.
+/// Finds the newest usable session of `role` for a project.
+///
+/// Closed sessions are skipped: L1 closes a role session whose recorded cwd is gone, and a
+/// retired session must not keep a probe-back hand-off pending forever.
 fn role_session(
     store: &Store,
     project: &vowp_protocol::ProjectName,
@@ -838,7 +841,7 @@ fn role_session(
             ..SessionFilter::default()
         })?
         .into_iter()
-        .find(|session| session.role == Some(role)))
+        .find(|session| session.role == Some(role) && session.state != vowp_protocol::SessionState::Closed))
 }
 
 /// Maps one limit event kind to its row kind (used by tests and callers).

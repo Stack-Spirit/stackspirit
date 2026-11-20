@@ -18,9 +18,9 @@ use vowp_graph::{
 };
 use vowp_protocol::{
     ActiveState, CancelToken, GateResult, InboxId, InboxItem, InboxKind, InboxState, Job, JobId, JobKind, JobState,
-    Level, LimitRowKind, LoopBounds, NewSession, Node, NodeFile, ParkedReason, Profile, ProjectEntry, ProjectName,
-    ProjectState, Run, RunId, RunPurpose, SessionId, SessionRole, Timestamp, VowpConfig, Worker, WorkerKind,
-    WorkerState,
+    LedgerEntry, LedgerKind, Level, LimitRowKind, LoopBounds, NewSession, Node, NodeFile, ParkedReason, Profile,
+    ProjectEntry, ProjectName, ProjectState, Run, RunId, RunPurpose, SessionId, SessionRole, SessionState, Timestamp,
+    VowpConfig, Worker, WorkerKind, WorkerState,
 };
 use vowp_store::{CrossDbReconcile, JobFilter, MigrationReport, Store};
 
@@ -1490,17 +1490,66 @@ impl Supervisor {
         )
     }
 
-    /// Returns the newest session of `role` for this project.
+    /// Returns the newest usable session of `role` for this project.
+    ///
+    /// A role session is bound to the cwd it was created in. When that cwd no longer exists
+    /// (for example a planner job's worktree removed after its job finished), the session can
+    /// never run a turn again, so retrying it would wedge every planner/keeper tick. Such a
+    /// session is retired (closed) with one ledger note naming it; the search continues to an
+    /// older healthy session, or the caller creates a fresh one in the project checkout.
     fn find_role_session(&self, role: SessionRole) -> Result<Option<SessionId>, CoreError> {
-        Ok(self
-            .store
-            .list_sessions(&vowp_store::SessionFilter {
+        let sessions = self.store.list_sessions(&vowp_store::SessionFilter {
+            project: Some(self.project.clone()),
+            ..vowp_store::SessionFilter::default()
+        })?;
+        for session in sessions {
+            if session.role != Some(role) || session.state == SessionState::Closed {
+                continue;
+            }
+            if !Path::new(&session.cwd).is_dir() {
+                self.retire_role_session(&session, role)?;
+                continue;
+            }
+            return Ok(Some(session.id));
+        }
+        Ok(None)
+    }
+
+    /// Closes a role session whose recorded cwd is gone and records one ledger note.
+    ///
+    /// Closing clears the role binding: [`Supervisor::find_role_session`] skips closed
+    /// sessions, so the stale session is never retried and a fresh one is created instead.
+    fn retire_role_session(&self, session: &vowp_protocol::Session, role: SessionRole) -> Result<(), CoreError> {
+        self.store
+            .set_session_state(&session.id, SessionState::Closed, session.executor.as_ref())?;
+        self.ledger.record(
+            &self.store,
+            LedgerEntry {
+                id: None,
+                ts: self.deps.clock.now(),
+                kind: LedgerKind::Note,
                 project: Some(self.project.clone()),
-                ..vowp_store::SessionFilter::default()
-            })?
-            .into_iter()
-            .find(|session| session.role == Some(role))
-            .map(|session| session.id))
+                job_id: session.job_id.clone(),
+                run_id: None,
+                session_id: Some(session.id.clone()),
+                role: None,
+                provider: None,
+                harness: None,
+                model: None,
+                cost: None,
+                summary: format!(
+                    "retired stale {role:?} session {}: cwd {} is gone",
+                    session.id, session.cwd
+                ),
+                detail: serde_json::json!({
+                    "reason": "cwd_missing",
+                    "session": session.id.as_str(),
+                    "cwd": session.cwd,
+                    "role": format!("{role:?}").to_lowercase(),
+                }),
+            },
+        )?;
+        Ok(())
     }
 
     /// Records a loop row after a planner/keeper turn starts.

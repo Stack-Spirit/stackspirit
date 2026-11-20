@@ -47,6 +47,7 @@ pub enum CoreError {
     #[error("switch aborted: {0}")]            SwitchAborted(String),
     #[error("provider limited: {0:?}")]        Limited(vowp_protocol::LimitEvent),
     #[error("refused: {0}")]                   Refused(String),   // cwd allow-list, guard failures that must not be worked around
+    #[error("cwd_missing: working directory {0} does not exist")] CwdMissing(String), // leaf gone but inside an allowed root
     #[error("guard failed: {name}: {detail}")] Guard { name: String, detail: String },
     #[error("not found: {0}")]                 NotFound(String),
     #[error("invalid: {0}")]                   Invalid(String),
@@ -185,7 +186,7 @@ existing home with `Store::open_writable` and passes that handle, so a web switc
 rows and events as the CLI but cannot create or migrate a home.
 
 `run_turn` algorithm (numbered, normative):
-1. Check `cwd` against the allow-list (`Refused` otherwise). Resolve adapter via `AdapterRegistry::get`; missing → `ServiceError::Failed("harness not installed")`.
+1. Check `cwd` against the allow-list: `CwdMissing` when the leaf is gone but its deepest existing ancestor is inside a root, `Refused` when the path escapes the root through `..` or a symlink. Resolve adapter via `AdapterRegistry::get`; missing → `ServiceError::Failed("harness not installed")`.
 2. Open the session's `SessionLog` (lockfile; a second concurrent writer → `Conflict`). Append **first** `session.executor` (attach; every run, not only the first on an executor) and **then** `turn.started` (turn = last turn + 1); the attach carries `native_session_id` from `session_natives` if resuming the same harness; if the session has no native session on this harness and a capsule exists, the prompt is `seed_prompt(capsule, tail, tail_turns, prompt)` where `tail` = the events of the last `[capsule].tail_turns` complete turns; else `prompt`.
 3. Append the `user.message`; insert the `runs` row (`started_at=now`, `purpose`, `profile`, `rung`, `window`); `Adapter::start(StartInput{ resume, prompt, cwd, env: configured env_pass values, … })`.
 4. Loop on `run.events()` with `recv_timeout(200 ms)`: append each event through `SessionLog::append` (blob spill >8192 B), update `sessions.last_seq`/`updated_at` and `session_events` index every 20 events and at the end; poll `cancel` → `interrupt()`.
