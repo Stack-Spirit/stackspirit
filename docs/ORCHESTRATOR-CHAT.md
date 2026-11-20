@@ -226,8 +226,8 @@ child itself.
 - **Other proven engine reads:** these are for the model catalog and provider list, not
   chat. `GET /doc` is an OpenAPI document, not a chat read.
   - **Model catalog order:** read `GET /config/providers` first (3 s). Fall back to
-    `GET /provider` (10 s; the document can be several MiB) only when that read fails or
-    yields nothing usable. `/provider` is not gone: it stays the model-catalog fallback.
+    `GET /provider` (10 s; the document can be several MiB) only when that read fails
+    (a transport error or a non-2xx status; a 2xx answer is used as is). `/provider` is not gone: it stays the model-catalog fallback.
     `fetch_providers` (the BYOK provider list) is a separate call and still reads
     `/provider` first; do not treat the provider list and the model catalog as one read.
   - **Connected filter:** when a provider document carries a `connected` id array (the
