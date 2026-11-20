@@ -310,10 +310,7 @@ pub fn parse_engine_event(frame: &SseFrame) -> EngineEvent {
         "permission.asked" | "permission.updated" => permission_asked(properties),
         "permission.replied" => EngineEvent::PermissionReplied {
             session_id: session_id(properties).map(str::to_owned),
-            id: text(properties, "requestID")
-                .or_else(|| text(properties, "permissionID"))
-                .or_else(|| text(properties, "id"))
-                .map(str::to_owned),
+            id: permission_id(properties),
         },
         _ => EngineEvent::Unknown,
     }
@@ -356,16 +353,21 @@ fn permission_asked(properties: &Value) -> EngineEvent {
         .unwrap_or_default();
     EngineEvent::PermissionAsked {
         session_id: session_id(properties).map(str::to_owned),
-        id: text(properties, "requestID")
-            .or_else(|| text(properties, "permissionID"))
-            .or_else(|| text(properties, "id"))
-            .map(str::to_owned),
+        id: permission_id(properties),
         permission: text(properties, "permission")
             .or_else(|| text(properties, "type"))
             .unwrap_or("permission")
             .to_owned(),
         patterns,
     }
+}
+
+fn permission_id(properties: &Value) -> Option<String> {
+    text(properties, "requestID")
+        .or_else(|| text(properties, "permissionID"))
+        .or_else(|| text(properties, "id"))
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
 }
 
 fn message_part_updated(properties: &Value) -> EngineEvent {

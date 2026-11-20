@@ -1083,9 +1083,22 @@ impl Inner {
                 .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
             (endpoint, record.native_session_id.clone())
         };
-        // A request that another client already answered is gone from the list; the
-        // reply then reduces to refreshing the view instead of guessing.
-        self.clone().sync_permissions(session).await;
+        // A prompt the stream already delivered is authoritative; do not let a
+        // transiently empty `GET /permission` erase it before the owner's reply. Only
+        // reconcile when the id is unknown, so a request the stream missed can still be
+        // discovered and answered.
+        let was_known = {
+            let state = self.state.lock().await;
+            state.sessions.get(session).is_some_and(|record| {
+                record
+                    .pending_permissions
+                    .iter()
+                    .any(|prompt| prompt.id == permission_id)
+            })
+        };
+        if !was_known {
+            self.clone().sync_permissions(session).await;
+        }
         let known = {
             let state = self.state.lock().await;
             state.sessions.get(session).is_some_and(|record| {
@@ -1657,6 +1670,9 @@ impl Inner {
             record.error = None;
             record.active_turn = None;
             record.turn_completed = true;
+            // A finished turn cannot still be waiting on a permission; clearing here
+            // also removes a card whose `permission.replied` frame was missed.
+            record.pending_permissions.clear();
             record.last_event_at = Some(now);
             let truncated = truncated || record.applier.is_truncated(&done_id);
             (self.view_for(session, record), (done_id, truncated))
@@ -1726,6 +1742,8 @@ impl Inner {
         };
         for session in sessions {
             self.clone().reload_session(&session).await;
+            // A request raised while the stream was down still has to become visible.
+            self.clone().sync_permissions(&session).await;
         }
         let now = self.clock.now();
         let views = {

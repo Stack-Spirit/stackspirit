@@ -504,6 +504,59 @@ async fn a_pending_permission_is_surfaced_and_allow_once_resolves_the_turn() {
 }
 
 #[tokio::test]
+async fn a_stream_prompt_is_not_erased_by_an_empty_permission_list_before_the_reply() {
+    let fake = Fake::new(|state| state.turn_with_permission = true);
+    let provider = provider(fake.port);
+    start(&provider).await;
+    let mut events = provider.subscribe();
+    provider.send(&ChatSessionId::Setup, "go").await.unwrap();
+    // The SSE prompt is real, but the fake keeps `GET /permission` empty (a transient
+    // read while the engine is registering it). The owner click must still be sent.
+    fake.push_frame(json!({"type": "permission.asked", "properties": {
+        "id": "per_sse", "sessionID": "ses_1", "permission": "bash",
+        "patterns": ["git status"]}}));
+
+    let view = next_view(&mut events, |view| view.pending_permissions.is_some()).await;
+    assert_eq!(view.pending_permissions.unwrap()[0].id, "per_sse");
+    let after = provider
+        .reply_permission(
+            &ChatSessionId::Setup,
+            "per_sse",
+            ChatPermissionDecision::Once,
+        )
+        .await
+        .unwrap();
+    assert!(after.pending_permissions.is_none());
+    assert_eq!(
+        fake.replies(),
+        vec![("per_sse".to_owned(), "once".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn an_idle_turn_clears_a_prompt_whose_reply_frame_was_missed() {
+    let fake = Fake::new(|state| state.turn_with_permission = true);
+    let provider = provider(fake.port);
+    start(&provider).await;
+    let mut events = provider.subscribe();
+    provider.send(&ChatSessionId::Setup, "go").await.unwrap();
+    fake.push_frame(json!({"type": "permission.asked", "properties": {
+        "id": "per_idle", "sessionID": "ses_1", "permission": "bash",
+        "patterns": ["git status"]}}));
+    let view = next_view(&mut events, |view| view.pending_permissions.is_some()).await;
+    assert_eq!(view.pending_permissions.unwrap()[0].id, "per_idle");
+
+    fake.push_frame(json!({"type": "session.idle", "properties": {"sessionID": "ses_1"}}));
+    let ready = next_view(&mut events, |view| view.state == ChatSessionState::Ready).await;
+    assert!(
+        ready.pending_permissions.is_none(),
+        "a finished turn must not keep a stale permission card"
+    );
+    // Unblock the fake turn so it can shut down cleanly.
+    lock(&fake.state).answered = Some("once".to_owned());
+}
+
+#[tokio::test]
 async fn an_idless_permission_event_reconciles_with_the_permission_list() {
     let fake = Fake::new(|state| state.turn_with_permission = true);
     let provider = provider(fake.port);
