@@ -5,10 +5,48 @@ mod error;
 mod events;
 mod state;
 
-use tauri::Manager;
+use std::sync::Arc;
+
+use spirit_core::engine::EngineRuntime;
+use tauri::{Manager, RunEvent};
 use tracing_subscriber::EnvFilter;
 
 use crate::state::AppState;
+
+/// Stops the bundled engine synchronously. Safe to call more than once.
+///
+/// The app is torn down without running `Drop` for managed state on every exit path
+/// (a signal, or Tauri's own `process::exit`), so the sidecar must be stopped explicitly
+/// or it is reparented to init and keeps running.
+pub fn stop_engine(runtime: &dyn EngineRuntime) {
+    runtime.kill_now();
+}
+
+/// Waits for `SIGTERM` or `SIGINT`, stops the engine, and returns `true` once it did.
+/// Returns `false` immediately where signals cannot be installed.
+#[cfg(unix)]
+pub async fn shutdown_on_signal(runtime: Arc<dyn EngineRuntime>) -> bool {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let (Ok(mut terminate), Ok(mut interrupt)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        return false;
+    };
+    tokio::select! {
+        _ = terminate.recv() => {}
+        _ = interrupt.recv() => {}
+    }
+    stop_engine(runtime.as_ref());
+    true
+}
+
+/// Signals are not wired on non-Unix targets; the exit events still stop the engine.
+#[cfg(not(unix))]
+pub async fn shutdown_on_signal(_runtime: Arc<dyn EngineRuntime>) -> bool {
+    false
+}
 
 /// Builds and runs the desktop application.
 pub fn run() {
@@ -22,7 +60,15 @@ pub fn run() {
             let (state, events) = AppState::new(app_data_dir)?;
             events::spawn_event_forwarder(app.handle().clone(), events);
             events::spawn_chat_event_forwarder(app.handle().clone(), state.chat().subscribe());
+            let runtime = state.engine_runtime();
             app.manage(state);
+            // SIGTERM/SIGINT: stop the sidecar, then leave through Tauri's normal exit.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if shutdown_on_signal(runtime).await {
+                    handle.exit(0);
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -91,6 +137,14 @@ pub fn run() {
             commands::local_orchestrator::local_orchestrator_stop,
             commands::local_orchestrator::local_orchestrator_resume,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running StackSpirit");
+        .build(tauri::generate_context!())
+        .expect("error while building StackSpirit")
+        .run(|app, event| {
+            // Quit, window close and `app.exit` all pass through one of these.
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit)
+                && let Some(state) = app.try_state::<AppState>()
+            {
+                stop_engine(state.engine_runtime().as_ref());
+            }
+        });
 }

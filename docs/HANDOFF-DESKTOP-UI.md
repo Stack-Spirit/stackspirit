@@ -477,10 +477,12 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
    real pinned `opencode` `1.19.5` sidecar with a synthetic key. Both the Rust flows
    (`FakeKeychain` and the real `OsKeychain`; the test joins a fresh session keyring because
    the container starts with a read-only one) and the Playwright flow pass with zero
-   `opencode.log` errors and zero key leaks. It found two product defects for the next job:
-   the desktop binary **orphans the sidecar on `SIGTERM`** (no signal or `RunEvent::Exit`
-   handling in `src-tauri/src/lib.rs`; the boot smoke therefore exits non-zero), and the
-   picker's scroll region fails axe `scrollable-region-focusable` with a long list.
+   `opencode.log` errors and zero key leaks. It found one product defect, now fixed in this job: the desktop binary
+   **orphaned the sidecar on `SIGTERM`**; `src-tauri/src/lib.rs` now stops the engine on
+   `SIGTERM`/`SIGINT` and on `RunEvent::ExitRequested`/`Exit`, with the regression test
+   `src-tauri/tests/engine_shutdown.rs`. `node scripts/verify-byok-xvfb.mjs` exits 0. Still
+   open (follow-up `ss-91`): the picker's scroll region fails axe `scrollable-region-focusable`
+   with a long list, and the chat header overlaps the tall picker at 1280×720.
 
 ## 6. Known gaps and cautions
 

@@ -2650,28 +2650,31 @@ backend and records a skip instead.
   no secret store outside the test's unique service was touched.
 - Playwright live spec: passed in light and dark (about 45 s each); `opencode.log` 24 lines,
   errors 0, leaks 0; axe clean apart from the open defect below.
-- `node scripts/verify-byok-xvfb.mjs`: fetch, both Rust flows and both Playwright runs pass;
-  it still exits non-zero at the boot smoke because of defect 1 below.
+- `node scripts/verify-byok-xvfb.mjs`: **exits 0** after the shutdown fix below: fetch, both
+  Rust flows (FakeKeychain and OsKeychain), the desktop boot smoke (6 s, `SIGTERM` clean, no
+  orphan `opencode`, sidecar seen during boot, `opencode.log` errors 0, leaks 0) and both
+  Playwright runs pass.
+- `cargo test -p spirit-desktop --test engine_shutdown`: the `SIGTERM` regression test
+  (real pinned sidecar) passes.
 
-#### Defects found by ss-88 (not fixed: outside the job's owned paths)
+#### Defect fixed in ss-88: sidecar orphaned on `SIGTERM`
 
-1. **The desktop binary orphans the `opencode` sidecar on `SIGTERM`.** The boot smoke
-   (`xvfb-run -a target/debug/spirit-desktop`, isolated `HOME`/XDG, 6 s, `SIGTERM`) leaves
-   one `opencode serve` parented to PID 1 after the app exits; it was still alive after
-   14 minutes, so there is no idle timeout that hides it. `apps/spirit-desktop/src-tauri/src/lib.rs`
-   installs no signal handler and no `RunEvent::Exit` hook, so `EngineSupervisor`'s `Drop`
-   (`kill_now`) never runs. A normal window close is expected to drop the managed state,
-   but `SIGTERM` (and a systemd `KillMode=control-group` stop of only the main process)
-   bypasses it. Fix in a follow-up: handle `SIGTERM`/`SIGINT` and
-   `RunEvent::ExitRequested`/`Exit` by stopping the supervisor, then re-run
-   `node scripts/verify-byok-xvfb.mjs`. Until then that command exits non-zero at the boot
-   smoke; the runner deliberately does not send the signal to the whole process group,
-   because that would hide the defect.
-2. **Picker scroll region is not keyboard-focusable.** With a long list axe reports
+The boot smoke found that `target/debug/spirit-desktop` left one `opencode serve` parented to
+PID 1 after `SIGTERM` (still alive 14 minutes later). `lib.rs` had no signal handler and no
+`RunEvent` hook, so `EngineSupervisor`'s `Drop` (`kill_now`) never ran. The owner extended
+the job to fix it: `run()` now builds the app and, on `RunEvent::ExitRequested`/`Exit`, calls
+`stop_engine` (`EngineRuntime::kill_now`); `shutdown_on_signal` waits for `SIGTERM`/`SIGINT`,
+stops the engine and then calls `app.exit(0)`. `tokio`'s `signal` feature is enabled for
+`spirit-desktop` (and `tempfile` as a dev-dependency). The runner still signals only the app
+process, never the process group, so the app must stop its own child.
+
+#### Open defects found by ss-88 (follow-up job `ss-91`, in `packages/spirit-ui`)
+
+1. **Picker scroll region is not keyboard-focusable.** With a long list axe reports
    `scrollable-region-focusable` on `.nx-model-menu__scroll` (the mock fixtures are too short
    to overflow). The spec carves out exactly that rule on exactly that element; remove the
    carve-out once the region gets `tabIndex={0}` in `ComposerBar.tsx`/`theme.css`.
-3. **Picker clipped by the chat header at 1280×720.** A pointer click on the first row of a
+2. **Picker clipped by the chat header at 1280×720.** A pointer click on the first row of a
    tall list is intercepted by `.nx-chat-head`; the spec selects with the keyboard instead.
-4. Cosmetic: the Settings notice reads `Openrouter rejected this key…` because the
+3. Cosmetic: the Settings notice reads `Openrouter rejected this key…` because the
    notice derives its label from the provider id rather than the engine's `OpenRouter`.
