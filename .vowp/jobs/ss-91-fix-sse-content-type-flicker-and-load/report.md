@@ -6,10 +6,18 @@ commits:
   - 63a6b10
   - 84b4c10
 tests:
-  - cargo test -p spirit-core --test chat (14 passed, incl. new non_sse_event_endpoint_stays_ready_without_reconnect_flicker)
-  - cargo fmt --check; scripts/cargo-gate.sh clippy -p spirit-core --all-targets -- -D warnings (clean)
+  - node scripts/fetch-engine.mjs (pinned sidecar present and verified)
+  - scripts/cargo-gate.sh fmt --all -- --check (clean)
+  - scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings (clean)
+  - scripts/cargo-gate.sh test -p spirit-core (407 passed; chat suite 14, incl. new non_sse_event_endpoint_stays_ready_without_reconnect_flicker)
   - npm run test -w @stackspirit/ui (36 files, 375 tests passed, incl. new serverLoad.test.tsx)
   - npm run typecheck -w @stackspirit/ui; npm run lint -w @stackspirit/ui (clean)
+files_changed:
+  - crates/spirit-core/src/engine/chat/local.rs
+  - crates/spirit-core/tests/chat.rs
+  - packages/spirit-ui/src/next/health.tsx
+  - packages/spirit-ui/src/next/Sidebar.tsx
+  - packages/spirit-ui/src/test/next/serverLoad.test.tsx
 ---
 
 # ss-91 report
@@ -39,6 +47,14 @@ tests:
   (CPU/RAM/disk), normal load, CPU pressure, high load (`load1 > cpu_count`) and zero cores.
 - Not changed: `capacity.rs` still zero-fills `CpuView`/`DiskView` without a sample; the
   Next UI no longer reads those zero-filled fields for health.
+
+## Gate evidence
+- `scripts/cargo-gate.sh fmt --all -- --check`: pass.
+- `scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings`: pass
+  (spirit-core, spirit-cli and spirit-desktop).
+- `scripts/cargo-gate.sh test -p spirit-core`: 407 tests pass, 0 failed.
+- `npm run test -w @stackspirit/ui`: 375 tests pass, 0 failed.
+- `npm run typecheck -w @stackspirit/ui` and `npm run lint -w @stackspirit/ui`: pass.
 
 ## Notes
 - The brief had no `owns` list; edits touched only the files above.
