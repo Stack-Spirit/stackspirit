@@ -1,7 +1,7 @@
 # Handoff: StackSpirit desktop UI redesign (Meadow shell)
 
 Read this first if you are picking up the desktop UI, the brand, or the next integration
-steps. Last updated 2026-11-20. It records the decisions the owner made in the design
+steps. Last updated 2026-11-21. It records the decisions the owner made in the design
 sessions, what is real versus preview, and what to do next. `AGENTS.md` still applies
 (Rust core owns host/SSH/VOWP logic, UI calls go through `SpiritBridge`, no secrets).
 
@@ -474,15 +474,14 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
 
 ## 6. Known gaps and cautions
 
-- e2e status (updated 2026-11-20): the Meadow desktop suite passed **23/23** in the
-  `ss-73` run (2.3 m, zero failed, skipped or flaky, no waivers). That includes the new
-  empty-hero/inline-model/context-meter axe case in both light and dark. The specs are
-  `next-shell`, `meadow-flows`, `meadow-bridge-flows`, `meadow-cluster`, `sessions-asif`,
-  `local-orchestrator-gated` and `local-orchestrator-ready`. The earlier `ss-56`
-  (`a80775e`) run recorded 18/18 before the composer work and before the cluster spec.
-  The final `ss-75` run then passed **25/25** with axe WCAG 2.2 AA in light and dark,
-  including the new focus audit for text fields and the Create and Pair
-  local-orchestrator dialogs.
+- e2e status (updated 2026-11-21): the Meadow desktop suite passed **39/39** in the
+  `ss-87` run (3.7 m, zero failed, skipped or flaky, no waivers), including the
+  provider-grouped searchable picker, its empty-search state, **Manage models**, and the
+  in-place `Engine & Models` panel in light and dark. The `ss-75` run passed **25/25**
+  with axe WCAG 2.2 AA in light and dark, including the focus audit for text fields and
+  the Create and Pair local-orchestrator dialogs; `ss-73` passed **23/23** with the
+  empty-hero/inline-model/context-meter axe case; `ss-56` (`a80775e`) recorded 18/18
+  before the composer and cluster work.
 - **Cluster product gaps.** `ClusterHealth` carries no last-backup timestamp, so freshness
   is shown as the backup policy's maximum age at promotion, not an observed backup time.
   Promotion requires the old Home to answer `vowp down --drain`, so it cannot rescue an
