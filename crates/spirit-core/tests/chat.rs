@@ -127,6 +127,7 @@ enum SseScript {
     None,
     Deltas,
     Reconnect,
+    Html,
 }
 
 #[derive(Debug, Clone)]
@@ -630,6 +631,15 @@ fn handle_event(mut stream: TcpStream, state: Arc<Mutex<FakeState>>, stop: Arc<A
         write_json(&mut stream, 404, &json!({}));
         return;
     }
+    if sse == SseScript::Html {
+        let body = "<!doctype html><title>app</title>";
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(reply.as_bytes());
+        return;
+    }
     let Some(native) = native else {
         write_json(&mut stream, 404, &json!({}));
         return;
@@ -665,7 +675,7 @@ fn handle_event(mut stream: TcpStream, state: Arc<Mutex<FakeState>>, stop: Arc<A
             thread::sleep(Duration::from_millis(300));
             send_recovered(&mut stream, &native)
         }
-        SseScript::None => Ok(()),
+        SseScript::None | SseScript::Html => Ok(()),
     };
     if result.is_err() {
         return;
@@ -1260,6 +1270,42 @@ async fn streaming_is_honestly_disabled_when_the_probe_is_unpinned() {
     assert_eq!(applier.messages().len(), 2);
     assert_eq!(applier.messages()[1].joined_text(), "Hello world");
     assert_eq!(server.event_connections(), 0);
+}
+
+#[tokio::test]
+async fn non_sse_event_endpoint_stays_ready_without_reconnect_flicker() {
+    let server = FakeEngine::sse(SseScript::Html);
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, _engine) = build_provider(&server, workspace.path(), true);
+    let mut receiver = provider.subscribe();
+    let view = provider.start(&setup_input()).await.unwrap();
+    wait_until(|| server.event_connections() >= 1, Duration::from_secs(2)).await;
+    // Several backoff periods: a reconnect loop would open more connections.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(server.event_connections(), 1, "must not loop-reconnect");
+    let mut events = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        events.push(event);
+    }
+    for event in &events {
+        if let ChatEvent::Session { session, .. } = event {
+            assert!(
+                !matches!(
+                    session.state,
+                    spirit_core::engine::chat::ChatSessionState::Connecting
+                        | spirit_core::engine::chat::ChatSessionState::Error
+                ),
+                "no Reconnecting/Error flicker: {events:#?}"
+            );
+        }
+    }
+    assert!(
+        matches!(
+            view.state,
+            spirit_core::engine::chat::ChatSessionState::Ready
+        ),
+        "session starts Ready: {view:#?}"
+    );
 }
 
 #[cfg(unix)]

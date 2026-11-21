@@ -2296,6 +2296,7 @@ async fn run_pump(
         if attempts > 0 {
             provider.clone().mark_reconnecting(port, setup).await;
         }
+        let mut unsupported = false;
         let (sender, mut receiver) = mpsc::channel(SSE_CAPACITY);
         let reader_endpoint = endpoint.clone();
         let reader_cancel = Arc::clone(&cancel);
@@ -2312,9 +2313,18 @@ async fn run_pump(
                     provider.clone().handle_frame(frame, port, setup).await;
                 }
                 SseSignal::Failed => {}
+                SseSignal::Unsupported => unsupported = true,
             }
         }
         let _ = reader.await;
+        if unsupported {
+            // The endpoint answers 200 but is not an SSE stream (for example an SPA
+            // page). Reconnecting would only flicker, so attach once and stay Ready.
+            if !cancel.load(Ordering::SeqCst) {
+                provider.clone().on_sse_connected(port, setup).await;
+            }
+            return;
+        }
         if cancel.load(Ordering::SeqCst) {
             return;
         }
@@ -2332,6 +2342,13 @@ enum SseSignal {
     Connected,
     Frame(SseFrame),
     Failed,
+    /// 2xx response whose content type is not `text/event-stream`.
+    Unsupported,
+}
+
+enum SseHead {
+    Stream { chunked: bool, remainder: Vec<u8> },
+    Unsupported,
 }
 
 fn read_sse(endpoint: &ChatEndpoint, sender: mpsc::Sender<SseSignal>, cancel: Arc<AtomicBool>) {
@@ -2339,9 +2356,16 @@ fn read_sse(endpoint: &ChatEndpoint, sender: mpsc::Sender<SseSignal>, cancel: Ar
         let _ = sender.blocking_send(SseSignal::Failed);
         return;
     };
-    let Some((chunked, remainder)) = sse_headers(&mut stream) else {
-        let _ = sender.blocking_send(SseSignal::Failed);
-        return;
+    let (chunked, remainder) = match sse_headers(&mut stream) {
+        Some(SseHead::Stream { chunked, remainder }) => (chunked, remainder),
+        Some(SseHead::Unsupported) => {
+            let _ = sender.blocking_send(SseSignal::Unsupported);
+            return;
+        }
+        None => {
+            let _ = sender.blocking_send(SseSignal::Failed);
+            return;
+        }
     };
     if sender.blocking_send(SseSignal::Connected).is_err() {
         return;
@@ -2533,7 +2557,7 @@ fn connect_sse(endpoint: &ChatEndpoint) -> Option<TcpStream> {
     Some(stream)
 }
 
-fn sse_headers(stream: &mut TcpStream) -> Option<(bool, Vec<u8>)> {
+fn sse_headers(stream: &mut TcpStream) -> Option<SseHead> {
     let mut raw = Vec::new();
     let mut chunk = [0_u8; 4 * 1024];
     loop {
@@ -2552,7 +2576,17 @@ fn sse_headers(stream: &mut TcpStream) -> Option<(bool, Vec<u8>)> {
                 let lower = line.to_ascii_lowercase();
                 lower.starts_with("transfer-encoding:") && lower.contains("chunked")
             });
-            return Some((chunked, raw[boundary + 4..].to_vec()));
+            let event_stream = head.lines().any(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.starts_with("content-type:") && lower.contains("text/event-stream")
+            });
+            if !event_stream {
+                return Some(SseHead::Unsupported);
+            }
+            return Some(SseHead::Stream {
+                chunked,
+                remainder: raw[boundary + 4..].to_vec(),
+            });
         }
         if raw.len() > 64 * 1024 {
             return None;

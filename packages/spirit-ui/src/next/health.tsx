@@ -23,6 +23,34 @@ export interface ServerHealth {
   stale: boolean;
 }
 
+/** The slice of a host sample the CPU line needs. */
+export interface CpuSample {
+  load1: number;
+  cpu_count: number;
+  pressure_cpu_avg10?: number | null;
+}
+
+/**
+ * CPU numbers for display. `ratio` is the 1-minute load average divided by cores,
+ * clamped to 1 for the bar only; `text` always keeps the real figures, so
+ * `10.3 / 8 cores` is never shown as a flat 100%. No sample (or no core count) gives
+ * `null` and `—`, never a made-up `0%`.
+ */
+export function cpuDisplay(sample: CpuSample | null | undefined): {
+  ratio: number | null;
+  text: string;
+  over: boolean;
+} {
+  if (!sample || !(sample.cpu_count > 0) || !Number.isFinite(sample.load1)) {
+    return { ratio: null, text: "—", over: false };
+  }
+  const raw = sample.load1 / sample.cpu_count;
+  const pressure = sample.pressure_cpu_avg10;
+  const parts = [`load ${sample.load1.toFixed(1)} / ${sample.cpu_count} cores`];
+  if (pressure != null && Number.isFinite(pressure)) parts.push(`${Math.round(pressure)}% CPU pressure`);
+  return { ratio: Math.min(1, Math.max(0, raw)), text: parts.join(" · "), over: raw > 1 };
+}
+
 export function useServerHealth(): ServerHealth {
   const fleet = useFleet();
   const capacity = useCapacity() ?? fleet?.capacity ?? null;
@@ -31,7 +59,8 @@ export function useServerHealth(): ServerHealth {
   const target = capacity?.target.target_workers ?? null;
   const diskFree = capacity?.disk.free_home_bytes ?? sample?.disk_free_home_bytes ?? null;
   const ramRatio = usedRatio(sample?.mem_available_bytes, sample?.mem_total_bytes);
-  const cpuRatio = capacity ? Math.min(1, capacity.cpu.load_ratio) : null;
+  const cpu = cpuDisplay(sample);
+  const cpuRatio = cpu.ratio;
   const load =
     ramRatio == null && cpuRatio == null
       ? null
@@ -48,11 +77,11 @@ export function useServerHealth(): ServerHealth {
     ramRatio,
     ramText: sample
       ? `${formatGiB(sample.mem_total_bytes - sample.mem_available_bytes)} of ${formatGiB(sample.mem_total_bytes)}`
-      : "unknown",
+      : "—",
     diskText: diskFree != null ? `${formatGiB(diskFree)} free` : "unknown",
     diskFloorText: capacity ? `keeps ${formatGiB(capacity.disk.floor_bytes)} free` : null,
     cpuRatio,
-    cpuText: capacity ? `${capacity.cpu.load1.toFixed(1)} on ${capacity.cpu.cpu_count} cores` : "unknown",
+    cpuText: cpu.text,
     brake: capacity?.brake.active ?? false,
     brakeReasons: capacity?.brake.reasons.map((reason) => reason.detail || reason.code) ?? [],
     stale: fleet?.stale ?? false,
