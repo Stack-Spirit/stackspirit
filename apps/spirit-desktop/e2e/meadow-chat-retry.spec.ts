@@ -40,19 +40,18 @@ for (const theme of ["light", "dark"] as const) {
     await expect(notice.getByRole("button", { name: "Stop retrying" })).toBeEnabled();
     await expectNoWcagViolations(page);
 
-    // Switch model opens the searchable composer picker with the free list and the
-    // connected BYOK provider, and puts focus in the search field.
+    // Switch model opens the composer picker with the free list and the connected BYOK
+    // provider, and leaves focus on the picker trigger.
     await notice.getByRole("button", { name: "Switch model" }).click();
-    const menu = page.getByTestId("model-picker-popover");
+    const menu = page.getByRole("menu", { name: "Choose a model" });
     await expect(menu).toBeVisible();
-    await expect(menu.getByTestId("composer-model-search")).toBeFocused();
-    await expect(menu.getByRole("group", { name: "OpenCode Free" })).toContainText("Big Pickle");
-    await expect(menu.getByRole("group", { name: "DeepSeek" })).toContainText(
-      /DeepSeek V4\.1 Flash(?! Free)/,
-    );
-    await expect(menu.getByRole("option", { name: /Big Pickle/ })).toBeVisible();
+    await expect(menu.getByRole("menuitemradio", { name: /OpenCode free · Big Pickle/ })).toBeVisible();
+    await expect(
+      menu.getByRole("menuitemradio", { name: /BYOK · DeepSeek V4.1 Flash/ }),
+    ).toBeVisible();
+    await expect(page.getByTestId("composer-model")).toBeFocused();
 
-    await menu.getByRole("option", { name: /Big Pickle/ }).click();
+    await menu.getByRole("menuitemradio", { name: /Big Pickle/ }).click();
     await expect(page.getByTestId("composer-model")).toContainText("OpenCode free · Big Pickle");
     await expect(notice).toBeVisible();
     await expectNoWcagViolations(page);
