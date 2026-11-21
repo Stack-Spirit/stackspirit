@@ -484,10 +484,11 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
 
 ## 6. Known gaps and cautions
 
-- e2e status (updated 2026-11-21): the Meadow desktop suite passed **39/39** in the
-  `ss-87` run (3.7 m, zero failed, skipped or flaky, no waivers), including the
-  provider-grouped searchable picker, its empty-search state, **Manage models**, and the
-  in-place `Engine & Models` panel in light and dark. The `ss-75` run passed **25/25**
+- e2e status (updated 2026-11-21): the Meadow desktop suite passed **41/41** in the
+  `ss-88` run (5.7 m, zero failed, skipped or flaky, no waivers), including the two live
+  `opencode` `1.19.5` BYOK runs in light and dark; the `ss-87` run passed **39/39** (3.7 m),
+  covering the provider-grouped searchable picker, its empty-search state, **Manage
+  models**, and the in-place `Engine & Models` panel in light and dark. The `ss-75` run passed **25/25**
   with axe WCAG 2.2 AA in light and dark, including the focus audit for text fields and
   the Create and Pair local-orchestrator dialogs; `ss-73` passed **23/23** with the
   empty-hero/inline-model/context-meter axe case; `ss-56` (`a80775e`) recorded 18/18
