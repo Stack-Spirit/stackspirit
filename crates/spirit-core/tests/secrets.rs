@@ -151,6 +151,43 @@ async fn secret_list_accepts_a_storage_document_but_never_invents_a_mode() {
 }
 
 #[tokio::test]
+async fn secret_list_maps_the_vowp_05_mode_to_storage() {
+    for mode in ["basic", "vault_user", "encrypted", "future_mode"] {
+        let doc = format!(
+            r#"{{"mode":"{mode}","secrets":[{{"name":"DEEPSEEK_API_KEY","last4":"3b35","created_at":"2026-11-15T09:00:00.000Z","updated_at":"2026-11-16T10:30:00.000Z"}}]}}"#
+        );
+        let (_, client) = client_with(vec![CommandOutput::ok(doc)]);
+        let view = client.secret_list().await.unwrap();
+        assert_eq!(view.storage.as_deref(), Some(mode));
+        assert_eq!(view.secrets[0].name, "DEEPSEEK_API_KEY");
+    }
+    let (_, client) = client_with(vec![CommandOutput::ok(r#"{"secrets":[]}"#)]);
+    assert_eq!(client.secret_list().await.unwrap().storage, None);
+}
+
+#[tokio::test]
+async fn secret_list_rejects_an_unsafe_mode() {
+    for mode in [
+        "Basic",
+        "has space",
+        "a\\nb",
+        "",
+        "1basic",
+        "x-y",
+        &"a".repeat(33),
+    ] {
+        let doc = format!(r#"{{"mode":"{mode}","secrets":[]}}"#);
+        let (_, client) = client_with(vec![CommandOutput::ok(doc)]);
+        let error = client.secret_list().await.unwrap_err();
+        assert_eq!(
+            error.code,
+            SpiritErrorCode::VowpIncompatible,
+            "mode {mode:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn secret_list_rejects_an_unsafe_metadata_row() {
     let unsafe_name = r#"[{"name":"lower_case","last4":"a1b2","created_at":"2026-11-15T09:00:00.000Z","updated_at":"2026-11-16T10:30:00.000Z"}]"#;
     let (_, client) = client_with(vec![CommandOutput::ok(unsafe_name)]);

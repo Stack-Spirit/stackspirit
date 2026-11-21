@@ -5,8 +5,11 @@
 //! value. [`SecretSetRequest`] keeps its value in a zeroizing [`SecretString`] and has an
 //! explicit `Debug` implementation that redacts it.
 //!
-//! VOWP `0.4.0` facts this module relies on:
-//! - `vowp --json secret ls` prints a bare array of `{name,last4,created_at,updated_at}`;
+//! VOWP facts this module relies on:
+//! - VOWP `0.4.0`: `vowp --json secret ls` prints a bare array of
+//!   `{name,last4,created_at,updated_at}` and reports no storage mode;
+//! - VOWP `0.5.1`: `secret ls --json` prints `{"mode":"basic"|"vault_user"|"encrypted",
+//!   "secrets":[…]}`; `mode` becomes [`SecretListView::storage`];
 //! - `vowp --json secret rm NAME --yes` prints `{name,removed:true}`;
 //! - `vowp --json secret set NAME` prompts on its stderr with `value for NAME: ` only
 //!   after its `stty -echo` guard has run.
@@ -45,9 +48,10 @@ pub struct SecretListView {
     pub secrets: Vec<SecretEntry>,
     /// Storage mode when VOWP reports one.
     ///
-    /// `None` means "not reported". It never means "basic": VOWP `0.4.0` does not
-    /// report a storage mode at all, and the UI must stay honest about that.
-    #[serde(default)]
+    /// VOWP `0.5.1` reports it as the document's `mode` (`basic`, `vault_user` or
+    /// `encrypted`; other safe tokens are kept verbatim). `None` means "not reported"
+    /// (the VOWP `0.4.0` bare array). It never means "basic".
+    #[serde(default, alias = "mode")]
     pub storage: Option<String>,
 }
 
@@ -155,7 +159,7 @@ fn validate_secret_value(value: &str) -> Result<(), SpiritError> {
 enum SecretListWire {
     /// VOWP `0.4.0`: a bare array of metadata rows.
     Entries(Vec<SecretEntry>),
-    /// A future document that also reports the storage mode.
+    /// VOWP `0.5.1`: a document that also reports the storage `mode`.
     Document(SecretListView),
 }
 
@@ -170,6 +174,14 @@ pub(crate) fn parse_secret_list(bytes: &[u8]) -> Result<SecretListView, SpiritEr
         },
         SecretListWire::Document(view) => view,
     };
+    if let Some(mode) = &view.storage {
+        if !is_safe_mode_token(mode) {
+            return Err(SpiritError::vowp_incompatible(
+                "secret list",
+                "VOWP returned an unsafe vault storage mode",
+            ));
+        }
+    }
     for entry in &view.secrets {
         if validate_secret_name(&entry.name).is_err() {
             return Err(SpiritError::vowp_incompatible(
@@ -185,6 +197,14 @@ pub(crate) fn parse_secret_list(bytes: &[u8]) -> Result<SecretListView, SpiritEr
         }
     }
     Ok(view)
+}
+
+/// A storage mode must match `^[a-z][a-z0-9_]{0,31}$`.
+fn is_safe_mode_token(mode: &str) -> bool {
+    let mut chars = mode.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && mode.len() <= 32
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 /// The minimal object VOWP returns from `secret set`.

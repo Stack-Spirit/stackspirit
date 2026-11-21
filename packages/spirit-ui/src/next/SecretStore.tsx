@@ -364,14 +364,12 @@ export function SecretStore() {
           ) : null}
 
           {visibleEntries && visibleEntries.storage === null ? (
-            <p className="nx-secrets__storage-note">
-              VOWP 0.4.0 does not report whether the vault is basic or vault-user mode
+            <p className="nx-secrets__storage-note" data-testid="vault-mode-missing">
+              VOWP did not report a storage mode
             </p>
           ) : null}
           {visibleEntries && visibleEntries.storage !== null ? (
-            <p className="nx-secrets__storage-note">
-              VOWP reports the vault storage mode as {visibleEntries.storage}.
-            </p>
+            <VaultModeBadge mode={visibleEntries.storage} />
           ) : null}
         </div>
       ) : null}
@@ -484,5 +482,35 @@ export function SecretStore() {
         </div>
       </form>
     </div>
+  );
+}
+
+const KNOWN_VAULT_MODES: Record<string, { label: string; note: string }> = {
+  basic: {
+    label: "Basic",
+    note: "Files under the runtime user, mode 0600, not encrypted at rest.",
+  },
+  vault_user: {
+    label: "Vault user",
+    note: "Stored in the vault user's home.",
+  },
+  encrypted: {
+    label: "Encrypted",
+    note: "Encrypted at rest with age.",
+  },
+};
+
+/** Labels the storage mode VOWP reported without inventing semantics for unknown tokens. */
+function VaultModeBadge({ mode }: { mode: string }) {
+  const known = Object.prototype.hasOwnProperty.call(KNOWN_VAULT_MODES, mode)
+    ? KNOWN_VAULT_MODES[mode]
+    : undefined;
+  return (
+    <p className="nx-secrets__storage-note" data-testid="vault-mode-note">
+      <span className="nx-secrets__mode-badge" data-testid="vault-mode" data-mode={mode}>
+        {known ? known.label : mode}
+      </span>{" "}
+      {known ? known.note : `VOWP reported this storage mode: ${mode}.`}
+    </p>
   );
 }

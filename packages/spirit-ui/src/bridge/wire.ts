@@ -162,8 +162,10 @@ export interface SecretEntryView {
 /**
  * The `vowp secret ls` read model.
  *
- * `storage` is `null` when VOWP does not report a storage mode; it never means "basic"
- * (VOWP `0.4.0` reports none, and the UI must stay honest about that).
+ * `storage` is the `mode` of the VOWP `0.5.1` `secret ls --json` document (serde alias
+ * `mode`): `basic`, `vault_user` or `encrypted`; any other safe token is passed through
+ * verbatim. It is `null` when VOWP does not report one (the `0.4.0` bare array); `null`
+ * never means "basic".
  */
 export interface SecretListView {
   /** Secrets in the exact order VOWP returned them. */

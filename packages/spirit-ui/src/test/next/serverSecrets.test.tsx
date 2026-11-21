@@ -446,27 +446,38 @@ describe("Settings server secrets", () => {
     expect(list).toHaveBeenCalledTimes(1);
   });
 
-  it("states honestly that VOWP 0.4.0 does not report the storage mode", async () => {
+  it("says VOWP did not report a storage mode when none is given", async () => {
     renderStore({ list: async () => listOf([entry("OPENAI_API_KEY", "9f2a")], null) });
 
-    expect(
-      await screen.findByText(
-        "VOWP 0.4.0 does not report whether the vault is basic or vault-user mode",
-      ),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("VOWP did not report a storage mode")).toBeInTheDocument();
+    expect(screen.queryByTestId("vault-mode")).not.toBeInTheDocument();
+    expect(screen.queryByText(/0\.4\.0/)).not.toBeInTheDocument();
   });
 
-  it("shows a storage mode when VOWP reports one", async () => {
+  it.each([
+    ["basic", "Basic", "Files under the runtime user, mode 0600, not encrypted at rest."],
+    ["vault_user", "Vault user", "Stored in the vault user's home."],
+    ["encrypted", "Encrypted", "Encrypted at rest with age."],
+  ])("shows the %s storage mode badge and note", async (mode, label, note) => {
     renderStore({
-      list: async () => listOf([entry("OPENAI_API_KEY", "9f2a")], "vault-user"),
+      list: async () => listOf([entry("OPENAI_API_KEY", "9f2a")], mode),
     });
 
-    expect(
-      await screen.findByText("VOWP reports the vault storage mode as vault-user."),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/does not report whether the vault is basic/),
-    ).not.toBeInTheDocument();
+    const badge = await screen.findByTestId("vault-mode");
+    expect(badge).toHaveTextContent(label);
+    expect(screen.getByTestId("vault-mode-note")).toHaveTextContent(note);
+    expect(screen.queryByText("VOWP did not report a storage mode")).not.toBeInTheDocument();
+  });
+
+  it("shows an unknown storage token raw and says VOWP reported it", async () => {
+    renderStore({
+      list: async () => listOf([entry("OPENAI_API_KEY", "9f2a")], "future_mode"),
+    });
+
+    expect(await screen.findByTestId("vault-mode")).toHaveTextContent("future_mode");
+    expect(screen.getByTestId("vault-mode-note")).toHaveTextContent(
+      "VOWP reported this storage mode: future_mode.",
+    );
   });
 
   it("disables the form with the exact reason when set is not supported", async () => {
