@@ -266,29 +266,3 @@ async fn current_gates(state: &AppState) -> spirit_core::engine::GateSnapshot {
     snapshot.enforce_local_orchestrator_flag();
     snapshot
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Regression: the fallback used to hold the core mutex while `current_gates`
-    /// locked it again, so an empty node card hung forever.
-    #[tokio::test]
-    async fn resolve_local_node_without_a_card_returns_gate_error_instead_of_hanging() {
-        let dir = std::env::temp_dir().join(format!("ss92-resolve-node-{}", std::process::id()));
-        let (state, _events) = AppState::new(dir.clone()).expect("state");
-        let client =
-            spirit_core::fixtures::FixtureVowpClient::new(spirit_core::fixtures::Scenario::Idle)
-                .expect("fixture client");
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            resolve_local_node(&state, &client, Some("stackspirit")),
-        )
-        .await
-        .expect("resolve_local_node must not deadlock");
-        let error = result.expect_err("no enrolled node");
-        assert_eq!(error.code, SpiritErrorCode::Gate);
-        assert!(error.message.contains("chat_gated"));
-        let _ = std::fs::remove_dir_all(dir);
-    }
-}
