@@ -120,6 +120,35 @@ fn older_snapshot_without_owner_still_parses() {
     assert!(view.session_owners.is_empty());
 }
 
+#[test]
+fn session_projects_come_from_the_view_and_use_node_when_absent() {
+    let mut doc: Value = serde_json::from_slice(&status_with_owner(None)).unwrap();
+    let orchestrator = &mut doc["snapshot"]["orchestrators"][0];
+    let orchestrator_session = orchestrator["session_id"].as_str().unwrap().to_owned();
+    orchestrator.as_object_mut().unwrap().remove("project");
+    let view = fleet(&serde_json::to_vec(&doc).unwrap());
+
+    // A project session card keeps its project.
+    assert_eq!(view.project_for_session(SESSION).as_deref(), Some("vowp"));
+    // The project-less global orchestrator lives in VOWP's reserved `_node` project.
+    assert_eq!(
+        view.project_for_session(&orchestrator_session).as_deref(),
+        Some("_node")
+    );
+    assert_eq!(view.project_for_session("01JCF5WQ8ZK3M2V7N4P6R8T0AZ"), None);
+}
+
+#[test]
+fn a_projectless_session_card_resolves_to_the_node_project() {
+    let mut doc: Value = serde_json::from_slice(&status_with_owner(None)).unwrap();
+    doc["snapshot"]["sessions"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("project");
+    let view = fleet(&serde_json::to_vec(&doc).unwrap());
+    assert_eq!(view.project_for_session(SESSION).as_deref(), Some("_node"));
+}
+
 fn client(responses: Vec<CommandOutput>) -> (Arc<FakeCommandRunner>, SshVowpClient) {
     let fake = Arc::new(FakeCommandRunner::new(responses));
     let target = SshTarget::new("owner", "192.0.2.10", 2222).unwrap();
@@ -137,7 +166,7 @@ fn request() -> SessionTakeoverRequest {
         session: SESSION.to_owned(),
         node: "macbook".to_owned(),
         label: Some("StackSpirit · macbook".to_owned()),
-        project: Some("repo".to_owned()),
+        project: "repo".to_owned(),
     }
 }
 
@@ -166,6 +195,26 @@ async fn takeover_runs_the_documented_command_without_force() {
     assert!(command.contains(SESSION));
     assert!(!command.contains("--force"));
     assert!(!command.contains("lease"));
+}
+
+#[tokio::test]
+async fn takeover_sends_the_node_project_for_the_global_orchestrator() {
+    let (fake, client) = client(vec![CommandOutput::ok(
+        r#"{"previous":null,"drained":false}"#,
+    )]);
+    client
+        .session_takeover(SessionTakeoverRequest {
+            project: "_node".to_owned(),
+            ..request()
+        })
+        .await
+        .unwrap();
+
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1);
+    let command = calls[0].args.last().cloned().unwrap();
+    assert!(command.contains("'vowp' '--project' '_node' '--json' 'session' 'takeover'"));
+    assert!(command.contains(SESSION));
 }
 
 #[tokio::test]
@@ -199,6 +248,10 @@ async fn takeover_validates_argv_values_before_running() {
         },
         SessionTakeoverRequest {
             label: Some("a\nb".to_owned()),
+            ..request()
+        },
+        SessionTakeoverRequest {
+            project: "../repo".to_owned(),
             ..request()
         },
     ] {

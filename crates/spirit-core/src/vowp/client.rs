@@ -526,8 +526,9 @@ pub struct SessionTakeoverRequest {
     /// Friendly surface label, for example `StackSpirit · macbook`.
     pub label: Option<String>,
     /// Project the session belongs to. VOWP needs project context when the command
-    /// runs from the SSH login home, so the host derives it from the fleet view.
-    pub project: Option<String>,
+    /// runs from the SSH login home, so the host derives it from the fleet view and
+    /// uses the reserved `_node` project for a project-less session.
+    pub project: String,
 }
 
 impl SessionTakeoverRequest {
@@ -535,9 +536,7 @@ impl SessionTakeoverRequest {
     pub fn validate(&self) -> Result<(), SpiritError> {
         SessionId::parse(&self.session)?;
         NodeName::parse(&self.node)?;
-        if let Some(project) = &self.project {
-            ProjectName::parse(project)?;
-        }
+        ProjectName::parse(&self.project)?;
         if let Some(label) = &self.label {
             if label.is_empty() || label.len() > 80 || label.chars().any(char::is_control) {
                 return Err(SpiritError::new(
@@ -857,9 +856,7 @@ impl VowpClient for SshVowpClient {
     ) -> Result<SessionTakeoverResult, SpiritError> {
         request.validate()?;
         let mut argv = self.base_argv();
-        if let Some(project) = &request.project {
-            argv.extend(["--project".to_owned(), project.clone()]);
-        }
+        argv.extend(["--project".to_owned(), request.project.clone()]);
         push_json(&mut argv);
         argv.extend([
             "session".to_owned(),

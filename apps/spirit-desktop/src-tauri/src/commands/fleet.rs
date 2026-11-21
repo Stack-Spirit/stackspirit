@@ -173,25 +173,14 @@ fn project_for_job(view: &FleetView, job_id: &str) -> Option<String> {
     None
 }
 
-fn project_for_session(view: &FleetView, session_id: &str) -> Option<String> {
-    view.sessions
-        .iter()
-        .find(|card| card.id == session_id)
-        .and_then(|card| card.project.clone())
-        .or_else(|| {
-            view.orchestrators
-                .iter()
-                .find(|card| card.session_id == session_id)
-                .and_then(|card| card.project.clone())
-        })
-}
-
 /// Takes a session over for StackSpirit.
 ///
 /// The renderer supplies only the session id. The local node and surface label come
 /// from the host-side local-node state, and the idle-versus-running confirmation is a
-/// UI decision made before this call. A VOWP without the command returns a typed
-/// `not_supported` error and no ownership is faked.
+/// UI decision made before this call. The project comes from the fleet view because
+/// VOWP rejects `session takeover` without project context when the SSH command starts
+/// outside a checkout; the project-less global orchestrator uses `_node`. A VOWP
+/// without the command returns a typed `not_supported` error and no ownership is faked.
 #[tauri::command]
 pub async fn session_takeover(
     state: State<'_, AppState>,
@@ -216,7 +205,14 @@ pub async fn session_takeover(
         .connection_manager()
         .await
         .fleet_view()
-        .and_then(|view| project_for_session(&view, &session_id));
+        .and_then(|view| view.project_for_session(&session_id))
+        .ok_or_else(|| {
+            SpiritError::new(
+                SpiritErrorCode::NotFound,
+                format!("session {session_id} is not in the current snapshot"),
+            )
+            .with_hint("Refresh the fleet view and try again.")
+        })?;
     client
         .session_takeover(SessionTakeoverRequest {
             session: session_id,

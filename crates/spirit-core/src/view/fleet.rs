@@ -16,6 +16,9 @@ use crate::wire::{
     SessionOwner, SessionSurfaceCard, Snapshot, SurfaceRef,
 };
 
+/// VOWP's reserved project for project-less node sessions, such as the global orchestrator.
+const NODE_PROJECT: &str = "_node";
+
 /// The whole cockpit view for one revision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetView {
@@ -340,6 +343,26 @@ impl FleetView {
     pub fn mutations_disabled(&self) -> bool {
         self.stale
     }
+
+    /// Returns the VOWP project that owns a session.
+    ///
+    /// The global orchestrator and other project-less sessions have no `project` on their
+    /// card; VOWP keeps them in the reserved `_node` project database, so they resolve to
+    /// `_node`. Returns `None` when the session is not in the snapshot.
+    #[must_use]
+    pub fn project_for_session(&self, session_id: &str) -> Option<String> {
+        if let Some(card) = self.sessions.iter().find(|card| card.id == session_id) {
+            return Some(card.project.clone().unwrap_or_else(node_project));
+        }
+        self.orchestrators
+            .iter()
+            .find(|card| card.session_id == session_id)
+            .map(|card| card.project.clone().unwrap_or_else(node_project))
+    }
+}
+
+fn node_project() -> String {
+    NODE_PROJECT.to_owned()
 }
 
 fn supervisor_view(snapshot: &Snapshot, now: Timestamp) -> SupervisorView {

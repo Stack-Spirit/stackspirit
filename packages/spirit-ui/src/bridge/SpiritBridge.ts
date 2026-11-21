@@ -333,9 +333,10 @@ export interface SpiritBridge {
     importAsif(options: AsifImportOptions): Promise<AsifImportResult | null>;
     /**
      * Takes a session over for StackSpirit (`vowp session takeover`). The host resolves
-     * the local node and the surface label; the renderer sends only the session id.
-     * The idle-versus-running confirmation is the caller's job. An older VOWP rejects
-     * with a `not_supported` or `chat_gated` error and ownership is never faked.
+     * the local node, the session's project and the surface label; the renderer sends
+     * only the session id. The idle-versus-running confirmation is the caller's job. An
+     * older VOWP rejects with a `not_supported` or `chat_gated` error and ownership is
+     * never faked.
      */
     takeoverSession(sessionId: string): Promise<SessionTakeoverResult>;
   };
