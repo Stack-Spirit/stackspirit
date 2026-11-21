@@ -137,6 +137,7 @@ fn request() -> SessionTakeoverRequest {
         session: SESSION.to_owned(),
         node: "macbook".to_owned(),
         label: Some("StackSpirit · macbook".to_owned()),
+        project: Some("repo".to_owned()),
     }
 }
 
@@ -160,7 +161,7 @@ async fn takeover_runs_the_documented_command_without_force() {
     assert_eq!(calls.len(), 1);
     let command = calls[0].args.last().cloned().unwrap();
     assert!(command.contains(
-        "'vowp' '--json' 'session' 'takeover' '--kind' 'chat' '--holder' 'stackspirit' '--node' 'macbook' '--label'"
+        "'vowp' '--project' 'repo' '--json' 'session' 'takeover' '--kind' 'chat' '--holder' 'stackspirit' '--node' 'macbook' '--label'"
     ));
     assert!(command.contains(SESSION));
     assert!(!command.contains("--force"));

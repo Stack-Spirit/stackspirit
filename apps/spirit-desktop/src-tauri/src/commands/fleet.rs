@@ -173,6 +173,19 @@ fn project_for_job(view: &FleetView, job_id: &str) -> Option<String> {
     None
 }
 
+fn project_for_session(view: &FleetView, session_id: &str) -> Option<String> {
+    view.sessions
+        .iter()
+        .find(|card| card.id == session_id)
+        .and_then(|card| card.project.clone())
+        .or_else(|| {
+            view.orchestrators
+                .iter()
+                .find(|card| card.session_id == session_id)
+                .and_then(|card| card.project.clone())
+        })
+}
+
 /// Takes a session over for StackSpirit.
 ///
 /// The renderer supplies only the session id. The local node and surface label come
@@ -199,11 +212,17 @@ pub async fn session_takeover(
             .with_hint("Pair this computer as a local node, then try again.")
         })?;
     let label = Some(format!("StackSpirit \u{b7} {node}"));
+    let project = state
+        .connection_manager()
+        .await
+        .fleet_view()
+        .and_then(|view| project_for_session(&view, &session_id));
     client
         .session_takeover(SessionTakeoverRequest {
             session: session_id,
             node,
             label,
+            project,
         })
         .await
 }
