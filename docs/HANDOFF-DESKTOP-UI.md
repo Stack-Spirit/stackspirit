@@ -471,6 +471,15 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
    `xvfb-run` with live `opencode.log` inspection.
    **`ss-87` landed** the searchable picker; **Manage models opens the existing Engine & Models
    modal** (see `docs/ORCHESTRATOR-CHAT.md`).
+   **`ss-88` landed the verification harness** (details, commands and results in
+   `docs/ORCHESTRATOR-CHAT.md` → "Landed in ss-88"): `crates/spirit-core/tests/byok_live_sidecar.rs`,
+   `apps/spirit-desktop/e2e/xvfb-byok-live.spec.ts` and `scripts/verify-byok-xvfb.mjs` drive the
+   real pinned `opencode` `1.19.5` sidecar with a synthetic key. Both the Rust and the
+   Playwright flows pass with zero `opencode.log` errors and zero key leaks. It found two
+   product defects for the next job: the desktop binary **orphans the sidecar on `SIGTERM`**
+   (no signal or `RunEvent::Exit` handling in `src-tauri/src/lib.rs`), and the picker's
+   scroll region fails axe `scrollable-region-focusable` with a long list. The `OsKeychain`
+   live run was skipped here because the sandbox blocks the kernel keyring.
 
 ## 6. Known gaps and cautions
 

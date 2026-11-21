@@ -2586,3 +2586,79 @@ unsearchable menu is unusable. Modeled on OpenCode's model selector
   the user opens the picker themselves. Tab reaches it.
 - Verification: `npm run typecheck`, `lint` and the full `@stackspirit/ui` vitest suite
   pass. The Playwright specs were updated but not run in this job.
+
+### Landed in ss-88: real-sidecar Xvfb verification (2026-11-21)
+
+`ss-88` adds a repeatable, mock-free check of the BYOK flow on the Linux VPS (Xvfb,
+`webkit2gtk-4.1`, Playwright Chromium, the pinned `opencode` `1.19.5` sidecar from
+`node scripts/fetch-engine.mjs`, never `PATH`). The only key is the synthetic
+`sk-or-v1-test-dummy-not-a-real-key-00000000`; every check also scans for it.
+
+| Layer | File | What runs for real |
+|---|---|---|
+| Rust | `crates/spirit-core/tests/byok_live_sidecar.rs` | `ProcessEngineRuntime` + `EngineSupervisor` + `LocalChatProvider` + `verify_provider_key` over the real sidecar, in a `tempfile` app-data dir, with `FakeKeychain` always and `OsKeychain` under `--features keychain` |
+| Browser | `apps/spirit-desktop/e2e/xvfb-byok-live.spec.ts` | Real Chromium bridges `SettingsPage` and `ComposerBar` to a live sidecar's `/provider`, `/config/providers` and verification replies (the key lives only in the Node harness's memory and reaches the sidecar through `OPENCODE_AUTH_CONTENT`); axe WCAG 2.2 AA in light and dark |
+| Runner | `scripts/verify-byok-xvfb.mjs` | fetch engine → Rust live test → desktop binary boot smoke under `xvfb-run -a` → the Playwright spec under `xvfb-run -a` |
+
+Rust flow verified against the real `1.19.5` binary: start (`/global/health` healthy, `opencode`
+free models only, `openrouter` not connected) → `connect_provider` restarts the sidecar, no
+`auth.json` anywhere under `engine/data`, `/config/providers` and `/provider` report
+`openrouter` connected with 100+ models → `verify_provider_key` through the ephemeral-XDG probe
+returns `Invalid` (the synthetic key; `Unverified` offline) and the key is still in the
+keychain → setup chat lists OpenCode Free and `openrouter/*` (`anthropic/`, `google/`) models →
+`set_model` to an `openrouter/*` model updates `ChatSessionView.model` → `opencode.log` is
+non-empty with zero panics, `SQLITE_BUSY`/`database is locked`, crashes or key occurrences
+(also in `supervisor.logs()` and every file of the private tree) → `disconnect_provider`
+removes the key, restarts, drops the `openrouter/*` models. A second test proves
+`Verified → Saved`, `Unverified → Unverified` (including the `429`/`503` classifier cases) and
+`Invalid → Invalid` all leave the saved key intact, and `Missing` only occurs for an empty
+keychain.
+
+Playwright flow verified: Setup chat picker shows only **OpenCode Free** → **Manage models**
+opens Engine & Models → search `openrouter`, save the key (the host verifies once on save) →
+**Verify key** reports `Invalid key` honestly and OpenRouter stays under **Connected
+providers** with `Verify key`, `Replace key` and `Remove key` → the composer picker shows the
+live OpenRouter group (100+ rows) beside OpenCode Free, `claude` and `gemini` searches narrow
+it, and selecting an OpenRouter model updates the trigger → the sidecar's `opencode.log` has
+zero panics/lock errors/key occurrences → no sidecar process survives the test.
+
+#### Commands
+
+```sh
+node scripts/fetch-engine.mjs
+scripts/cargo-gate.sh test -p spirit-core --features keychain --test byok_live_sidecar -- --nocapture --test-threads=1
+xvfb-run -a npx playwright test e2e/xvfb-byok-live.spec.ts      # from apps/spirit-desktop
+node scripts/verify-byok-xvfb.mjs                               # everything above plus the desktop boot smoke
+BYOK_REQUIRE_OS_KEYCHAIN=1 node scripts/verify-byok-xvfb.mjs    # fail instead of skipping when keyutils is blocked
+BYOK_ONLY=rust|boot|e2e node scripts/verify-byok-xvfb.mjs       # one step while debugging
+```
+
+#### Verified results (this VPS, sidecar `opencode` `1.19.5`)
+
+- Rust live flow, `FakeKeychain`: passed; verify state `Invalid`; `opencode.log` 51 lines,
+  errors 0, leaks 0. `cargo test -p spirit-core` (default features) passes with it.
+- Playwright live spec: passed in light and dark (about 45 s each); `opencode.log` 24 lines,
+  errors 0, leaks 0; axe clean apart from the open defect below.
+- **`OsKeychain` live flow skipped here.** This environment blocks the kernel keyring
+  (`keyctl(KEYCTL_GET_KEYRING_ID)` fails inside the job sandbox), so the test prints
+  `skipping: platform keychain unavailable`; set `BYOK_REQUIRE_OS_KEYCHAIN=1` on a host with
+  keyutils to make it mandatory. It has therefore **not** been run against the real
+  `OsKeychain` in this job.
+
+#### Defects found by ss-88 (not fixed: outside the job's owned paths)
+
+1. **The desktop binary orphans the `opencode` sidecar on `SIGTERM`.** The boot smoke
+   (`xvfb-run -a target/debug/spirit-desktop`, isolated `HOME`/XDG, 6 s, `SIGTERM`) leaves
+   one `opencode serve` alive for 10 s+ after the app exits. `apps/spirit-desktop/src-tauri/src/lib.rs`
+   installs no signal handler and no `RunEvent::Exit` hook, so `EngineSupervisor`'s `Drop`
+   (`kill_now`) never runs. Fix in a follow-up: handle `SIGTERM`/`SIGINT` and
+   `RunEvent::ExitRequested`/`Exit` by stopping the supervisor, then re-run
+   `node scripts/verify-byok-xvfb.mjs`. Until then that command exits non-zero at the boot smoke.
+2. **Picker scroll region is not keyboard-focusable.** With a long list axe reports
+   `scrollable-region-focusable` on `.nx-model-menu__scroll` (the mock fixtures are too short
+   to overflow). The spec carves out exactly that rule on exactly that element; remove the
+   carve-out once the region gets `tabIndex={0}` in `ComposerBar.tsx`/`theme.css`.
+3. **Picker clipped by the chat header at 1280×720.** A pointer click on the first row of a
+   tall list is intercepted by `.nx-chat-head`; the spec selects with the keyboard instead.
+4. Cosmetic: the Settings notice reads `Openrouter rejected this key…` because the
+   notice derives its label from the provider id rather than the engine's `OpenRouter`.
