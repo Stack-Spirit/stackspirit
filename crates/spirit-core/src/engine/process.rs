@@ -1667,6 +1667,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         all_providers = [{"id": "opencode", "models": {"big-pickle": {"name": "Big Pickle", "cost": {"input": 0}}}}]
         if "deepseek" in auth:
             all_providers.append({"id": "deepseek", "models": {"deepseek-flash": {"name": "DeepSeek Flash", "cost": {"input": 1}}}})
+        if "openrouter" in auth:
+            all_providers.append({"id": "openrouter", "models": {
+                "free/model-a:free": {"name": "Free A", "cost": {"input": 0}},
+                "free/model-b:free": {"name": "Free B", "cost": {"input": 0}},
+                "free/model-c:free": {"name": "Free C", "cost": {"input": 0}},
+                "paid/model-a": {"name": "Paid A", "cost": {"input": 0.1}},
+                "paid/model-b": {"name": "Paid B", "cost": {"input": 0.2}}
+            }})
         return all_providers
     def do_GET(self):
         if self.path == "/global/health":
@@ -1681,18 +1689,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0") or 0)
-        if length:
-            self.rfile.read(length)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            payload = json.loads(raw or b"{}")
+        except Exception:
+            payload = {}
         if self.path == "/session":
             self.send_json({"id": "ses_test"})
         elif self.path.endswith("/message"):
-            key = (auth.get("deepseek") or {}).get("key")
-            if key == "valid-test-key":
-                self.send_json({"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "OK"}]})
+            model = payload.get("model") or {}
+            provider_id = model.get("providerID")
+            model_id = model.get("modelID") or ""
+            if provider_id == "openrouter":
+                openrouter_key = (auth.get("openrouter") or {}).get("key")
+                if openrouter_key != "valid-test-key":
+                    self.send_json({"info": {"error": {"statusCode": 401, "message": "Invalid API key"}}})
+                elif model_id.endswith(":free"):
+                    # Free-tier calls are rate-limited or privacy-gated, so a key probe
+                    # must never settle Unverified while a paid model could succeed.
+                    self.send_json({"info": {"error": {"statusCode": 404, "message": "No endpoints found matching your data policy"}}})
+                else:
+                    self.send_json({"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "OK"}]})
             else:
-                # The pinned engine returns HTTP 200 and carries the provider error in
-                # the body. The adapter must inspect the body, not just the status line.
-                self.send_json({"info": {"error": {"statusCode": 401, "message": "Invalid API key"}}})
+                key = (auth.get("deepseek") or {}).get("key")
+                if key == "valid-test-key":
+                    self.send_json({"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "OK"}]})
+                else:
+                    # The pinned engine returns HTTP 200 and carries the provider error in
+                    # the body. The adapter must inspect the body, not just the status line.
+                    self.send_json({"info": {"error": {"statusCode": 401, "message": "Invalid API key"}}})
         else:
             self.send_error(404)
     def do_DELETE(self):
@@ -1916,6 +1941,32 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
                 "deepseek",
                 &SecretString::new("invalid-test-key"),
             )
+            .await;
+        assert_eq!(rejected, KeyVerification::Invalid);
+        runtime.shutdown(&info).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn openrouter_key_verifies_on_a_paid_model_when_free_models_fail() {
+        if !python_available() {
+            return;
+        }
+        let _guard = PROCESS_TEST_LOCK.lock().await;
+        let directory = tempfile::tempdir().unwrap();
+        let binary = write_fake_engine(directory.path());
+        let runtime = ProcessEngineRuntime::with_binary(binary);
+        let info = runtime.spawn(0).await.unwrap();
+        let verified = runtime
+            .verify_key(
+                info.port,
+                "openrouter",
+                &SecretString::new("valid-test-key"),
+            )
+            .await;
+        assert_eq!(verified, KeyVerification::Verified);
+        let rejected = runtime
+            .verify_key(info.port, "openrouter", &SecretString::new("bad-key"))
             .await;
         assert_eq!(rejected, KeyVerification::Invalid);
         runtime.shutdown(&info).await.unwrap();
