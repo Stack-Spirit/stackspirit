@@ -14,6 +14,8 @@ export interface ServerHealth {
   diskFloorText: string | null;
   cpuRatio: number | null;
   cpuText: string;
+  /** True when load1 is above cpu_count, so the clamped ratio hides the real figure. */
+  cpuOver: boolean;
   /** The most pressing of RAM and CPU, so one number can stand for "load". */
   load: { ratio: number; source: "RAM" | "CPU" } | null;
   /** Short disk number for compact places, e.g. "42 GiB free". */
@@ -57,7 +59,9 @@ export function useServerHealth(): ServerHealth {
   const sample = capacity?.host ?? null;
   const running = fleet?.running.length ?? 0;
   const target = capacity?.target.target_workers ?? null;
-  const diskFree = capacity?.disk.free_home_bytes ?? sample?.disk_free_home_bytes ?? null;
+  // `capacity.disk` is zero-filled when there is no host sample, so the sample is the
+  // only honest source here; a missing sample gives "unknown", never "0 B free".
+  const diskFree = sample?.disk_free_home_bytes ?? null;
   const ramRatio = usedRatio(sample?.mem_available_bytes, sample?.mem_total_bytes);
   const cpu = cpuDisplay(sample);
   const cpuRatio = cpu.ratio;
@@ -82,6 +86,7 @@ export function useServerHealth(): ServerHealth {
     diskFloorText: capacity ? `keeps ${formatGiB(capacity.disk.floor_bytes)} free` : null,
     cpuRatio,
     cpuText: cpu.text,
+    cpuOver: cpu.over,
     brake: capacity?.brake.active ?? false,
     brakeReasons: capacity?.brake.reasons.map((reason) => reason.detail || reason.code) ?? [],
     stale: fleet?.stale ?? false,

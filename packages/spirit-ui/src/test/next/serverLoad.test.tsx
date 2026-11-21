@@ -60,6 +60,9 @@ describe("CPU load display", () => {
     expect(result.cpuRatio).toBeNull();
     expect(result.cpuText).toBe("—");
     expect(result.ramText).toBe("—");
+    expect(result.diskText).toBe("unknown");
+    expect(result.diskShort).toBe("disk unknown");
+    expect(result.cpuOver).toBe(false);
     expect(result.load).toBeNull();
   });
 
@@ -67,6 +70,7 @@ describe("CPU load display", () => {
     const result = health(sample());
     expect(result.cpuText).toBe("load 2.1 / 8 cores");
     expect(result.cpuRatio).toBeCloseTo(2.1 / 8);
+    expect(result.cpuOver).toBe(false);
     expect(result.ramText).toContain("of");
     expect(result.diskText).toContain("free");
   });
@@ -81,6 +85,7 @@ describe("CPU load display", () => {
     const result = health(sample({ load1: 10.3 }));
     expect(result.cpuText).toBe("load 10.3 / 8 cores");
     expect(result.cpuRatio).toBe(1);
+    expect(result.cpuOver).toBe(true);
     expect(cpuDisplay(sample({ load1: 10.3 })).over).toBe(true);
   });
 
