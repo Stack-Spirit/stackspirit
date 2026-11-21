@@ -1220,7 +1220,9 @@ fn classify_probe_response(body: &[u8]) -> ProbeOutcome {
     }
 }
 
-/// Picks up to three cheap, active, text-capable candidate models for a key probe.
+const VERIFICATION_CANDIDATES: usize = 5;
+
+/// Picks up to five cheap, active, text-capable candidate models for a key probe.
 ///
 /// Reads a `/config/providers` or `/provider` document. Deprecated and non-text models are
 /// dropped; non-reasoning models rank before reasoning ones, then lowest input cost, then id.
@@ -1263,7 +1265,9 @@ pub fn select_verification_models(body: &[u8], provider: &str) -> Vec<String> {
                     != Some(false)
             })
     };
-    let mut ranked: Vec<(bool, f64, String)> = entries
+    // Free-tier models (`:free`) are rate-limited and often gated by account privacy
+    // settings, so a valid key can fail on them. Rank them after paid models.
+    let mut ranked: Vec<(bool, bool, f64, String)> = entries
         .iter()
         .filter(|(_, model)| text_capable(model))
         .map(|(id, model)| {
@@ -1275,16 +1279,21 @@ pub fn select_verification_models(body: &[u8], provider: &str) -> Vec<String> {
                 .pointer("/cost/input")
                 .and_then(Value::as_f64)
                 .unwrap_or(f64::MAX);
-            (reasoning, cost, id.clone())
+            (id.ends_with(":free"), reasoning, cost, id.clone())
         })
         .collect();
     ranked.sort_by(|a, b| {
         a.0.cmp(&b.0)
-            .then(a.1.total_cmp(&b.1))
-            .then_with(|| a.2.cmp(&b.2))
+            .then(a.1.cmp(&b.1))
+            .then(a.2.total_cmp(&b.2))
+            .then_with(|| a.3.cmp(&b.3))
     });
-    let mut chosen: Vec<String> = ranked.into_iter().map(|(_, _, id)| id).take(3).collect();
-    if chosen.len() < 3
+    let mut chosen: Vec<String> = ranked
+        .into_iter()
+        .map(|(_, _, _, id)| id)
+        .take(VERIFICATION_CANDIDATES)
+        .collect();
+    if chosen.len() < VERIFICATION_CANDIDATES
         && let Some(default) = document
             .pointer(&format!("/default/{provider}"))
             .and_then(Value::as_str)
@@ -1773,7 +1782,8 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
                 "img/image-only": { "capabilities": { "reasoning": false, "input": { "text": false }, "output": { "text": false } }, "cost": { "input": 0.0 } },
                 "cheap/text-b": { "capabilities": { "reasoning": false, "input": { "text": true }, "output": { "text": true } }, "cost": { "input": 0.05 } },
                 "cheap/text-a": { "capabilities": { "reasoning": false, "input": { "text": true }, "output": { "text": true } }, "cost": { "input": 0.05 } },
-                "mid/text": { "capabilities": { "reasoning": false }, "cost": { "input": 0.5 } }
+                "mid/text": { "capabilities": { "reasoning": false }, "cost": { "input": 0.5 } },
+                "free/model:free": { "capabilities": { "reasoning": false }, "cost": { "input": 0.0 } }
             } }
         ]
     }"#;
@@ -1781,7 +1791,17 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
     #[test]
     fn select_verification_models_prefers_cheap_active_text_non_reasoning() {
         let chosen = select_verification_models(OPENROUTER_FIXTURE, "openrouter");
-        assert_eq!(chosen, vec!["cheap/text-a", "cheap/text-b", "mid/text"]);
+        // Paid non-reasoning first, then paid reasoning, with the rate-limited free tier last.
+        assert_eq!(
+            chosen,
+            vec![
+                "cheap/text-a",
+                "cheap/text-b",
+                "mid/text",
+                "aion-labs/aion-2.0",
+                "free/model:free"
+            ]
+        );
         assert!(select_verification_models(OPENROUTER_FIXTURE, "missing").is_empty());
     }
 

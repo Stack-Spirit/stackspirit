@@ -250,6 +250,37 @@ describe("Composer → Engine & Models", () => {
     },
   );
 
+  it("shows Verifying… while checking, then Verified, and keeps the key", async () => {
+    const { bridge, user, dialog } = await openProviderPanel();
+    const card = within(dialog).getByTestId("engine-models-settings");
+    const row = await connectAnthropic(user, card);
+    let finish!: (value: { provider: string; state: "saved"; last_checked_at: string }) => void;
+    const pending = new Promise<{ provider: string; state: "saved"; last_checked_at: string }>(
+      (resolve) => {
+        finish = resolve;
+      },
+    );
+    vi.spyOn(bridge.engine, "verifyKey").mockReturnValue(pending);
+    await user.click(within(row).getByRole("button", { name: "Verify key" }));
+    const busy = await within(card).findByRole("button", { name: "Verifying…" });
+    expect(busy).toBeDisabled();
+    const verdict = {
+      provider: "anthropic",
+      state: "saved" as const,
+      last_checked_at: "2026-11-21T00:00:00Z",
+    };
+    vi.spyOn(bridge.engine, "keyStatus").mockResolvedValue([verdict]);
+    finish(verdict);
+    await waitFor(() =>
+      expect(within(card).getByTestId("provider-anthropic")).toHaveTextContent("Verified"),
+    );
+    expect(
+      within(within(card).getByTestId("provider-anthropic")).getByRole("button", {
+        name: "Remove Anthropic key",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("opens an inline key form from Replace key", async () => {
     const { user, dialog } = await openProviderPanel();
     const card = within(dialog).getByTestId("engine-models-settings");

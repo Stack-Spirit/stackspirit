@@ -1,6 +1,7 @@
 import {
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -449,6 +450,7 @@ function ModelPicker({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState<string | null>(null);
+  const [maxHeight, setMaxHeight] = useState<number | null>(null);
   const id = useId();
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -468,6 +470,24 @@ function ModelPicker({
     const timer = setTimeout(openPicker, 0);
     return () => clearTimeout(timer);
   }, [openRequest]);
+
+  // Cap the popover to the room between the trigger and the page header so the
+  // sticky search field never slides under the server banner; only the list scrolls.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const measure = () => {
+      const top = trigger.current?.getBoundingClientRect().top;
+      if (top === undefined) return;
+      let inset = 0;
+      for (const head of document.querySelectorAll(".nx-chat-head")) {
+        inset = Math.max(inset, head.getBoundingClientRect().bottom);
+      }
+      setMaxHeight(Math.max(140, Math.floor(top - inset - 6 - 8)));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [open]);
 
   useEffect(() => {
     if (open) search.current?.focus();
@@ -563,6 +583,7 @@ function ModelPicker({
           role="dialog"
           aria-label="Choose a model"
           data-testid="model-picker-popover"
+          style={maxHeight === null ? undefined : { maxHeight }}
         >
           <div className="nx-model-menu__search">
             <input

@@ -399,3 +399,22 @@ test("add project dialog meets WCAG 2.2 AA", async ({ page }) => {
   await expect(dialog.getByLabel("Project name")).toHaveValue("billing-api");
   await expectNoWcagViolations(page);
 });
+
+test("model picker search stays below the page header at a compact viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 700 });
+  await page.goto(url("empty"));
+  await page.getByRole("button", { name: /Set up with AI/ }).click();
+  await page.getByTestId("composer-model").click();
+  const popover = page.getByTestId("model-picker-popover");
+  await expect(popover).toBeVisible();
+  const search = page.getByTestId("composer-model-search");
+  const box = await search.boundingBox();
+  const head = await page.locator(".nx-chat-head").first().boundingBox();
+  expect(box).not.toBeNull();
+  expect(head).not.toBeNull();
+  expect(box!.y).toBeGreaterThanOrEqual(head!.y + head!.height);
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(700);
+  const pop = await popover.boundingBox();
+  expect(pop!.y).toBeGreaterThanOrEqual(head!.y + head!.height);
+});

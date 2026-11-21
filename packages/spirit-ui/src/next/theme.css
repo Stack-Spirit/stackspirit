@@ -1588,6 +1588,8 @@ button.nx-composer__start:hover {
 }
 
 .nx-model-menu__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
   max-height: min(360px, 55vh);
   overflow-y: auto;
   overscroll-behavior: contain;

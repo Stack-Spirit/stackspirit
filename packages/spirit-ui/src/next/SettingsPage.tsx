@@ -283,7 +283,7 @@ export function SettingsPage() {
             ? `${providerLabel(provider)} key verified.`
             : checked.state === "invalid"
               ? `${providerLabel(provider)} rejected this key. Replace or remove it.`
-              : `${providerLabel(provider)} is still unverified.`,
+              : `${providerLabel(provider)} is saved, but the engine could not confirm it yet (network, rate limit or model access). The key was kept; try Verify key again.`,
         );
       }
       await refreshEngine();
@@ -411,7 +411,7 @@ export function SettingsPage() {
                 disabled={busy === provider}
                 aria-label={`Verify ${label} key`}
               >
-                {busy === provider ? "Checking…" : "Verify key"}
+                {busy === provider ? "Verifying…" : "Verify key"}
               </button>
               <button
                 type="button"
@@ -615,7 +615,7 @@ function ProviderItem({
                 onClick={onVerify}
                 disabled={busy}
               >
-                {busy ? "Checking…" : "Verify key"}
+                {busy ? "Verifying…" : "Verify key"}
               </button>
               <button
                 type="button"
