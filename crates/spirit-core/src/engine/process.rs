@@ -1704,9 +1704,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 openrouter_key = (auth.get("openrouter") or {}).get("key")
                 if openrouter_key != "valid-test-key":
                     self.send_json({"info": {"error": {"statusCode": 401, "message": "Invalid API key"}}})
-                elif model_id.endswith(":free"):
-                    # Free-tier calls are rate-limited or privacy-gated, so a key probe
-                    # must never settle Unverified while a paid model could succeed.
+                elif model_id.endswith(":free") or model_id == "paid/model-a":
+                    # The first-ranked paid model and the free tier fail with a model-specific
+                    # 404, so a key probe must move on instead of settling Unverified.
                     self.send_json({"info": {"error": {"statusCode": 404, "message": "No endpoints found matching your data policy"}}})
                 else:
                     self.send_json({"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "OK"}]})
@@ -1948,7 +1948,7 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn openrouter_key_verifies_on_a_paid_model_when_free_models_fail() {
+    async fn openrouter_key_verifies_after_a_model_specific_404() {
         if !python_available() {
             return;
         }
@@ -1957,6 +1957,7 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         let binary = write_fake_engine(directory.path());
         let runtime = ProcessEngineRuntime::with_binary(binary);
         let info = runtime.spawn(0).await.unwrap();
+        // paid/model-a ranks first and answers 404, so Verified proves the fallback ran.
         let verified = runtime
             .verify_key(
                 info.port,

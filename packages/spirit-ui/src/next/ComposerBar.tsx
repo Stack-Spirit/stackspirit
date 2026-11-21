@@ -479,6 +479,9 @@ function ModelPicker({
       const top = trigger.current?.getBoundingClientRect().top;
       if (top === undefined) return;
       let inset = 0;
+      // The popover is clipped by .nx-chat, which sits below the pinned saved-server banner.
+      const clip = trigger.current?.closest(".nx-chat");
+      if (clip) inset = clip.getBoundingClientRect().top;
       for (const head of document.querySelectorAll(".nx-chat-head")) {
         inset = Math.max(inset, head.getBoundingClientRect().bottom);
       }

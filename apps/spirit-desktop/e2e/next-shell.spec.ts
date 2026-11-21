@@ -400,21 +400,36 @@ test("add project dialog meets WCAG 2.2 AA", async ({ page }) => {
   await expectNoWcagViolations(page);
 });
 
-test("model picker search stays below the page header at a compact viewport", async ({ page }) => {
-  await page.setViewportSize({ width: 1024, height: 700 });
-  await page.goto(url("empty"));
-  await page.getByRole("button", { name: /Set up with AI/ }).click();
+test("model picker search stays inside the chat clip below the saved-server banner", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 480 });
+  await page.goto(url("fresh"));
+  await page.getByRole("button", { name: "Chat with the setup assistant" }).click();
+  const message = page.getByRole("textbox", { name: "Message" });
+  await message.fill("hello");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".nx-hero")).toHaveClass(/nx-hero--docked/);
+  // Docked, the saved-server banner is pinned above the clipping container.
+  await expect(page.getByTestId("saved-server-card")).toBeVisible();
   await page.getByTestId("composer-model").click();
   const popover = page.getByTestId("model-picker-popover");
   await expect(popover).toBeVisible();
   const search = page.getByTestId("composer-model-search");
+  const clipTop = await page.locator(".nx-chat").first().evaluate((el) => el.getBoundingClientRect().top);
+  const banner = await page.getByTestId("saved-server-card").boundingBox();
   const box = await search.boundingBox();
-  const head = await page.locator(".nx-chat-head").first().boundingBox();
-  expect(box).not.toBeNull();
-  expect(head).not.toBeNull();
-  expect(box!.y).toBeGreaterThanOrEqual(head!.y + head!.height);
-  expect(box!.y).toBeGreaterThanOrEqual(0);
-  expect(box!.y + box!.height).toBeLessThanOrEqual(700);
   const pop = await popover.boundingBox();
-  expect(pop!.y).toBeGreaterThanOrEqual(head!.y + head!.height);
+  expect(banner).not.toBeNull();
+  expect(box).not.toBeNull();
+  expect(pop).not.toBeNull();
+  // The popover (not just the search) sits fully inside the clip and below the banner.
+  expect(pop!.y).toBeGreaterThanOrEqual(clipTop - 1);
+  expect(pop!.y).toBeGreaterThanOrEqual(banner!.y + banner!.height - 1);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(480);
+  // The search field is the topmost element at its own top edge (not covered by the banner).
+  const covered = await search.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + 1);
+    return !(hit && (hit === el || el.contains(hit)));
+  });
+  expect(covered).toBe(false);
 });
