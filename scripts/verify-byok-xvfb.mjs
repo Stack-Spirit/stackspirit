@@ -153,6 +153,18 @@ async function fetchEngine() {
 // ───────────────────────── step 2: live Rust test ─────────────────────────
 
 async function rustLiveTest() {
+  // The test re-execs itself through a tiny helper that joins a fresh session keyring,
+  // so the real keyutils backend is usable even when the container starts us in a
+  // read-only keyring. Require it on the x86_64 Linux VPS this runner targets; other
+  // hosts (and an explicit BYOK_ALLOW_KEYCHAIN_SKIP=1) may still report a skip.
+  const env = { ...process.env };
+  if (
+    process.platform === "linux" &&
+    process.arch === "x64" &&
+    env.BYOK_ALLOW_KEYCHAIN_SKIP !== "1"
+  ) {
+    env.BYOK_REQUIRE_OS_KEYCHAIN = "1";
+  }
   const output = await run(
     "scripts/cargo-gate.sh",
     [
@@ -167,7 +179,7 @@ async function rustLiveTest() {
       "--nocapture",
       "--test-threads=1",
     ],
-    { env: { ...process.env } },
+    { env },
   );
   const stats = [...output.matchAll(/\[([\w-]+)\] final opencode\.log: lines=(\d+) errors=(\d+) leaks=(\d+)/g)];
   if (stats.length === 0) fail("the live Rust test printed no opencode.log statistics");

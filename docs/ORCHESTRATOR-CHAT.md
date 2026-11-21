@@ -2591,12 +2591,13 @@ unsearchable menu is unusable. Modeled on OpenCode's model selector
 
 `ss-88` adds a repeatable, mock-free check of the BYOK flow on the Linux VPS (Xvfb,
 `webkit2gtk-4.1`, Playwright Chromium, the pinned `opencode` `1.19.5` sidecar from
-`node scripts/fetch-engine.mjs`, never `PATH`). The only key is the synthetic
-`sk-or-v1-test-dummy-not-a-real-key-00000000`; every check also scans for it.
+`node scripts/fetch-engine.mjs`, never `PATH`). The only key is a clearly synthetic
+dummy assembled from parts at runtime; every check also scans for it. No real key,
+`.env` file or secret value is read, printed or committed.
 
 | Layer | File | What runs for real |
 |---|---|---|
-| Rust | `crates/spirit-core/tests/byok_live_sidecar.rs` | `ProcessEngineRuntime` + `EngineSupervisor` + `LocalChatProvider` + `verify_provider_key` over the real sidecar, in a `tempfile` app-data dir, with `FakeKeychain` always and `OsKeychain` under `--features keychain` |
+| Rust | `crates/spirit-core/tests/byok_live_sidecar.rs` | `ProcessEngineRuntime` + `EngineSupervisor` + `LocalChatProvider` + `verify_provider_key` over the real sidecar, in a `tempfile` app-data dir, with `FakeKeychain` always and the real `OsKeychain` under `--features keychain` (the test re-execs itself through a tiny helper that joins a fresh session keyring first, because this container starts with a read-only one) |
 | Browser | `apps/spirit-desktop/e2e/xvfb-byok-live.spec.ts` | Real Chromium bridges `SettingsPage` and `ComposerBar` to a live sidecar's `/provider`, `/config/providers` and verification replies (the key lives only in the Node harness's memory and reaches the sidecar through `OPENCODE_AUTH_CONTENT`); axe WCAG 2.2 AA in light and dark |
 | Runner | `scripts/verify-byok-xvfb.mjs` | fetch engine → Rust live test → desktop binary boot smoke under `xvfb-run -a` → the Playwright spec under `xvfb-run -a` |
 
@@ -2629,31 +2630,43 @@ node scripts/fetch-engine.mjs
 scripts/cargo-gate.sh test -p spirit-core --features keychain --test byok_live_sidecar -- --nocapture --test-threads=1
 xvfb-run -a npx playwright test e2e/xvfb-byok-live.spec.ts      # from apps/spirit-desktop
 node scripts/verify-byok-xvfb.mjs                               # everything above plus the desktop boot smoke
-BYOK_REQUIRE_OS_KEYCHAIN=1 node scripts/verify-byok-xvfb.mjs    # fail instead of skipping when keyutils is blocked
 BYOK_ONLY=rust|boot|e2e node scripts/verify-byok-xvfb.mjs       # one step while debugging
+BYOK_ALLOW_KEYCHAIN_SKIP=1 node scripts/verify-byok-xvfb.mjs    # allow a keychain skip on an unusual host
 ```
+
+The runner requires the real keychain on Linux x86_64 (`BYOK_REQUIRE_OS_KEYCHAIN=1`); the
+test's keyring-join helper makes that pass here. On other hosts the test probes the native
+backend and records a skip instead.
 
 #### Verified results (this VPS, sidecar `opencode` `1.19.5`)
 
 - Rust live flow, `FakeKeychain`: passed; verify state `Invalid`; `opencode.log` 51 lines,
   errors 0, leaks 0. `cargo test -p spirit-core` (default features) passes with it.
+- Rust live flow, **real `OsKeychain`**: passed with `--features keychain` and
+  `BYOK_REQUIRE_OS_KEYCHAIN=1`; verify state `Invalid`; the saved key was still in the
+  kernel keyring after verification and the flow removed it at the end; `opencode.log`
+  51 lines, errors 0, leaks 0. The container's inherited session keyring is read-only, so
+  the test re-execs itself through a helper that joins a fresh anonymous session keyring;
+  no secret store outside the test's unique service was touched.
 - Playwright live spec: passed in light and dark (about 45 s each); `opencode.log` 24 lines,
   errors 0, leaks 0; axe clean apart from the open defect below.
-- **`OsKeychain` live flow skipped here.** This environment blocks the kernel keyring
-  (`keyctl(KEYCTL_GET_KEYRING_ID)` fails inside the job sandbox), so the test prints
-  `skipping: platform keychain unavailable`; set `BYOK_REQUIRE_OS_KEYCHAIN=1` on a host with
-  keyutils to make it mandatory. It has therefore **not** been run against the real
-  `OsKeychain` in this job.
+- `node scripts/verify-byok-xvfb.mjs`: fetch, both Rust flows and both Playwright runs pass;
+  it still exits non-zero at the boot smoke because of defect 1 below.
 
 #### Defects found by ss-88 (not fixed: outside the job's owned paths)
 
 1. **The desktop binary orphans the `opencode` sidecar on `SIGTERM`.** The boot smoke
    (`xvfb-run -a target/debug/spirit-desktop`, isolated `HOME`/XDG, 6 s, `SIGTERM`) leaves
-   one `opencode serve` alive for 10 s+ after the app exits. `apps/spirit-desktop/src-tauri/src/lib.rs`
+   one `opencode serve` parented to PID 1 after the app exits; it was still alive after
+   14 minutes, so there is no idle timeout that hides it. `apps/spirit-desktop/src-tauri/src/lib.rs`
    installs no signal handler and no `RunEvent::Exit` hook, so `EngineSupervisor`'s `Drop`
-   (`kill_now`) never runs. Fix in a follow-up: handle `SIGTERM`/`SIGINT` and
+   (`kill_now`) never runs. A normal window close is expected to drop the managed state,
+   but `SIGTERM` (and a systemd `KillMode=control-group` stop of only the main process)
+   bypasses it. Fix in a follow-up: handle `SIGTERM`/`SIGINT` and
    `RunEvent::ExitRequested`/`Exit` by stopping the supervisor, then re-run
-   `node scripts/verify-byok-xvfb.mjs`. Until then that command exits non-zero at the boot smoke.
+   `node scripts/verify-byok-xvfb.mjs`. Until then that command exits non-zero at the boot
+   smoke; the runner deliberately does not send the signal to the whole process group,
+   because that would hide the defect.
 2. **Picker scroll region is not keyboard-focusable.** With a long list axe reports
    `scrollable-region-focusable` on `.nx-model-menu__scroll` (the mock fixtures are too short
    to overflow). The spec carves out exactly that rule on exactly that element; remove the

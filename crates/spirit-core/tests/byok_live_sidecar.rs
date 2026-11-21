@@ -641,12 +641,54 @@ async fn live_sidecar_byok_flow_with_fake_keychain() {
     run_live_flow("fake-keychain", Arc::new(FakeKeychain::new())).await;
 }
 
-/// The real OS keychain flow. Set `BYOK_REQUIRE_OS_KEYCHAIN=1` (the runner does) to turn
-/// an unavailable keyutils backend into a failure instead of a skip.
+/// Re-execs this test binary after joining a fresh anonymous session keyring.
+///
+/// Some CI containers (including the VPS this suite targets) start the process in a
+/// read-only session keyring, which makes `add_key` fail even though the kernel keyutils
+/// backend itself is available. The test crate forbids `unsafe`, so the unprivileged
+/// `KEYCTL_JOIN_SESSION_KEYRING` call is made by a tiny Python helper that then `exec`s the
+/// same test binary. The child inherits the fresh keyring, so the real `OsKeychain` flow
+/// runs instead of skipping. Only the test process's keyring is changed.
+#[cfg(all(feature = "keychain", target_os = "linux", target_arch = "x86_64"))]
+const OS_KEYCHAIN_CHILD: &str = "SPIRIT_BYOK_OS_KEYCHAIN_CHILD";
+
+#[cfg(all(feature = "keychain", target_os = "linux", target_arch = "x86_64"))]
+fn run_os_keychain_in_joined_child() {
+    const HELPER: &str = "\
+import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+# SYS_keyctl = 250, KEYCTL_JOIN_SESSION_KEYRING = 1 on x86_64; NULL creates a new
+# anonymous session keyring for this process before exec.
+if libc.syscall(250, 1, None) < 0:
+    raise SystemExit('keyctl join session keyring failed: %d' % ctypes.get_errno())
+os.execv(sys.argv[1], sys.argv[1:])
+";
+    let exe = std::env::current_exe().expect("current test binary");
+    let status = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(HELPER)
+        .arg(exe)
+        .arg("live_sidecar_byok_flow_with_os_keychain")
+        .arg("--nocapture")
+        .env(OS_KEYCHAIN_CHILD, "1")
+        .status()
+        .expect("spawn the keyring-joined test child");
+    assert!(status.success(), "keyring-joined OS keychain test failed");
+}
+
+/// The real OS keychain flow. Set `BYOK_REQUIRE_OS_KEYCHAIN=1` to turn an unavailable
+/// keyutils backend into a failure instead of a skip (the runner sets it only when the
+/// host is expected to provide keyutils).
 #[cfg(feature = "keychain")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_sidecar_byok_flow_with_os_keychain() {
     use spirit_core::engine::OsKeychain;
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if std::env::var_os(OS_KEYCHAIN_CHILD).is_none() {
+        run_os_keychain_in_joined_child();
+        return;
+    }
 
     let index = tempfile::tempdir().expect("index dir");
     let service = format!("dev.stackspirit.byok-live.{}", ulid::Ulid::generate());
