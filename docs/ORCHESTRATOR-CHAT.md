@@ -2664,9 +2664,9 @@ PID 1 after `SIGTERM` (still alive 14 minutes later). `lib.rs` had no signal han
 `RunEvent` hook, so `EngineSupervisor`'s `Drop` (`kill_now`) never ran. The owner extended
 the job to fix it: `run()` now builds the app and, on `RunEvent::ExitRequested`/`Exit`, calls
 `stop_engine` (`EngineRuntime::kill_now`); `shutdown_on_signal` waits for `SIGTERM`/`SIGINT`,
-stops the engine and then calls `app.exit(0)`. `tokio`'s `signal` feature is enabled for
-`spirit-desktop` (and `tempfile` as a dev-dependency). The runner still signals only the app
-process, never the process group, so the app must stop its own child.
+stops the engine and then calls `app.exit(0)`. The signal path uses a libc
+`signal()` handler that sets an atomic flag polled every 50 ms, so no manifest change is
+needed. The runner still signals only the app process, never the process group, so the app must stop its own child.
 
 #### Open defects found by ss-88 (follow-up job `ss-91`, in `packages/spirit-ui`)
 
