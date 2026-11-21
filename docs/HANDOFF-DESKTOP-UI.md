@@ -456,6 +456,8 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
    free/connected badges, and a **Manage models** button (Meadow tokens, WCAG 2.2 AA);
    `ss-88` verifies the real bundled `opencode` `1.19.5` sidecar and desktop app under
    `xvfb-run` with live `opencode.log` inspection.
+   **`ss-87` landed** the searchable picker; **Manage models opens the existing Engine & Models
+   modal** (see `docs/ORCHESTRATOR-CHAT.md`).
 
 ## 6. Known gaps and cautions
 

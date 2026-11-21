@@ -244,6 +244,7 @@ export function ComposerBar({
               openRequest={openModelPickerRequest}
               onSelect={onSelectModel}
               onConnectProvider={() => setProviderSettingsOpen(true)}
+              onManageModels={() => setProviderSettingsOpen(true)}
             />
           ) : null}
           {showStaticModel ? (
@@ -345,6 +346,40 @@ export function ComposerDock({ usage }: { usage?: ChatUsageView | null }) {
   );
 }
 
+/** Case-insensitive match over label, id, provider and tier. Every term must hit. */
+export function filterChatModels(models: ChatModelView[], query: string): ChatModelView[] {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return models;
+  return models.filter((model) => {
+    const haystack = `${model.label} ${model.id} ${model.provider} ${tierLabel(model)}`.toLowerCase();
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
+/** Provider-owned models grouped by provider (popular order is the engine's order). */
+function providerSections(models: ChatModelView[]) {
+  const sections: { id: string; title: string; badge: string; models: ChatModelView[] }[] = [];
+  const free = models.filter((model) => model.tier === "included");
+  if (free.length > 0) {
+    sections.push({ id: "included", title: "OpenCode Free", badge: "Free", models: free });
+  }
+  for (const model of models) {
+    if (model.tier === "included") continue;
+    let section = sections.find((entry) => entry.id === `p:${model.provider}`);
+    if (!section) {
+      section = {
+        id: `p:${model.provider}`,
+        title: model.provider,
+        badge: "Connected",
+        models: [],
+      };
+      sections.push(section);
+    }
+    section.models.push(model);
+  }
+  return sections;
+}
+
 function ModelPicker({
   model,
   models,
@@ -352,6 +387,7 @@ function ModelPicker({
   openRequest = 0,
   onSelect,
   onConnectProvider,
+  onManageModels,
 }: {
   model: ChatModelView | null;
   models: ChatModelView[];
@@ -359,17 +395,38 @@ function ModelPicker({
   openRequest?: number;
   onSelect?: (modelId: string) => void;
   onConnectProvider?: () => void;
+  onManageModels?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
   const id = useId();
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const search = useRef<HTMLInputElement>(null);
+  /** A recovery notice opens the picker with focus left on the trigger (ss-76 contract). */
+  const keepTriggerFocus = useRef(false);
+
+  const optionId = (index: number) => `${id}-opt-${index}`;
+  const visible = filterChatModels(models, query);
+  const sections = providerSections(visible);
+  const flat = sections.flatMap((section) => section.models);
+  const indexOf = new Map(flat.map((candidate, index) => [candidate.id, index]));
+  const activeIndex = Math.min(active, Math.max(flat.length - 1, 0));
+
+  const close = (restoreFocus: boolean) => {
+    setOpen(false);
+    setQuery("");
+    setActive(0);
+    if (restoreFocus) trigger.current?.focus();
+  };
 
   useEffect(() => {
     if (openRequest <= 0) return;
     // A recovery notice asks for the picker after its click handler; defer one tick so
     // the popover can measure the trigger before it opens.
     const timer = setTimeout(() => {
+      keepTriggerFocus.current = true;
       setOpen(true);
       trigger.current?.focus();
     }, 0);
@@ -378,14 +435,13 @@ function ModelPicker({
 
   useEffect(() => {
     if (!open) return;
+    if (keepTriggerFocus.current) keepTriggerFocus.current = false;
+    else search.current?.focus();
     const onPointer = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
+      if (!root.current?.contains(event.target as Node)) close(false);
     };
     const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-        trigger.current?.focus();
-      }
+      if (event.key === "Escape") close(true);
     };
     document.addEventListener("pointerdown", onPointer);
     document.addEventListener("keydown", onKey);
@@ -394,6 +450,31 @@ function ModelPicker({
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    document.getElementById(optionId(activeIndex))?.scrollIntoView?.({ block: "nearest" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- optionId only closes over `id`
+  }, [open, activeIndex, query, id]);
+
+  const choose = (candidate: ChatModelView) => {
+    close(true);
+    onSelect?.(candidate.id);
+  };
+
+  const onSearchKey = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (flat.length > 0) setActive((activeIndex + 1) % flat.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (flat.length > 0) setActive((activeIndex - 1 + flat.length) % flat.length);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const candidate = flat[activeIndex];
+      if (candidate) choose(candidate);
+    }
+  };
 
   const current = model ? modelDisplayLabel(model) : "Choose a model";
 
@@ -410,7 +491,7 @@ function ModelPicker({
         data-testid="composer-model"
         title={current}
         disabled={disabled || !onSelect}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => (open ? close(false) : setOpen(true))}
       >
         <span className="nx-model-picker__label">{current}</span>
         <Chevron />
@@ -419,56 +500,112 @@ function ModelPicker({
         <div
           id={id}
           className="nx-menu__pop nx-menu__pop--above nx-menu__pop--start nx-model-menu"
-          role="menu"
-          aria-label="Choose a model"
+          data-testid="composer-model-popover"
         >
-          {groupChatModels(models).map((group) => (
-            <div
-              key={group.id}
-              className="nx-model-menu__section"
-              role="group"
-              aria-label={group.title}
-            >
-              <span className="nx-model-menu__heading" aria-hidden="true">
-                {group.title}
-              </span>
-              {group.models.map((candidate) => (
-                <button
-                  key={candidate.id}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={candidate.id === model?.id}
-                  className="nx-menu__item nx-model-menu__item"
-                  onClick={() => {
-                    setOpen(false);
-                    onSelect?.(candidate.id);
-                  }}
-                >
-                  <span className="nx-menu__icon" aria-hidden="true">
-                    {candidate.id === model?.id ? "✓" : ""}
-                  </span>
-                  <span className="nx-menu__text">{modelDisplayLabel(candidate)}</span>
-                  <span className="nx-menu__meta">{tierLabel(candidate)}</span>
-                </button>
-              ))}
-            </div>
-          ))}
-          <button
-            type="button"
-            role="menuitem"
-            className="nx-menu__item nx-model-menu__connect"
-            data-testid="composer-connect-provider"
-            onClick={() => {
-              setOpen(false);
-              onConnectProvider?.();
+          <input
+            ref={search}
+            type="search"
+            role="searchbox"
+            className="nx-model-menu__search"
+            data-testid="composer-model-search"
+            placeholder="Search models"
+            aria-label="Search models"
+            aria-controls={`${id}-list`}
+            aria-activedescendant={flat.length > 0 ? optionId(activeIndex) : undefined}
+            autoComplete="off"
+            spellCheck={false}
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setActive(0);
             }}
-            disabled={!onConnectProvider}
+            onKeyDown={onSearchKey}
+          />
+          <div
+            id={`${id}-list`}
+            className="nx-model-menu__list"
+            data-testid="composer-model-list"
+            role="menu"
+            aria-label="Choose a model"
           >
-            <span className="nx-menu__icon" aria-hidden="true">
-              ＋
-            </span>
-            <span className="nx-menu__text">Connect another provider…</span>
-          </button>
+            {sections.map((section) => (
+              <div
+                key={section.id}
+                className="nx-model-menu__section"
+                role="group"
+                aria-label={section.title}
+              >
+                <span className="nx-model-menu__heading">
+                  <span aria-hidden="true">{section.title}</span>
+                  <span className="nx-model-menu__badge" data-testid="model-section-badge">
+                    {section.badge}
+                  </span>
+                </span>
+                {section.models.map((candidate) => {
+                  const index = indexOf.get(candidate.id) ?? 0;
+                  return (
+                    <button
+                      key={candidate.id}
+                      id={optionId(index)}
+                      type="button"
+                      tabIndex={-1}
+                      role="menuitemradio"
+                      aria-checked={candidate.id === model?.id}
+                      data-active={index === activeIndex ? "true" : undefined}
+                      className="nx-menu__item nx-model-menu__item"
+                      onMouseMove={() => setActive(index)}
+                      onClick={() => choose(candidate)}
+                    >
+                      <span className="nx-menu__icon" aria-hidden="true">
+                        {candidate.id === model?.id ? "✓" : ""}
+                      </span>
+                      <span className="nx-menu__text">
+                        {modelDisplayLabel(candidate)}
+                        <span className="nx-model-menu__id" aria-hidden="true">
+                          {candidate.id}
+                        </span>
+                      </span>
+                      <span className="nx-menu__meta">{tierLabel(candidate)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+            {flat.length === 0 ? (
+              <p className="nx-model-menu__empty" role="status">
+                No models match “{query}”.
+              </p>
+            ) : null}
+          </div>
+          <div className="nx-model-menu__footer">
+            <button
+              type="button"
+              className="nx-menu__item nx-model-menu__manage"
+              data-testid="composer-manage-models"
+              onClick={() => {
+                close(false);
+                onManageModels?.();
+              }}
+              disabled={!onManageModels}
+            >
+              <span className="nx-menu__text">Manage models</span>
+            </button>
+            <button
+              type="button"
+              className="nx-menu__item nx-model-menu__connect"
+              data-testid="composer-connect-provider"
+              onClick={() => {
+                close(false);
+                onConnectProvider?.();
+              }}
+              disabled={!onConnectProvider}
+            >
+              <span className="nx-menu__icon" aria-hidden="true">
+                ＋
+              </span>
+              <span className="nx-menu__text">Connect another provider…</span>
+            </button>
+          </div>
         </div>
       ) : null}
     </div>

@@ -138,13 +138,43 @@ describe("Meadow composer", () => {
     const menu = screen.getByRole("menu", { name: "Choose a model" });
     const free = within(menu).getByRole("group", { name: "OpenCode Free" });
     expect(free).toHaveTextContent("DeepSeek V4.1 Flash Free");
-    const connected = within(menu).getByRole("group", { name: "Connected providers" });
-    expect(connected).toHaveTextContent("BYOK · DeepSeek V4.1 Flash");
+    expect(free).toHaveTextContent("Free");
+    expect(menu).toHaveTextContent("BYOK · DeepSeek V4.1 Flash");
+    expect(screen.getAllByTestId("model-section-badge").map((b) => b.textContent)).toContain(
+      "Connected",
+    );
 
-    const footer = within(menu).getByRole("menuitem", {
-      name: /Connect another provider/,
-    });
-    await user.click(footer);
+    await user.click(screen.getByTestId("composer-connect-provider"));
+    const dialog = await screen.findByRole("dialog", { name: "Engine & Models" });
+    expect(within(dialog).getByTestId("engine-models-settings")).toBeInTheDocument();
+  });
+
+  it("searches, navigates by keyboard and opens Manage models", async () => {
+    const { user, bridge } = await openSetup();
+    const setModel = vi.spyOn(bridge.chat!, "setModel");
+    await user.click(await screen.findByTestId("composer-model"));
+    const search = screen.getByRole("searchbox", { name: "Search models" });
+    expect(search).toHaveFocus();
+
+    await user.type(search, "zzz-no-such-model");
+    expect(screen.getByText(/No models match/)).toBeInTheDocument();
+
+    await user.clear(search);
+    await user.type(search, "pickle");
+    const menu = screen.getByRole("menu", { name: "Choose a model" });
+    expect(within(menu).getAllByRole("menuitemradio")).toHaveLength(1);
+    await user.keyboard("{Enter}");
+    await waitFor(() =>
+      expect(setModel).toHaveBeenCalledWith("setup", "opencode/big-pickle"),
+    );
+
+    await user.click(screen.getByTestId("composer-model"));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("composer-model-popover")).not.toBeInTheDocument();
+    expect(screen.getByTestId("composer-model")).toHaveFocus();
+
+    await user.click(screen.getByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-manage-models"));
     const dialog = await screen.findByRole("dialog", { name: "Engine & Models" });
     expect(within(dialog).getByTestId("engine-models-settings")).toBeInTheDocument();
   });

@@ -33,19 +33,22 @@ for (const theme of THEMES) {
     const model = page.getByTestId("composer-model");
     await expect(model).toContainText("OpenCode free");
     await model.click();
-    const menu = page.getByRole("menu", { name: "Choose a model" });
+    const popover = page.getByTestId("composer-model-popover");
+    const menu = popover.getByRole("menu", { name: "Choose a model" });
+    await expect(popover.getByRole("searchbox", { name: "Search models" })).toBeFocused();
     await expect(menu.getByRole("group", { name: "OpenCode Free" })).toContainText(
       "OpenCode free",
     );
-    await expect(menu.getByRole("group", { name: "Connected providers" })).toContainText(
-      "BYOK · DeepSeek V4.1 Flash",
+    await expect(menu).toContainText("BYOK · DeepSeek V4.1 Flash");
+    await expect(popover.getByTestId("composer-manage-models")).toContainText(
+      "Manage models",
     );
-    await expect(menu.getByTestId("composer-connect-provider")).toContainText(
+    await expect(popover.getByTestId("composer-connect-provider")).toContainText(
       "Connect another provider…",
     );
     await expectNoWcagViolations(page);
 
-    await menu.getByTestId("composer-connect-provider").click();
+    await popover.getByTestId("composer-connect-provider").click();
     const dialog = page.getByRole("dialog", { name: "Engine & Models" });
     await expect(dialog).toBeVisible();
     const card = dialog.getByTestId("engine-models-settings");

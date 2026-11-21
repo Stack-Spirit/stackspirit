@@ -2561,3 +2561,21 @@ unsearchable menu is unusable. Modeled on OpenCode's model selector
 - Settings keeps a key visible after `invalid`/`unverified`, labels it `Verified`, `Saved`,
   `Invalid key` or `Unverified`, offers `Replace key`, shows an alert for `missing`, and
   refreshes the engine, key list and setup models after every verify.
+
+### Landed in ss-87: searchable model picker and Manage models decision
+
+- `ComposerBar.tsx`'s `ModelPicker` is now a popover with a `Search models` searchbox
+  (`composer-model-search`, auto-focused on a user click), a bounded scroll list
+  (`role="menu"`, `max-height: min(340px, 50vh)`) grouped by provider with `Free` and
+  `Connected` badges plus the secondary model id, and a footer outside the scroll area.
+  Search matches label, id, provider and tier (every term must match). `ArrowUp`/`ArrowDown`
+  move a highlighted option through `aria-activedescendant`, `Enter` selects it, `Escape`
+  closes and returns focus to the trigger.
+- **Decision: Manage models opens the existing Engine & Models modal** (the same
+  `SettingsPage` the connect action uses), not a new surface. It lives in the popover footer
+  as `composer-manage-models`, next to `composer-connect-provider`. No new bridge call.
+- **Decision: the recovery notice's "Switch model" keeps focus on the trigger** (the `ss-76`
+  contract and `meadow-chat-retry.spec.ts` assert it); the search box takes focus only when
+  the user opens the picker themselves. Tab reaches it.
+- Verification: `npm run typecheck`, `lint` and the full `@stackspirit/ui` vitest suite
+  pass. The Playwright specs were updated but not run in this job.
