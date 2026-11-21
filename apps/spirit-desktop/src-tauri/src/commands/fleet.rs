@@ -226,7 +226,7 @@ async fn resolve_local_node(
     if let Some(node) = core.local_orchestrator_state().node {
         return Ok(node.name);
     }
-    let gates = crate::commands::local_orchestrator::current_local_gates(state).await;
+    let gates = current_gates(state).await;
     if let spirit_core::engine::LocalOrchestratorGate::Ready {
         node: Some(name), ..
     } = &gates.local_orchestrator
@@ -240,4 +240,24 @@ async fn resolve_local_node(
         "chat_gated: this computer is not an enrolled local node yet, so it cannot take a session over",
     )
     .with_hint("Pair this computer as a local node in Settings, then try again."))
+}
+
+/// The gate snapshot for the current connection, with build flags applied.
+///
+/// A missing or expired cache entry is the honest "unknown" default.
+async fn current_gates(state: &AppState) -> spirit_core::engine::GateSnapshot {
+    let connection = state.connection_manager().await.status();
+    if connection.state != "connected" {
+        return crate::state::default_gate_snapshot();
+    }
+    let Some(host_id) = connection.host_id else {
+        return crate::state::default_gate_snapshot();
+    };
+    let mut snapshot = state
+        .gate_cache()
+        .get(host_id.as_str(), Timestamp::now())
+        .map(crate::state::with_build_gate_features)
+        .unwrap_or_else(crate::state::default_gate_snapshot);
+    snapshot.enforce_local_orchestrator_flag();
+    snapshot
 }
