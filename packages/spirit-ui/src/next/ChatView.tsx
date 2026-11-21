@@ -236,7 +236,9 @@ function OwnershipBanner({ session }: { session: SessionId }) {
       if (isNotSupported(failure.code, failure.message)) {
         setUnsupported(true);
         setError(
-          "Take over isn't available with this VOWP yet. This session stays read-only.",
+          /chat_gated/.test(failure.message)
+            ? "Pair this computer as a local node in Settings to take sessions over. This session stays read-only until then."
+            : "Take over isn't available with this VOWP yet. This session stays read-only.",
         );
       } else {
         setError(failure.message);

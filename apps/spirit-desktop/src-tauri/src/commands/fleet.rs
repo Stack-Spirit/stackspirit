@@ -188,19 +188,6 @@ pub async fn session_takeover(
 ) -> CommandResult<SessionTakeoverResult> {
     SessionId::parse(&session_id)?;
     let client = state.client()?;
-    let core = state.core().await;
-    let node = core
-        .local_orchestrator_state()
-        .node
-        .map(|node| node.name)
-        .ok_or_else(|| {
-            SpiritError::new(
-                SpiritErrorCode::Gate,
-                "chat_gated: this computer is not an enrolled local node yet, so it cannot take a session over",
-            )
-            .with_hint("Pair this computer as a local node, then try again.")
-        })?;
-    let label = Some(format!("StackSpirit \u{b7} {node}"));
     let project = state
         .connection_manager()
         .await
@@ -213,6 +200,8 @@ pub async fn session_takeover(
             )
             .with_hint("Refresh the fleet view and try again.")
         })?;
+    let node = resolve_local_node(&state, client.as_ref(), Some(project.as_str())).await?;
+    let label = Some(format!("StackSpirit \u{b7} {node}"));
     client
         .session_takeover(SessionTakeoverRequest {
             session: session_id,
@@ -221,4 +210,34 @@ pub async fn session_takeover(
             project,
         })
         .await
+}
+
+/// The local node name for `--node`, never supplied by the renderer.
+///
+/// The chat screen never opens Settings, so the cached node card can be empty after a
+/// connect. Fall back to the probed gate's ready node and read its card, exactly as the
+/// local-orchestrator overview does.
+async fn resolve_local_node(
+    state: &AppState,
+    client: &dyn spirit_core::vowp::VowpClient,
+    project: Option<&str>,
+) -> Result<String, SpiritError> {
+    let core = state.core().await;
+    if let Some(node) = core.local_orchestrator_state().node {
+        return Ok(node.name);
+    }
+    let gates = crate::commands::local_orchestrator::current_local_gates(state).await;
+    if let spirit_core::engine::LocalOrchestratorGate::Ready {
+        node: Some(name), ..
+    } = &gates.local_orchestrator
+    {
+        if let Ok(card) = core.refresh_local_node(client, project, name).await {
+            return Ok(card.name.to_string());
+        }
+    }
+    Err(SpiritError::new(
+        SpiritErrorCode::Gate,
+        "chat_gated: this computer is not an enrolled local node yet, so it cannot take a session over",
+    )
+    .with_hint("Pair this computer as a local node in Settings, then try again."))
 }

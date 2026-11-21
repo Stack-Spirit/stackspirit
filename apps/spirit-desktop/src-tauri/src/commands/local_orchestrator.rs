@@ -240,7 +240,7 @@ impl AgentPathAddInput {
 /// A missing or expired cache entry is the honest "unknown" default, never a remembered
 /// `Ready` from another connection. The D6 action flag is derived from the three-part
 /// rule so a stale renderer cannot advertise an enabled action.
-async fn current_local_gates(state: &AppState) -> GateSnapshot {
+pub(crate) async fn current_local_gates(state: &AppState) -> GateSnapshot {
     let connection = state.connection_manager().await.status();
     if connection.state != "connected" {
         return default_gate_snapshot();
