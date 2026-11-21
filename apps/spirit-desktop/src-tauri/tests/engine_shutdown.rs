@@ -31,10 +31,10 @@ async fn sigterm_stops_the_sidecar() {
         binary.is_file(),
         "pinned sidecar missing: run `node scripts/fetch-engine.mjs`"
     );
-    let app_data = tempfile::tempdir().expect("tempdir");
-    let runtime: Arc<dyn EngineRuntime> = Arc::new(
-        ProcessEngineRuntime::with_binary(binary).with_private_state(app_data.path().to_path_buf()),
-    );
+    let app_data = std::env::temp_dir().join(format!("ss88-shutdown-{}", std::process::id()));
+    std::fs::create_dir_all(&app_data).expect("tempdir");
+    let runtime: Arc<dyn EngineRuntime> =
+        Arc::new(ProcessEngineRuntime::with_binary(binary).with_private_state(app_data.clone()));
     let info = runtime.spawn(0).await.expect("spawn sidecar");
     let pid = info.pid.expect("sidecar pid");
     assert!(pid_alive(pid), "sidecar should be running");

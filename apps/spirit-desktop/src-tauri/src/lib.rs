@@ -26,17 +26,30 @@ pub fn stop_engine(runtime: &dyn EngineRuntime) {
 /// Returns `false` immediately where signals cannot be installed.
 #[cfg(unix)]
 pub async fn shutdown_on_signal(runtime: Arc<dyn EngineRuntime>) -> bool {
-    use tokio::signal::unix::{SignalKind, signal};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
-    let (Ok(mut terminate), Ok(mut interrupt)) = (
-        signal(SignalKind::terminate()),
-        signal(SignalKind::interrupt()),
-    ) else {
+    static RECEIVED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn on_signal(_: i32) {
+        // Async-signal-safe: only touches an atomic.
+        RECEIVED.store(true, Ordering::SeqCst);
+    }
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+    const SIGINT: i32 = 2;
+    const SIGTERM: i32 = 15;
+    const SIG_ERR: usize = usize::MAX;
+
+    // SAFETY: `signal` is the libc function; the handler only stores to an atomic.
+    let installed =
+        unsafe { signal(SIGTERM, on_signal) != SIG_ERR && signal(SIGINT, on_signal) != SIG_ERR };
+    if !installed {
         return false;
-    };
-    tokio::select! {
-        _ = terminate.recv() => {}
-        _ = interrupt.recv() => {}
+    }
+    while !RECEIVED.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     stop_engine(runtime.as_ref());
     true
