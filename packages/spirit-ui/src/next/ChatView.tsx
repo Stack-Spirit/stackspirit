@@ -15,6 +15,7 @@ import type {
   HostKeyPin,
   HostKeyScan,
   HostProfile,
+  OrchestratorView,
   SessionOwnerView,
 } from "../bridge/wire";
 import { modelProviderLabel } from "../domain/engine";
@@ -145,6 +146,20 @@ function retryWaitLabel(retry: ChatRetryStatus, now: number): string {
 const LOCAL_HOLDER = "stackspirit";
 
 /**
+ * The orchestrator that serves a chat session. Global (`project === null`) selects the
+ * project-less card; a project prefers its `chat` card, then falls back to the first
+ * card for that project.
+ */
+export function selectProjectOrchestrator(
+  orchestrators: readonly OrchestratorView[],
+  project: string | null,
+): OrchestratorView | null {
+  const matches = orchestrators.filter((row) => (row.project ?? null) === project);
+  if (project === null) return matches[0] ?? null;
+  return matches.find((row) => row.app === "chat") ?? matches[0] ?? null;
+}
+
+/**
  * The structured owner of this orchestrator's VOWP session when another surface holds
  * it. Returns null when there is no owner, the owner is StackSpirit, or the session
  * cannot be resolved from the last snapshot.
@@ -157,9 +172,7 @@ function foreignOwner(
   const project = session.startsWith("project:")
     ? session.slice("project:".length)
     : null;
-  const orchestrator = fleet.orchestrators.find(
-    (row) => (row.project ?? null) === project,
-  );
+  const orchestrator = selectProjectOrchestrator(fleet.orchestrators, project);
   if (!orchestrator) return null;
   const owner = fleet.session_owners?.find(
     (row) => row.session_id === orchestrator.session_id,
