@@ -28,3 +28,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 default = ["d5"]
 d5 = []
 custom-protocol = ["tauri/custom-protocol"]
+
+[dev-dependencies]
+spirit-core = { path = "../../../crates/spirit-core", features = ["desktop", "fixtures"] }
