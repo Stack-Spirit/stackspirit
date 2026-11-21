@@ -147,6 +147,7 @@ export const MOCK_SCENARIOS = [
   "owner-running",
   "owner-local",
   "owner-unsupported",
+  "owner-project",
 ] as const;
 
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
@@ -246,6 +247,10 @@ const LOCAL_SESSION_ID = "01JCF5WQ8ZK3M2V7N4P6R8T0AE";
 const LOCAL_SURFACE_ID = "01J9Z00000000000000000000A";
 const LOCAL_REVOKED_SURFACE_ID = "01J9Z00000000000000000000B";
 const LOCAL_NODE = "mac-studio";
+/** The connected local agent node in the `owner-project` scenario. */
+const PROJECT_LOCAL_NODE = "local-mac";
+const PROJECT_CHAT_SESSION = "01JCF5WQ8ZK3M2V7N4P6R8T0BC";
+const PROJECT_OPENCODE_SESSION = "01JCF5WQ8ZK3M2V7N4P6R8T0BD";
 const LOCAL_PAIRING_CODE = "pairing-code-placeholder";
 
 /** One recorded D6 call. Preview-only; it never touches a real host or agent. */
@@ -339,6 +344,8 @@ export class MockBridge implements SpiritBridge {
   private ownerOverride: SessionOwnerView | null = null;
   /** Session ids passed to `takeoverSession`, for tests. */
   readonly takeovers: string[] = [];
+  /** Every `orchestratorMove` call, with the requested target. */
+  readonly orchestratorMoves: { name: string; target: OrchestratorMoveTarget }[] = [];
   private raw: RawDocument | null = null;
   private engineStatus: EngineStatus;
   private gateSnapshot: GateSnapshot;
@@ -755,6 +762,8 @@ export class MockBridge implements SpiritBridge {
           generated_at: this.now(),
           stale: false,
           latency: this.latency(),
+          orchestrators: this.makeOrchestrators(),
+          session_owners: this.makeSessionOwners(),
         };
       } else {
         this.fleetView = { ...this.fleetView, revision, latency: this.latency() };
@@ -1428,6 +1437,7 @@ export class MockBridge implements SpiritBridge {
       }
       this.requireLocalAction("orchestrator_move");
       this.recordLocal("orchestrator_move", name);
+      this.orchestratorMoves.push({ name, target: clone(target) });
       const orchestrator = this.localState.orchestrators.find((row) => row.name === name);
       if (!orchestrator) {
         throw errorDto("not_found", `Orchestrator ${name} was not found.`);
@@ -2511,6 +2521,7 @@ export class MockBridge implements SpiritBridge {
       case "gate-d6-incompatible":
         return "incompatible";
       case "gate-d6-ready":
+      case "owner-project":
         return "ready";
       case "gate-d6-revoked":
         return "revoked";
@@ -2529,7 +2540,44 @@ export class MockBridge implements SpiritBridge {
     }
   }
 
+  private localNodeName(): string {
+    return this.scenario === "owner-project" ? PROJECT_LOCAL_NODE : LOCAL_NODE;
+  }
+
   private makeLocalState(): MockLocalState {
+    const base = this.makeLocalStateBase();
+    if (this.scenario !== "owner-project") return base;
+    const node = PROJECT_LOCAL_NODE;
+    const card = (
+      name: string,
+      sessionId: string,
+      app: string,
+    ): LocalOrchestratorView => ({
+      name,
+      session_id: sessionId,
+      project: "stackspirit",
+      app,
+      state: "running",
+      node: null,
+      protocol: "vowp-agent/1",
+      agent_status: base.agent.state,
+      lease_holder: null,
+      session_state: "running",
+      join: this.localJoin(sessionId),
+    });
+    return {
+      ...base,
+      agent: { ...base.agent, node },
+      node: base.node ? { ...base.node, name: node } : base.node,
+      surfaces: base.surfaces.map((row) => ({ ...row, node })),
+      orchestrators: [
+        card("local-chat", PROJECT_CHAT_SESSION, "chat"),
+        card("local-stackspirit", PROJECT_OPENCODE_SESSION, "opencode"),
+      ],
+    };
+  }
+
+  private makeLocalStateBase(): MockLocalState {
     const gate = this.gateSnapshot.local_orchestrator;
     const agentState = this.gateSnapshot.local_agent.state;
     const emptyAgent: LocalAgentView = {
@@ -3255,6 +3303,18 @@ export class MockBridge implements SpiritBridge {
       },
       cost_today_usd: 1.37,
     };
+    if (this.scenario === "owner-project") {
+      return [
+        base,
+        {
+          name: "stackspirit",
+          state: "active",
+          paused_reason: "",
+          jobs_by_state: { ready: 1, done: 4 },
+          cost_today_usd: null,
+        },
+      ];
+    }
     if (this.scenario !== "multi-project" && this.scenario !== "busy") return [base];
     return [
       base,
@@ -3555,6 +3615,9 @@ export class MockBridge implements SpiritBridge {
 
   /** The Global orchestrator exists only in the ownership scenarios. */
   private makeOrchestrators(): OrchestratorView[] {
+    if (this.scenario === "owner-project") {
+      return this.localState.orchestrators.map((row) => this.toOrchestrator(row));
+    }
     if (!this.ownerScenario()) return [];
     return [
       {
@@ -3572,7 +3635,7 @@ export class MockBridge implements SpiritBridge {
   private makeOwner(): SessionOwnerView | null {
     if (this.ownerOverride) return this.ownerOverride;
     const base = {
-      session_id: OWNER_SESSION,
+      session_id: this.scenario === "owner-project" ? PROJECT_CHAT_SESSION : OWNER_SESSION,
       mode: "interactive",
       state: "active",
       epoch: 3,
@@ -3591,7 +3654,7 @@ export class MockBridge implements SpiritBridge {
         activity: "idle",
       };
     }
-    if (!this.ownerScenario()) return null;
+    if (!this.ownerScenario() && this.scenario !== "owner-project") return null;
     return {
       ...base,
       surface_id: "01JCF5WQ8ZK3M2V7N4P6R8T0AG",
@@ -3609,7 +3672,7 @@ export class MockBridge implements SpiritBridge {
   }
 
   private makeSessions(): SessionCardView[] {
-    const owner = this.makeOwner();
+    const owner = this.scenario === "owner-project" ? null : this.makeOwner();
     const ownerSessions: SessionCardView[] = owner
       ? [
           {
@@ -3671,6 +3734,7 @@ export class MockBridge implements SpiritBridge {
         return "ready-export-only";
       case "gate-asif-ready":
       case "gates-ready":
+      case "owner-project":
       case "asif-export-losses":
       case "asif-import-warnings":
       case "asif-strict-refusal":
@@ -3697,7 +3761,7 @@ export class MockBridge implements SpiritBridge {
         ? {
             state: "ready",
             agent_protocol: "vowp-agent/1",
-            node: LOCAL_NODE,
+            node: this.localNodeName(),
             capabilities: [
               "node_card",
               "offload_status",
@@ -3780,7 +3844,7 @@ export class MockBridge implements SpiritBridge {
       asif,
       local_agent: {
         state: agentState,
-        node: localReady ? LOCAL_NODE : agentState === "not_installed" ? null : LOCAL_NODE,
+        node: localReady ? this.localNodeName() : agentState === "not_installed" ? null : LOCAL_NODE,
         protocol:
           localReady || agentState === "revoked"
             ? "vowp-agent/1"

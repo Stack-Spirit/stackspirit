@@ -4462,3 +4462,68 @@ button.nx-node:hover {
 .nx-owner__error {
   color: var(--nx-danger);
 }
+
+/* Session host control: explicit Home / Local switch beside the header. */
+.nx-host {
+  display: grid;
+  gap: 8px;
+  margin: 0 24px 8px;
+  color: var(--nx-text);
+  font-size: 13px;
+}
+
+.nx-host__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.nx-host__label {
+  color: var(--nx-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.nx-host__button {
+  border: 1px solid var(--nx-line);
+  background: var(--nx-raised);
+  color: var(--nx-text);
+}
+
+.nx-host__status {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 10px;
+  border-radius: var(--nx-radius);
+  background: var(--nx-accent-soft);
+  color: var(--nx-accent-soft-ink);
+}
+
+.nx-host__panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius);
+  background: var(--nx-raised);
+}
+
+.nx-host__option {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.nx-host__hint {
+  color: var(--nx-muted);
+  font-size: 12px;
+}
+
+.nx-host__error {
+  margin: 0;
+  color: var(--nx-danger);
+}

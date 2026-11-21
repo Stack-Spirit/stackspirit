@@ -15,6 +15,7 @@ import type {
   HostKeyPin,
   HostKeyScan,
   HostProfile,
+  OrchestratorMoveTarget,
   OrchestratorView,
   SessionOwnerView,
 } from "../bridge/wire";
@@ -339,6 +340,209 @@ function OwnershipBanner({ session }: { session: SessionId }) {
   );
 }
 
+interface HostTarget {
+  key: string;
+  label: string;
+  target: OrchestratorMoveTarget | null;
+  disabled: boolean;
+  hint: string | null;
+}
+
+function hostLabel(orchestrator: OrchestratorView): string {
+  return orchestrator.node == null ? "Home" : `Local · ${orchestrator.node}`;
+}
+
+function movedNote(target: OrchestratorMoveTarget): string {
+  return `Moved to ${target.kind === "home" ? "Home" : target.node}. Reconnect the chat to use the new host.`;
+}
+
+/**
+ * The explicit session host control. It only ever shows the host from the refreshed
+ * orchestrator card, and it moves nothing until the owner picks a target.
+ */
+function HostControl({
+  session,
+  attached,
+  onReconnect,
+}: {
+  session: SessionId;
+  attached: boolean;
+  onReconnect: () => void;
+}) {
+  const fleet = useFleetStore((state) => state.fleet);
+  const bridge = useFleetStore((state) => state.bridge);
+  const [open, setOpen] = useState(false);
+  const [agentNode, setAgentNode] = useState<string | null>(null);
+  const [agentLoaded, setAgentLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const panelId = useId();
+
+  const project = session.startsWith("project:") ? session.slice("project:".length) : null;
+  const orchestrator =
+    session === "setup" || !fleet
+      ? null
+      : selectProjectOrchestrator(fleet.orchestrators, project);
+  const local = bridge?.localOrchestrators;
+  const move = local?.orchestratorMove;
+  const overview = local?.overview;
+
+  useEffect(() => {
+    if (!open || !overview) return;
+    let cancelled = false;
+    void overview()
+      .then((result) => {
+        if (cancelled) return;
+        setAgentNode(
+          result.agent.state === "connected" ? (result.agent.node ?? null) : null,
+        );
+        setAgentLoaded(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setAgentNode(null);
+        setAgentLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, overview]);
+
+  if (!orchestrator || !local || !move) return null;
+
+  const home: HostTarget = {
+    key: "home",
+    label: "Home (this server)",
+    target: { kind: "home" },
+    disabled: orchestrator.node == null,
+    hint: orchestrator.node == null ? "Already here" : null,
+  };
+  const localRow: HostTarget = agentNode
+    ? {
+        key: "local",
+        label: `Local · ${agentNode}`,
+        target: { kind: "node", node: agentNode },
+        disabled: orchestrator.node === agentNode,
+        hint: orchestrator.node === agentNode ? "Already here" : null,
+      }
+    : {
+        key: "local",
+        label: "Local · no connected agent",
+        target: null,
+        disabled: true,
+        hint: agentLoaded
+          ? "Pair and connect the local agent to run this chat on your Mac."
+          : "Checking the local agent…",
+      };
+  const rows = agentNode ? [localRow, home] : [home, localRow];
+
+  function close() {
+    setOpen(false);
+    buttonRef.current?.focus();
+  }
+
+  async function choose(target: OrchestratorMoveTarget) {
+    if (!orchestrator || !move || busy) return;
+    setBusy(true);
+    setError(null);
+    setNote(null);
+    try {
+      await move(orchestrator.name, target);
+      setOpen(false);
+      try {
+        await bridge?.fleet.refresh();
+      } catch {
+        // The next snapshot shows the new host; the move itself succeeded.
+      }
+      setNote(movedNote(target));
+    } catch (caught) {
+      const failure = toSpiritError(caught);
+      setError(
+        isNotSupported(failure.code, failure.message)
+          ? "This VOWP cannot move orchestrators yet. The chat stays on its current host."
+          : failure.message,
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="nx-host"
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && open) {
+          event.stopPropagation();
+          close();
+        }
+      }}
+    >
+      <div className="nx-host__row">
+        <span className="nx-host__label">Host</span>
+        <button
+          ref={buttonRef}
+          type="button"
+          className="nx-btn nx-btn--quiet nx-btn--sm nx-host__button"
+          data-testid="orchestrator-host"
+          aria-expanded={open}
+          aria-controls={open ? panelId : undefined}
+          aria-label={`Session host: ${hostLabel(orchestrator)}`}
+          onClick={() => {
+            if (!open) setAgentLoaded(false);
+            setOpen((value) => !value);
+          }}
+        >
+          {hostLabel(orchestrator)}
+        </button>
+        {note ? (
+          <span className="nx-host__status" role="status" data-testid="orchestrator-host-note">
+            {note}
+            {attached ? (
+              <button
+                type="button"
+                className="nx-btn nx-btn--sm"
+                onClick={onReconnect}
+              >
+                Reconnect
+              </button>
+            ) : null}
+          </span>
+        ) : null}
+      </div>
+      {open ? (
+        <div
+          id={panelId}
+          className="nx-host__panel"
+          role="group"
+          aria-label="Choose session host"
+          data-testid="orchestrator-host-panel"
+        >
+          {rows.map((row) => (
+            <div className="nx-host__option" key={row.key}>
+              <button
+                type="button"
+                className="nx-btn nx-btn--sm"
+                disabled={row.disabled || busy || !row.target}
+                onClick={() => row.target && void choose(row.target)}
+              >
+                {row.label}
+              </button>
+              {row.hint ? <span className="nx-host__hint">{row.hint}</span> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {error ? (
+        <p className="nx-host__error" role="alert" data-testid="orchestrator-host-error">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 export function ChatView({
   session,
   serverLabel,
@@ -544,6 +748,13 @@ export function ChatView({
         ) : null}
       </PageHeader>
 
+      {session !== "setup" ? (
+        <HostControl
+          session={session}
+          attached={view != null}
+          onReconnect={() => void restart(session)}
+        />
+      ) : null}
       {session !== "setup" ? <OwnershipBanner session={session} /> : null}
 
       {/* A stable slot keeps the chat (and the composer inside it) mounted when the
