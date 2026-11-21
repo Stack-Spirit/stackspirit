@@ -6,12 +6,9 @@ commits:
   - 63a6b10
   - 84b4c10
 tests:
-  - node scripts/fetch-engine.mjs (pinned sidecar present and verified)
-  - scripts/cargo-gate.sh fmt --all -- --check (clean)
-  - scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings (clean)
-  - scripts/cargo-gate.sh test -p spirit-core (407 passed; chat suite 14, incl. new non_sse_event_endpoint_stays_ready_without_reconnect_flicker)
-  - npm run test -w @stackspirit/ui (36 files, 375 tests passed, incl. new serverLoad.test.tsx)
-  - npm run typecheck -w @stackspirit/ui; npm run lint -w @stackspirit/ui (clean)
+  command: "node scripts/fetch-engine.mjs; scripts/cargo-gate.sh fmt --all -- --check; scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings; scripts/cargo-gate.sh test -p spirit-core; npm run test -w @stackspirit/ui; npm run typecheck -w @stackspirit/ui; npm run lint -w @stackspirit/ui"
+  passed: 782
+  failed: 0
 files_changed:
   - crates/spirit-core/src/engine/chat/local.rs
   - crates/spirit-core/tests/chat.rs
