@@ -780,6 +780,11 @@ export interface JoinView {
   chat: string;
 }
 
+/** Where an orchestrator moves to; matches the serde tagged enum in spirit-core. */
+export type OrchestratorMoveTarget =
+  | { kind: "home" }
+  | { kind: "node"; node: string };
+
 export interface OrchestratorView {
   name: string;
   session_id: string;

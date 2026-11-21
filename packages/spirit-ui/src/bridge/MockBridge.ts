@@ -70,6 +70,7 @@ import type {
   NodeCardView,
   OnboardingInstallInput,
   OnboardingInstallOutcome,
+  OrchestratorMoveTarget,
   OrchestratorNewInput,
   OrchestratorView,
   ProjectView,
@@ -260,7 +261,8 @@ export interface MockLocalCall {
     | "orchestrator_new"
     | "orchestrator_list"
     | "orchestrator_stop"
-    | "orchestrator_resume";
+    | "orchestrator_resume"
+    | "orchestrator_move";
   name: string | null;
 }
 
@@ -1413,6 +1415,34 @@ export class MockBridge implements SpiritBridge {
         ),
       };
       return clone(this.toOrchestrator(running));
+    },
+    orchestratorMove: async (
+      name: string,
+      target: OrchestratorMoveTarget,
+    ): Promise<OrchestratorView> => {
+      this.validateOrchestratorName(name);
+      this.requireConnectedHost();
+      if (target.kind === "node") this.validateNode(target.node);
+      else if (target.kind !== "home") {
+        throw errorDto("invalid_input", "Choose a node or home.");
+      }
+      this.requireLocalAction("orchestrator_move");
+      this.recordLocal("orchestrator_move", name);
+      const orchestrator = this.localState.orchestrators.find((row) => row.name === name);
+      if (!orchestrator) {
+        throw errorDto("not_found", `Orchestrator ${name} was not found.`);
+      }
+      const moved: LocalOrchestratorView = {
+        ...orchestrator,
+        node: target.kind === "node" ? target.node : null,
+      };
+      this.localState = {
+        ...this.localState,
+        orchestrators: this.localState.orchestrators.map((row) =>
+          row.name === name ? moved : row,
+        ),
+      };
+      return clone(this.toOrchestrator(moved));
     },
   };
 

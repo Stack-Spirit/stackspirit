@@ -150,6 +150,7 @@ pub fn run() {
             commands::local_orchestrator::local_orchestrator_list,
             commands::local_orchestrator::local_orchestrator_stop,
             commands::local_orchestrator::local_orchestrator_resume,
+            commands::local_orchestrator::local_orchestrator_move,
         ])
         .build(tauri::generate_context!())
         .expect("error while building StackSpirit")

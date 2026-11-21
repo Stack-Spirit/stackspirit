@@ -22,7 +22,9 @@ use spirit_core::time::Timestamp;
 use spirit_core::view::{
     AgentPathView, LocalAgentView, LocalOrchestratorView, LocalSurfaceView, OrchestratorView,
 };
-use spirit_core::vowp::{AgentPairRequest, AgentPairing, SurfacePairingView};
+use spirit_core::vowp::{
+    AgentPairRequest, AgentPairing, OrchestratorMoveTarget, SurfacePairingView,
+};
 use spirit_core::wire::{
     AgentPathAddRequest, NodeCard, OrchestratorApp, OrchestratorNewRequest, SurfaceEntry,
     SurfaceKind, SurfacePairRequest, SurfaceRevokeResult, SurfaceRotateRequest,
@@ -512,4 +514,18 @@ pub async fn local_orchestrator_resume(
     core.set_gates(gates);
     core.orchestrator_resume(client.as_ref(), &name, project.as_deref(), node.as_deref())
         .await
+}
+
+/// Moves an orchestrator to a node or back home after re-checking every D6 prerequisite.
+#[tauri::command]
+pub async fn local_orchestrator_move(
+    state: State<'_, AppState>,
+    name: String,
+    target: OrchestratorMoveTarget,
+) -> CommandResult<OrchestratorView> {
+    let gates = set_current_gates(state.inner()).await;
+    let client = state.client()?;
+    let core = state.core().await;
+    core.set_gates(gates);
+    core.orchestrator_move(client.as_ref(), &name, target).await
 }

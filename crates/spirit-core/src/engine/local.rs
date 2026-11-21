@@ -47,6 +47,8 @@ pub enum LocalOrchestratorAction {
     OrchestratorStop,
     /// `vowp orchestrator resume`.
     OrchestratorResume,
+    /// `vowp orchestrator move`.
+    OrchestratorMove,
 }
 
 impl LocalOrchestratorAction {
@@ -65,6 +67,7 @@ impl LocalOrchestratorAction {
             Self::OrchestratorList => "orchestrator_list",
             Self::OrchestratorStop => "orchestrator_stop",
             Self::OrchestratorResume => "orchestrator_resume",
+            Self::OrchestratorMove => "orchestrator_move",
         }
     }
 
@@ -81,6 +84,7 @@ impl LocalOrchestratorAction {
                 | Self::AgentPair
                 | Self::OrchestratorNew
                 | Self::OrchestratorResume
+                | Self::OrchestratorMove
         )
     }
 

@@ -50,6 +50,7 @@ import type {
   NewHostProfile,
   OnboardingInstallInput,
   OnboardingInstallOutcome,
+  OrchestratorMoveTarget,
   OrchestratorNewInput,
   OrchestratorView,
   RawDocument,
@@ -385,6 +386,14 @@ export interface SpiritBridge {
       name: string,
       project?: string | null,
       node?: string | null,
+    ): Promise<OrchestratorView>;
+    /**
+     * Moves an orchestrator to a node or back home. The backend re-checks the D6 gate
+     * and the connected agent; the result is only the card VOWP printed.
+     */
+    orchestratorMove(
+      name: string,
+      target: OrchestratorMoveTarget,
     ): Promise<OrchestratorView>;
   };
 }

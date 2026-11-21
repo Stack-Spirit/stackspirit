@@ -22,12 +22,12 @@ use crate::view::local::{AgentPathView, LocalAgentView, LocalOrchestratorView, L
 use crate::view::{FleetView, OrchestratorView};
 use crate::vowp::{
     AgentPairRequest, AgentPairing, AsifExport, AsifExportOptions, AsifImportOptions,
-    LocalAgentClient, SurfacePairing, VowpClient,
+    LocalAgentClient, OrchestratorMoveTarget, SurfacePairing, VowpClient,
 };
 use crate::wire::{
-    AgentPathAddRequest, AgentPathMap, AsifImportResponse, NodeCard, OrchestratorNewRequest,
-    ProjectName, SurfaceEntry, SurfacePairRequest, SurfaceRevokeResult, SurfaceRotateRequest,
-    SurfaceRotateResult, ensure_surface_id,
+    AgentPathAddRequest, AgentPathMap, AsifImportResponse, NodeCard, NodeName,
+    OrchestratorNewRequest, ProjectName, SurfaceEntry, SurfacePairRequest, SurfaceRevokeResult,
+    SurfaceRotateRequest, SurfaceRotateResult, ensure_surface_id,
 };
 
 /// A provider-key state returned to the UI. It never carries the key.
@@ -662,6 +662,28 @@ impl SpiritCore {
         Ok(OrchestratorView::from_card(&card))
     }
 
+    /// Moves an orchestrator to a node or back home after re-checking the D6 gate and the
+    /// connected agent. The returned view is only what VOWP printed.
+    pub async fn orchestrator_move(
+        &self,
+        client: &dyn VowpClient,
+        name: &str,
+        target: OrchestratorMoveTarget,
+    ) -> Result<OrchestratorView, SpiritError> {
+        validate_orchestrator_name(name)?;
+        let target_node = match &target {
+            OrchestratorMoveTarget::Home => None,
+            OrchestratorMoveTarget::Node { node } => Some(NodeName::parse(node)?),
+        };
+        self.require_connected_host()?;
+        self.local_orchestrator_guard(None).ensure(
+            LocalOrchestratorAction::OrchestratorMove,
+            target_node.as_ref().map(NodeName::as_str),
+        )?;
+        let card = client.orchestrator_move(name, target).await?;
+        Ok(OrchestratorView::from_card(&card))
+    }
+
     /// Builds the honest local surface cards: node, protocol, agent status, lease
     /// holder and session state, with revoked/expired surfaces marked non-writable.
     pub async fn local_surface_views(
@@ -745,7 +767,7 @@ impl SpiritCore {
     }
 }
 
-fn validate_orchestrator_name(name: &str) -> Result<(), SpiritError> {
+pub(crate) fn validate_orchestrator_name(name: &str) -> Result<(), SpiritError> {
     if name.is_empty()
         || name.len() > 64
         || name.starts_with('-')

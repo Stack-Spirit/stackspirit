@@ -219,6 +219,21 @@ pub trait VowpClient: Send + Sync {
         .with_hint("Connect with a VOWP client that implements the D6 orchestrator contract."))
     }
 
+    /// Moves an orchestrator to another node (or home) through `vowp orchestrator move`.
+    ///
+    /// The default refuses so a client that cannot move never fakes a new location.
+    async fn orchestrator_move(
+        &self,
+        _name: &str,
+        _target: OrchestratorMoveTarget,
+    ) -> Result<OrchestratorCard, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "local orchestrator move is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that implements the D6 orchestrator contract."))
+    }
+
     /// Reads one redacted `vowp node show --json` card.
     async fn node_card(
         &self,
@@ -514,6 +529,19 @@ fn takeover_unsupported(output: &CommandOutput) -> bool {
 fn not_supported_takeover(detail: &str) -> SpiritError {
     SpiritError::new(SpiritErrorCode::Gate, format!("not_supported: {detail}"))
         .with_hint("Update VOWP to 0.5.1 or newer. The banner stays read-only.")
+}
+
+/// Where `vowp orchestrator move` puts an orchestrator.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum OrchestratorMoveTarget {
+    /// Back to the home host (`--home`).
+    Home,
+    /// Onto a registered node (`--node <node>`).
+    Node {
+        /// Target node name.
+        node: String,
+    },
 }
 
 /// One takeover request. The surface kind and holder are fixed by StackSpirit.
@@ -962,6 +990,37 @@ impl VowpClient for SshVowpClient {
             .map_err(|err| SpiritError::parse("orchestrator resume", err))
     }
 
+    async fn orchestrator_move(
+        &self,
+        name: &str,
+        target: OrchestratorMoveTarget,
+    ) -> Result<OrchestratorCard, SpiritError> {
+        crate::service::validate_orchestrator_name(name)?;
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend([
+            "orchestrator".to_owned(),
+            "move".to_owned(),
+            name.to_owned(),
+        ]);
+        match target {
+            OrchestratorMoveTarget::Home => argv.push("--home".to_owned()),
+            OrchestratorMoveTarget::Node { node } => {
+                let node = NodeName::parse(&node)?;
+                argv.extend(["--node".to_owned(), node.as_str().to_owned()]);
+            }
+        }
+        let output = self.run(&argv, WRITE_TIMEOUT).await?;
+        if !output.success() && takeover_unsupported(&output) {
+            return Err(not_supported_takeover(
+                "the installed VOWP does not provide `orchestrator move`",
+            ));
+        }
+        let output = self.check_output(output)?;
+        serde_json::from_slice(&output.stdout)
+            .map_err(|err| SpiritError::parse("orchestrator move", err))
+    }
+
     async fn node_card(&self, project: Option<&str>, node: &str) -> Result<NodeCard, SpiritError> {
         NodeName::parse(node)?;
         let mut argv = self.base_argv();
@@ -1105,6 +1164,7 @@ struct MockState {
     orchestrator_new_calls: Vec<OrchestratorNewRequest>,
     orchestrator_stop_calls: Vec<String>,
     orchestrator_resume_calls: Vec<String>,
+    orchestrator_move_calls: Vec<(String, OrchestratorMoveTarget)>,
     node_cards: Vec<NodeCard>,
     secrets: SecretListView,
 }
@@ -1152,6 +1212,7 @@ impl MockVowpClient {
                 orchestrator_new_calls: Vec::new(),
                 orchestrator_stop_calls: Vec::new(),
                 orchestrator_resume_calls: Vec::new(),
+                orchestrator_move_calls: Vec::new(),
                 node_cards: Vec::new(),
                 secrets: SecretListView {
                     secrets: Vec::new(),
@@ -1378,6 +1439,16 @@ impl MockVowpClient {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .orchestrator_resume_calls
+            .clone()
+    }
+
+    /// Returns recorded orchestrator-move calls.
+    #[must_use]
+    pub fn orchestrator_move_calls(&self) -> Vec<(String, OrchestratorMoveTarget)> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .orchestrator_move_calls
             .clone()
     }
 
@@ -1675,6 +1746,31 @@ impl VowpClient for MockVowpClient {
             .find(|card| card.name == name)
             .cloned()
             .ok_or_else(|| SpiritError::not_found(&format!("orchestrator {name}")))
+    }
+
+    async fn orchestrator_move(
+        &self,
+        name: &str,
+        target: OrchestratorMoveTarget,
+    ) -> Result<OrchestratorCard, SpiritError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .orchestrator_move_calls
+            .push((name.to_owned(), target.clone()));
+        let new_node = match target {
+            OrchestratorMoveTarget::Home => None,
+            OrchestratorMoveTarget::Node { node } => Some(NodeName::parse(&node)?),
+        };
+        let card = state
+            .orchestrators
+            .iter_mut()
+            .find(|card| card.name == name)
+            .ok_or_else(|| SpiritError::not_found(&format!("orchestrator {name}")))?;
+        card.node = new_node;
+        Ok(card.clone())
     }
 
     async fn node_card(&self, _project: Option<&str>, node: &str) -> Result<NodeCard, SpiritError> {

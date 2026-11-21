@@ -25,7 +25,7 @@ use spirit_core::view::{
 };
 use spirit_core::vowp::{
     AgentPairRequest, CommandLocalAgent, LocalAgentClient, MockLocalAgentClient, MockVowpClient,
-    VowpClient,
+    OrchestratorMoveTarget, VowpClient,
 };
 use spirit_core::wire::{
     AGENT_PROTOCOL, AgentPathAddRequest, AgentPathMap, AgentStatusDocument, AgentSurfaceState,
@@ -1023,4 +1023,167 @@ fn d6_guard_state_never_contains_absolute_paths() {
     let json = serde_json::to_string(&state).unwrap();
     assert!(!json.contains("/Users/"), "{json}");
     assert!(json.contains("\"valid\""));
+}
+
+fn ssh_client(runner: Arc<FakeCommandRunner>) -> spirit_core::vowp::SshVowpClient {
+    spirit_core::vowp::SshVowpClient::new(
+        runner,
+        SshTarget::new("owner", "192.0.2.10", 22).unwrap(),
+        SshOptions::new("/tmp/opencode/known_hosts"),
+        None,
+    )
+}
+
+fn node_target(node: &str) -> OrchestratorMoveTarget {
+    OrchestratorMoveTarget::Node {
+        node: node.to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn orchestrator_move_uses_the_exact_node_and_home_argv() {
+    let card = orchestrator_card("vowp-local");
+    let runner = Arc::new(FakeCommandRunner::new(vec![
+        CommandOutput::ok(serde_json::to_vec(&card).unwrap()),
+        CommandOutput::ok(serde_json::to_vec(&card).unwrap()),
+    ]));
+    let client = ssh_client(runner.clone());
+    let moved = client
+        .orchestrator_move("vowp-local", node_target("mac-studio"))
+        .await
+        .unwrap();
+    assert_eq!(moved.node.as_ref().unwrap().as_str(), "mac-studio");
+    client
+        .orchestrator_move("vowp-local", OrchestratorMoveTarget::Home)
+        .await
+        .unwrap();
+    let calls = runner.calls();
+    assert_eq!(
+        remote_argv(&calls[0]),
+        "'vowp' '--json' 'orchestrator' 'move' 'vowp-local' '--node' 'mac-studio'"
+    );
+    assert_eq!(
+        remote_argv(&calls[1]),
+        "'vowp' '--json' 'orchestrator' 'move' 'vowp-local' '--home'"
+    );
+    assert!(!remote_argv(&calls[0]).contains("--project"));
+}
+
+#[tokio::test]
+async fn orchestrator_move_ready_gate_allows_and_records_the_target() {
+    let client = fresh_mock().with_orchestrators(vec![orchestrator_card("vowp-local")]);
+    let core = connected_core(&client).await;
+    core.set_gates(ready_snapshot());
+    core.set_local_node_card(&node_card());
+    let view = core
+        .orchestrator_move(&client, "vowp-local", node_target("mac-studio"))
+        .await
+        .unwrap();
+    assert_eq!(view.node.as_deref(), Some("mac-studio"));
+    let home = core
+        .orchestrator_move(&client, "vowp-local", OrchestratorMoveTarget::Home)
+        .await
+        .unwrap();
+    assert_eq!(home.node, None);
+    assert_eq!(
+        client.orchestrator_move_calls(),
+        vec![
+            ("vowp-local".to_owned(), node_target("mac-studio")),
+            ("vowp-local".to_owned(), OrchestratorMoveTarget::Home),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn orchestrator_move_refuses_waiting_gate_disconnected_agent_and_disabled_feature() {
+    let client = fresh_mock().with_orchestrators(vec![orchestrator_card("vowp-local")]);
+    let core = connected_core(&client).await;
+
+    core.set_gates(GateSnapshot {
+        features: GateFeatureFlags::default(),
+        ..serde_json::from_str(include_str!("../fixtures/vowp/gate-phase3-waiting.json")).unwrap()
+    });
+    let error = core
+        .orchestrator_move(&client, "vowp-local", OrchestratorMoveTarget::Home)
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("local_orchestrator"), "{error}");
+
+    let ready = ready_snapshot();
+    core.set_gates(GateSnapshot {
+        local_agent: LocalAgentStatus {
+            state: LocalAgentState::Reconnecting,
+            ..ready.local_agent.clone()
+        },
+        ..ready.clone()
+    });
+    let error = core
+        .orchestrator_move(&client, "vowp-local", OrchestratorMoveTarget::Home)
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("local_agent_connection"), "{error}");
+
+    // The service derives the flag from gate + agent, so the switch is asserted on the
+    // guard itself, which is what the service calls.
+    let mut no_flag = ready;
+    no_flag.features.local_orchestrator_actions = false;
+    let state = LocalOrchestratorState::default();
+    for target in [None, Some("mac-studio")] {
+        let error = LocalOrchestratorGuard::from_snapshot(&no_flag, &state)
+            .ensure(LocalOrchestratorAction::OrchestratorMove, target)
+            .unwrap_err();
+        assert!(
+            error.message.contains("local_orchestrator_actions"),
+            "{error}"
+        );
+    }
+    assert!(client.orchestrator_move_calls().is_empty());
+}
+
+#[tokio::test]
+async fn orchestrator_move_rejects_invalid_name_and_node_before_the_client_call() {
+    let client = fresh_mock().with_orchestrators(vec![orchestrator_card("vowp-local")]);
+    let core = connected_core(&client).await;
+    core.set_gates(ready_snapshot());
+    core.set_local_node_card(&node_card());
+    assert!(
+        core.orchestrator_move(&client, "-bad", OrchestratorMoveTarget::Home)
+            .await
+            .is_err()
+    );
+    assert!(
+        core.orchestrator_move(&client, "vowp-local", node_target("Bad Node;rm"))
+            .await
+            .is_err()
+    );
+    assert!(client.orchestrator_move_calls().is_empty());
+
+    let runner = Arc::new(FakeCommandRunner::new(vec![]));
+    let ssh = ssh_client(runner.clone());
+    assert!(
+        ssh.orchestrator_move("a b", OrchestratorMoveTarget::Home)
+            .await
+            .is_err()
+    );
+    assert!(
+        ssh.orchestrator_move("vowp-local", node_target("--home"))
+            .await
+            .is_err()
+    );
+    assert!(runner.calls().is_empty());
+}
+
+#[tokio::test]
+async fn orchestrator_move_missing_command_is_not_supported_and_never_fakes_a_card() {
+    for output in [
+        CommandOutput::fail(127, b"vowp: command not found".to_vec()),
+        CommandOutput::fail(2, b"error: unrecognized subcommand 'move'".to_vec()),
+    ] {
+        let runner = Arc::new(FakeCommandRunner::new(vec![output]));
+        let error = ssh_client(runner)
+            .orchestrator_move("vowp-local", OrchestratorMoveTarget::Home)
+            .await
+            .unwrap_err();
+        assert!(error.message.starts_with("not_supported:"), "{error}");
+    }
 }
