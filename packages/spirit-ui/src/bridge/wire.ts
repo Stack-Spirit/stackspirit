@@ -706,8 +706,6 @@ export interface SessionCardView {
   executor: ExecutorView | null;
   node: string;
   active_surface: SurfaceRefView | null;
-  /** Structured owner; absent or null on older VOWP snapshots. */
-  owner?: SessionOwnerView | null;
   last_event_at: Timestamp;
 }
 
@@ -1216,6 +1214,8 @@ export interface FleetView {
   lanes: JobLanes;
   inbox: InboxItemView[];
   sessions: SessionCardView[];
+  /** Structured session owners keyed by `session_id`; absent or empty on older VOWP. */
+  session_owners?: SessionOwnerView[];
   orchestrators: OrchestratorView[];
   latency: LatencyStats;
 }

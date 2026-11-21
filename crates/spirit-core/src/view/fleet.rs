@@ -47,6 +47,10 @@ pub struct FleetView {
     pub inbox: Vec<InboxItemView>,
     /// Session cards.
     pub sessions: Vec<SessionCardView>,
+    /// Structured session owners (VOWP 0.5.1), one per owned session; empty on older
+    /// snapshots. Keyed by `session_id`.
+    #[serde(default)]
+    pub session_owners: Vec<SessionOwnerView>,
     /// Orchestrator cards. The current contract has no `node` field.
     pub orchestrators: Vec<OrchestratorView>,
     /// Round-trip latency stats.
@@ -169,9 +173,6 @@ pub struct SessionCardView {
     pub node: String,
     /// Live lease holder.
     pub active_surface: Option<SurfaceRefView>,
-    /// Structured owner (VOWP 0.5.1); `None` on older snapshots.
-    #[serde(default)]
-    pub owner: Option<SessionOwnerView>,
     /// Newest event time.
     pub last_event_at: Timestamp,
 }
@@ -324,6 +325,11 @@ impl FleetView {
             lanes,
             inbox,
             sessions,
+            session_owners: snapshot
+                .sessions
+                .iter()
+                .filter_map(|session| session.owner.as_ref().map(owner_view))
+                .collect(),
             orchestrators,
             latency,
         }
@@ -449,7 +455,6 @@ fn session_view(session: &SessionSurfaceCard) -> SessionCardView {
         executor: session.executor.as_deref().map(ExecutorView::parse),
         node: session.node.as_str().to_owned(),
         active_surface: session.active_surface.as_ref().map(surface_view),
-        owner: session.owner.as_ref().map(owner_view),
         last_event_at: session.last_event_at,
     }
 }

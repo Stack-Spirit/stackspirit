@@ -135,7 +135,7 @@ pub fn run() {
             commands::asif::probe_gates_with_build_flags,
             commands::asif::asif_export,
             commands::asif::asif_import,
-            commands::session::session_takeover,
+            commands::fleet::session_takeover,
             commands::local_orchestrator::local_orchestrator_overview,
             commands::local_orchestrator::local_agent_status,
             commands::local_orchestrator::local_agent_pair,

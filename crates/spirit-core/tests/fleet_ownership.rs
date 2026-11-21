@@ -12,7 +12,8 @@ use spirit_core::ssh::command::CommandOutput;
 use spirit_core::ssh::{FakeCommandRunner, SshOptions, SshTarget};
 use spirit_core::time::Timestamp;
 use spirit_core::view::FleetView;
-use spirit_core::vowp::{SessionTakeoverRequest, SshVowpClient, VowpClient};
+use spirit_core::vowp::client::SessionTakeoverRequest;
+use spirit_core::vowp::{SshVowpClient, VowpClient};
 use spirit_core::wire::parse_fleet_status;
 
 const FRESH: &str = include_str!("../fixtures/vowp/fleet-status-fresh.json");
@@ -71,7 +72,7 @@ fn owner_populated_snapshot_parses_and_reaches_the_view() {
     assert_eq!(owner.epoch, 7);
 
     let view = fleet(&bytes);
-    let owner = view.sessions[0].owner.as_ref().unwrap();
+    let owner = view.session_owners.first().unwrap();
     assert_eq!(owner.label, "OpenCode · macbook");
     assert_eq!(owner.holder, "opencode");
     assert_eq!(owner.activity, "running");
@@ -85,7 +86,7 @@ fn owner_populated_snapshot_parses_and_reaches_the_view() {
 fn a_null_or_blank_label_falls_back_to_the_holder() {
     for label in [Value::Null, json!("  ")] {
         let view = fleet(&status_with_owner(Some(owner_json(label, "idle"))));
-        assert_eq!(view.sessions[0].owner.as_ref().unwrap().label, "opencode");
+        assert_eq!(view.session_owners.first().unwrap().label, "opencode");
     }
 }
 
@@ -100,7 +101,7 @@ fn owner_defaults_apply_when_optional_fields_are_missing() {
         "heartbeat_at": "2026-11-14T11:59:55.000Z"
     });
     let view = fleet(&status_with_owner(Some(owner)));
-    let owner = view.sessions[0].owner.as_ref().unwrap();
+    let owner = view.session_owners.first().unwrap();
     assert_eq!(owner.activity, "idle");
     assert_eq!(owner.mode, "interactive");
     assert_eq!(owner.state, "active");
@@ -116,9 +117,7 @@ fn older_snapshot_without_owner_still_parses() {
     assert!(parsed.snapshot.sessions[0].owner.is_none());
     // The shipped fixture predates `owner` and must keep working unchanged.
     let view = fleet(FRESH.as_bytes());
-    assert!(view.sessions.iter().all(|session| session.owner.is_none()));
-    let value = serde_json::to_value(&view.sessions[0]).unwrap();
-    assert!(value["owner"].is_null());
+    assert!(view.session_owners.is_empty());
 }
 
 fn client(responses: Vec<CommandOutput>) -> (Arc<FakeCommandRunner>, SshVowpClient) {

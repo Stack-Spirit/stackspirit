@@ -4,7 +4,10 @@ use serde::Serialize;
 use spirit_core::error::{SpiritError, SpiritErrorCode};
 use spirit_core::time::Timestamp;
 use spirit_core::view::{FleetView, InboxItemView, TargetView};
-use spirit_core::wire::{CapacityReportDoc, FleetStatus, JobAction, SetTargetInput, WireWarning};
+use spirit_core::vowp::client::{SessionTakeoverRequest, SessionTakeoverResult};
+use spirit_core::wire::{
+    CapacityReportDoc, FleetStatus, JobAction, SessionId, SetTargetInput, WireWarning,
+};
 use tauri::State;
 
 use crate::error::CommandResult;
@@ -168,4 +171,39 @@ fn project_for_job(view: &FleetView, job_id: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Takes a session over for StackSpirit.
+///
+/// The renderer supplies only the session id. The local node and surface label come
+/// from the host-side local-node state, and the idle-versus-running confirmation is a
+/// UI decision made before this call. A VOWP without the command returns a typed
+/// `not_supported` error and no ownership is faked.
+#[tauri::command]
+pub async fn session_takeover(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> CommandResult<SessionTakeoverResult> {
+    SessionId::parse(&session_id)?;
+    let client = state.client()?;
+    let core = state.core().await;
+    let node = core
+        .local_orchestrator_state()
+        .node
+        .map(|node| node.name)
+        .ok_or_else(|| {
+            SpiritError::new(
+                SpiritErrorCode::Gate,
+                "chat_gated: this computer is not an enrolled local node yet, so it cannot take a session over",
+            )
+            .with_hint("Pair this computer as a local node, then try again.")
+        })?;
+    let label = Some(format!("StackSpirit \u{b7} {node}"));
+    client
+        .session_takeover(SessionTakeoverRequest {
+            session: session_id,
+            node,
+            label,
+        })
+        .await
 }

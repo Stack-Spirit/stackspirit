@@ -22,12 +22,12 @@ use crate::view::local::{AgentPathView, LocalAgentView, LocalOrchestratorView, L
 use crate::view::{FleetView, OrchestratorView};
 use crate::vowp::{
     AgentPairRequest, AgentPairing, AsifExport, AsifExportOptions, AsifImportOptions,
-    LocalAgentClient, SessionTakeoverRequest, SessionTakeoverResult, SurfacePairing, VowpClient,
+    LocalAgentClient, SurfacePairing, VowpClient,
 };
 use crate::wire::{
     AgentPathAddRequest, AgentPathMap, AsifImportResponse, NodeCard, OrchestratorNewRequest,
-    ProjectName, SessionId, SurfaceEntry, SurfacePairRequest, SurfaceRevokeResult,
-    SurfaceRotateRequest, SurfaceRotateResult, ensure_surface_id,
+    ProjectName, SurfaceEntry, SurfacePairRequest, SurfaceRevokeResult, SurfaceRotateRequest,
+    SurfaceRotateResult, ensure_surface_id,
 };
 
 /// A provider-key state returned to the UI. It never carries the key.
@@ -538,39 +538,6 @@ impl SpiritCore {
         self.local_orchestrator_guard(None)
             .ensure(LocalOrchestratorAction::SurfaceRevoke, None)?;
         client.surface_revoke(surface).await
-    }
-
-    /// Takes one session over for StackSpirit.
-    ///
-    /// The node is the local node the host already resolved; the renderer never
-    /// supplies it. Without a known local node the call refuses and the banner stays
-    /// read-only. The idle-versus-running confirmation is the UI's job.
-    pub async fn session_takeover(
-        &self,
-        client: &dyn VowpClient,
-        session: &str,
-    ) -> Result<SessionTakeoverResult, SpiritError> {
-        SessionId::parse(session)?;
-        self.require_connected_host()?;
-        let node = self
-            .local_orchestrator_state()
-            .node
-            .map(|node| node.name)
-            .ok_or_else(|| {
-                SpiritError::new(
-                    SpiritErrorCode::Gate,
-                    "chat_gated: this computer is not an enrolled local node yet, so it cannot take a session over",
-                )
-                .with_hint("Pair this computer as a local node, then try again.")
-            })?;
-        let label = Some(format!("StackSpirit \u{b7} {node}"));
-        client
-            .session_takeover(SessionTakeoverRequest {
-                session: session.to_owned(),
-                node,
-                label,
-            })
-            .await
     }
 
     /// Reads the Mac agent status through the local command runner.

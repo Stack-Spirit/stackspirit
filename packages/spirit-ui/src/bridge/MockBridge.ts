@@ -1036,26 +1036,31 @@ export class MockBridge implements SpiritBridge {
           "Update VOWP to 0.5.1 or newer. The banner stays read-only.",
         );
       }
-      const current = this.fleetView?.sessions.find((session) => session.id === sessionId);
-      if (!this.fleetView || !current?.owner) {
+      const currentOwner = this.fleetView?.session_owners?.find(
+        (owner) => owner.session_id === sessionId,
+      );
+      if (!this.fleetView || !currentOwner) {
         throw errorDto("not_found", "That session has no owner to take over from.");
       }
       this.takeovers.push(sessionId);
-      const previous = current.owner.label;
+      const previous = currentOwner.label;
       this.ownerOverride = {
-        ...current.owner,
+        ...currentOwner,
         surface_id: "01JCF5WQ8ZK3M2V7N4P6R8T0AH",
         label: "StackSpirit · macbook",
         holder: "stackspirit",
         kind: "chat",
         node: "macbook",
         activity: "idle",
-        epoch: current.owner.epoch + 1,
+        epoch: currentOwner.epoch + 1,
         acquired_at: this.now(),
         heartbeat_at: this.now(),
       };
       const revision = this.nextRevision();
-      this.fleetView = { ...this.fleetView, revision, sessions: this.makeSessions() };
+      this.fleetView = { ...this.fleetView, revision,
+        sessions: this.makeSessions(),
+        session_owners: this.makeSessionOwners(),
+      };
       this.emit({ kind: "fleet", revision, fleet: clone(this.fleetView) });
       return { session_id: sessionId, previous };
     },
@@ -2843,6 +2848,7 @@ export class MockBridge implements SpiritBridge {
         options: [],
       })),
       sessions: this.makeSessions(),
+      session_owners: this.makeSessionOwners(),
       orchestrators: this.makeOrchestrators(),
       latency: this.latency(),
     };
@@ -3567,6 +3573,11 @@ export class MockBridge implements SpiritBridge {
     };
   }
 
+  private makeSessionOwners(): SessionOwnerView[] {
+    const owner = this.makeOwner();
+    return owner ? [owner] : [];
+  }
+
   private makeSessions(): SessionCardView[] {
     const owner = this.makeOwner();
     const ownerSessions: SessionCardView[] = owner
@@ -3581,7 +3592,6 @@ export class MockBridge implements SpiritBridge {
             executor: null,
             node: "vps",
             active_surface: null,
-            owner,
             last_event_at: this.now(),
           },
         ]
