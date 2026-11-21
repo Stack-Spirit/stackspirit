@@ -584,7 +584,14 @@ function ModelPicker({
               onKeyDown={onSearchKeyDown}
             />
           </div>
-          <div className="nx-model-menu__scroll" ref={list}>
+          <div
+            className="nx-model-menu__scroll"
+            ref={list}
+            role="region"
+            aria-label="Models"
+            tabIndex={0}
+            data-testid="model-picker-scroll"
+          >
             {visible.length === 0 ? (
               <p className="nx-model-menu__empty" role="status">
                 {`No models match “${trimmed}”.`}
@@ -593,7 +600,7 @@ function ModelPicker({
               <div
                 id={`${id}-list`}
                 role="listbox"
-                aria-label="Models"
+                aria-label="Model list"
                 className="nx-model-menu__list"
               >
                 {groups.map((group) => (

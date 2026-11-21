@@ -1548,12 +1548,15 @@ button.nx-composer__start:hover {
   min-width: 272px;
   max-width: min(400px, calc(100vw - 24px));
   padding: 0;
-  overflow: hidden;
+  /* clip, not hidden: hidden is still programmatically scrollable and let
+     scrollIntoView slide the search header over the first rows (ss-91). */
+  overflow: clip;
 }
 
 .nx-model-menu__search {
-  position: sticky;
-  top: 0;
+  /* A flex sibling of the scroller, never inside it, so it cannot cover rows. */
+  position: relative;
+  flex: none;
   z-index: 1;
   padding: 8px;
   border-bottom: 1px solid var(--nx-line);
@@ -1589,6 +1592,12 @@ button.nx-composer__start:hover {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 5px;
+  scroll-padding: 5px;
+}
+
+.nx-model-menu__scroll:focus-visible {
+  outline: 2px solid var(--nx-accent);
+  outline-offset: -2px;
 }
 
 .nx-model-menu__list {
@@ -1682,8 +1691,7 @@ button.nx-composer__start:hover {
 }
 
 .nx-model-menu__footer {
-  position: sticky;
-  bottom: 0;
+  flex: none;
   display: grid;
   gap: 1px;
   padding: 5px;

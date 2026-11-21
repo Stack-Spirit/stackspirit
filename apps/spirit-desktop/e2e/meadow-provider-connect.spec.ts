@@ -119,6 +119,91 @@ for (const theme of THEMES) {
 }
 
 for (const theme of THEMES) {
+  test(`Long model list is keyboard-scrollable with no header overlap (${theme})`, async ({
+    page,
+  }) => {
+    await page.goto(url(theme));
+    await page.getByRole("button", { name: /Set up with AI/ }).click();
+    const model = page.getByTestId("composer-model");
+
+    // Connect three preview providers so the list is long enough to scroll.
+    await model.click();
+    await page.getByTestId("composer-connect-provider").click();
+    const dialog = page.getByRole("dialog", { name: "Engine & Models" });
+    const card = dialog.getByTestId("engine-models-settings");
+    const search = card.getByRole("searchbox", { name: "Search providers" });
+    for (const [id, name] of [
+      ["openrouter", "OpenRouter"],
+      ["anthropic", "Anthropic"],
+      ["openai", "OpenAI"],
+    ] as const) {
+      await search.fill(name);
+      const row = card.getByTestId(`provider-${id}`);
+      await row.getByRole("button", { name: `Connect ${name}` }).click();
+      await row.getByLabel(`API key for ${name}`).fill("not-a-real-provider-key");
+      await row.getByRole("button", { name: "Save key" }).click();
+      await expect(row).toContainText("Connected");
+    }
+    await dialog.getByRole("button", { name: "Close dialog" }).click();
+
+    await model.click();
+    const menu = page.getByTestId("model-picker-popover");
+    const scroller = menu.getByRole("region", { name: "Models" });
+    await expect(menu.getByTestId("composer-model-search")).toBeFocused();
+    expect(
+      await scroller.evaluate((node) => node.scrollHeight > node.clientHeight),
+    ).toBe(true);
+
+    // Tab moves from the search field into the scroll region.
+    await page.keyboard.press("Tab");
+    await expect(scroller).toBeFocused();
+
+    const overlap = () =>
+      page.evaluate(() => {
+        const header = document
+          .querySelector(".nx-model-menu__search")!
+          .getBoundingClientRect();
+        const box = document
+          .querySelector(".nx-model-menu__scroll")!
+          .getBoundingClientRect();
+        const first = document
+          .querySelector(".nx-model-menu__heading")!
+          .getBoundingClientRect();
+        return {
+          headerBottom: header.bottom,
+          scrollTop: box.top,
+          firstHeadingTop: first.top,
+        };
+      });
+
+    // At the top the first heading sits below the header, never under it.
+    await scroller.evaluate((node) => (node.scrollTop = 0));
+    let rect = await overlap();
+    expect(rect.scrollTop).toBeGreaterThanOrEqual(rect.headerBottom - 1);
+    expect(rect.firstHeadingTop).toBeGreaterThanOrEqual(rect.headerBottom - 1);
+    await expectNoWcagViolations(page);
+
+    // Keyboard scrolling to the bottom keeps the popover itself unscrolled.
+    await page.keyboard.press("End");
+    await expect
+      .poll(() => scroller.evaluate((n) => n.scrollTop + n.clientHeight >= n.scrollHeight - 1))
+      .toBe(true);
+    rect = await overlap();
+    expect(rect.scrollTop).toBeGreaterThanOrEqual(rect.headerBottom - 1);
+    expect(await menu.evaluate((node) => node.scrollTop)).toBe(0);
+    await expectNoWcagViolations(page);
+
+    await page.keyboard.press("Home");
+    await expect.poll(() => scroller.evaluate((n) => n.scrollTop)).toBe(0);
+
+    const results = await new AxeBuilder({ page })
+      .withRules(["scrollable-region-focusable"])
+      .analyze();
+    expect(results.violations).toEqual([]);
+  });
+}
+
+for (const theme of THEMES) {
   test(`Settings shows the Engine & Models panel (${theme})`, async ({ page }) => {
     await page.goto(`/?theme=${theme}`);
     await expect(page.getByTestId("next-shell")).toBeVisible();

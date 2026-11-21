@@ -353,6 +353,45 @@ describe("Searchable model picker", () => {
     expect(screen.getByTestId("composer-model")).toHaveFocus();
   });
 
+  it("exposes a focusable, labelled scroll region that owns the listbox", async () => {
+    const { user } = renderPicker();
+    await user.click(screen.getByTestId("composer-model"));
+    const scroller = screen.getByRole("region", { name: "Models" });
+    expect(scroller).toHaveAttribute("tabindex", "0");
+    expect(within(scroller).getByRole("listbox")).toBeInTheDocument();
+    expect(screen.getByTestId("composer-model-search")).toHaveFocus();
+    await user.tab();
+    expect(scroller).toHaveFocus();
+  });
+
+  it("keeps the search header outside the scroll region so it cannot cover the first heading", async () => {
+    const { user } = renderPicker();
+    await user.click(screen.getByTestId("composer-model"));
+    const scroller = screen.getByRole("region", { name: "Models" });
+    const header = screen
+      .getByTestId("composer-model-search")
+      .closest(".nx-model-menu__search")!;
+    expect(header).not.toBeNull();
+    expect(scroller.contains(header)).toBe(false);
+    const first = scroller.querySelector(".nx-model-menu__heading")!;
+    expect(first).toHaveTextContent("OpenCode Free");
+    expect(scroller.firstElementChild).toContainElement(first as HTMLElement);
+    // Header precedes the scroller as a sibling (flex column), not a sticky overlay.
+    expect(header.nextElementSibling).toBe(scroller);
+  });
+
+  it("still navigates with the keyboard and selects with the mouse", async () => {
+    const { user, onSelect } = renderPicker();
+    await user.click(screen.getByTestId("composer-model"));
+    const search = screen.getByTestId("composer-model-search");
+    await user.keyboard("{ArrowDown}");
+    expect(
+      document.getElementById(search.getAttribute("aria-activedescendant") ?? ""),
+    ).toHaveTextContent("Claude Sonnet 4");
+    await user.click(screen.getByRole("option", { name: /Zeta/ }));
+    expect(onSelect).toHaveBeenCalledWith("acme/zeta");
+  });
+
   it("Manage models opens Engine & Models in place (not onOpenEngineSettings)", async () => {
     const { user, onOpenEngineSettings } = renderPicker();
     await user.click(screen.getByTestId("composer-model"));
