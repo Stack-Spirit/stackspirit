@@ -7,6 +7,7 @@ import type {
   ChatPermissionPrompt,
   ChatRetryStatus,
   ChatSessionState,
+  ChatUsageView,
   ChatToolActivity,
   ChatToolStatus,
   FleetView,
@@ -15,6 +16,7 @@ import type {
   HostKeyScan,
   HostProfile,
 } from "../bridge/wire";
+import { modelProviderLabel } from "../domain/engine";
 import { useFleet, useFleetStore } from "../state/fleetStore";
 import { ComposerBar } from "./ComposerBar";
 import {
@@ -24,7 +26,7 @@ import {
 } from "./conversations";
 import { EmptyHero } from "./EmptyHero";
 import { PageHeader } from "./PageHeader";
-import { SpiritMark } from "./SpiritMark";
+import { SpiritLoader } from "./SpiritLoader";
 import { openInbox, projectSummaries } from "./summary";
 
 export interface ChatViewProps {
@@ -208,6 +210,20 @@ export function ChatView({
   const hasReply = visibleMessages.some(
     (message) => message.origin === "model" || message.origin === "preview",
   );
+  let lastAssistantIndex = -1;
+  for (let i = visibleMessages.length - 1; i >= 0; i--) {
+    const m = visibleMessages[i]!;
+    if (m.role === "user") break;
+    if (m.origin === "model" || m.origin === "preview") {
+      lastAssistantIndex = i;
+      break;
+    }
+  }
+  const lastUserText =
+    [...visibleMessages]
+      .reverse()
+      .find((m) => m.role === "user")
+      ?.text.join("\n\n") ?? null;
   const pendingPermissions = view?.pending_permissions ?? [];
   const hero = !hasConversation && visibleMessages.length === 0 && pendingPermissions.length === 0;
   const secureCardOpen = visibleMessages.some(
@@ -373,9 +389,25 @@ export function ChatView({
           ) : null}
           {visibleMessages.length > 0 || pendingPermissions.length > 0 ? (
             <div className="nx-chat__inner">
-              {visibleMessages.map((message) => (
-                <Message key={message.id} session={session} message={message} />
+              {visibleMessages.map((message, index) => (
+                <Message
+                  key={message.id}
+                  session={session}
+                  message={message}
+                  model={view?.model ?? null}
+                  usage={index === lastAssistantIndex ? (view?.usage ?? null) : null}
+                  onRetry={
+                    index === lastAssistantIndex && state === "ready" && lastUserText
+                      ? () => void send(session, lastUserText)
+                      : null
+                  }
+                />
               ))}
+              {state === "streaming" && !retry ? (
+                <div className="nx-msg__thinking">
+                  <SpiritLoader label="StackSpirit is replying" />
+                </div>
+              ) : null}
               {pendingPermissions.map((prompt) => (
                 <PermissionCard
                   key={prompt.id}
@@ -694,7 +726,122 @@ function RetryNotice({
   );
 }
 
-function Message({ session, message }: { session: SessionId; message: ChatMessageView }) {
+function compactTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
+  return String(value);
+}
+
+function messageTime(createdAt: string | undefined): string | null {
+  if (!createdAt) return null;
+  const at = new Date(createdAt);
+  if (Number.isNaN(at.getTime())) return null;
+  return at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * The quiet footer under a finished assistant reply: copy, model and provider, token or
+ * context figures when the engine reported them, and the time. Retry appears only on the
+ * newest reply of a settled session. Nothing here is invented: absent data is omitted.
+ */
+function AnswerFooter({
+  message,
+  model,
+  usage,
+  onRetry,
+}: {
+  message: ChatMessageView;
+  model: ChatModelView | null;
+  usage: ChatUsageView | null;
+  onRetry: (() => void) | null;
+}) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  async function copy() {
+    const text = message.text.join("\n\n");
+    try {
+      await navigator.clipboard?.writeText(text);
+    } catch {
+      return;
+    }
+    setCopied(true);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1800);
+  }
+
+  const meta: string[] = [];
+  if (message.origin === "preview") {
+    meta.push("Preview");
+  } else if (model) {
+    meta.push(`${model.label} · ${modelProviderLabel(model.provider)}`);
+  }
+  if (usage) {
+    if (usage.output_tokens != null) meta.push(`${compactTokens(usage.output_tokens)} out`);
+    if (usage.context_tokens_used != null && usage.context_limit) {
+      meta.push(
+        `${compactTokens(usage.context_tokens_used)} / ${compactTokens(usage.context_limit)} context`,
+      );
+    }
+  }
+  const time = messageTime(message.created_at);
+  if (time) meta.push(time);
+
+  return (
+    <div className="nx-msg-footer" data-testid="answer-footer">
+      <button
+        type="button"
+        className="nx-msg-footer__btn"
+        onClick={() => void copy()}
+        aria-label={copied ? "Copied" : "Copy answer"}
+        data-testid="answer-copy"
+      >
+        <span aria-hidden="true">{copied ? "✓" : "⧉"}</span>
+        <span>{copied ? "Copied" : "Copy"}</span>
+      </button>
+      {onRetry ? (
+        <button
+          type="button"
+          className="nx-msg-footer__btn"
+          onClick={onRetry}
+          data-testid="answer-retry"
+        >
+          <span aria-hidden="true">↻</span>
+          <span>Retry</span>
+        </button>
+      ) : null}
+      {meta.length > 0 ? (
+        <span className="nx-msg-footer__meta" data-testid="answer-meta">
+          {meta.map((item) => (
+            <span key={item} data-testid={item === "Preview" ? "preview-tag" : undefined}>
+              {item}
+            </span>
+          ))}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function Message({
+  session,
+  message,
+  model,
+  usage,
+  onRetry,
+}: {
+  session: SessionId;
+  message: ChatMessageView;
+  model: ChatModelView | null;
+  usage: ChatUsageView | null;
+  onRetry: (() => void) | null;
+}) {
   if (message.role === "user") {
     return (
       <div className="nx-msg nx-msg--user">
@@ -705,30 +852,31 @@ function Message({ session, message }: { session: SessionId; message: ChatMessag
     );
   }
   const received = message.card?.kind === "secure-received";
-  const preview = message.origin === "preview";
   const card = <MessageCard session={session} message={message} />;
+  const answered =
+    !message.streaming &&
+    (message.origin === "model" || message.origin === "preview") &&
+    message.text.some((paragraph) => paragraph.trim() !== "");
   return (
-    <div className={`nx-msg${message.streaming ? " nx-msg--streaming" : ""}`}>
-      <div className="nx-msg__who">
-        <SpiritMark size={20} />
-        <span>StackSpirit</span>
-        {preview ? (
-          <span className="nx-msg__preview" data-testid="preview-tag">
-            Preview
-          </span>
-        ) : null}
-        {message.streaming ? <span className="nx-msg__cursor" aria-hidden="true" /> : null}
-      </div>
+    <div
+      className={`nx-msg nx-msg--assistant${message.streaming ? " nx-msg--streaming" : ""}`}
+      data-testid="assistant-message"
+    >
       {received ? card : null}
       {message.tools && message.tools.length > 0 ? <ToolActivity tools={message.tools} /> : null}
-      {message.text
-        .filter((paragraph) => paragraph.trim() !== "" || !message.tools?.length)
-        .map((paragraph, index) => (
-          <p key={index} className={received ? "nx-secure__outcome" : undefined}>
-            {paragraph}
-          </p>
-        ))}
+      <div className="nx-msg__body">
+        {message.text
+          .filter((paragraph) => paragraph.trim() !== "" || !message.tools?.length)
+          .map((paragraph, index) => (
+            <p key={index} className={received ? "nx-secure__outcome" : undefined}>
+              {paragraph}
+            </p>
+          ))}
+      </div>
       {received ? null : card}
+      {answered ? (
+        <AnswerFooter message={message} model={model} usage={usage} onRetry={onRetry} />
+      ) : null}
     </div>
   );
 }
