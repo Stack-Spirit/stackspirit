@@ -429,40 +429,6 @@ export function ComposerDock({ usage }: { usage?: ChatUsageView | null }) {
   );
 }
 
-/** Case-insensitive match over label, id, provider and tier. Every term must hit. */
-export function filterChatModels(models: ChatModelView[], query: string): ChatModelView[] {
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  if (terms.length === 0) return models;
-  return models.filter((model) => {
-    const haystack = `${model.label} ${model.id} ${model.provider} ${tierLabel(model)}`.toLowerCase();
-    return terms.every((term) => haystack.includes(term));
-  });
-}
-
-/** Provider-owned models grouped by provider (popular order is the engine's order). */
-function providerSections(models: ChatModelView[]) {
-  const sections: { id: string; title: string; badge: string; models: ChatModelView[] }[] = [];
-  const free = models.filter((model) => model.tier === "included");
-  if (free.length > 0) {
-    sections.push({ id: "included", title: "OpenCode Free", badge: "Free", models: free });
-  }
-  for (const model of models) {
-    if (model.tier === "included") continue;
-    let section = sections.find((entry) => entry.id === `p:${model.provider}`);
-    if (!section) {
-      section = {
-        id: `p:${model.provider}`,
-        title: model.provider,
-        badge: "Connected",
-        models: [],
-      };
-      sections.push(section);
-    }
-    section.models.push(model);
-  }
-  return sections;
-}
-
 function ModelPicker({
   model,
   models,
@@ -509,13 +475,14 @@ function ModelPicker({
 
   useEffect(() => {
     if (!open) return;
-    if (keepTriggerFocus.current) keepTriggerFocus.current = false;
-    else search.current?.focus();
     const onPointer = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) close(false);
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
     };
     const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") close(true);
+      if (event.key === "Escape") {
+        setOpen(false);
+        trigger.current?.focus();
+      }
     };
     document.addEventListener("pointerdown", onPointer);
     document.addEventListener("keydown", onKey);
