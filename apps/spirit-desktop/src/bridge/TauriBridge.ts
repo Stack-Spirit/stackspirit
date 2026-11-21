@@ -52,6 +52,7 @@ import type {
   NewHostProfile,
   OnboardingInstallInput,
   OnboardingInstallOutcome,
+  OrchestratorMoveTarget,
   OrchestratorNewInput,
   OrchestratorView,
   RawDocument,
@@ -337,5 +338,10 @@ export class TauriBridge implements SpiritBridge {
         project: project ?? null,
         node: node ?? null,
       }),
+    orchestratorMove: (
+      name: string,
+      target: OrchestratorMoveTarget,
+    ): Promise<OrchestratorView> =>
+      call("local_orchestrator_move", { name, target }),
   };
 }

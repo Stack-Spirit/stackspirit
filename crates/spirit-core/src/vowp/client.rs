@@ -531,6 +531,11 @@ fn not_supported_takeover(detail: &str) -> SpiritError {
         .with_hint("Update VOWP to 0.5.1 or newer. The banner stays read-only.")
 }
 
+fn not_supported_move(detail: &str) -> SpiritError {
+    SpiritError::new(SpiritErrorCode::Gate, format!("not_supported: {detail}"))
+        .with_hint("Update VOWP to 0.5.1 or newer. The orchestrator stays where it is.")
+}
+
 /// Where `vowp orchestrator move` puts an orchestrator.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -1012,7 +1017,7 @@ impl VowpClient for SshVowpClient {
         }
         let output = self.run(&argv, WRITE_TIMEOUT).await?;
         if !output.success() && takeover_unsupported(&output) {
-            return Err(not_supported_takeover(
+            return Err(not_supported_move(
                 "the installed VOWP does not provide `orchestrator move`",
             ));
         }
