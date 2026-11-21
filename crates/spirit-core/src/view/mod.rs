@@ -17,7 +17,7 @@ pub use capacity::{
 pub use executor::{ExecutorView, friendly_model_name};
 pub use fleet::{
     FleetView, InboxItemView, JoinView, OrchestratorView, ProjectView, SessionCardView,
-    SupervisorView, SurfaceRefView, WorkerCardView,
+    SessionOwnerView, SupervisorView, SurfaceRefView, WorkerCardView,
 };
 pub use format::{
     format_age_secs, format_bytes_gib, format_clock, format_percent, short_id, truncate_chars,

@@ -79,6 +79,8 @@ import type {
   SecretSetInput,
   SecretSetOutcome,
   SessionCardView,
+  SessionOwnerView,
+  SessionTakeoverResult,
   SessionId,
   SetTargetInput,
   SpiritErrorDto,
@@ -140,10 +142,15 @@ export const MOCK_SCENARIOS = [
   "chat-session-lost",
   "chat-tools",
   "chat-permission",
+  "owner-idle",
+  "owner-running",
+  "owner-local",
+  "owner-unsupported",
 ] as const;
 
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
 
+const OWNER_SESSION = "01JCF5WQ8ZK3M2V7N4P6R8T0AB";
 const EPOCH = Date.parse("2026-11-14T12:00:00.000Z");
 const GIB = 1024 ** 3;
 const OLD_SHA = "SHA256:oldPin0000000000000000000000000000000000000";
@@ -327,6 +334,9 @@ export class MockBridge implements SpiritBridge {
   private hostList: HostProfile[];
   private connectionState: ConnectionSnapshot;
   private fleetView: FleetView | null = null;
+  private ownerOverride: SessionOwnerView | null = null;
+  /** Session ids passed to `takeoverSession`, for tests. */
+  readonly takeovers: string[] = [];
   private raw: RawDocument | null = null;
   private engineStatus: EngineStatus;
   private gateSnapshot: GateSnapshot;
@@ -1017,6 +1027,38 @@ export class MockBridge implements SpiritBridge {
   sessionsApi = {
     list: async (): Promise<SessionCardView[]> =>
       clone(this.fleetView?.sessions ?? []),
+    takeoverSession: async (sessionId: string): Promise<SessionTakeoverResult> => {
+      this.requireSessionId(sessionId);
+      if (this.scenario === "owner-unsupported") {
+        throw errorDto(
+          "gate",
+          "not_supported: the installed VOWP does not provide `session takeover`",
+          "Update VOWP to 0.5.1 or newer. The banner stays read-only.",
+        );
+      }
+      const current = this.fleetView?.sessions.find((session) => session.id === sessionId);
+      if (!this.fleetView || !current?.owner) {
+        throw errorDto("not_found", "That session has no owner to take over from.");
+      }
+      this.takeovers.push(sessionId);
+      const previous = current.owner.label;
+      this.ownerOverride = {
+        ...current.owner,
+        surface_id: "01JCF5WQ8ZK3M2V7N4P6R8T0AH",
+        label: "StackSpirit · macbook",
+        holder: "stackspirit",
+        kind: "chat",
+        node: "macbook",
+        activity: "idle",
+        epoch: current.owner.epoch + 1,
+        acquired_at: this.now(),
+        heartbeat_at: this.now(),
+      };
+      const revision = this.nextRevision();
+      this.fleetView = { ...this.fleetView, revision, sessions: this.makeSessions() };
+      this.emit({ kind: "fleet", revision, fleet: clone(this.fleetView) });
+      return { session_id: sessionId, previous };
+    },
     exportAsif: async (
       sessionId: string,
       options: AsifExportOptions = {},
@@ -2801,7 +2843,7 @@ export class MockBridge implements SpiritBridge {
         options: [],
       })),
       sessions: this.makeSessions(),
-      orchestrators: [],
+      orchestrators: this.makeOrchestrators(),
       latency: this.latency(),
     };
   }
@@ -3466,8 +3508,86 @@ export class MockBridge implements SpiritBridge {
     ];
   }
 
-  private makeSessions(): SessionCardView[] {
+  private ownerScenario(): boolean {
+    return (
+      this.scenario === "owner-idle" ||
+      this.scenario === "owner-running" ||
+      this.scenario === "owner-local" ||
+      this.scenario === "owner-unsupported"
+    );
+  }
+
+  /** The Global orchestrator exists only in the ownership scenarios. */
+  private makeOrchestrators(): OrchestratorView[] {
+    if (!this.ownerScenario()) return [];
     return [
+      {
+        name: "global",
+        session_id: OWNER_SESSION,
+        project: null,
+        app: "opencode",
+        state: "running",
+        join: { desktop: "vowp orchestrator attach global", phone: "", chat: "vowp chat global" },
+        node: "vps",
+      },
+    ];
+  }
+
+  private makeOwner(): SessionOwnerView | null {
+    if (this.ownerOverride) return this.ownerOverride;
+    const base = {
+      session_id: OWNER_SESSION,
+      mode: "interactive",
+      state: "active",
+      epoch: 3,
+      acquired_at: iso(this.nowMs - 600_000),
+      heartbeat_at: iso(this.nowMs - 5_000),
+      expires_at: null,
+    };
+    if (this.scenario === "owner-local") {
+      return {
+        ...base,
+        surface_id: "01JCF5WQ8ZK3M2V7N4P6R8T0AH",
+        label: "StackSpirit · macbook",
+        holder: "stackspirit",
+        kind: "chat",
+        node: "macbook",
+        activity: "idle",
+      };
+    }
+    if (!this.ownerScenario()) return null;
+    return {
+      ...base,
+      surface_id: "01JCF5WQ8ZK3M2V7N4P6R8T0AG",
+      label: "OpenCode · macbook",
+      holder: "opencode",
+      kind: "opencode",
+      node: "macbook",
+      activity: this.scenario === "owner-running" ? "running" : "idle",
+    };
+  }
+
+  private makeSessions(): SessionCardView[] {
+    const owner = this.makeOwner();
+    const ownerSessions: SessionCardView[] = owner
+      ? [
+          {
+            id: OWNER_SESSION,
+            project: null,
+            job_id: null,
+            role: null,
+            title: "Global orchestrator",
+            state: owner.activity === "running" ? "active" : "idle",
+            executor: null,
+            node: "vps",
+            active_surface: null,
+            owner,
+            last_event_at: this.now(),
+          },
+        ]
+      : [];
+    return [
+      ...ownerSessions,
       {
         id: "01MOCKSESSION00000000000000",
         project: "vowp",

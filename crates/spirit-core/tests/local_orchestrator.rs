@@ -157,6 +157,7 @@ fn running_session_for(surface: &SurfaceEntry) -> SessionCardView {
             heartbeat_at: Timestamp::epoch(),
         }),
         last_event_at: Timestamp::epoch(),
+        owner: None,
     }
 }
 
@@ -929,6 +930,7 @@ fn d6_offline_node_cannot_write_even_with_the_lease() {
             heartbeat_at: Timestamp::epoch(),
         }),
         last_event_at: Timestamp::epoch(),
+        owner: None,
     };
 
     let mut offline = LocalNodeState::from_card(&node_card());

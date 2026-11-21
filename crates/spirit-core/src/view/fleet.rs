@@ -13,7 +13,7 @@ use crate::view::executor::ExecutorView;
 use crate::view::lanes::{JobLanes, build_lanes};
 use crate::wire::{
     CapacityReportDoc, FleetStatus, InboxItem, InboxSummary, OrchestratorCard, ProjectSnapshot,
-    SessionSurfaceCard, Snapshot, SurfaceRef,
+    SessionOwner, SessionSurfaceCard, Snapshot, SurfaceRef,
 };
 
 /// The whole cockpit view for one revision.
@@ -169,8 +169,42 @@ pub struct SessionCardView {
     pub node: String,
     /// Live lease holder.
     pub active_surface: Option<SurfaceRefView>,
+    /// Structured owner (VOWP 0.5.1); `None` on older snapshots.
+    #[serde(default)]
+    pub owner: Option<SessionOwnerView>,
     /// Newest event time.
     pub last_event_at: Timestamp,
+}
+
+/// The structured owner of a session, with a ready display label.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionOwnerView {
+    /// Surface id, when the owner has a paired surface.
+    pub surface_id: Option<String>,
+    /// Display name: the saved label, else the holder.
+    pub label: String,
+    /// Holder name.
+    pub holder: String,
+    /// Client kind.
+    pub kind: String,
+    /// Owner node.
+    pub node: String,
+    /// `idle`, `running`, `waiting`, or an unknown raw value.
+    pub activity: String,
+    /// `interactive` or `job`.
+    pub mode: String,
+    /// `active`, `stale`, `expired`, or an unknown raw value.
+    pub state: String,
+    /// Ownership epoch.
+    pub epoch: u64,
+    /// Acquisition time.
+    pub acquired_at: Timestamp,
+    /// Last heartbeat.
+    pub heartbeat_at: Timestamp,
+    /// Job expiry.
+    pub expires_at: Option<Timestamp>,
+    /// Session id.
+    pub session_id: String,
 }
 
 /// The live lease holder of a session.
@@ -415,6 +449,7 @@ fn session_view(session: &SessionSurfaceCard) -> SessionCardView {
         executor: session.executor.as_deref().map(ExecutorView::parse),
         node: session.node.as_str().to_owned(),
         active_surface: session.active_surface.as_ref().map(surface_view),
+        owner: session.owner.as_ref().map(owner_view),
         last_event_at: session.last_event_at,
     }
 }
@@ -427,5 +462,30 @@ fn surface_view(surface: &SurfaceRef) -> SurfaceRefView {
         node: surface.node.as_str().to_owned(),
         acquired_at: surface.acquired_at,
         heartbeat_at: surface.heartbeat_at,
+    }
+}
+
+fn owner_view(owner: &SessionOwner) -> SessionOwnerView {
+    let label = owner
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .unwrap_or(&owner.holder)
+        .to_owned();
+    SessionOwnerView {
+        surface_id: owner.surface_id.clone(),
+        label,
+        holder: owner.holder.clone(),
+        kind: owner.kind.clone(),
+        node: owner.node.as_str().to_owned(),
+        activity: owner.activity.clone(),
+        mode: owner.mode.clone(),
+        state: owner.state.clone(),
+        epoch: owner.epoch,
+        acquired_at: owner.acquired_at,
+        heartbeat_at: owner.heartbeat_at,
+        expires_at: owner.expires_at,
+        session_id: owner.session_id.to_string(),
     }
 }

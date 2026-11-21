@@ -11,3 +11,4 @@ pub mod hosts;
 pub mod local_orchestrator;
 pub mod onboarding;
 pub mod secrets;
+pub mod session;

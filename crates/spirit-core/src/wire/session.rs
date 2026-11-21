@@ -49,4 +49,60 @@ pub struct SessionSurfaceCard {
     pub active_surface: Option<SurfaceRef>,
     /// Time of the newest event.
     pub last_event_at: Timestamp,
+    /// Structured session ownership (VOWP 0.5.1). Absent on older snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<SessionOwner>,
+}
+
+/// The read projection of a session's ownership record (VOWP `SessionOwner`).
+///
+/// It never carries a lease token. Every liveness field is tolerant of older or newer
+/// VOWP spellings, so the raw strings are kept.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionOwner {
+    /// Session the owner holds.
+    pub session_id: SessionId,
+    /// Surface instance id; `None` for a job run with no paired surface.
+    #[serde(default)]
+    pub surface_id: Option<SurfaceId>,
+    /// Friendly saved surface name, for example `StackSpirit · macbook`.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Human-visible holder name.
+    pub holder: String,
+    /// Kind of client that owns the session (`opencode`, `chat`, ...).
+    pub kind: String,
+    /// Node the owner runs on.
+    pub node: NodeName,
+    /// `idle`, `running`, `waiting`, or an unknown raw value.
+    #[serde(default = "default_activity")]
+    pub activity: String,
+    /// `interactive` or `job`.
+    #[serde(default = "default_mode")]
+    pub mode: String,
+    /// `active`, `stale`, `expired`, or an unknown raw value.
+    #[serde(default = "default_state")]
+    pub state: String,
+    /// Monotonic ownership counter.
+    #[serde(default)]
+    pub epoch: u64,
+    /// When the owner acquired the session.
+    pub acquired_at: Timestamp,
+    /// Last heartbeat.
+    pub heartbeat_at: Timestamp,
+    /// Expiry of a job owner.
+    #[serde(default)]
+    pub expires_at: Option<Timestamp>,
+}
+
+fn default_activity() -> String {
+    "idle".to_owned()
+}
+
+fn default_mode() -> String {
+    "interactive".to_owned()
+}
+
+fn default_state() -> String {
+    "active".to_owned()
 }

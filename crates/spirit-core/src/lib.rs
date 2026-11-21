@@ -54,8 +54,8 @@ pub use view::{
 };
 pub use vowp::{
     AgentPairRequest, AgentPairing, AsifExport, AsifExportOptions, AsifImportOptions,
-    AsifLossPolicy, AsifPackage, LocalAgentClient, SurfacePairing, SurfacePairingView, VowpClient,
-    VowpProbe, ensure_package_size,
+    AsifLossPolicy, AsifPackage, LocalAgentClient, SessionTakeoverRequest, SessionTakeoverResult,
+    SurfacePairing, SurfacePairingView, VowpClient, VowpProbe, ensure_package_size,
 };
 pub use wire::{
     AGENT_PROTOCOL, ASIF_ARCHIVE_CAP_BYTES, ASIF_FORMAT, ASIF_JSON_CAP_BYTES, AgentPathMap,

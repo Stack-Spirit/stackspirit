@@ -60,6 +60,7 @@ import type {
   SecretSetInput,
   SecretSetOutcome,
   SessionCardView,
+  SessionTakeoverResult,
   SessionId,
   SetTargetInput,
   StateEvent,
@@ -297,6 +298,8 @@ export class TauriBridge implements SpiritBridge {
       call("asif_export", { sessionId, options }),
     importAsif: (options: AsifImportOptions): Promise<AsifImportResult | null> =>
       call("asif_import", { options }),
+    takeoverSession: (sessionId: string): Promise<SessionTakeoverResult> =>
+      call("session_takeover", { sessionId }),
   };
 
   localOrchestrators = {

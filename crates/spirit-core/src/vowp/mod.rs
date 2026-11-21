@@ -11,7 +11,10 @@ pub use asif::{
     AsifExport, AsifExportOptions, AsifImportOptions, AsifLossPolicy, AsifPackage,
     ensure_package_size,
 };
-pub use client::{MockVowpClient, SshVowpClient, VowpClient, VowpProbe};
+pub use client::{
+    MockVowpClient, SessionTakeoverRequest, SessionTakeoverResult, SshVowpClient, VowpClient,
+    VowpProbe,
+};
 pub use local::{AgentPairRequest, AgentPairing, SurfacePairing, SurfacePairingView};
 pub use secret::{
     SECRET_VALUE_MAX_BYTES, SecretEntry, SecretListView, SecretRemoveOutcome, SecretSetOutcome,

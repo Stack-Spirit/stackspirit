@@ -669,6 +669,33 @@ export interface SurfaceRefView {
   heartbeat_at: Timestamp;
 }
 
+/** Structured session ownership (VOWP 0.5.1). Absent on older snapshots. */
+export interface SessionOwnerView {
+  surface_id: string | null;
+  /** Display name: the saved label, else the holder. */
+  label: string;
+  holder: string;
+  kind: string;
+  node: string;
+  /** `idle`, `running`, `waiting`, or an unknown raw value. */
+  activity: string;
+  /** `interactive` or `job`. */
+  mode: string;
+  /** `active`, `stale`, `expired`, or an unknown raw value. */
+  state: string;
+  epoch: number;
+  acquired_at: Timestamp;
+  heartbeat_at: Timestamp;
+  expires_at: Timestamp | null;
+  session_id: string;
+}
+
+/** The path-free result of a session takeover. */
+export interface SessionTakeoverResult {
+  session_id: string;
+  previous: string | null;
+}
+
 export interface SessionCardView {
   id: string;
   project: string | null;
@@ -679,6 +706,8 @@ export interface SessionCardView {
   executor: ExecutorView | null;
   node: string;
   active_surface: SurfaceRefView | null;
+  /** Structured owner; absent or null on older VOWP snapshots. */
+  owner?: SessionOwnerView | null;
   last_event_at: Timestamp;
 }
 

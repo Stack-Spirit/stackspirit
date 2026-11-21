@@ -45,7 +45,7 @@ pub use local::{
     SurfaceRotateRequest, SurfaceRotateResult, ensure_duration_arg, ensure_surface_id,
 };
 pub use ops::{FleetQueueRow, JobAction, SetTargetInput};
-pub use session::{SessionSurfaceCard, SurfaceId, SurfaceRef};
+pub use session::{SessionOwner, SessionSurfaceCard, SurfaceId, SurfaceRef};
 pub use snapshot::{
     BlockedJobCard, FleetStatus, GateFailureCard, InboxSummary, MergeCard, ProjectSnapshot,
     QueueJobCard, RunningJobCard, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, Snapshot, SupervisorSnapshot,

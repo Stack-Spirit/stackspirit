@@ -4399,3 +4399,66 @@ button.nx-node:hover {
     padding-left: 18px;
   }
 }
+
+/* Session ownership banner: calm, one row, sits above the transcript. */
+.nx-owner {
+  display: grid;
+  gap: 8px;
+  margin: 0 24px 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius);
+  background: var(--nx-raised);
+  color: var(--nx-text);
+  font-size: 13px;
+}
+
+.nx-owner__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.nx-owner__where {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.nx-owner__badge {
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--nx-accent-soft);
+  color: var(--nx-accent-soft-ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.nx-owner__badge--running {
+  background: var(--nx-warn-soft);
+  color: var(--nx-warn);
+}
+
+.nx-owner__badge--waiting {
+  background: var(--nx-local-soft);
+  color: var(--nx-local);
+}
+
+.nx-owner__confirm p,
+.nx-owner__error {
+  margin: 0;
+}
+
+.nx-owner__confirm {
+  display: grid;
+  gap: 8px;
+}
+
+.nx-owner__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.nx-owner__error {
+  color: var(--nx-danger);
+}

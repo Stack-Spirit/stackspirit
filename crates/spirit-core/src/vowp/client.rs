@@ -167,6 +167,19 @@ pub trait VowpClient: Send + Sync {
         .with_hint("Connect with a VOWP client that implements the D6 surface contract."))
     }
 
+    /// Takes a session over for this surface through the hidden
+    /// `vowp --json session takeover` command.
+    ///
+    /// The default refuses so a client that cannot take over never fakes ownership.
+    async fn session_takeover(
+        &self,
+        _request: SessionTakeoverRequest,
+    ) -> Result<SessionTakeoverResult, SpiritError> {
+        Err(not_supported_takeover(
+            "session takeover is unavailable for this client",
+        ))
+    }
+
     /// Reads `vowp orchestrator ls --json`.
     async fn orchestrator_list(&self) -> Result<Vec<OrchestratorCard>, SpiritError> {
         Err(SpiritError::new(
@@ -479,6 +492,67 @@ fn check_secret_output(
     }
 }
 
+/// True when VOWP rejected the command itself rather than the takeover.
+fn takeover_unsupported(output: &CommandOutput) -> bool {
+    if output.status == 127 {
+        return true;
+    }
+    let text = format!(
+        "{}\n{}",
+        output.stderr_text(),
+        String::from_utf8_lossy(&output.stdout)
+    )
+    .to_lowercase();
+    text.contains("unrecognized subcommand")
+        || text.contains("unknown command")
+        || text.contains("unknown subcommand")
+        || text.contains("unexpected argument")
+        || text.contains("unsupported_command")
+        || text.contains("unsupported command")
+}
+
+fn not_supported_takeover(detail: &str) -> SpiritError {
+    SpiritError::new(SpiritErrorCode::Gate, format!("not_supported: {detail}"))
+        .with_hint("Update VOWP to 0.5.1 or newer. The banner stays read-only.")
+}
+
+/// One takeover request. The surface kind and holder are fixed by StackSpirit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTakeoverRequest {
+    /// Session id or unique prefix.
+    pub session: String,
+    /// Node this StackSpirit surface runs on, resolved by the host, never the renderer.
+    pub node: String,
+    /// Friendly surface label, for example `StackSpirit · macbook`.
+    pub label: Option<String>,
+}
+
+impl SessionTakeoverRequest {
+    /// Validates every value that reaches argv.
+    pub fn validate(&self) -> Result<(), SpiritError> {
+        SessionId::parse(&self.session)?;
+        NodeName::parse(&self.node)?;
+        if let Some(label) = &self.label {
+            if label.is_empty() || label.len() > 80 || label.chars().any(char::is_control) {
+                return Err(SpiritError::new(
+                    SpiritErrorCode::InvalidInput,
+                    "the surface label must be 1-80 printable characters",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The path-free result of a takeover.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionTakeoverResult {
+    /// Session now owned by StackSpirit.
+    pub session_id: String,
+    /// The previous owner as VOWP reported it, when there was one.
+    pub previous: Option<String>,
+}
+
 fn push_json(argv: &mut Vec<String>) {
     argv.push("--json".to_owned());
 }
@@ -769,6 +843,48 @@ impl VowpClient for SshVowpClient {
         let output = self.check_output(output)?;
         serde_json::from_slice(&output.stdout)
             .map_err(|err| SpiritError::parse("surface revoke", err))
+    }
+
+    async fn session_takeover(
+        &self,
+        request: SessionTakeoverRequest,
+    ) -> Result<SessionTakeoverResult, SpiritError> {
+        request.validate()?;
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend([
+            "session".to_owned(),
+            "takeover".to_owned(),
+            "--kind".to_owned(),
+            "chat".to_owned(),
+            "--holder".to_owned(),
+            "stackspirit".to_owned(),
+            "--node".to_owned(),
+            request.node.clone(),
+        ]);
+        if let Some(label) = &request.label {
+            argv.extend(["--label".to_owned(), label.clone()]);
+        }
+        argv.push(request.session.clone());
+        let output = self.run(&argv, WRITE_TIMEOUT).await?;
+        if !output.success() && takeover_unsupported(&output) {
+            return Err(not_supported_takeover(
+                "the installed VOWP does not provide `session takeover`",
+            ));
+        }
+        let output = self.check_output(output)?;
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|err| SpiritError::parse("session takeover", err))?;
+        Ok(SessionTakeoverResult {
+            session_id: request.session,
+            previous: value
+                .get("previous")
+                .filter(|previous| !previous.is_null())
+                .map(|previous| match previous.as_str() {
+                    Some(text) => text.to_owned(),
+                    None => previous.to_string(),
+                }),
+        })
     }
 
     async fn orchestrator_list(&self) -> Result<Vec<OrchestratorCard>, SpiritError> {

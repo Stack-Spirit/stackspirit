@@ -25,6 +25,7 @@ import {
   type SessionId,
 } from "./conversations";
 import { EmptyHero } from "./EmptyHero";
+import { OwnershipBanner } from "./OwnershipBanner";
 import { PageHeader } from "./PageHeader";
 import { SpiritLoader } from "./SpiritLoader";
 import { openInbox, projectSummaries } from "./summary";
@@ -344,6 +345,8 @@ export function ChatView({
           </span>
         ) : null}
       </PageHeader>
+
+      {session !== "setup" ? <OwnershipBanner session={session} /> : null}
 
       {/* A stable slot keeps the chat (and the composer inside it) mounted when the
           saved-server card appears after the first turn. */}
