@@ -243,15 +243,6 @@ function ServerCard({
   const busy = state === "connecting" || state === "disconnecting";
   const others = hosts.filter((item) => item.id !== host.id);
   const loadPct = health.load ? Math.round(health.load.ratio * 100) : null;
-  const loadOver = health.load?.source === "CPU" && health.cpuOver;
-  const loadLabel =
-    loadPct == null ? "load unknown" : `load ${loadPct}%${loadOver ? "+" : ""}`;
-  const loadDetail =
-    health.load == null
-      ? "No host sample yet"
-      : health.load.source === "CPU"
-        ? health.cpuText
-        : `RAM ${health.ramText}`;
   const loadTone = loadPct == null ? "" : loadPct >= 90 ? " nx-meter__fill--danger" : loadPct >= 75 ? " nx-meter__fill--warn" : "";
   const clusterHealth = cluster?.health ?? null;
   // The brief's badge appears only when at least one worker is actually online; an
@@ -437,7 +428,7 @@ function ServerCard({
         type="button"
         className="nx-server__main"
         aria-current={view.kind === "server" ? "page" : undefined}
-        aria-label={`${host.label}: ${loadLabel}, ${health.running} of ${health.target ?? "unknown"} workers active, ${health.diskShort}. Open server page`}
+        aria-label={`${host.label}: load ${loadPct ?? "unknown"}%, ${health.running} of ${health.target ?? "unknown"} workers active, ${health.diskShort}. Open server page`}
         onClick={() => onNavigate({ kind: "server" })}
         data-testid="health-card"
       >
@@ -450,8 +441,8 @@ function ServerCard({
           <span className="nx-meter__track">
             <span className={`nx-meter__fill${loadTone}`} style={{ width: `${loadPct ?? 0}%` }} />
           </span>
-          <span className="nx-server__load-value" title={loadDetail}>
-            {loadPct == null ? "—" : `${loadPct}%${loadOver ? "+" : ""}`}
+          <span className="nx-server__load-value">
+            {loadPct == null ? "–" : `${loadPct}%`}
             {health.load ? <small>{health.load.source}</small> : null}
           </span>
         </span>
