@@ -495,6 +495,30 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
    `src-tauri/tests/engine_shutdown.rs`. `node scripts/verify-byok-xvfb.mjs` exits 0. Still
    open (follow-up `ss-91`): the picker's scroll region fails axe `scrollable-region-focusable`
    with a long list, and the chat header overlaps the tall picker at 1280×720.
+10. **Private provider keys, project views, Inbox and one-click orchestrator — `ss-107`,
+    `ss-108b`, `ss-109`, `ss-110` landed (2026-11-22).**
+    - **`ss-107` (`456036a`):** live VPS `refresh_capacity` on connect, poll and refresh, bound
+      to a per-connection `CancellationToken`. `PrivateKeyStore`
+      (`<app-data>/engine/state/provider-keys.json`, atomic mode-`0600` file in a mode-`0700`
+      directory, `Zeroizing` buffers, secret-free errors) replaces the OS keychain for local
+      provider keys, so there are no macOS Keychain prompts for them; `OsKeychain` stays
+      opt-in in `spirit-core` and existing Keychain entries are not auto-migrated. This
+      supersedes the keychain wording in item 9. Settings shows a `Default · <model>` badge
+      and updated private key-file copy. Limits are in [`SECURITY.md`](../SECURITY.md): the
+      file is readable by the same OS account and is not encrypted at rest.
+    - **`ss-108b` (`26a4fb7`):** Active-only project view plus a History tab
+      (`ProjectView.last_merge`, wait reasons, phase and model badges, one active lane per
+      job, newest gate failure wins).
+    - **`ss-109` (`a9d7b23`):** global and project Inbox views (`InboxView.tsx`), Sidebar
+      unread badge, project Inbox tab, Server "Needs you" summary, one-click option and
+      free-text answers.
+    - **`ss-110` (`4e2b490`):** one-click **Start `<project>` orchestrator** replaces the
+      `chat_not_configured` dead end, via `LocalChatProvider::provision_orchestrator`, and
+      `Connect a provider` is hidden on gate errors.
+    - **Honest limits:** `ss-110` is the local bundled OpenCode fallback (private workspace,
+      using connected OpenCode/BYOK models). The VPS `vowp orchestrator new` plus
+      `surface pair` path is separate and still pending, and the owner's Mac live D6
+      readiness check has not been run; no live Mac verification is claimed here.
 
 ## 6. Known gaps and cautions
 

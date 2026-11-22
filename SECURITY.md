@@ -47,8 +47,15 @@ password, token, hostname, path or secret value in an issue, report, screenshot 
 
 ### Provider keys
 
-- Local model provider keys used by the StackSpirit Engine are stored in the local OS
-  keychain. They are not written to the engine config, the VOWP home or a session log.
+- Local model provider keys used by the StackSpirit Engine are stored by the desktop app's
+  `PrivateKeyStore` in `<app-data>/engine/state/provider-keys.json`: an atomically written
+  JSON file with mode `0600` inside a directory with mode `0700`. Key material is held in
+  `Zeroizing` buffers while in memory and error messages never contain a key value. This
+  file is not encrypted at rest (see [Local provider keys](#local-provider-keys)). Keys are
+  not written to the engine config, the VOWP home or a session log. The desktop app does
+  not use the macOS Keychain for provider keys, so it triggers no Keychain prompts for them.
+- The SSH app-key passphrase is a separate secret and is still kept in the local OS keychain
+  under `ssh-key:<name>` (see [App-owned SSH key](#app-owned-ssh-key)).
 - Provider keys can instead be stored on the connected server in VOWP's own vault, through
   Settings → Advanced → **Server secrets**. StackSpirit does not create a second server
   secret store.
@@ -145,7 +152,8 @@ implementation, the prompt-gated set path above is available.
 ### A compromised Mac
 
 An attacker with the owner's macOS/Linux account (or admin access) can read the OS keychain
-entries available to that account, use the app-owned SSH key, run `ssh` or `vowp` directly,
+entries available to that account (such as the SSH key passphrase), read the `0600`
+provider-key file, use the app-owned SSH key, run `ssh` or `vowp` directly,
 read StackSpirit's local data, and ask the app to perform actions. StackSpirit does not
 defend against a compromised Mac. OS account separation, disk encryption and a locked
 screen are the boundary.
@@ -189,10 +197,19 @@ and do not publish it without reviewing it.
 
 ### Local provider keys
 
-Local provider keys live in the OS keychain and are used by the local engine over loopback
-for verification and model calls. Another process with access to the same OS account may be
-able to reach the keychain entry depending on the platform's keychain policy. The key is not
-a hardware-backed secret by default.
+Local provider keys live in `PrivateKeyStore`, the mode-`0600` file
+`<app-data>/engine/state/provider-keys.json` in a mode-`0700` directory (atomic writes,
+`Zeroizing` in-memory buffers, secret-free errors). They are passed to the bundled engine
+only over loopback or ephemeral environment for verification and model calls, and are never
+written to the engine config, the VOWP home or session logs.
+
+Limits: any process running as the same OS account can read a mode-`0600` file, so this
+protects against other OS users, not against the same account. The keys are not encrypted at
+rest and are not hardware-backed by default; disk encryption and OS account separation are
+the boundary (see [A compromised Mac](#a-compromised-mac)). An `OsKeychain` backend remains
+available in `spirit-core` as an opt-in; the desktop app does not use it by default, and
+keys previously saved to the Keychain are not automatically migrated, so they may need to be
+re-entered and the old Keychain entries removed by the owner.
 
 ### Metadata and traffic
 
