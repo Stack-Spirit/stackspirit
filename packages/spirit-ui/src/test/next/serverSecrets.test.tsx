@@ -465,6 +465,8 @@ describe("Settings server secrets", () => {
 
     const badge = await screen.findByTestId("vault-mode");
     expect(badge).toHaveTextContent(label);
+    expect(badge).toHaveClass("nx-secrets__mode-badge");
+    expect(badge).toHaveAttribute("data-mode", mode);
     expect(screen.getByTestId("vault-mode-note")).toHaveTextContent(note);
     expect(screen.queryByText("VOWP did not report a storage mode")).not.toBeInTheDocument();
   });
@@ -474,7 +476,10 @@ describe("Settings server secrets", () => {
       list: async () => listOf([entry("OPENAI_API_KEY", "9f2a")], "future_mode"),
     });
 
-    expect(await screen.findByTestId("vault-mode")).toHaveTextContent("future_mode");
+    const badge = await screen.findByTestId("vault-mode");
+    expect(badge).toHaveTextContent("future_mode");
+    expect(badge).toHaveClass("nx-secrets__mode-badge");
+    expect(badge).toHaveAttribute("data-mode", "future_mode");
     expect(screen.getByTestId("vault-mode-note")).toHaveTextContent(
       "VOWP reported this storage mode: future_mode.",
     );

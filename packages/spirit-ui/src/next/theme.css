@@ -2822,6 +2822,40 @@ button.nx-composer__start:hover {
   line-height: 1.5;
 }
 
+.nx-secrets__mode-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid var(--nx-line-strong);
+  border-radius: 999px;
+  background: var(--nx-panel);
+  color: var(--nx-text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+
+.nx-secrets__mode-badge[data-mode="basic"] {
+  border-color: color-mix(in srgb, var(--nx-warn) 45%, transparent);
+  background: var(--nx-warn-soft);
+  color: var(--nx-warn);
+}
+
+.nx-secrets__mode-badge[data-mode="vault_user"] {
+  border-color: color-mix(in srgb, var(--nx-local) 45%, transparent);
+  background: var(--nx-local-soft);
+  color: var(--nx-local);
+}
+
+.nx-secrets__mode-badge[data-mode="encrypted"] {
+  border-color: color-mix(in srgb, var(--nx-server) 45%, transparent);
+  background: var(--nx-server-soft);
+  color: var(--nx-server);
+}
+
 .nx-secrets__notice {
   padding: 9px 11px;
   border-left: 3px solid var(--nx-ok);
