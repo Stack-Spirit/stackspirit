@@ -2655,7 +2655,7 @@ backend and records a skip instead.
   the test re-execs itself through a helper that joins a fresh anonymous session keyring;
   no secret store outside the test's unique service was touched.
 - Playwright live spec: passed in light and dark (about 45 s each); `opencode.log` 24 lines,
-  errors 0, leaks 0; axe clean apart from the open defect below.
+  errors 0, leaks 0; axe clean (the one defect axe found then is resolved; see the resolved record below).
 - `node scripts/verify-byok-xvfb.mjs`: **exits 0** after the shutdown fix below: fetch, both
   Rust flows (FakeKeychain and OsKeychain), the desktop boot smoke (6 s, `SIGTERM` clean, no
   orphan `opencode`, sidecar seen during boot, `opencode.log` errors 0, leaks 0) and both
@@ -2674,13 +2674,15 @@ stops the engine and then calls `app.exit(0)`. The signal path uses a libc
 `signal()` handler that sets an atomic flag polled every 50 ms, so no manifest change is
 needed. The runner still signals only the app process, never the process group, so the app must stop its own child.
 
-#### Open defects found by ss-88 (follow-up job `ss-91`, in `packages/spirit-ui`)
+#### Defects found by ss-88: all resolved
 
-1. **Picker scroll region is not keyboard-focusable.** With a long list axe reports
-   `scrollable-region-focusable` on `.nx-model-menu__scroll` (the mock fixtures are too short
-   to overflow). The spec carves out exactly that rule on exactly that element; remove the
-   carve-out once the region gets `tabIndex={0}` in `ComposerBar.tsx`/`theme.css`.
-2. **Picker clipped by the chat header at 1280×720.** A pointer click on the first row of a
-   tall list is intercepted by `.nx-chat-head`; the spec selects with the keyboard instead.
-3. Cosmetic: the Settings notice reads `Openrouter rejected this key…` because the
-   notice derives its label from the provider id rather than the engine's `OpenRouter`.
+No ss-88 open defects remain. The three items the Xvfb run found are fixed on local `main`:
+
+1. **Picker scroll region not keyboard-focusable** — fixed: `.nx-model-menu__scroll` has
+   `tabIndex={0}` in `ComposerBar.tsx`, and `ss-104` (`120fd49`) removed the
+   `scrollable-region-focusable` carve-outs from `meadow-provider-connect.spec.ts` and
+   `xvfb-byok-live.spec.ts`; both specs now assert the full WCAG tag set.
+2. **Picker clipped by the chat header at 1280×720** — fixed by `ss-89` (`5d09668`,
+   `4dc9b0a`): the picker stays below the header and the spec exercises the pointer path.
+3. **Settings notice read `Openrouter`** — fixed by `ss-103` (`24bb5cf`): Settings uses the
+   shared `domain/engine` `providerLabel`, so it reads `OpenRouter`.
