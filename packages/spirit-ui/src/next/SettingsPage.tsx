@@ -301,7 +301,7 @@ export function SettingsPage() {
       const checked = await bridge.engine.verifyKey(provider);
       if (checked.state === "missing") {
         setError(
-          `${providerLabel(provider)} key was not found in this Mac's OS keychain. Enter it again to reconnect.`,
+          `${providerLabel(provider)} key was not found in this Mac's private provider-key file. Enter it again to reconnect.`,
         );
       } else {
         setKeys((current) => upsertKey(current, checked));
@@ -605,7 +605,7 @@ export function SettingsPage() {
         <p>
           This removes only the{" "}
           {pendingRemove ? providerLabel(pendingRemove) : ""} key from this
-          Mac&apos;s keychain and refreshes the engine model list. It does not
+          Mac&apos;s private key file and refreshes the engine model list. It does not
           change a VOWP setting or a server secret.
         </p>
       </Modal>
@@ -776,7 +776,7 @@ function ProviderKeyForm({
           Cancel
         </button>
         <span className="nx-provider__meta">
-          Stored in this Mac&apos;s keychain; never sent to your server.
+          Stored in a private file on this Mac; never sent to your server.
         </span>
       </div>
       {formError ? (

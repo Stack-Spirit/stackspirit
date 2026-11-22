@@ -1231,6 +1231,7 @@ struct MockState {
     fail_probe: Option<SpiritError>,
     fail_status: Option<SpiritError>,
     status_calls: u32,
+    capacity_calls: u32,
     actions: Vec<(String, String, JobAction, Option<String>)>,
     targets: Vec<SetTargetInput>,
     asif_export: Option<(AsifExportSummary, Vec<u8>)>,
@@ -1280,6 +1281,7 @@ impl MockVowpClient {
                 fail_probe: None,
                 fail_status: None,
                 status_calls: 0,
+                capacity_calls: 0,
                 actions: Vec::new(),
                 targets: Vec::new(),
                 asif_export: None,
@@ -1587,6 +1589,15 @@ impl MockVowpClient {
             .status_calls
     }
 
+    /// Returns the number of `capacity_report` calls.
+    #[must_use]
+    pub fn capacity_calls(&self) -> u32 {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .capacity_calls
+    }
+
     /// Returns recorded job actions.
     #[must_use]
     pub fn actions(&self) -> Vec<(String, String, JobAction, Option<String>)> {
@@ -1634,12 +1645,12 @@ impl VowpClient for MockVowpClient {
     }
 
     async fn capacity_report(&self) -> Result<CapacityReportDoc, SpiritError> {
-        Ok(self
+        let mut state = self
             .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .capacity
-            .clone())
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.capacity_calls = state.capacity_calls.saturating_add(1);
+        Ok(state.capacity.clone())
     }
 
     async fn fleet_queue(&self) -> Result<Vec<FleetQueueRow>, SpiritError> {

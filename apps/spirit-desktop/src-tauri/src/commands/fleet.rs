@@ -42,7 +42,14 @@ pub async fn fleet_get(state: State<'_, AppState>) -> CommandResult<Option<Fleet
 pub async fn fleet_refresh(state: State<'_, AppState>) -> CommandResult<FleetView> {
     let client = state.client()?;
     let manager = state.connection_manager().await;
-    let polled = manager.poll_once(client.as_ref()).await?;
+    refresh_fleet(&manager, client.as_ref()).await
+}
+
+async fn refresh_fleet(
+    manager: &spirit_core::connection::ConnectionManager,
+    client: &dyn spirit_core::vowp::VowpClient,
+) -> CommandResult<FleetView> {
+    let polled = manager.poll_once(client).await?;
     if polled.is_none() {
         return Err(SpiritError::new(
             SpiritErrorCode::Conflict,
@@ -50,7 +57,7 @@ pub async fn fleet_refresh(state: State<'_, AppState>) -> CommandResult<FleetVie
         ));
     }
     // Best effort: live Memory, Disk and CPU load. Falls back to the polled view.
-    crate::commands::connection::refresh_capacity_best_effort(&manager, client.as_ref()).await;
+    crate::commands::connection::refresh_capacity_best_effort(manager, client).await;
     Ok(manager.fleet_view().or(polled).expect("polled view exists"))
 }
 
@@ -274,6 +281,24 @@ async fn current_gates(state: &AppState) -> spirit_core::engine::GateSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fleet_refresh_reads_capacity() {
+        use spirit_core::fixtures::{Scenario, capacity_report, fleet_status};
+        let mock = spirit_core::vowp::MockVowpClient::new(
+            fleet_status(Scenario::Idle).expect("status"),
+            capacity_report(Scenario::Idle).expect("capacity"),
+        );
+        let manager = spirit_core::connection::ConnectionManager::default();
+        manager
+            .connect(&mock, spirit_core::host::HostId("h1".to_owned()))
+            .await
+            .expect("connect");
+        let before = mock.capacity_calls();
+        refresh_fleet(&manager, &mock).await.expect("refresh");
+        assert_eq!(mock.capacity_calls(), before + 1);
+        manager.disconnect();
+    }
 
     /// Regression: the fallback used to hold the core mutex while `current_gates`
     /// locked it again, so an empty node card hung forever.

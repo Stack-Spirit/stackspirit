@@ -406,7 +406,7 @@ describe("Composer → Engine & Models", () => {
     });
     await user.click(within(row).getByRole("button", { name: "Verify key" }));
     const alert = await within(card).findByRole("alert");
-    expect(alert).toHaveTextContent(/not found in this Mac's OS keychain/);
+    expect(alert).toHaveTextContent(/not found in this Mac's private provider-key file/);
     expect(card).not.toHaveTextContent("still unverified");
   });
 

@@ -241,6 +241,14 @@ impl ConnectionManager {
         self.guard().scheduler.next_delay()
     }
 
+    /// Returns a clone of the current connection's cancel token. `disconnect` and the
+    /// next `connect` both end work bound to this token, so loops started for one
+    /// connection never outlive it.
+    #[must_use]
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.guard().cancel.clone()
+    }
+
     /// Returns true after `disconnect` cancels the active poll token.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {

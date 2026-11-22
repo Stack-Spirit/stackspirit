@@ -24,17 +24,56 @@ pub(crate) async fn refresh_capacity_best_effort(
     let _ = manager.refresh_capacity(client).await;
 }
 
+/// Refreshes capacity every `interval` until `token` (the cancel token of the connection
+/// this loop was started for) is cancelled. Disconnect and any later connect both cancel
+/// it, so a loop never outlives its connection or reads for a different host.
 async fn run_capacity_loop(
     manager: spirit_core::connection::ConnectionManager,
     client: std::sync::Arc<dyn spirit_core::vowp::VowpClient>,
+    mut token: spirit_core::connection::CancellationToken,
+    interval: Duration,
 ) {
     loop {
-        tokio::time::sleep(CAPACITY_REFRESH_INTERVAL).await;
-        if manager.is_cancelled() || manager.status().state.as_str() == "disconnected" {
+        tokio::select! {
+            () = tokio::time::sleep(interval) => {}
+            () = token.cancelled() => break,
+        }
+        if token.is_cancelled() {
             break;
         }
         refresh_capacity_best_effort(&manager, client.as_ref()).await;
     }
+}
+
+/// Post-connect work: one immediate capacity read, then the poll and capacity loops,
+/// both bound to this connection's cancel token.
+fn start_connection_tasks(
+    manager: &spirit_core::connection::ConnectionManager,
+    client: &std::sync::Arc<dyn spirit_core::vowp::VowpClient>,
+    interval: Duration,
+) {
+    let token = manager.cancel_token();
+    let poll_manager = manager.clone();
+    let poll_client = client.clone();
+    tauri::async_runtime::spawn(async move {
+        poll_manager.run_poll_loop(poll_client).await;
+    });
+    let capacity_manager = manager.clone();
+    let capacity_client = client.clone();
+    tauri::async_runtime::spawn(async move {
+        run_capacity_loop(capacity_manager, capacity_client, token, interval).await;
+    });
+}
+
+/// Best-effort first capacity read after a successful connect, then start the loops.
+pub(crate) async fn finish_connect(
+    manager: &spirit_core::connection::ConnectionManager,
+    client: &std::sync::Arc<dyn spirit_core::vowp::VowpClient>,
+    interval: Duration,
+) {
+    // Best effort: an older host without `capacity report` stays connected.
+    refresh_capacity_best_effort(manager, client.as_ref()).await;
+    start_connection_tasks(manager, client, interval);
 }
 
 #[tauri::command]
@@ -94,20 +133,7 @@ pub async fn connect_host(
     };
 
     let _ = state.hosts().mark_connected(&id, Timestamp::now());
-    // Best effort: an older host without `capacity report` stays connected.
-    refresh_capacity_best_effort(&manager, client.as_ref()).await;
-    let poll_manager = manager.clone();
-    let poll_client = client.clone();
-    tauri::async_runtime::spawn(async move {
-        poll_manager.run_poll_loop(poll_client).await;
-    });
-    // The poll loop re-derives the view from the last capacity report, so a slower
-    // dedicated loop keeps Memory, Disk and CPU load live.
-    let capacity_manager = manager.clone();
-    let capacity_client = client;
-    tauri::async_runtime::spawn(async move {
-        run_capacity_loop(capacity_manager, capacity_client).await;
-    });
+    finish_connect(&manager, &client, CAPACITY_REFRESH_INTERVAL).await;
 
     Ok(snapshot)
 }
@@ -136,4 +162,70 @@ pub async fn disconnect_host(
 #[tauri::command]
 pub async fn connection_status(state: State<'_, AppState>) -> CommandResult<ConnectionSnapshot> {
     Ok(state.connection_manager().await.status())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spirit_core::connection::ConnectionManager;
+    use spirit_core::fixtures::{Scenario, capacity_report, fleet_status};
+    use spirit_core::host::HostId;
+    use spirit_core::vowp::{MockVowpClient, VowpClient};
+    use std::sync::Arc;
+
+    fn mock() -> MockVowpClient {
+        MockVowpClient::new(
+            fleet_status(Scenario::Idle).expect("status"),
+            capacity_report(Scenario::Idle).expect("capacity"),
+        )
+    }
+
+    async fn connected(client: &MockVowpClient) -> ConnectionManager {
+        let manager = ConnectionManager::default();
+        manager
+            .connect(client, HostId("h1".to_owned()))
+            .await
+            .expect("connect");
+        manager
+    }
+
+    #[tokio::test]
+    async fn finish_connect_reads_capacity_immediately_and_on_the_loop() {
+        let mock = mock();
+        let manager = connected(&mock).await;
+        let client: Arc<dyn VowpClient> = Arc::new(mock.clone());
+        finish_connect(&manager, &client, Duration::from_millis(20)).await;
+        assert!(mock.capacity_calls() >= 1, "connect reads capacity once");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(mock.capacity_calls() >= 3, "loop keeps reading capacity");
+        manager.disconnect();
+    }
+
+    #[tokio::test]
+    async fn capacity_loop_stops_when_its_connection_is_replaced() {
+        let mock = mock();
+        let manager = connected(&mock).await;
+        let client: Arc<dyn VowpClient> = Arc::new(mock.clone());
+        let old_token = manager.cancel_token();
+        let handle = tokio::spawn(run_capacity_loop(
+            manager.clone(),
+            client,
+            old_token,
+            Duration::from_millis(20),
+        ));
+        // The "Disconnect and connect" flow: disconnect, then connect again.
+        manager.disconnect();
+        manager
+            .connect(&mock, HostId("h2".to_owned()))
+            .await
+            .expect("reconnect");
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("old loop exits")
+            .expect("join");
+        let before = mock.capacity_calls();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(mock.capacity_calls(), before, "no reads from a stale loop");
+        manager.disconnect();
+    }
 }
