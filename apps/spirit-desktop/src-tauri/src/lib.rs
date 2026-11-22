@@ -125,6 +125,7 @@ pub fn run() {
             commands::engine::use_bundled,
             commands::engine::restart_engine,
             commands::chat::chat_start,
+            commands::chat::chat_provision_orchestrator,
             commands::chat::chat_attach,
             commands::chat::chat_send,
             commands::chat::chat_set_model,

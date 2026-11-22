@@ -94,6 +94,13 @@ import type {
 export interface ChatBridgeSurface {
   /** Ensure the engine/endpoint and attach/create the native session; idempotent. */
   start(input: ChatStartInput): Promise<ChatSessionView>;
+  /**
+   * One-click Start for a project orchestrator that has no local record yet. The host
+   * attaches VOWP's local endpoint when it exists, otherwise starts a project-scoped
+   * session on the bundled engine with the owner's connected models. Idempotent.
+   * Optional: an older bridge may omit it.
+   */
+  provisionOrchestrator?(project: string): Promise<ChatSessionView>;
   /** Reuse the stored native session; never creates one. */
   attach(session: SessionId): Promise<ChatSessionView>;
   /**

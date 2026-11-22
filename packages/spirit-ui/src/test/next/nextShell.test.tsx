@@ -338,6 +338,25 @@ describe("NextShell", () => {
     expect(await screen.findByRole("button", { name: "How busy is the server?" })).toBeDisabled();
   });
 
+  it("offers a one-click Start for a project with no local orchestrator, never Connect a provider", async () => {
+    const { user } = await renderConnected("chat-project-not-configured");
+    const sidebar = screen.getByRole("navigation", { name: "Sessions" });
+    await user.click(within(sidebar).getByRole("button", { name: /^vowp/ }));
+    await user.click(within(sidebar).getByRole("button", { name: /^Orchestrator/ }));
+
+    const card = await screen.findByTestId("start-orchestrator");
+    expect(card).toHaveTextContent("doesn’t have a local orchestrator running on this Mac yet");
+    expect(screen.queryByText("A capability gate is not ready")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect a provider" })).not.toBeInTheDocument();
+
+    await user.click(within(card).getByRole("button", { name: "Start vowp orchestrator" }));
+    await waitFor(() => expect(screen.queryByTestId("start-orchestrator")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled(),
+    );
+    expect(screen.queryByTestId("chat-error")).not.toBeInTheDocument();
+  });
+
   it("keeps the details panel closed until it is toggled", async () => {
     const { user } = await renderConnected();
     const panel = screen.getByTestId("details-panel");

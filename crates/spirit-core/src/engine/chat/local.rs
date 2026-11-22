@@ -192,6 +192,10 @@ pub trait ChatTransport: Send + Sync {
     ) -> Result<ChatSendReceipt, SpiritError>;
     /// Aborts the turn when supported and returns the stopped view.
     async fn stop(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError>;
+    /// One-click Start for a project orchestrator: attaches VOWP's local endpoint or falls
+    /// back to a project session on the bundled engine. Never a `chat_not_configured`
+    /// dead end.
+    async fn provision_orchestrator(&self, project: &str) -> Result<ChatSessionView, SpiritError>;
     /// Switches the setup assistant's model and returns the updated view.
     async fn set_model(
         &self,
@@ -248,6 +252,9 @@ struct SessionRecord {
     endpoint: Option<ChatEndpoint>,
     /// The VOWP home session reported with the endpoint. Core-only.
     vowp_session_id: Option<String>,
+    /// True when a project session runs on the bundled engine because VOWP has no local
+    /// endpoint for it yet (the one-click Start fallback). It behaves like the setup session.
+    engine_backed: bool,
     state: ChatSessionState,
     attached: bool,
     started_at: Option<Timestamp>,
@@ -276,6 +283,7 @@ impl SessionRecord {
             native_session_id,
             endpoint: None,
             vowp_session_id: None,
+            engine_backed: false,
             state: ChatSessionState::Idle,
             attached: false,
             started_at: None,
@@ -464,6 +472,88 @@ impl LocalChatProvider {
         }
     }
 
+    async fn is_engine_backed(&self, session: &ChatSessionId) -> bool {
+        let state = self.inner.state.lock().await;
+        state
+            .sessions
+            .get(session)
+            .is_some_and(|record| record.engine_backed)
+    }
+
+    /// One-click Start for a project orchestrator. It first looks for VOWP's local
+    /// endpoint; when there is none (`chat_not_configured`) it falls back to a
+    /// project-titled session on the bundled engine, which uses the owner's connected
+    /// OpenCode or BYOK models, so the owner can chat immediately. Any other failure is
+    /// returned unchanged. Idempotent: a running fallback session is reused.
+    pub async fn provision_orchestrator(
+        &self,
+        project: &str,
+    ) -> Result<ChatSessionView, SpiritError> {
+        validate_project_name(project)?;
+        let session = ChatSessionId::Project(project.to_owned());
+        if self.is_engine_backed(&session).await {
+            return self.attach_setup(&session).await;
+        }
+        let existing = {
+            let state = self.inner.state.lock().await;
+            state
+                .sessions
+                .get(&session)
+                .and_then(|record| record.vowp_session_id.clone())
+        };
+        match self
+            .inner
+            .resolve_local_endpoint(project, existing.as_deref())
+            .await
+        {
+            Ok(resolved) => self.open_orchestrator(project, &session, resolved).await,
+            Err(error) if error.message.starts_with("chat_not_configured") => {
+                self.start_engine_backed(&session, project).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn start_engine_backed(
+        &self,
+        session: &ChatSessionId,
+        project: &str,
+    ) -> Result<ChatSessionView, SpiritError> {
+        let port = self.inner.ensure_engine().await?;
+        self.inner.check_health(port).await?;
+        let endpoint = ChatEndpoint::engine(port, &self.inner.workspace);
+        let _ = self.inner.resolve_setup_model().await;
+        let native = self
+            .inner
+            .create_native_session_titled(&endpoint, &format!("{project} orchestrator"))
+            .await?;
+        let body = self.inner.read_log(&endpoint, &native).await?;
+        let usage = parse_usage(&body, self.inner.selected_context_limit());
+        let now = self.inner.clock.now();
+        let view = {
+            let mut state = self.inner.state.lock().await;
+            let mut record = SessionRecord::new(native);
+            record.endpoint = Some(endpoint.clone());
+            record.engine_backed = true;
+            record.state = ChatSessionState::Ready;
+            record.attached = true;
+            record.started_at = Some(now);
+            record.last_event_at = Some(now);
+            record.usage = usage;
+            record
+                .applier
+                .replace_log(parse_log(&body, self.inner.clock.now()));
+            record.applier.observe_revision(self.inner.bus.revision());
+            record.mapper.reset_from_messages(record.applier.messages());
+            let view = self.inner.view_for(session, &record);
+            state.sessions.insert(session.clone(), record);
+            view
+        };
+        let view = self.inner.clone().emit_session(view).await;
+        ensure_pump(&self.inner, &endpoint);
+        Ok(self.inner.current_view(session).await.unwrap_or(view))
+    }
+
     async fn start_setup(&self, input: &ChatStartInput) -> Result<ChatSessionView, SpiritError> {
         let port = self.inner.ensure_engine().await?;
         self.inner.check_health(port).await?;
@@ -545,6 +635,9 @@ impl LocalChatProvider {
         &self,
         input: &ChatStartInput,
     ) -> Result<ChatSessionView, SpiritError> {
+        if self.is_engine_backed(&input.session).await {
+            return self.attach_setup(&input.session).await;
+        }
         if !input.resumes() {
             return Err(chat_gated_error(
                 "a new global/project conversation must be created in VOWP; StackSpirit only attaches to the mirrored session",
@@ -715,6 +808,9 @@ impl LocalChatProvider {
         &self,
         session: &ChatSessionId,
     ) -> Result<ChatSessionView, SpiritError> {
+        if self.is_engine_backed(session).await {
+            return self.attach_setup(session).await;
+        }
         let name = orchestrator_name(session).ok_or_else(chat_not_started_error)?;
         let existing = {
             let state = self.inner.state.lock().await;
@@ -743,13 +839,13 @@ impl LocalChatProvider {
         text: &str,
     ) -> Result<ChatSendReceipt, SpiritError> {
         let text = validate_user_text(text)?;
-        let setup = matches!(session, ChatSessionId::Setup);
-        let (native, stored_endpoint) = {
+        let (native, stored_endpoint, setup) = {
             let state = self.inner.state.lock().await;
             let record = state
                 .sessions
                 .get(session)
                 .ok_or_else(chat_not_started_error)?;
+            let setup = matches!(session, ChatSessionId::Setup) || record.engine_backed;
             if !record.attached {
                 return Err(chat_not_started_error());
             }
@@ -762,7 +858,7 @@ impl LocalChatProvider {
                 .endpoint
                 .clone()
                 .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
-            (record.native_session_id.clone(), endpoint)
+            (record.native_session_id.clone(), endpoint, setup)
         };
         let endpoint = if setup {
             let port = self.inner.ensure_engine().await?;
@@ -955,7 +1051,7 @@ impl LocalChatProvider {
         model_id: &str,
     ) -> Result<ChatSessionView, SpiritError> {
         let model_id = validate_model_id(model_id)?;
-        if !matches!(session, ChatSessionId::Setup) {
+        if !matches!(session, ChatSessionId::Setup) && !self.is_engine_backed(session).await {
             return Err(chat_model_switch_gated_error());
         }
         {
@@ -1038,6 +1134,10 @@ impl ChatTransport for LocalChatProvider {
         LocalChatProvider::stop(self, session).await
     }
 
+    async fn provision_orchestrator(&self, project: &str) -> Result<ChatSessionView, SpiritError> {
+        LocalChatProvider::provision_orchestrator(self, project).await
+    }
+
     async fn set_model(
         &self,
         session: &ChatSessionId,
@@ -1060,14 +1160,15 @@ impl Inner {
         // The setup assistant shows the bundled engine's selected model and its verified
         // usable list. A VOWP orchestrator owns its own config, so the core neither copies
         // the setup model nor invents an orchestrator model list.
-        let (model, available_models) = if matches!(session, ChatSessionId::Setup) {
-            (
-                self.engine.selected_model(),
-                Some(self.engine.available_models()),
-            )
-        } else {
-            (None, None)
-        };
+        let (model, available_models) =
+            if matches!(session, ChatSessionId::Setup) || record.engine_backed {
+                (
+                    self.engine.selected_model(),
+                    Some(self.engine.available_models()),
+                )
+            } else {
+                (None, None)
+            };
         ChatSessionView {
             session: session.clone(),
             location: ChatSessionLocation::Local,
@@ -1440,7 +1541,16 @@ impl Inner {
     }
 
     async fn create_native_session(&self, endpoint: &ChatEndpoint) -> Result<String, SpiritError> {
-        let body = serde_json::to_vec(&json!({ "title": SETUP_TITLE })).map_err(|_| {
+        self.create_native_session_titled(endpoint, SETUP_TITLE)
+            .await
+    }
+
+    async fn create_native_session_titled(
+        &self,
+        endpoint: &ChatEndpoint,
+        title: &str,
+    ) -> Result<String, SpiritError> {
+        let body = serde_json::to_vec(&json!({ "title": title })).map_err(|_| {
             SpiritError::new(
                 SpiritErrorCode::Internal,
                 "the setup session request could not be encoded",
@@ -1701,7 +1811,7 @@ impl Inner {
                 .find(|(session, record)| {
                     record.native_session_id == native
                         && if setup {
-                            matches!(session, ChatSessionId::Setup)
+                            matches!(session, ChatSessionId::Setup) || record.engine_backed
                         } else {
                             record
                                 .endpoint
@@ -1886,7 +1996,7 @@ impl Inner {
         setup: bool,
     ) -> bool {
         if setup {
-            matches!(session, ChatSessionId::Setup)
+            matches!(session, ChatSessionId::Setup) || record.engine_backed
         } else {
             record
                 .endpoint
@@ -1925,8 +2035,10 @@ impl Inner {
             // The bundled engine may have restarted on a new port. Keep the setup
             // record's endpoint aligned with the live pump before matching frames.
             let mut state = self.state.lock().await;
-            if let Some(record) = state.sessions.get_mut(&ChatSessionId::Setup) {
-                record.endpoint = Some(ChatEndpoint::engine(port, &self.workspace));
+            for (session, record) in &mut state.sessions {
+                if matches!(session, ChatSessionId::Setup) || record.engine_backed {
+                    record.endpoint = Some(ChatEndpoint::engine(port, &self.workspace));
+                }
             }
         }
         let sessions = {

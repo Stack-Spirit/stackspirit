@@ -16,9 +16,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use spirit_core::engine::chat::{
-    ApplyOutcome, ChatEngine, ChatEvent, ChatEventApplier, ChatEventBus, ChatLogQuery, ChatMessage,
-    ChatSessionId, ChatSessionLocation, ChatSessionState, ChatStartInput, LocalChatProvider,
-    StreamSupport,
+    ApplyOutcome, ChatEndpointResolver, ChatEngine, ChatEvent, ChatEventApplier, ChatEventBus,
+    ChatLogQuery, ChatMessage, ChatSessionId, ChatSessionLocation, ChatSessionState,
+    ChatStartInput, LocalChatProvider, ResolvedEndpoint, StreamSupport,
 };
 use spirit_core::engine::{
     EngineChoice, EngineRuntime, EngineStatus, ExternalHarnessKind, PrivateEngineTree,
@@ -1418,4 +1418,136 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         );
     }
     runtime.shutdown(&info).await.unwrap();
+}
+
+/// A host with no VOWP local record for any orchestrator.
+struct NoLocalRecord;
+
+#[async_trait]
+impl ChatEndpointResolver for NoLocalRecord {
+    async fn resolve(
+        &self,
+        name: &str,
+        _expected_session_id: Option<&str>,
+    ) -> Result<ResolvedEndpoint, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            format!(
+                "chat_not_configured: the {name} orchestrator has no local endpoint (there is no local record for this orchestrator)"
+            ),
+        ))
+    }
+}
+
+fn unconfigured(provider: LocalChatProvider) -> LocalChatProvider {
+    provider.with_endpoint_resolver(Arc::new(NoLocalRecord))
+}
+
+fn project_session(name: &str) -> ChatSessionId {
+    ChatSessionId::Project(name.to_owned())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_without_a_local_record_is_a_dead_end_until_it_is_provisioned() {
+    let server = FakeEngine::sse(SseScript::Deltas);
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, _engine) = build_provider(&server, workspace.path(), true);
+    let provider = unconfigured(provider);
+    let session = project_session("stackspirit");
+
+    // Starting through the attach-only path still reports the typed gate; no session is
+    // invented behind the owner's back.
+    let err = provider
+        .start(&ChatStartInput {
+            session: session.clone(),
+            project: Some("stackspirit".to_owned()),
+            location: ChatSessionLocation::Local,
+            resume: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("chat_not_configured"), "{err:?}");
+    assert_eq!(server.created_sessions(), 0);
+
+    // One-click Start falls back to a project session on the bundled engine.
+    let view = provider
+        .provision_orchestrator("stackspirit")
+        .await
+        .unwrap();
+    assert_eq!(view.session, session);
+    assert_eq!(view.state, ChatSessionState::Ready);
+    assert!(view.attached);
+    assert!(view.error.is_none());
+    assert_eq!(view.location, ChatSessionLocation::Local);
+    assert!(view.model.is_some(), "the connected model is shown");
+    assert_eq!(server.created_sessions(), 1);
+    let created = server
+        .requests()
+        .into_iter()
+        .find(|request| request.method == "POST" && request.path == "/session")
+        .expect("session create request");
+    assert!(
+        created.body.contains("stackspirit orchestrator"),
+        "{}",
+        created.body
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provisioned_project_chats_and_is_reused_without_chat_not_configured() {
+    let server = FakeEngine::sse(SseScript::Deltas);
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, engine) = build_provider(&server, workspace.path(), true);
+    let provider = unconfigured(provider);
+    let session = project_session("stackspirit");
+    let mut receiver = provider.subscribe();
+    provider
+        .provision_orchestrator("stackspirit")
+        .await
+        .unwrap();
+    wait_until(|| server.event_connections() >= 1, Duration::from_secs(2)).await;
+
+    let receipt = provider.send(&session, "Hello?").await.unwrap();
+    assert!(receipt.accepted);
+    let events = collect_until_done(&mut receiver, Duration::from_secs(5)).await;
+    let applier = project(&events);
+    assert_eq!(applier.messages().len(), 2, "{events:#?}");
+    assert_eq!(applier.messages()[1].joined_text(), "Hello world");
+    let message = server
+        .requests()
+        .into_iter()
+        .find(|request| request.method == "POST" && request.path.ends_with("/message"))
+        .expect("message request");
+    let body: Value = serde_json::from_str(&message.body).unwrap();
+    assert_eq!(body["model"]["providerID"], "opencode");
+
+    // Idempotent: provisioning, starting and attaching again reuse the same session.
+    provider
+        .provision_orchestrator("stackspirit")
+        .await
+        .unwrap();
+    let started = provider
+        .start(&ChatStartInput {
+            session: session.clone(),
+            project: Some("stackspirit".to_owned()),
+            location: ChatSessionLocation::Local,
+            resume: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(started.state, ChatSessionState::Ready);
+    let attached = provider.attach(&session).await.unwrap();
+    assert_eq!(attached.state, ChatSessionState::Ready);
+    assert_eq!(server.created_sessions(), 1);
+    assert_eq!(engine.spawns(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provisioning_rejects_an_unsafe_project_name() {
+    let server = FakeEngine::new();
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, _engine) = build_provider(&server, workspace.path(), false);
+    let err = provider.provision_orchestrator("../etc").await.unwrap_err();
+    assert_eq!(err.code, SpiritErrorCode::InvalidInput);
+    assert_eq!(server.created_sessions(), 0);
 }

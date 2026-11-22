@@ -77,6 +77,82 @@ function isGateError(code: string | undefined, message: string | null | undefine
   );
 }
 
+function isNotConfiguredError(code: string | undefined, message: string | null | undefined) {
+  return code === "chat_not_configured" || /chat_not_configured/.test(message ?? "");
+}
+
+/**
+ * The calm one-click card for a project orchestrator that has no local record yet. It is
+ * never a provider error: the primary action starts the orchestrator through the bridge.
+ */
+function StartOrchestratorCard({
+  project,
+  starting,
+  onStart,
+  onOpenEngineSettings,
+}: {
+  project: string;
+  starting: boolean;
+  onStart: () => void;
+  onOpenEngineSettings?: () => void;
+}) {
+  const bridge = useFleetStore((state) => state.bridge);
+  const agentStatus = bridge?.localOrchestrators?.agentStatus;
+  const [agentEnrolled, setEnrolled] = useState<boolean | null>(null);
+  const enrolled = agentStatus ? agentEnrolled : false;
+
+  useEffect(() => {
+    if (!agentStatus) return;
+    let cancelled = false;
+    void agentStatus()
+      .then((result) => {
+        if (!cancelled) setEnrolled(result.state === "connected");
+      })
+      .catch(() => {
+        if (!cancelled) setEnrolled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentStatus]);
+
+  return (
+    <div
+      className="nx-chat__error nx-chat__start"
+      role="region"
+      aria-label={`Start ${project} orchestrator`}
+      data-testid="start-orchestrator"
+    >
+      <strong>{project} isn’t running on this Mac yet</strong>
+      <span>
+        {project} doesn’t have a local orchestrator running on this Mac yet. Start one and
+        you can chat right away with the models you already connected.
+      </span>
+      <div className="nx-chat__error-actions">
+        <button
+          type="button"
+          className="nx-btn nx-btn--sm"
+          onClick={onStart}
+          disabled={starting}
+          aria-busy={starting}
+          data-testid="start-orchestrator-button"
+        >
+          {starting ? "Starting…" : `Start ${project} orchestrator`}
+        </button>
+        {enrolled === false && onOpenEngineSettings ? (
+          <button
+            type="button"
+            className="nx-btn nx-btn--quiet nx-btn--sm"
+            onClick={onOpenEngineSettings}
+          >
+            Use OpenCode models locally
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function composerPlaceholder(
   session: SessionId,
   state: ChatSessionState,
@@ -560,6 +636,7 @@ export function ChatView({
   const permissionError = useConversations((state) => state.permissionError[session] ?? null);
   const open = useConversations((state) => state.open);
   const restart = useConversations((state) => state.restart);
+  const provision = useConversations((state) => state.provision);
   const loadEarlier = useConversations((state) => state.loadEarlier);
   const requestSecureServerCard = useConversations((state) => state.requestSecureServerCard);
   const hasEarlier = useConversations((state) => Boolean(state.earlier[session]));
@@ -636,6 +713,9 @@ export function ChatView({
   const heroTitle = isSetup ? "StackSpirit" : sessionTitle(session);
   const error = view?.error ?? null;
   const gate = isGateError(error?.code, error?.message);
+  const needsStart =
+    project !== null && isNotConfiguredError(error?.code, error?.message) && !retry;
+  const starting = view?.state === "connecting";
   const canRetry = Boolean(error?.retryable);
   const canRestartSetup =
     isSetup &&
@@ -900,7 +980,16 @@ export function ChatView({
         </EmptyHero>
       </div>
 
-      {error && !retry ? (
+      {needsStart && project ? (
+        <StartOrchestratorCard
+          project={project}
+          starting={starting}
+          onStart={() => void provision(session)}
+          onOpenEngineSettings={onOpenEngineSettings}
+        />
+      ) : null}
+
+      {error && !retry && !needsStart ? (
         <div
           className={`nx-chat__error${gate ? " nx-chat__error--gate" : ""}`}
           role="alert"
@@ -921,7 +1010,7 @@ export function ChatView({
                 Switch model
               </button>
             ) : null}
-            {onOpenEngineSettings ? (
+            {onOpenEngineSettings && !gate ? (
               <button
                 type="button"
                 className="nx-btn nx-btn--quiet nx-btn--sm"

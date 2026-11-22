@@ -109,6 +109,11 @@ interface ConversationState {
   open: (session: SessionId, project: string | null, location?: SessionLocation) => Promise<void>;
   /** Start a fresh local setup conversation (`resume: false`); never used for global/project. */
   restart: (session: SessionId) => Promise<void>;
+  /**
+   * One-click Start for a project orchestrator with no local record: the bridge attaches
+   * VOWP's endpoint or starts a project session on the bundled engine.
+   */
+  provision: (session: SessionId) => Promise<void>;
   /** Accept one user turn through `bridge.chat`; assistant text arrives as events. */
   send: (session: SessionId, text: string) => Promise<void>;
   /** Abort the current turn through `bridge.chat`; never stops an engine or host. */
@@ -585,6 +590,7 @@ async function doOpen(
   project: string | null,
   location: SessionLocation | undefined,
   resume: boolean | undefined,
+  provision = false,
 ): Promise<ChatSessionView | null> {
   const chat = bridge.chat;
   const desired: SessionLocation = session === "setup" ? "local" : (location ?? "local");
@@ -612,7 +618,10 @@ async function doOpen(
   });
 
   try {
-    const view = await chat.start({ session, project, location: desired, resume });
+    const view =
+      provision && project && chat.provisionOrchestrator
+        ? await chat.provisionOrchestrator(project)
+        : await chat.start({ session, project, location: desired, resume });
     setView(session, { ...view });
     // A fresh setup conversation (`resume: false`) replaces the rendered transcript; the
     // old native log is left intact by the bridge and remains in the engine's private tree.
@@ -650,6 +659,7 @@ async function runOpen(
   project: string | null,
   location: SessionLocation | undefined,
   resume: boolean | undefined,
+  provision = false,
 ): Promise<void> {
   const bridge = currentBridge();
   if (!bridge) {
@@ -668,7 +678,7 @@ async function runOpen(
     return;
   }
 
-  const promise = doOpen(bridge, session, project, location, resume);
+  const promise = doOpen(bridge, session, project, location, resume, provision);
   useConversations.setState((state) => ({
     opening: { ...state.opening, [session]: promise },
   }));
@@ -684,6 +694,8 @@ export const useConversations = create<ConversationState>((set, get) => ({
   ...createInitialState(),
 
   open: (session, project, location) => runOpen(session, project, location, undefined),
+
+  provision: (session) => runOpen(session, projectFor(session), "local", undefined, true),
 
   restart: (session) =>
     runOpen(

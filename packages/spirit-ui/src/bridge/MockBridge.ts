@@ -142,6 +142,7 @@ export const MOCK_SCENARIOS = [
   "chat-engine-stopped",
   "chat-external-engine",
   "chat-server-gated",
+  "chat-project-not-configured",
   "chat-session-lost",
   "chat-tools",
   "chat-permission",
@@ -1519,6 +1520,21 @@ export class MockBridge implements SpiritBridge {
       });
       return clone(view);
     },
+    provisionOrchestrator: async (project: string): Promise<ChatSessionView> => {
+      const session: SessionId = `project:${project}`;
+      this.validateChatStart({ session, location: "local", project, resume: true });
+      const existing = this.chatSessions.get(session);
+      if (existing) return clone(existing);
+      this.chatLogs.set(session, []);
+      const view = this.makeChatView(session, "local");
+      this.chatSessions.set(session, view);
+      this.emitChat({
+        kind: "session",
+        revision: this.nextRevision(),
+        session: clone(view),
+      });
+      return clone(view);
+    },
     attach: async (session: SessionId): Promise<ChatSessionView> => {
       this.validateChatSession(session);
       if (this.scenario === "chat-session-lost" && session !== "setup") {
@@ -2301,6 +2317,18 @@ export class MockBridge implements SpiritBridge {
   }
 
   private requireChatScenario(session: SessionId): void {
+    if (
+      this.scenario === "chat-project-not-configured" &&
+      session.startsWith("project:") &&
+      !this.chatSessions.has(session)
+    ) {
+      const name = session.slice("project:".length);
+      throw errorDto(
+        "chat_not_configured",
+        `chat_not_configured: the ${name} orchestrator has no local endpoint (there is no local record for this orchestrator)`,
+        "Start the orchestrator from the project chat.",
+      );
+    }
     if (this.scenario === "chat-engine-stopped") {
       throw errorDto(
         "engine_not_ready",

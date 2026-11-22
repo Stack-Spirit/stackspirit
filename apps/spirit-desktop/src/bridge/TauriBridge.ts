@@ -250,6 +250,8 @@ export class TauriBridge implements SpiritBridge {
       call("chat_start", { input }),
     attach: (session: SessionId): Promise<ChatSessionView> =>
       call("chat_attach", { session }),
+    provisionOrchestrator: (project: string): Promise<ChatSessionView> =>
+      call("chat_provision_orchestrator", { project }),
     send: async (input: ChatSendInput): Promise<ChatSendReceipt> => {
       // Blank text never leaves the renderer: the guard throws the normal typed error
       // shape and nothing is invoked.

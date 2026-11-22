@@ -29,6 +29,17 @@ pub async fn chat_start(
     chat.start(&input).await
 }
 
+/// One-click Start for a project orchestrator. Core attaches VOWP's local endpoint or
+/// falls back to a project session on the bundled engine.
+#[tauri::command]
+pub async fn chat_provision_orchestrator(
+    state: State<'_, AppState>,
+    project: String,
+) -> CommandResult<ChatSessionView> {
+    let chat = state.chat();
+    chat.provision_orchestrator(&project).await
+}
+
 /// Reuses the stored native session. Core never creates a session here.
 #[tauri::command]
 pub async fn chat_attach(

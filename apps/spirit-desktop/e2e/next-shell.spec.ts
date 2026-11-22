@@ -353,6 +353,26 @@ test("server chat shows the honest VOWP gate, not a fake reply", async ({ page }
   await expectNoWcagViolations(page);
 });
 
+test("a project without a local orchestrator offers one-click Start, not Connect a provider", async ({ page }) => {
+  for (const theme of ["light", "dark"] as const) {
+    await page.goto(url("chat-project-not-configured", theme));
+    await connect(page);
+    await page.getByRole("navigation", { name: "Sessions" }).getByRole("button", { name: /^vowp/ }).click();
+    await page.getByRole("navigation", { name: "Sessions" }).getByRole("button", { name: /^Orchestrator/ }).first().click();
+
+    const card = page.getByTestId("start-orchestrator");
+    await expect(card).toBeVisible();
+    await expect(page.getByText("A capability gate is not ready")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Connect a provider" })).toHaveCount(0);
+    await expectNoWcagViolations(page);
+
+    await card.getByRole("button", { name: "Start vowp orchestrator" }).click();
+    await expect(card).toHaveCount(0);
+    await expect(page.getByRole("textbox", { name: "Message" })).toBeEnabled();
+    await expectNoWcagViolations(page);
+  }
+});
+
 test("connected shell, details panel and settings menu meet WCAG 2.2 AA", async ({ page }) => {
   for (const theme of ["light", "dark"] as const) {
     await page.goto(url("busy", theme));
