@@ -378,6 +378,34 @@ impl SshVowpClient {
     }
 }
 
+/// Replaces every absolute home-side path token (`/x/y`, `~/x`) in a `project add`
+/// error so the clone target or folder never crosses the bridge.
+fn scrub_project_add_error(mut error: SpiritError) -> SpiritError {
+    fn scrub(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while !rest.is_empty() {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let (token, tail) = rest.split_at(end);
+            let core = token.trim_matches(|c: char| "\"'`()[]{}<>,;:.".contains(c));
+            if core.starts_with('/') || core.starts_with("~/") || core == "~" {
+                out.push_str(&token.replacen(core, "[remote-path]", 1));
+            } else {
+                out.push_str(token);
+            }
+            let ws = tail.len() - tail.trim_start().len();
+            out.push_str(&tail[..ws]);
+            rest = &tail[ws..];
+        }
+        out
+    }
+    error.message = scrub(&error.message);
+    if let Some(hint) = &mut error.hint {
+        *hint = scrub(hint);
+    }
+    error
+}
+
 fn first_line(input: &str) -> String {
     input
         .lines()
@@ -1075,7 +1103,9 @@ impl VowpClient for SshVowpClient {
                 "the installed VOWP does not provide `project add`",
             ));
         }
-        let output = self.check_output(output)?;
+        let output = self
+            .check_output(output)
+            .map_err(scrub_project_add_error)?;
         parse_project_bootstrap(&output.stdout)
     }
 
@@ -1958,5 +1988,20 @@ impl VowpClient for MockVowpClient {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .warnings,
         )
+    }
+}
+
+#[cfg(test)]
+mod project_add_scrub_tests {
+    use super::*;
+
+    #[test]
+    fn project_add_error_drops_the_clone_target_path() {
+        let doc = br#"{"error":{"hint":"remove /home/owner/demo-app first","kind":"conflict","message":"clone target /home/owner/demo-app already exists"}}"#;
+        let parsed = parse_error_document(doc).expect("error document");
+        let error = scrub_project_add_error(parsed.to_spirit_error(4));
+        assert!(!error.message.contains("/home/owner"), "{}", error.message);
+        assert!(error.message.contains("[remote-path] already exists"));
+        assert!(!error.hint.unwrap_or_default().contains("/home/owner"));
     }
 }

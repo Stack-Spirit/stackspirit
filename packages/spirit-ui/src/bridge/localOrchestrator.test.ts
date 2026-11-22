@@ -323,3 +323,17 @@ describe("D6 local-orchestrator bridge", () => {
     }
   });
 });
+
+describe("projects.add bridge", () => {
+  it("records the call and returns an outcome without a path", async () => {
+    const bridge = await probedLocal("gate-d6-waiting");
+    const input = {
+      name: "demo-app",
+      source: { kind: "git" as const, url: "https://example.invalid/org/demo-app.git" },
+    };
+    const outcome = await bridge.projects.add(input);
+    expect(bridge.recordedProjectAdds()).toEqual([input]);
+    expect(outcome.project).toBe("demo-app");
+    expect(Object.keys(JSON.parse(JSON.stringify(outcome)))).not.toContain("path");
+  });
+});
