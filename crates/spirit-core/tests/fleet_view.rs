@@ -143,6 +143,15 @@ fn gate_failure_of_a_running_job_is_live_review_not_history() {
     assert_eq!(live[0].kind, "build");
     assert_eq!(live[0].role, "worker");
     assert_eq!(live[0].gate.as_deref(), Some("secret_scan"));
+    assert!(
+        !fleet
+            .lanes
+            .running
+            .iter()
+            .any(|card| card.job_id == "ss-2-desktop-shell"),
+        "a job lives in at most one active lane: {:?}",
+        fleet.lanes.running
+    );
     let history: Vec<&str> = fleet
         .lanes
         .history
@@ -164,4 +173,87 @@ fn last_merge_reaches_the_project_view() {
     let merge = fleet.projects[0].last_merge.as_ref().expect("merge");
     assert_eq!(merge.job_id, "ss-4-merged");
     assert_eq!(merge.branch, "job/ss-4-merged");
+}
+
+fn failure_with(job: &str, gate: &str, at: &str, evidence: &str) -> Value {
+    json!({"job": job, "gate": gate, "at": at, "evidence": evidence})
+}
+
+#[test]
+fn live_running_job_uses_the_newest_gate_failure() {
+    // VOWP emits newest first.
+    let fleet = view_of(|project| {
+        project["gate_failures"] = json!([
+            failure_with(
+                "ss-2-desktop-shell",
+                "review",
+                "2026-11-14T10:10:00.000Z",
+                "new evidence"
+            ),
+            failure_with(
+                "ss-2-desktop-shell",
+                "secret_scan",
+                "2026-11-14T10:00:00.000Z",
+                "old evidence"
+            ),
+        ]);
+    });
+    let live: Vec<_> = fleet
+        .lanes
+        .review_fix
+        .iter()
+        .filter(|card| card.job_id == "ss-2-desktop-shell")
+        .collect();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].gate.as_deref(), Some("review"));
+    assert_eq!(live[0].gate_evidence.as_deref(), Some("new evidence"));
+    assert_eq!(
+        live[0].gate_at,
+        Some(Timestamp::parse("2026-11-14T10:10:00.000Z").unwrap())
+    );
+    assert!(
+        !fleet
+            .lanes
+            .running
+            .iter()
+            .any(|card| card.job_id == "ss-2-desktop-shell")
+    );
+}
+
+#[test]
+fn history_uses_the_newest_gate_failure_in_any_input_order() {
+    for newest_first in [true, false] {
+        let fleet = view_of(|project| {
+            let new = failure_with(
+                "ss-98-gone",
+                "review",
+                "2026-11-14T09:30:00.000Z",
+                "new evidence",
+            );
+            let old = failure_with(
+                "ss-98-gone",
+                "secret_scan",
+                "2026-11-14T09:00:00.000Z",
+                "old evidence",
+            );
+            project["gate_failures"] = if newest_first {
+                json!([new, old])
+            } else {
+                json!([old, new])
+            };
+        });
+        let rows: Vec<_> = fleet
+            .lanes
+            .history
+            .iter()
+            .filter(|card| card.job_id == "ss-98-gone")
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].gate.as_deref(), Some("review"));
+        assert_eq!(rows[0].gate_evidence.as_deref(), Some("new evidence"));
+        assert_eq!(
+            rows[0].gate_at,
+            Some(Timestamp::parse("2026-11-14T09:30:00.000Z").unwrap())
+        );
+    }
 }

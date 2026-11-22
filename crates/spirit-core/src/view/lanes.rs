@@ -166,23 +166,20 @@ fn build_project_cards(project: &ProjectSnapshot, lanes: &mut JobLanes) {
         let stalled = queue_by_job
             .get(card.job.as_str())
             .is_some_and(|row| row.state == JobState::Stalled);
-        lanes
-            .running
-            .push(running_card(&project_name, card, stalled));
         // VOWP lists gating/reviewing/fixing jobs in `running` (they hold the lock), not in
-        // `queue`. A gate failure on a running job is live review work, enriched from its card.
-        if let Some(failure) = project
-            .gate_failures
-            .iter()
-            .rev()
-            .find(|f| f.job == card.job)
-        {
+        // `queue`. A gate failure on a running job is live review work: the job goes to
+        // `review_fix` only (never both lanes), enriched from its card with the newest failure.
+        if let Some(failure) = newest_failure(project, &card.job) {
             let mut review = running_card(&project_name, card, stalled);
             review.state = if stalled { "stalled" } else { "fixing" }.to_owned();
             review.gate = Some(failure.gate.clone());
             review.gate_at = Some(failure.at);
             review.gate_evidence = Some(failure.evidence.clone());
             lanes.review_fix.push(review);
+        } else {
+            lanes
+                .running
+                .push(running_card(&project_name, card, stalled));
         }
     }
 
@@ -215,11 +212,7 @@ fn build_project_cards(project: &ProjectSnapshot, lanes: &mut JobLanes) {
             JobState::Gating | JobState::Reviewing | JobState::Fixing => {
                 // Live review work: enriched with its gate failure when one exists.
                 seen.insert(key);
-                let failure = project
-                    .gate_failures
-                    .iter()
-                    .rev()
-                    .find(|f| f.job == row.job);
+                let failure = newest_failure(project, &row.job);
                 lanes.review_fix.push(match failure {
                     Some(failure) => gate_card(&project_name, failure, Some(row)),
                     None => queue_card(&project_name, row),
@@ -247,7 +240,7 @@ fn build_project_cards(project: &ProjectSnapshot, lanes: &mut JobLanes) {
         .chain(project.blocked.iter().map(|card| card.job.as_str()))
         .collect();
     let mut history_seen: HashSet<&str> = HashSet::new();
-    for failure in project.gate_failures.iter().rev() {
+    for failure in newest_first_failures(project) {
         let job = failure.job.as_str();
         let live_review = queue_by_job.get(job).is_some_and(|row| {
             matches!(
@@ -264,6 +257,25 @@ fn build_project_cards(project: &ProjectSnapshot, lanes: &mut JobLanes) {
             queue_by_job.get(job).copied(),
         ));
     }
+}
+
+/// The failure of `job` with the greatest timestamp, regardless of input order.
+fn newest_failure<'a>(
+    project: &'a ProjectSnapshot,
+    job: &crate::wire::JobId,
+) -> Option<&'a GateFailureCard> {
+    project
+        .gate_failures
+        .iter()
+        .filter(|f| &f.job == job)
+        .max_by_key(|f| f.at)
+}
+
+/// All failures sorted newest first (stable for equal timestamps).
+fn newest_first_failures(project: &ProjectSnapshot) -> Vec<&GateFailureCard> {
+    let mut all: Vec<&GateFailureCard> = project.gate_failures.iter().collect();
+    all.sort_by_key(|f| std::cmp::Reverse(f.at));
+    all
 }
 
 fn running_card(project: &str, card: &RunningJobCard, stalled: bool) -> JobCardView {
