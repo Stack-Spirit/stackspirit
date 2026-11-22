@@ -853,6 +853,105 @@ fn oom_kill_marks_run_usage() {
     assert_eq!(stored.project, project);
 }
 
+/// Owns a spawned child and its sentinel file; kills, reaps and removes both on drop.
+///
+/// Dropping runs even when the test panics, so no shell loop outlives the test body.
+#[cfg(target_os = "linux")]
+struct ProbeGuard {
+    child: std::process::Child,
+    sentinel: Option<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+impl ProbeGuard {
+    fn spawn(script: &str, sentinel: Option<PathBuf>) -> Self {
+        let child = std::process::Command::new("sh")
+            .args(["-c", script])
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        Self { child, sentinel }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(path) = self.sentinel.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Returns the pids of live processes whose command line mentions `needle`.
+#[cfg(target_os = "linux")]
+fn processes_mentioning(needle: &str) -> Vec<u32> {
+    let me = std::process::id();
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        if String::from_utf8_lossy(&raw).replace('\0', " ").contains(needle) {
+            found.push(pid);
+        }
+    }
+    found
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn scope_leaves_no_probe_child_after_drop() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("node");
+    let store = test_store(&root);
+    let project = insert_project(&store);
+    let job = insert_job(&store, &project, "no-leak");
+    let run_id = RunId::new();
+    insert_run(&store, &job, &run_id, &NodeName::parse("local").unwrap());
+    let deps = test_deps(&root);
+    let needle = root.display().to_string();
+    {
+        let child = ProbeGuard::spawn("while :; do :; done", None);
+        let scope = RunScope::begin(&deps, &run_id, child.id()).unwrap();
+        let _ = scope.sample().unwrap();
+        // Dropped without `finish`: the holder shell and its hold file must still go away.
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let leaked = processes_mentioning(&needle);
+        if leaked.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scope holder processes survived the drop: {leaked:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(deps.paths.tmp_dir())
+        .map(|dir| dir.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    assert!(
+        leftovers
+            .iter()
+            .all(|path| path.extension().is_none_or(|ext| ext != "hold")),
+        "hold files survived the drop: {leftovers:?}"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn scope_begin_measures_a_real_child() {
@@ -868,10 +967,7 @@ fn scope_begin_measures_a_real_child() {
     // after `sleep 0.2` has exited and read zeros. Keep a real child alive and busy until
     // the scope has observed it, then poll for the measurement instead of betting on one
     // sample.
-    let mut child = std::process::Command::new("sh")
-        .args(["-c", "while :; do :; done"])
-        .spawn()
-        .unwrap();
+    let mut child = ProbeGuard::spawn("while :; do :; done", None);
     let scope = RunScope::begin(&deps, &run_id, child.id()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut sample = scope.sample().unwrap();
@@ -885,8 +981,8 @@ fn scope_begin_measures_a_real_child() {
     }
     assert!(sample.peak_rss_bytes > 0, "no memory measured: {sample:?}");
     assert!(sample.cpu_usec > 0, "no CPU measured: {sample:?}");
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = child.child.kill();
+    let _ = child.child.wait();
     let usage = scope.finish(&store, BuildMode::Unknown).unwrap();
     assert!(usage.peak_rss_bytes > 0);
     assert!(usage.cpu_usec > 0, "the usage row lost the child's CPU: {usage:?}");
