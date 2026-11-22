@@ -63,10 +63,17 @@ fn pinned_sidecar() -> PathBuf {
     path
 }
 
-fn http_json(port: u16, path: &str) -> Value {
+/// Readiness reads retry only these startup/load statuses.
+const TRANSIENT_STATUSES: [&str; 3] = [" 499 ", " 502 ", " 503 "];
+const READY_ATTEMPTS: usize = 3;
+const READY_RETRY_SLEEP: Duration = Duration::from_millis(250);
+
+/// One GET. `Err` is a transient startup symptom (connection refused/closed/reset or a
+/// 499/502/503 answer); every other failure (other statuses, malformed JSON) panics at once.
+fn http_json_once(port: u16, path: &str) -> Result<Value, String> {
     let address = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream =
-        TcpStream::connect_timeout(&address, Duration::from_secs(2)).expect("connect engine");
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .map_err(|error| format!("connect: {error}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
         .expect("timeout");
@@ -75,21 +82,62 @@ fn http_json(port: u16, path: &str) -> Value {
         stream,
         "GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nAccept: application/json\r\n\r\n"
     )
-    .expect("write request");
+    .map_err(|error| format!("write: {error}"))?;
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).expect("read response");
-    let boundary = raw
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .expect("http headers");
+    if let Err(error) = stream.read_to_end(&mut raw) {
+        let closed = matches!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::UnexpectedEof
+        );
+        assert!(closed, "GET {path}: read response failed: {error}");
+        return Err(format!("connection closed: {error}"));
+    }
+    let Some(boundary) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+        // The connection closed before any complete response head arrived.
+        assert!(raw.is_empty(), "GET {path}: malformed http response head");
+        return Err("connection closed before a response".to_owned());
+    };
     let head = String::from_utf8_lossy(&raw[..boundary]).to_string();
+    let status_line = head.lines().next().unwrap_or_default();
+    let padded = format!("{status_line} ");
+    if TRANSIENT_STATUSES.iter().any(|code| padded.contains(code)) {
+        return Err(format!("transient status: {status_line}"));
+    }
     assert!(head.contains(" 200 "), "GET {path} failed: {head}");
-    serde_json::from_slice(&raw[boundary + 4..]).unwrap_or_else(|_| panic!("GET {path}: not JSON"))
+    Ok(serde_json::from_slice(&raw[boundary + 4..])
+        .unwrap_or_else(|_| panic!("GET {path}: not JSON")))
+}
+
+/// Ordinary assertions: no retry, so a real engine error fails fast.
+fn http_json(port: u16, path: &str) -> Value {
+    http_json_once(port, path).unwrap_or_else(|reason| panic!("GET {path} failed: {reason}"))
+}
+
+/// Readiness reads: up to three attempts with a short sleep for startup 499/502/503 or a
+/// closed connection. Anything else still fails immediately.
+fn http_json_ready(port: u16, path: &str) -> Value {
+    let mut last = String::new();
+    for attempt in 1..=READY_ATTEMPTS {
+        match http_json_once(port, path) {
+            Ok(value) => return value,
+            Err(reason) => {
+                eprintln!("GET {path} attempt {attempt}/{READY_ATTEMPTS}: {reason}");
+                last = reason;
+                if attempt < READY_ATTEMPTS {
+                    std::thread::sleep(READY_RETRY_SLEEP);
+                }
+            }
+        }
+    }
+    panic!("GET {path} not ready after {READY_ATTEMPTS} attempts: {last}");
 }
 
 /// `provider id -> model count` from `/config/providers`.
 fn config_providers(port: u16) -> Vec<(String, usize)> {
-    let document = http_json(port, "/config/providers");
+    let document = http_json_ready(port, "/config/providers");
     document["providers"]
         .as_array()
         .expect("providers array")
@@ -113,7 +161,7 @@ fn model_count(providers: &[(String, usize)], id: &str) -> usize {
 }
 
 fn connected_providers(port: u16) -> Vec<String> {
-    http_json(port, "/provider")["connected"]
+    http_json_ready(port, "/provider")["connected"]
         .as_array()
         .expect("connected array")
         .iter()
