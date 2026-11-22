@@ -68,10 +68,11 @@ VITE_SPIRIT_MOCK=1 npm run dev -w @stackspirit/desktop   # http://127.0.0.1:1420
 SSH), "Local" for this Mac. Not VM/AOM.
 
 **Sessions**: one global orchestrator plus one orchestrator session per project. Each
-session shows where it runs with a chip (green **Server · name**, blue **Local · this
-Mac**) and a one-click switch. The session log always lives on the server. Today
-sessions run on the server; the owner wants **Local by default later**, once VOWP's
-local orchestrator works, so agents get local-machine context.
+session shows its transport with a read-only chip (green **Server · name**, blue
+**Local · this Mac**), and an explicit chat **Host** control moves a session between
+Server and Local. The session log always lives on the server. Local global/project chat
+is live; the owner wants **Local by default later**, once the live Mac check of VOWP's
+local orchestrator passes, so agents get local-machine context.
 - Server chat transport is decision **A** (2026-11-19): wait for VOWP `0.5`'s
   `vowp orchestrator endpoint`; the app-owned SSH forward is **not approved**; Local chat
   on the bundled engine is the working path. Revisit only if the owner asks.
@@ -532,7 +533,7 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
   remain unverified.
 - The Password login and Server secrets cards now have Playwright coverage in
   `meadow-bridge-flows.spec.ts` (`ss-53`, `6f2a568`), including the three password-login
-  outcomes, masked `last4`, Revoke, the read-only location chip and the `chat_gated`
+  outcomes, masked `last4`, Revoke, the read-only transport chip and the `chat_gated`
   composer, with axe scans in light and dark.
 - The Server secrets card shows the storage mode VOWP reports (`ss-96`, `90c515b`),
   and says so when none is reported; the app does not encrypt the vault itself, and

@@ -629,7 +629,7 @@ event.
 | The server orchestrator uses OpenCode v1 | **Assumed** | Health/version gate; the live 1.19.5 `/doc` also lists `/api/...` paths, but their presence is not proof of v2 |
 | VOWP `0.5` `orchestrator endpoint` ships with auth metadata | **Planned, not shipped** | VOWP `0.5` scope; `vowp 0.4.0 --help` has no endpoint command |
 | VOWP can attach a surface to an already-running StackSpirit Engine | **Not available in 0.4.0** | `vowp agent --help` has no `surface` command; PLAN §9.8 says no attach command |
-| `vowp orchestrator move` preserves the native session | **Planned, not shipped** | VOWP `0.5` scope; HANDOFF §5 step 6 |
+| `vowp orchestrator move` preserves the native session | **Landed (`ss-97`, `ss-98`); live Mac check pending** | `vowp orchestrator move --help` exits 0; HANDOFF §5 step 6 |
 | `POST /session/{id}/message` accepts an omitted `model` | **Schema confirms optional; runtime server/owner** | `/doc` marks `model` optional; a successful server turn is still an owner/server check |
 | `GET /doc` exposes OpenAPI | **Proven live** | 200 `application/json`, OpenAPI 3.1.0, 162 paths, 479,667 bytes |
 | `permission.asked` is the v1 permission event | **Proven by `/doc`** | `permission.updated` is absent; `permission.replied` and v2-only `permission.v2.*` are separate |
@@ -1106,7 +1106,7 @@ export type ChatPanelTarget =
 export interface ProjectRequest {
   name: string;
   source:
-    | { kind: "git"; url: string; branch: string }
+    | { kind: "git"; url: string }
     | { kind: "folder"; path: string };
 }
 ```
@@ -1152,8 +1152,8 @@ Validation:
   non-UTF-8 value is `invalid_input`. The renderer only sends names, never paths.
 - `ProjectRequest.source.path` is the one path-like user input in the add-project dialog.
   It is not a leaked server path: the user chose it. Core validates it and never echoes
-  it in an error or a view. Add-project behavior remains preview until VOWP `0.5`'s
-  one-step project bootstrap; this job only moves the type.
+  it in an error or a view. Add project is live (`ss-99`, `ss-100`) and passes no
+  `--branch`; HANDOFF §5 step 6 records it.
 
 ### 4.2 New wire types
 
@@ -2046,9 +2046,9 @@ what is blocked is enabling the live path and claiming it works.
 - The bundled StackSpirit Engine is **not** the VOWP orchestrator app. VOWP runs its own
   `opencode serve` and reports that endpoint; the setup assistant keeps the bundled
   engine.
-- `vowp orchestrator move` and the real Local/Server switch (HANDOFF §5 step 6).
-- `vowp project add --git/--init/--orchestrator` for the `＋ Add project` dialog (not chat,
-  but it shares the `ProjectRequest` type moved here).
+- The D6 live flip: the owner's agent must report VOWP `0.4.0+` before the D6 gate leaves
+  `Waiting`. The move (`ss-97`, `ss-98`) and Add project (`ss-99`, `ss-100`) surfaces
+  have landed; see §3.5 and §3.6.
 
 ### 7.3 Rules this contract enforces
 
