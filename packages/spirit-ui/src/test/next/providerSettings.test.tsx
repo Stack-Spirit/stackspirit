@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MockBridge } from "../../bridge/MockBridge";
+import type { ModelChoice } from "../../bridge/wire";
+import { defaultModelLabel } from "../../next/SettingsPage";
 import { NextShell } from "../../next/NextShell";
 import { resetConversations, useConversations } from "../../next/conversations";
 import { resetShellUi } from "../../next/shellUi";
@@ -15,7 +17,8 @@ async function openProviderPanel(scenario: "empty" | "stopped" = "empty") {
   resetConversations();
   const bridge = new MockBridge("empty");
   // "empty" has a ready preview engine; a stopped one has no live catalog to show.
-  if (scenario === "stopped") await bridge.engine.selectExternal("opencode", "/usr/bin/opencode");
+  if (scenario === "stopped")
+    await bridge.engine.selectExternal("opencode", "/usr/bin/opencode");
   bridges.push(bridge);
   const rendered = render(<NextShell bridge={bridge} />);
   await waitFor(() => expect(useFleetStore.getState().hostsLoaded).toBe(true));
@@ -41,15 +44,23 @@ describe("Composer → Engine & Models", () => {
     const { user, dialog } = await openProviderPanel();
     const card = within(dialog).getByTestId("engine-models-settings");
     const opencode = within(card).getByTestId("provider-opencode");
-    expect(within(opencode).getByRole("heading", { name: "OpenCode" })).toBeInTheDocument();
-    expect(within(opencode).getByText("Free models included")).toBeInTheDocument();
+    expect(
+      within(opencode).getByRole("heading", { name: "OpenCode" }),
+    ).toBeInTheDocument();
+    expect(
+      within(opencode).getByText("Free models included"),
+    ).toBeInTheDocument();
 
-    const search = within(card).getByRole("searchbox", { name: "Search providers" });
+    const search = within(card).getByRole("searchbox", {
+      name: "Search providers",
+    });
     await user.type(search, "anthropic");
     const row = within(card).getByTestId("provider-anthropic");
     expect(row).toHaveTextContent("Anthropic");
     expect(row).toHaveTextContent("Available");
-    expect(within(card).queryByTestId("provider-openai")).not.toBeInTheDocument();
+    expect(
+      within(card).queryByTestId("provider-openai"),
+    ).not.toBeInTheDocument();
 
     await user.clear(search);
     await user.type(search, "not a provider");
@@ -61,10 +72,12 @@ describe("Composer → Engine & Models", () => {
     const { bridge, user, dialog, container } = await openProviderPanel();
     const card = within(dialog).getByTestId("engine-models-settings");
     const storeKey = bridge.engine.storeKey.bind(bridge.engine);
-    vi.spyOn(bridge.engine, "storeKey").mockImplementation(async (provider, secret) => {
-      seen.push(provider, secret);
-      return storeKey(provider, secret);
-    });
+    vi.spyOn(bridge.engine, "storeKey").mockImplementation(
+      async (provider, secret) => {
+        seen.push(provider, secret);
+        return storeKey(provider, secret);
+      },
+    );
     const secret = ["sk", "providerOnly1234567890"].join("_");
 
     await user.type(
@@ -72,18 +85,30 @@ describe("Composer → Engine & Models", () => {
       "anthropic",
     );
     const row = within(card).getByTestId("provider-anthropic");
-    await user.click(within(row).getByRole("button", { name: "Connect Anthropic" }));
-    await user.type(within(row).getByLabelText("API key for Anthropic"), secret);
+    await user.click(
+      within(row).getByRole("button", { name: "Connect Anthropic" }),
+    );
+    await user.type(
+      within(row).getByLabelText("API key for Anthropic"),
+      secret,
+    );
     await user.click(within(row).getByRole("button", { name: "Save key" }));
 
-    expect(await within(card).findByRole("status")).toHaveTextContent("Anthropic connected");
-    expect(within(card).getByTestId("provider-anthropic")).toHaveTextContent("Connected");
+    expect(await within(card).findByRole("status")).toHaveTextContent(
+      "Anthropic connected",
+    );
+    expect(within(card).getByTestId("provider-anthropic")).toHaveTextContent(
+      "Connected",
+    );
     expect(seen).toEqual(["anthropic", secret]);
     expect(container.innerHTML).not.toContain(secret);
-    expect(within(card).queryByLabelText("API key for Anthropic")).not.toBeInTheDocument();
     expect(
-      (await bridge.engine.keyStatus()).find((status) => status.provider === "anthropic")
-        ?.state,
+      within(card).queryByLabelText("API key for Anthropic"),
+    ).not.toBeInTheDocument();
+    expect(
+      (await bridge.engine.keyStatus()).find(
+        (status) => status.provider === "anthropic",
+      )?.state,
     ).not.toBe("missing");
   });
 
@@ -95,38 +120,57 @@ describe("Composer → Engine & Models", () => {
       "anthropic",
     );
     const row = within(card).getByTestId("provider-anthropic");
-    await user.click(within(row).getByRole("button", { name: "Connect Anthropic" }));
-    await user.type(within(row).getByLabelText("API key for Anthropic"), "not-a-real-key");
+    await user.click(
+      within(row).getByRole("button", { name: "Connect Anthropic" }),
+    );
+    await user.type(
+      within(row).getByLabelText("API key for Anthropic"),
+      "not-a-real-key",
+    );
     await user.click(within(row).getByRole("button", { name: "Save key" }));
     await within(card).findByRole("status");
 
     await user.click(
       await within(card).findByRole("button", { name: "Remove Anthropic key" }),
     );
-    const confirm = screen.getByRole("dialog", { name: "Remove provider key?" });
-    await user.click(within(confirm).getByRole("button", { name: "Remove key" }));
+    const confirm = screen.getByRole("dialog", {
+      name: "Remove provider key?",
+    });
+    await user.click(
+      within(confirm).getByRole("button", { name: "Remove key" }),
+    );
 
     await waitFor(() =>
-      expect(within(card).getByTestId("provider-anthropic")).toHaveTextContent("Available"),
+      expect(within(card).getByTestId("provider-anthropic")).toHaveTextContent(
+        "Available",
+      ),
     );
-    expect(within(card).getByRole("status")).toHaveTextContent("Anthropic key removed");
+    expect(within(card).getByRole("status")).toHaveTextContent(
+      "Anthropic key removed",
+    );
   });
 
   it("keeps a failed save error free of the typed secret", async () => {
     const { bridge, user, dialog, container } = await openProviderPanel();
     const secret = ["sk", "errorOnly1234567890"].join("_");
-    vi.spyOn(bridge.engine, "storeKey").mockRejectedValue(new Error("keychain unavailable"));
+    vi.spyOn(bridge.engine, "storeKey").mockRejectedValue(
+      new Error("keychain unavailable"),
+    );
     const card = within(dialog).getByTestId("engine-models-settings");
     await user.type(
       within(card).getByRole("searchbox", { name: "Search providers" }),
       "openai",
     );
     const row = within(card).getByTestId("provider-openai");
-    await user.click(within(row).getByRole("button", { name: "Connect OpenAI" }));
+    await user.click(
+      within(row).getByRole("button", { name: "Connect OpenAI" }),
+    );
     await user.type(within(row).getByLabelText("API key for OpenAI"), secret);
     await user.click(within(row).getByRole("button", { name: "Save key" }));
 
-    expect(await within(card).findByRole("alert")).toHaveTextContent("keychain unavailable");
+    expect(await within(card).findByRole("alert")).toHaveTextContent(
+      "keychain unavailable",
+    );
     expect(container.innerHTML).not.toContain(secret);
   });
 
@@ -138,13 +182,20 @@ describe("Composer → Engine & Models", () => {
       "openai",
     );
     const row = within(card).getByTestId("provider-openai");
-    await user.click(within(row).getByRole("button", { name: "Connect OpenAI" }));
-    await user.type(within(row).getByLabelText("API key for OpenAI"), "invalid-key-value");
+    await user.click(
+      within(row).getByRole("button", { name: "Connect OpenAI" }),
+    );
+    await user.type(
+      within(row).getByLabelText("API key for OpenAI"),
+      "invalid-key-value",
+    );
     await user.click(within(row).getByRole("button", { name: "Save key" }));
 
     await within(card).findByRole("status");
     await waitFor(() =>
-      expect(within(card).getByTestId("provider-openai")).toHaveTextContent("Invalid key"),
+      expect(within(card).getByTestId("provider-openai")).toHaveTextContent(
+        "Invalid key",
+      ),
     );
   });
 
@@ -156,25 +207,38 @@ describe("Composer → Engine & Models", () => {
       "anthropic",
     );
     const row = within(card).getByTestId("provider-anthropic");
-    await user.click(within(row).getByRole("button", { name: "Connect Anthropic" }));
-    await user.type(within(row).getByLabelText("API key for Anthropic"), "not-a-real-key");
+    await user.click(
+      within(row).getByRole("button", { name: "Connect Anthropic" }),
+    );
+    await user.type(
+      within(row).getByLabelText("API key for Anthropic"),
+      "not-a-real-key",
+    );
     await user.click(within(row).getByRole("button", { name: "Save key" }));
     await within(card).findByRole("status");
 
     await waitFor(() =>
       expect(
-        useConversations.getState().views.setup?.available_models?.map((m) => m.id),
+        useConversations
+          .getState()
+          .views.setup?.available_models?.map((m) => m.id),
       ).toContain("anthropic/claude-sonnet-4"),
     );
 
     await user.click(
       await within(card).findByRole("button", { name: "Remove Anthropic key" }),
     );
-    const confirm = screen.getByRole("dialog", { name: "Remove provider key?" });
-    await user.click(within(confirm).getByRole("button", { name: "Remove key" }));
+    const confirm = screen.getByRole("dialog", {
+      name: "Remove provider key?",
+    });
+    await user.click(
+      within(confirm).getByRole("button", { name: "Remove key" }),
+    );
     await waitFor(() =>
       expect(
-        useConversations.getState().views.setup?.available_models?.map((m) => m.id),
+        useConversations
+          .getState()
+          .views.setup?.available_models?.map((m) => m.id),
       ).not.toContain("anthropic/claude-sonnet-4"),
     );
   });
@@ -187,24 +251,36 @@ describe("Composer → Engine & Models", () => {
       "openrouter",
     );
     const row = within(card).getByTestId("provider-openrouter");
-    await user.click(within(row).getByRole("button", { name: "Connect OpenRouter" }));
-    await user.type(within(row).getByLabelText("API key for OpenRouter"), "not-a-real-key");
+    await user.click(
+      within(row).getByRole("button", { name: "Connect OpenRouter" }),
+    );
+    await user.type(
+      within(row).getByLabelText("API key for OpenRouter"),
+      "not-a-real-key",
+    );
     await user.click(within(row).getByRole("button", { name: "Save key" }));
     await within(card).findByRole("status");
     await waitFor(() =>
       expect(
-        useConversations.getState().views.setup?.available_models?.map((m) => m.id),
+        useConversations
+          .getState()
+          .views.setup?.available_models?.map((m) => m.id),
       ).toContain("openrouter/anthropic/claude-sonnet-4"),
     );
 
     await user.keyboard("{Escape}");
     await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "Engine & Models" })).not.toBeInTheDocument(),
+      expect(
+        screen.queryByRole("dialog", { name: "Engine & Models" }),
+      ).not.toBeInTheDocument(),
     );
     await user.click(screen.getByTestId("composer-model"));
     const section = screen.getByRole("group", { name: "OpenRouter" });
     expect(section).toHaveTextContent("Connected");
-    await user.type(screen.getByTestId("composer-model-search"), "openrouter claude");
+    await user.type(
+      screen.getByTestId("composer-model-search"),
+      "openrouter claude",
+    );
     const options = screen.getAllByRole("option");
     expect(options.length).toBe(2);
     expect(options[0]).toHaveTextContent("anthropic/claude-sonnet-4");
@@ -219,8 +295,13 @@ describe("Composer → Engine & Models", () => {
       "anthropic",
     );
     const row = within(card).getByTestId("provider-anthropic");
-    await user.click(within(row).getByRole("button", { name: "Connect Anthropic" }));
-    await user.type(within(row).getByLabelText("API key for Anthropic"), "not-a-real-key");
+    await user.click(
+      within(row).getByRole("button", { name: "Connect Anthropic" }),
+    );
+    await user.type(
+      within(row).getByLabelText("API key for Anthropic"),
+      "not-a-real-key",
+    );
     await user.click(within(row).getByRole("button", { name: "Save key" }));
     await within(card).findByRole("status");
     return within(card).getByTestId("provider-anthropic");
@@ -239,14 +320,20 @@ describe("Composer → Engine & Models", () => {
       const row = within(card).getByTestId("provider-anthropic");
       await user.click(within(row).getByRole("button", { name: "Verify key" }));
       await waitFor(() =>
-        expect(within(card).getByTestId("provider-anthropic")).toHaveTextContent(
-          state === "invalid" ? "Invalid key" : "Unverified",
-        ),
+        expect(
+          within(card).getByTestId("provider-anthropic"),
+        ).toHaveTextContent(state === "invalid" ? "Invalid key" : "Unverified"),
       );
       const kept = within(card).getByTestId("provider-anthropic");
-      expect(within(kept).getByRole("button", { name: "Verify key" })).toBeInTheDocument();
-      expect(within(kept).getByRole("button", { name: "Replace Anthropic key" })).toBeInTheDocument();
-      expect(within(kept).getByRole("button", { name: "Remove Anthropic key" })).toBeInTheDocument();
+      expect(
+        within(kept).getByRole("button", { name: "Verify key" }),
+      ).toBeInTheDocument();
+      expect(
+        within(kept).getByRole("button", { name: "Replace Anthropic key" }),
+      ).toBeInTheDocument();
+      expect(
+        within(kept).getByRole("button", { name: "Remove Anthropic key" }),
+      ).toBeInTheDocument();
     },
   );
 
@@ -254,15 +341,23 @@ describe("Composer → Engine & Models", () => {
     const { bridge, user, dialog } = await openProviderPanel();
     const card = within(dialog).getByTestId("engine-models-settings");
     const row = await connectAnthropic(user, card);
-    let finish!: (value: { provider: string; state: "saved"; last_checked_at: string }) => void;
-    const pending = new Promise<{ provider: string; state: "saved"; last_checked_at: string }>(
-      (resolve) => {
-        finish = resolve;
-      },
-    );
+    let finish!: (value: {
+      provider: string;
+      state: "saved";
+      last_checked_at: string;
+    }) => void;
+    const pending = new Promise<{
+      provider: string;
+      state: "saved";
+      last_checked_at: string;
+    }>((resolve) => {
+      finish = resolve;
+    });
     vi.spyOn(bridge.engine, "verifyKey").mockReturnValue(pending);
     await user.click(within(row).getByRole("button", { name: "Verify key" }));
-    const busy = await within(card).findByRole("button", { name: "Verifying…" });
+    const busy = await within(card).findByRole("button", {
+      name: "Verifying…",
+    });
     expect(busy).toBeDisabled();
     const verdict = {
       provider: "anthropic",
@@ -272,12 +367,17 @@ describe("Composer → Engine & Models", () => {
     vi.spyOn(bridge.engine, "keyStatus").mockResolvedValue([verdict]);
     finish(verdict);
     await waitFor(() =>
-      expect(within(card).getByTestId("provider-anthropic")).toHaveTextContent("Verified"),
+      expect(within(card).getByTestId("provider-anthropic")).toHaveTextContent(
+        "Verified",
+      ),
     );
     expect(
-      within(within(card).getByTestId("provider-anthropic")).getByRole("button", {
-        name: "Remove Anthropic key",
-      }),
+      within(within(card).getByTestId("provider-anthropic")).getByRole(
+        "button",
+        {
+          name: "Remove Anthropic key",
+        },
+      ),
     ).toBeInTheDocument();
   });
 
@@ -285,9 +385,13 @@ describe("Composer → Engine & Models", () => {
     const { user, dialog } = await openProviderPanel();
     const card = within(dialog).getByTestId("engine-models-settings");
     const row = await connectAnthropic(user, card);
-    await user.click(within(row).getByRole("button", { name: "Replace Anthropic key" }));
+    await user.click(
+      within(row).getByRole("button", { name: "Replace Anthropic key" }),
+    );
     expect(
-      within(within(card).getByTestId("provider-anthropic")).getByLabelText("API key for Anthropic"),
+      within(within(card).getByTestId("provider-anthropic")).getByLabelText(
+        "API key for Anthropic",
+      ),
     ).toBeInTheDocument();
   });
 
@@ -328,7 +432,9 @@ describe("Composer → Engine & Models", () => {
         engine: {
           ...engine!,
           providers: engine!.providers!.map((p) =>
-            p.id === "openrouter" ? ({ id: p.id, connected: p.connected } as typeof p) : p,
+            p.id === "openrouter"
+              ? ({ id: p.id, connected: p.connected } as typeof p)
+              : p,
           ),
         },
       });
@@ -341,8 +447,13 @@ describe("Composer → Engine & Models", () => {
     const row = within(card).getByTestId("provider-openrouter");
     expect(row).toHaveTextContent("OpenRouter");
     expect(row).not.toHaveTextContent("Openrouter");
-    await user.click(within(row).getByRole("button", { name: "Connect OpenRouter" }));
-    await user.type(within(row).getByLabelText("API key for OpenRouter"), "invalid-key-value");
+    await user.click(
+      within(row).getByRole("button", { name: "Connect OpenRouter" }),
+    );
+    await user.type(
+      within(row).getByLabelText("API key for OpenRouter"),
+      "invalid-key-value",
+    );
     await user.click(within(row).getByRole("button", { name: "Save key" }));
     const notice = await within(card).findByRole("status");
     expect(notice).toHaveTextContent("OpenRouter rejected this key");
@@ -353,16 +464,21 @@ describe("Composer → Engine & Models", () => {
     const { dialog } = await openProviderPanel();
     const card = within(dialog).getByTestId("engine-models-settings");
     expect(
-      within(within(card).getByTestId("provider-opencode")).getByRole("button", {
-        name: "Connect OpenCode Go",
-      }),
+      within(within(card).getByTestId("provider-opencode")).getByRole(
+        "button",
+        {
+          name: "Connect OpenCode Go",
+        },
+      ),
     ).toBeInTheDocument();
   });
 
   it("groups a provider the engine reports as connected without a keychain key", async () => {
     const { dialog } = await openProviderPanel();
     const card = within(dialog).getByTestId("engine-models-settings");
-    const section = within(card).getByRole("list", { name: "Connected providers" });
+    const section = within(card).getByRole("list", {
+      name: "Connected providers",
+    });
     const google = within(section).getByTestId("provider-google");
     expect(google).toHaveTextContent("Connected");
     expect(google).toHaveTextContent("Connected outside the keychain");
@@ -375,7 +491,49 @@ describe("Composer → Engine & Models", () => {
     const { dialog } = await openProviderPanel("stopped");
     const card = within(dialog).getByTestId("engine-models-settings");
     expect(within(card).getByText(/engine is stopped/i)).toBeInTheDocument();
-    expect(within(card).getByRole("searchbox", { name: "Search providers" })).toBeDisabled();
-    expect(within(card).queryByTestId("provider-anthropic")).not.toBeInTheDocument();
+    expect(
+      within(card).getByRole("searchbox", { name: "Search providers" }),
+    ).toBeDisabled();
+    expect(
+      within(card).queryByTestId("provider-anthropic"),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("Settings default-model badge", () => {
+  const free: ModelChoice = {
+    id: "big-pickle",
+    label: "Big Pickle",
+    provider: "opencode",
+    access: "included",
+    context_tokens: null,
+    notes: "",
+    verified_at: null,
+  };
+  const paid: ModelChoice = {
+    ...free,
+    id: "deepseek-chat",
+    label: "DeepSeek Chat",
+    provider: "deepseek",
+    access: "byok",
+  };
+
+  it("shows an explicit selection, else the first free model, else No model", () => {
+    expect(defaultModelLabel(paid, [free, paid])).toBe(
+      "Default · DeepSeek Chat",
+    );
+    expect(defaultModelLabel(null, [paid, free])).toBe("Default · Big Pickle");
+    expect(defaultModelLabel(null, [paid])).toBe("Default · DeepSeek Chat");
+    expect(defaultModelLabel(null, [])).toBe("No model");
+  });
+
+  it("never says No model beside a verified free model count", async () => {
+    const { dialog } = await openProviderPanel();
+    const card = within(dialog).getByTestId("engine-models-settings");
+    await waitFor(() =>
+      expect(card).toHaveTextContent(/free models? verified/),
+    );
+    expect(card).not.toHaveTextContent("No model");
+    expect(card).toHaveTextContent("Default ·");
   });
 });

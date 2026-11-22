@@ -1,4 +1,5 @@
-//! Provider-key storage. Keys live only in the local OS keychain.
+//! Provider-key storage. Keys live in a private `0600` file ([`PrivateKeyStore`]) or,
+//! by explicit opt-in, the local OS keychain.
 //!
 //! [`SecretString`] deliberately has no `Debug`, `Display` or `Serialize` implementation,
 //! so a key cannot be logged or sent to the VPS through a derived wire type.
@@ -422,6 +423,140 @@ impl Keychain for OsKeychain {
     }
 }
 
+/// A mode-`0600` JSON provider-key file inside a mode-`0700` private directory.
+///
+/// This matches OpenCode's own credential model: user-private permissions, no OS
+/// keychain dialogs. Writes are atomic (temp `0600` file, then rename). The map is
+/// held in `Zeroizing` buffers while it is serialized, and errors never carry a value.
+#[derive(Debug, Clone)]
+pub struct PrivateKeyStore {
+    path: std::path::PathBuf,
+    lock: std::sync::Arc<Mutex<()>>,
+}
+
+impl PrivateKeyStore {
+    /// Stores keys in `path`; the parent directory is created `0700` on first write.
+    #[must_use]
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            lock: std::sync::Arc::new(Mutex::new(())),
+        }
+    }
+
+    fn fail(provider: &str) -> KeychainError {
+        KeychainError::new(provider, KeychainErrorClass::Platform)
+    }
+
+    fn read_map(&self, provider: &str) -> Result<BTreeMap<String, String>, KeychainError> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => Zeroizing::new(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
+            Err(_) => return Err(Self::fail(provider)),
+        };
+        serde_json::from_slice(&bytes).map_err(|_| Self::fail(provider))
+    }
+
+    fn write_map(
+        &self,
+        provider: &str,
+        map: &BTreeMap<String, String>,
+    ) -> Result<(), KeychainError> {
+        use std::io::Write;
+        let parent = self.path.parent().ok_or_else(|| Self::fail(provider))?;
+        std::fs::create_dir_all(parent).map_err(|_| Self::fail(provider))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| Self::fail(provider))?;
+        }
+        let bytes = Zeroizing::new(serde_json::to_vec(map).map_err(|_| Self::fail(provider))?);
+        let staged = self.path.with_extension("json.tmp");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let result = options.open(&staged).and_then(|mut file| {
+            file.write_all(&bytes)?;
+            file.sync_all()
+        });
+        if result.is_err() {
+            let _ = std::fs::remove_file(&staged);
+            return Err(Self::fail(provider));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600));
+        }
+        std::fs::rename(&staged, &self.path).map_err(|_| {
+            let _ = std::fs::remove_file(&staged);
+            Self::fail(provider)
+        })
+    }
+
+    fn guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Keychain for PrivateKeyStore {
+    fn set(&self, provider: &str, secret: &SecretString) -> Result<(), KeychainError> {
+        if provider.trim().is_empty() || secret.is_empty() {
+            return Err(KeychainError::new(provider, KeychainErrorClass::Invalid));
+        }
+        let _guard = self.guard();
+        let mut map = self.read_map(provider)?;
+        map.insert(provider.to_owned(), secret.expose().to_owned());
+        let result = self.write_map(provider, &map);
+        for value in map.values_mut() {
+            zeroize::Zeroize::zeroize(value);
+        }
+        result
+    }
+
+    fn get(&self, provider: &str) -> Result<Option<SecretString>, KeychainError> {
+        let _guard = self.guard();
+        let mut map = self.read_map(provider)?;
+        let found = map.remove(provider).map(SecretString::new);
+        for value in map.values_mut() {
+            zeroize::Zeroize::zeroize(value);
+        }
+        Ok(found)
+    }
+
+    fn delete(&self, provider: &str) -> Result<(), KeychainError> {
+        let _guard = self.guard();
+        let mut map = self.read_map(provider)?;
+        if map.remove(provider).is_none() {
+            return Err(KeychainError::new(provider, KeychainErrorClass::NotFound));
+        }
+        let result = self.write_map(provider, &map);
+        for value in map.values_mut() {
+            zeroize::Zeroize::zeroize(value);
+        }
+        result
+    }
+
+    fn list(&self) -> Result<Vec<String>, KeychainError> {
+        let _guard = self.guard();
+        let mut map = self.read_map("all")?;
+        let names = map.keys().cloned().collect();
+        for value in map.values_mut() {
+            zeroize::Zeroize::zeroize(value);
+        }
+        Ok(names)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,6 +597,79 @@ mod tests {
             .unwrap();
         assert_eq!(status.state, ProviderKeyState::Missing);
         assert!(!format!("{status:?}").contains("key"));
+    }
+
+    #[test]
+    fn private_key_store_round_trips_with_private_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("engine")
+            .join("state")
+            .join("provider-keys.json");
+        let store = PrivateKeyStore::new(&path);
+        assert!(store.get("deepseek").unwrap().is_none());
+        store
+            .set("deepseek", &SecretString::new("fake-value-1"))
+            .unwrap();
+        store
+            .set("openrouter", &SecretString::new("fake-value-2"))
+            .unwrap();
+        assert_eq!(
+            store.get("deepseek").unwrap().unwrap().expose(),
+            "fake-value-1"
+        );
+        assert_eq!(store.list().unwrap(), vec!["deepseek", "openrouter"]);
+        store
+            .set("deepseek", &SecretString::new("fake-value-3"))
+            .unwrap();
+        assert_eq!(
+            store.get("deepseek").unwrap().unwrap().expose(),
+            "fake-value-3"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        assert!(!path.with_extension("json.tmp").exists());
+        store.delete("deepseek").unwrap();
+        assert!(store.get("deepseek").unwrap().is_none());
+        assert_eq!(
+            store.delete("deepseek").err().unwrap().class,
+            KeychainErrorClass::NotFound
+        );
+        assert_eq!(store.list().unwrap(), vec!["openrouter"]);
+    }
+
+    #[test]
+    fn private_key_store_errors_never_contain_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider-keys.json");
+        std::fs::write(&path, b"{ corrupt fake-value-9").unwrap();
+        let store = PrivateKeyStore::new(&path);
+        let error = store.get("deepseek").err().unwrap();
+        let text = format!("{error} {error:?}");
+        assert!(!text.contains("fake-value-9"));
+        assert_eq!(
+            store
+                .set("", &SecretString::new("fake-value-9"))
+                .unwrap_err()
+                .class,
+            KeychainErrorClass::Invalid
+        );
+        assert!(!format!("{store:?}").contains("fake-value-9"));
     }
 
     #[cfg(feature = "keychain")]

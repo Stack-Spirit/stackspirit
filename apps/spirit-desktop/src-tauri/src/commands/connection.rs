@@ -12,6 +12,31 @@ use tauri::State;
 use crate::error::CommandResult;
 use crate::state::AppState;
 
+/// How often live VPS capacity is re-read while connected.
+const CAPACITY_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
+
+/// Reads `capacity report` and merges it into the fleet view. Any failure is ignored so
+/// the connection and the existing fleet view are never affected.
+pub(crate) async fn refresh_capacity_best_effort(
+    manager: &spirit_core::connection::ConnectionManager,
+    client: &dyn spirit_core::vowp::VowpClient,
+) {
+    let _ = manager.refresh_capacity(client).await;
+}
+
+async fn run_capacity_loop(
+    manager: spirit_core::connection::ConnectionManager,
+    client: std::sync::Arc<dyn spirit_core::vowp::VowpClient>,
+) {
+    loop {
+        tokio::time::sleep(CAPACITY_REFRESH_INTERVAL).await;
+        if manager.is_cancelled() || manager.status().state.as_str() == "disconnected" {
+            break;
+        }
+        refresh_capacity_best_effort(&manager, client.as_ref()).await;
+    }
+}
+
 #[tauri::command]
 pub async fn connect_host(
     state: State<'_, AppState>,
@@ -69,10 +94,19 @@ pub async fn connect_host(
     };
 
     let _ = state.hosts().mark_connected(&id, Timestamp::now());
+    // Best effort: an older host without `capacity report` stays connected.
+    refresh_capacity_best_effort(&manager, client.as_ref()).await;
     let poll_manager = manager.clone();
-    let poll_client = client;
+    let poll_client = client.clone();
     tauri::async_runtime::spawn(async move {
         poll_manager.run_poll_loop(poll_client).await;
+    });
+    // The poll loop re-derives the view from the last capacity report, so a slower
+    // dedicated loop keeps Memory, Disk and CPU load live.
+    let capacity_manager = manager.clone();
+    let capacity_client = client;
+    tauri::async_runtime::spawn(async move {
+        run_capacity_loop(capacity_manager, capacity_client).await;
     });
 
     Ok(snapshot)

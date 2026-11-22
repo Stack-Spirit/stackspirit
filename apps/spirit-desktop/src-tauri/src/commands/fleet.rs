@@ -42,12 +42,16 @@ pub async fn fleet_get(state: State<'_, AppState>) -> CommandResult<Option<Fleet
 pub async fn fleet_refresh(state: State<'_, AppState>) -> CommandResult<FleetView> {
     let client = state.client()?;
     let manager = state.connection_manager().await;
-    manager.poll_once(client.as_ref()).await?.ok_or_else(|| {
-        SpiritError::new(
+    let polled = manager.poll_once(client.as_ref()).await?;
+    if polled.is_none() {
+        return Err(SpiritError::new(
             SpiritErrorCode::Conflict,
             "no host is connected, so there is no fleet view to refresh",
-        )
-    })
+        ));
+    }
+    // Best effort: live Memory, Disk and CPU load. Falls back to the polled view.
+    crate::commands::connection::refresh_capacity_best_effort(&manager, client.as_ref()).await;
+    Ok(manager.fleet_view().or(polled).expect("polled view exists"))
 }
 
 #[tauri::command]

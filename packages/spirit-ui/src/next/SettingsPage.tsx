@@ -1,7 +1,18 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 
 import type { SpiritBridge } from "../bridge/SpiritBridge";
-import type { EngineProvider, EngineStatus, KeyStatus, ModelChoice } from "../bridge/wire";
+import type {
+  EngineProvider,
+  EngineStatus,
+  KeyStatus,
+  ModelChoice,
+} from "../bridge/wire";
 import { toSpiritError } from "../bridge/errors";
 import { Button } from "../components/Button";
 import { Modal } from "../components/Modal";
@@ -60,10 +71,15 @@ async function refreshSetupModels(bridge: SpiritBridge): Promise<void> {
 
 function upsertKey(statuses: KeyStatus[], next: KeyStatus): KeyStatus[] {
   const rest = statuses.filter((status) => status.provider !== next.provider);
-  return [...rest, next].sort((left, right) => left.provider.localeCompare(right.provider));
+  return [...rest, next].sort((left, right) =>
+    left.provider.localeCompare(right.provider),
+  );
 }
 
-function savedStatus(statuses: KeyStatus[], provider: string): KeyStatus | null {
+function savedStatus(
+  statuses: KeyStatus[],
+  provider: string,
+): KeyStatus | null {
   const status = statuses.find((candidate) => candidate.provider === provider);
   return status && status.state !== "missing" ? status : null;
 }
@@ -105,6 +121,21 @@ function providerMeta(provider: ProviderRow): string {
  * to `bridge.engine.storeKey`, the field is cleared immediately, and no notice or
  * error ever includes it.
  */
+/**
+ * The badge above the provider list. An explicit selection wins; otherwise the first
+ * verified usable model (an included free model first) is the effective default.
+ * "No model" appears only when the runtime reports zero usable models.
+ */
+export function defaultModelLabel(
+  selected: { label?: string; id: string } | null,
+  models: ModelChoice[],
+): string {
+  if (selected) return `Default · ${selected.label ?? selected.id}`;
+  const fallback =
+    models.find((model) => model.access === "included") ?? models[0];
+  return fallback ? `Default · ${fallback.label || fallback.id}` : "No model";
+}
+
 export function SettingsPage() {
   const bridge = useFleetStore((state) => state.bridge);
   const engine = useEngine();
@@ -164,7 +195,9 @@ export function SettingsPage() {
   }
 
   const keyed = new Set(
-    keys.filter((status) => status.state !== "missing").map((status) => status.provider),
+    keys
+      .filter((status) => status.state !== "missing")
+      .map((status) => status.provider),
   );
   const rows: ProviderRow[] = catalogFromStatus(engine).map((provider) => {
     const count = counts.get(provider.id);
@@ -173,7 +206,10 @@ export function SettingsPage() {
       label: provider.label,
       connected: provider.connected === true || keyed.has(provider.id),
       modelCount: Math.max(provider.model_count ?? 0, count?.total ?? 0),
-      freeModelCount: Math.max(provider.free_model_count ?? 0, count?.free ?? 0),
+      freeModelCount: Math.max(
+        provider.free_model_count ?? 0,
+        count?.free ?? 0,
+      ),
     };
   });
   const connected = (provider: string): boolean =>
@@ -181,15 +217,22 @@ export function SettingsPage() {
     keyed.has(provider) ||
     rows.some((row) => row.id === provider && row.connected);
   const catalogReady = rows.length > 0;
+  const defaultModelBadge = defaultModelLabel(
+    engine?.selected_model ?? null,
+    models,
+  );
 
-  const featured: ProviderRow = rows.find((provider) => provider.id === "opencode") ?? {
+  const featured: ProviderRow = rows.find(
+    (provider) => provider.id === "opencode",
+  ) ?? {
     id: "opencode",
     label: "OpenCode",
     connected: true,
     modelCount: 0,
     freeModelCount: 0,
   };
-  const opencodeGo = rows.find((provider) => provider.id === "opencode-go") ?? null;
+  const opencodeGo =
+    rows.find((provider) => provider.id === "opencode-go") ?? null;
 
   const needle = query.trim().toLowerCase();
   const searchable = rows.filter(
@@ -325,22 +368,23 @@ export function SettingsPage() {
         <span>
           <strong>Providers</strong>
           <small>
-            OpenCode free models are included. Connect a provider key to unlock its models
-            in the composer.
+            OpenCode free models are included. Connect a provider key to unlock
+            its models in the composer.
           </small>
         </span>
-        <span className="nx-chip nx-chip--muted">
-          {engine?.selected_model
-            ? providerLabel(engine.selected_model.provider)
-            : "No model"}
-        </span>
+        <span className="nx-chip nx-chip--muted">{defaultModelBadge}</span>
       </div>
 
-      <div className="nx-provider nx-provider--featured" data-testid="provider-opencode">
+      <div
+        className="nx-provider nx-provider--featured"
+        data-testid="provider-opencode"
+      >
         <div className="nx-provider__head">
           <div className="nx-provider__title">
             <h3>{featured.label}</h3>
-            <span className="nx-chip nx-chip--server">Free models included</span>
+            <span className="nx-chip nx-chip--server">
+              Free models included
+            </span>
           </div>
           <span className="nx-provider__meta">
             {featured.freeModelCount > 0
@@ -351,8 +395,8 @@ export function SettingsPage() {
           </span>
         </div>
         <p className="nx-provider__copy">
-          Use the included free models on this Mac. Add an OpenCode API key for higher
-          limits, or connect OpenCode Go with a Go/Zen account key.
+          Use the included free models on this Mac. Add an OpenCode API key for
+          higher limits, or connect OpenCode Go with a Go/Zen account key.
         </p>
         <div className="nx-provider__actions">
           <button
@@ -370,7 +414,9 @@ export function SettingsPage() {
               onClick={() => startEditing("opencode-go")}
               aria-expanded={editing === "opencode-go"}
             >
-              {connected("opencode-go") ? "Manage OpenCode Go" : "Connect OpenCode Go"}
+              {connected("opencode-go")
+                ? "Manage OpenCode Go"
+                : "Connect OpenCode Go"}
             </button>
           ) : null}
           {engine?.selected_model ? (
@@ -429,11 +475,16 @@ export function SettingsPage() {
         ) : null}
       </div>
 
-      <div className="nx-provider__section" aria-labelledby="nx-connected-providers">
+      <div
+        className="nx-provider__section"
+        aria-labelledby="nx-connected-providers"
+      >
         <div className="nx-block__head">
           <h3 id="nx-connected-providers">Connected providers</h3>
           <span className="nx-provider__meta">
-            {connectedRows.length === 0 ? "No others yet" : `${connectedRows.length} connected`}
+            {connectedRows.length === 0
+              ? "No others yet"
+              : `${connectedRows.length} connected`}
           </span>
         </div>
         {connectedRows.length > 0 ? (
@@ -455,13 +506,16 @@ export function SettingsPage() {
           </ul>
         ) : (
           <p className="nx-provider__empty">
-            No other providers are connected yet. OpenCode free models are always
-            available.
+            No other providers are connected yet. OpenCode free models are
+            always available.
           </p>
         )}
       </div>
 
-      <div className="nx-provider__section" aria-labelledby="nx-connect-provider">
+      <div
+        className="nx-provider__section"
+        aria-labelledby="nx-connect-provider"
+      >
         <div className="nx-block__head">
           <h3 id="nx-connect-provider">Connect a provider</h3>
           <span className="nx-provider__meta">
@@ -482,7 +536,8 @@ export function SettingsPage() {
         </label>
         {!catalogReady ? (
           <p className="nx-provider__empty">
-            The StackSpirit Engine is stopped. Start it to load the live provider catalog.
+            The StackSpirit Engine is stopped. Start it to load the live
+            provider catalog.
           </p>
         ) : availableRows.length > 0 ? (
           <ul className="nx-provider__list" aria-label="Available providers">
@@ -537,15 +592,20 @@ export function SettingsPage() {
             >
               Cancel
             </Button>
-            <Button variant="danger" onClick={() => void remove()} loading={busy !== null}>
+            <Button
+              variant="danger"
+              onClick={() => void remove()}
+              loading={busy !== null}
+            >
               Remove key
             </Button>
           </>
         }
       >
         <p>
-          This removes only the {pendingRemove ? providerLabel(pendingRemove) : ""} key
-          from this Mac&apos;s keychain and refreshes the engine model list. It does not
+          This removes only the{" "}
+          {pendingRemove ? providerLabel(pendingRemove) : ""} key from this
+          Mac&apos;s keychain and refreshes the engine model list. It does not
           change a VOWP setting or a server secret.
         </p>
       </Modal>
@@ -580,7 +640,11 @@ function ProviderItem({
       <div className="nx-provider-row__head">
         <div className="nx-provider-row__name">
           <strong>{provider.label}</strong>
-          <span className={connected ? "nx-chip nx-chip--server" : "nx-chip nx-chip--muted"}>
+          <span
+            className={
+              connected ? "nx-chip nx-chip--server" : "nx-chip nx-chip--muted"
+            }
+          >
             {connected ? "Connected" : "Available"}
           </span>
           {status ? (

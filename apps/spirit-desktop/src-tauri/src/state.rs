@@ -18,7 +18,7 @@ use spirit_core::engine::{
     EngineChoice, EnginePreferences, EnginePreferencesStore, EngineRuntime, EngineState,
     EngineStatus, EngineSupervisor, EngineSupervisorConfig, GateFeatureFlags, GateSnapshot,
     HostGateCache, JsonEnginePreferences, Keychain, ModelAccess, ModelCatalog, ModelChoice,
-    OsKeychain, PrivateEngineTree, ProcessEngineRuntime, bundled_catalog,
+    PrivateEngineTree, PrivateKeyStore, ProcessEngineRuntime, bundled_catalog,
 };
 use spirit_core::error::{SpiritError, SpiritErrorCode};
 use spirit_core::host::{HostProfile, HostStore, JsonHostStore};
@@ -29,8 +29,6 @@ use spirit_core::vowp::{CommandLocalAgent, LocalAgentClient, SshVowpClient, Vowp
 use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
 use crate::error::CommandResult;
-
-const KEYCHAIN_SERVICE: &str = "com.stackspirit.desktop";
 
 /// True only in the D5 build, which ships the ASIF export/import actions.
 pub(crate) const ASIF_ACTIONS_ENABLED: bool = cfg!(feature = "d5");
@@ -530,9 +528,14 @@ impl AppState {
         let known_hosts = app_data_dir.join("known_hosts");
         let app_keys_dir = app_data_dir.join("ssh-keys");
 
-        let keychain: Arc<dyn Keychain> = Arc::new(
-            OsKeychain::new(KEYCHAIN_SERVICE).with_index(app_data_dir.join("keychain-index.json")),
-        );
+        // Provider keys live in a 0600 JSON file inside the 0700 engine state directory,
+        // like OpenCode's own credential file. No macOS Keychain dialog ever appears.
+        let keychain: Arc<dyn Keychain> = Arc::new(PrivateKeyStore::new(
+            app_data_dir
+                .join("engine")
+                .join("state")
+                .join("provider-keys.json"),
+        ));
 
         // The Mac-side agent is always local: it runs `vowp agent ...` with the local
         // command runner and never over SSH.

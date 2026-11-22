@@ -34,8 +34,8 @@ pub use gate::{
 #[cfg(feature = "keychain")]
 pub use keychain::OsKeychain;
 pub use keychain::{
-    FakeKeychain, Keychain, KeychainError, KeychainErrorClass, ProviderKeyState, ProviderKeyStatus,
-    SecretStore, SecretString, verify_provider_key,
+    FakeKeychain, Keychain, KeychainError, KeychainErrorClass, PrivateKeyStore, ProviderKeyState,
+    ProviderKeyStatus, SecretStore, SecretString, verify_provider_key,
 };
 pub use local::{
     LocalNodeState, LocalOrchestratorAction, LocalOrchestratorGuard, LocalOrchestratorPrerequisite,
