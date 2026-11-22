@@ -1155,6 +1155,8 @@ export interface JobLanes {
   review_fix: JobCardView[];
   parked_blocked: JobCardView[];
   done: JobCardView[];
+  /** Cancelled jobs and gate failures of jobs no longer live; History tab only. */
+  history?: JobCardView[];
   counts: Record<string, number>;
   queue_truncated: boolean;
   queue_shown: number;

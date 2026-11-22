@@ -47,7 +47,9 @@ fn lanes_match_the_contract_mapping() {
     let fleet = view(&fresh(), None);
     assert_eq!(fleet.lanes.running.len(), 3);
     assert_eq!(fleet.lanes.ready.len(), 3);
-    assert_eq!(fleet.lanes.review_fix.len(), 1);
+    // The only gate failure is for a job that is not live review work: history, not a card.
+    assert_eq!(fleet.lanes.review_fix.len(), 0);
+    assert_eq!(fleet.lanes.history.len(), 1);
     assert_eq!(fleet.lanes.parked_blocked.len(), 1);
     assert!(
         fleet.lanes.done.is_empty(),
@@ -58,12 +60,9 @@ fn lanes_match_the_contract_mapping() {
     assert_eq!(fleet.lanes.counts.get("review_fix"), Some(&1));
     assert_eq!(fleet.lanes.counts.get("parked_blocked"), Some(&1));
     assert_eq!(fleet.lanes.counts.get("done"), Some(&37));
-    assert_eq!(
-        fleet.lanes.review_fix[0].gate.as_deref(),
-        Some("secret_scan")
-    );
-    assert_eq!(fleet.lanes.review_fix[0].detail, None);
-    assert!(fleet.lanes.review_fix[0].gate_at.is_some());
+    assert_eq!(fleet.lanes.history[0].gate.as_deref(), Some("secret_scan"));
+    assert_eq!(fleet.lanes.history[0].detail, None);
+    assert!(fleet.lanes.history[0].gate_at.is_some());
     let ready_ids: Vec<&str> = fleet
         .lanes
         .ready
