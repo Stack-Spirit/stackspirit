@@ -5,14 +5,9 @@ import type { EngineProvider, EngineStatus, KeyStatus, ModelChoice } from "../br
 import { toSpiritError } from "../bridge/errors";
 import { Button } from "../components/Button";
 import { Modal } from "../components/Modal";
+import { providerLabel } from "../domain/engine";
 import { useEngine, useFleetStore } from "../state/fleetStore";
 import { useConversations } from "./conversations";
-
-/** Display names for the two OpenCode providers the featured block always shows. */
-const KNOWN_LABELS: Record<string, string> = {
-  opencode: "OpenCode",
-  "opencode-go": "OpenCode Go",
-};
 
 interface ProviderRow {
   id: string;
@@ -21,17 +16,6 @@ interface ProviderRow {
   connected: boolean;
   modelCount: number;
   freeModelCount: number;
-}
-
-function providerLabel(id: string): string {
-  const known = KNOWN_LABELS[id];
-  if (known) return known;
-  const words = id.replaceAll(/[_-]+/g, " ").split(/\s+/).filter(Boolean);
-  return (
-    words
-      .map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1)}`)
-      .join(" ") || id
-  );
 }
 
 /**

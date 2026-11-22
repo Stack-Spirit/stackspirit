@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -317,6 +317,46 @@ describe("Composer → Engine & Models", () => {
     await waitFor(() => expect(attach).toHaveBeenCalledWith("setup"));
     expect(keyStatus).toHaveBeenCalled();
     expect(status).toHaveBeenCalled();
+  });
+
+  it("labels a label-less openrouter entry as OpenRouter in rows and notices", async () => {
+    const { user, dialog } = await openProviderPanel();
+    const engine = useFleetStore.getState().engine;
+    expect(engine?.providers).toBeDefined();
+    act(() => {
+      useFleetStore.setState({
+        engine: {
+          ...engine!,
+          providers: engine!.providers!.map((p) =>
+            p.id === "openrouter" ? ({ id: p.id, connected: p.connected } as typeof p) : p,
+          ),
+        },
+      });
+    });
+    const card = within(dialog).getByTestId("engine-models-settings");
+    await user.type(
+      within(card).getByRole("searchbox", { name: "Search providers" }),
+      "openrouter",
+    );
+    const row = within(card).getByTestId("provider-openrouter");
+    expect(row).toHaveTextContent("OpenRouter");
+    expect(row).not.toHaveTextContent("Openrouter");
+    await user.click(within(row).getByRole("button", { name: "Connect OpenRouter" }));
+    await user.type(within(row).getByLabelText("API key for OpenRouter"), "invalid-key-value");
+    await user.click(within(row).getByRole("button", { name: "Save key" }));
+    const notice = await within(card).findByRole("status");
+    expect(notice).toHaveTextContent("OpenRouter rejected this key");
+    expect(notice).not.toHaveTextContent("Openrouter");
+  });
+
+  it("shows the opencode-go provider as OpenCode Go", async () => {
+    const { dialog } = await openProviderPanel();
+    const card = within(dialog).getByTestId("engine-models-settings");
+    expect(
+      within(within(card).getByTestId("provider-opencode")).getByRole("button", {
+        name: "Connect OpenCode Go",
+      }),
+    ).toBeInTheDocument();
   });
 
   it("groups a provider the engine reports as connected without a keychain key", async () => {
