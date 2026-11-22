@@ -58,7 +58,9 @@ export function projectJobs(fleet: FleetView | null, project: string | null): Pr
 /** Historical work for the History tab: cancelled jobs and past gate failures. */
 export function historyJobs(fleet: FleetView | null, project: string | null): JobCardView[] {
   if (!fleet) return [];
-  return [...(fleet.lanes.history ?? []), ...fleet.lanes.done].filter(
+  // `history` is not yet declared on the shared wire type (wire.ts is outside this job's owns).
+  const past = (fleet.lanes as { history?: JobCardView[] }).history ?? [];
+  return [...past, ...fleet.lanes.done].filter(
     (job) => project === null || job.project === project,
   );
 }
