@@ -165,9 +165,10 @@ Settings → Advanced → **Server secrets** lists, stores and revokes keys in V
 vault (`ss-38`, `bf45d31`; `ss-34`, `def3538`; `ss-35`, `506d9d2`). A value is
 write-only: it leaves the app only over the verified SSH connection on stdin, after
 VOWP's hidden `value for <NAME>: ` prompt, and never through argv, the environment, a
-log or an error. The card shows `name`, `•••• last4`, the update time and a storage mode
-when VOWP reports one; VOWP `0.4.0` reports none, so the card says so instead of
-guessing. See [`SECURITY.md`](../SECURITY.md) for the exact path and limits.
+log or an error. The card shows `name`, `•••• last4`, the update time and a storage-mode
+badge from the `mode` that `secret ls --json` reports (`basic`, `vault_user` or
+`encrypted`; an unknown safe token is shown verbatim, and the card says so when nothing is
+reported instead of guessing) (`ss-96`, `90c515b`). See [`SECURITY.md`](../SECURITY.md) for the exact path and limits.
 
 Chat has three surfaces (see §5 step 4): **setup chat** on the bundled engine (below);
 **Local `global`/`project`** through `vowp agent orchestrator endpoint`, real when the
@@ -273,7 +274,6 @@ Preview only (clearly labelled in the UI; logic in `next/conversations.ts`):
   details panel. Every preview assistant message starts with `Preview reply.` and carries
   `origin: "preview"`; a real bridge drops that origin instead of rendering it (`ss-46`,
   `c1e2402`).
-- Add project (hands a message to the global orchestrator; no VOWP call).
 
 Gated, not preview: Server `global`/`project` chat shows a typed gate (`chat_gated`)
 with the composer disabled and no assistant reply. The blocker is VOWP `0.5`'s
@@ -282,9 +282,11 @@ SSH forward is not approved (owner decision A, 2026-11-19). Local `global`/`proj
 not gated when the installed VOWP reports an endpoint: it attaches there, continues the
 newest host session when no native id is reported, and never creates a session or falls
 back to the bundled engine (`ss-61`, `66563cd`; `ss-62`, `0237770`, `147e153`). The
-Local/Server location is a read-only chip derived from the transport; there is no live
-switch. Moving a session is `vowp orchestrator move` (VOWP `0.5`, §5 step 6), so it stays
-pending too.
+Local/Server transport chip is still read-only and derived from the transport. The
+separate chat **Host** control moves the session's orchestrator explicitly with
+`vowp orchestrator move` (§5 step 6; `ss-97`, `c589c79`; `ss-98`, `eb2474f`). **Add
+project** is live, not preview: it runs `vowp project add` (`ss-99`, `6fc6d8d`; `ss-100`,
+`18ff640`).
 
 ## 5. Next steps (suggested order, updated 2026-11-19)
 
@@ -337,9 +339,8 @@ pending too.
      `vowp orchestrator endpoint`, so Server chat returns the typed `chat_gated` gate
      until VOWP `0.5` ships the endpoint. The owner chose that endpoint (decision **A**,
      recorded with `ss-50` on 2026-11-19) and did **not** approve the app-owned SSH
-     forward; the `chat_gated` behavior is unchanged. The **Local/Server switch** still
-     needs VOWP `0.5` `vowp orchestrator move` (step 6); the location chip stays
-     read-only.
+     forward; the `chat_gated` behavior is unchanged. The transport chip stays
+     read-only; the session **Host** control (step 6) moves the orchestrator.
    The contract is [`docs/ORCHESTRATOR-CHAT.md`](ORCHESTRATOR-CHAT.md) §2–§7 and
    §9; the owner checklist is
    [`scripts/verify-orchestrator-chat.mjs`](../scripts/verify-orchestrator-chat.mjs), and
@@ -353,22 +354,32 @@ pending too.
    storage mode when reported) and an in-card Revoke. The `set` path shipped; it is not
    a `not_supported` fallback. The value is written only after VOWP's exact hidden
    `value for <NAME>: ` prompt and never appears in argv, the environment, a log or an
-   error. VOWP `0.4.0` does not report whether the vault is basic or vault-user mode,
-   so the card says that rather than guessing; VOWP `0.5` is the planned
-   encrypted-at-rest upgrade. [`SECURITY.md`](../SECURITY.md) records the exact path and
+   error. The storage-mode badge shows the mode VOWP reports in `secret ls --json`
+   (`basic` / `vault_user` / `encrypted`, unknown safe tokens verbatim; `ss-96`,
+   `90c515b`) and says so when none is reported. [`SECURITY.md`](../SECURITY.md) records the exact path and
    limits.
-6. **Live `Local` / `Server` switch, `＋ Add project`, and live D6 flip (pairs with VOWP
-   `0.5`) — still pending:** VOWP `0.5` `vowp orchestrator move` (`b85a8de` / `b7a50f8`)
-   and encrypted `vowp secret` (`c601bc6`) are merged, with
-   `project add --git/--init/--orchestrator` and `orchestrator endpoint` landing next, and
-   the Mac agent is now running `vowp 0.4.0` (`connected`). Flip D6 readiness probes on
-   the live `0.4.0+` agent, wire the session location chip/switch to
-   `vowp orchestrator move` (defaulting to **Local** when the Mac agent is connected), wire
-   the sidebar **`＋` Add project** dialog to VOWP's one-step project add + orchestrator
-   creation, and surface the VOWP `0.5` vault storage mode badge (`basic` / `vault_user` /
-   `encrypted`) in Settings → Server secrets. The local setup chat landing did not change
-   this order: the chat location chip is read-only, and no switch is offered until these
-   commands land.
+6. **Session location switch, `＋ Add project`, vault mode and live D6 flip — code-complete
+   except the live D6 flip.**
+   - **Session location switch — landed (`ss-97`, `c589c79`; `ss-98`, `eb2474f`).** Core has
+     `OrchestratorMoveTarget`, `VowpClient::orchestrator_move`
+     (`vowp --json orchestrator move <name> --node|--home`), the D6 guard and the bridge;
+     the chat **Host** control (Home / Local · node) needs an explicit choice, refreshes the
+     card, shows a reconnect note and reports typed failures. The transport chip stays
+     read-only; only the Host control moves the orchestrator.
+   - **Live Add project — landed (`ss-99`, `6fc6d8d`; `ss-100`, `18ff640`).** Core and the
+     bridge run `vowp project add` with a path-free `ProjectAddOutcome` and
+     `[remote-path]` scrubbing of VOWP errors. The sidebar **`＋`** dialog creates the project
+     on the home, has no branch field (VOWP clones the default branch; `vowp project add`
+     has no `--branch`), offers `Create the chat on this Mac` by default when the agent is
+     connected, and opens the new project chat.
+   - **Vault storage mode — landed (`ss-96`, `90c515b`).** The Server secrets badge maps
+     `secret ls --json`'s `mode` (`basic` / `vault_user` / `encrypted`); unknown safe tokens
+     are shown verbatim.
+   - **Remaining: the live D6 flip (owner/Mac check, not a code job).** The code probes
+     already match VOWP `0.4.0+`, but the owner's Mac agent must report `0.4.0+` and the
+     gate must become `Ready`. This Linux host cannot verify the Mac: the gate stays
+     `Waiting` until the agent reports the required version, and no live Mac takeover or
+     add run has been performed from here.
 7. **Pooled-Compute & Failover Clusters (owner decision 2026-11-18 — Full VOWP-Native
    Cluster V1) — landed in two halves (`ss-54`, `fe3146b`; `ss-55`, `58a37f2`,
    `04c9fdd`).** Multiple saved servers stay **independent by default** with the existing
@@ -410,12 +421,12 @@ pending too.
    `apps/spirit-desktop/src/test/e2e/fleet.spec.ts` was deleted rather than skipped. `ss-53`
    also fixed two WCAG AA contrast misses in `packages/spirit-ui/src/next/theme.css`
    (`.badge--accent` and `.btn--danger:hover`) and added coverage for onboarding
-   password-login, the Server secrets card, the read-only location chip and the `chat_gated`
+   password-login, the Server secrets card, the read-only transport chip and the `chat_gated`
    composer. Proven green: `ss-56` (`a80775e`) ran
    `npm run test:e2e -w @stackspirit/desktop` at **18/18 on two consecutive runs** (2.6 m
    and 1.9 m), with zero failed, skipped or flaky tests, no waivers, and no spec or config
-   change. Step 6 (Local/Server switch, live Server chat, Add project) remains pending and
-   is not claimed here; step 7 landed as `ss-54`/`ss-55` above.
+   change. Step 6 had not landed at that point (it landed later as `ss-96`–`ss-100`);
+   live Server chat is still gated; step 7 landed as `ss-54`/`ss-55` above.
 
 ### 5.1 Plan after the first live run (2026-11-19)
 
@@ -523,8 +534,8 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
   `meadow-bridge-flows.spec.ts` (`ss-53`, `6f2a568`), including the three password-login
   outcomes, masked `last4`, Revoke, the read-only location chip and the `chat_gated`
   composer, with axe scans in light and dark.
-- VOWP `0.4.0` does not report the vault storage mode and does not encrypt the vault at
-  rest. The Server secrets card shows the mode as not reported, and
+- The Server secrets card shows the storage mode VOWP reports (`ss-96`, `90c515b`),
+  and says so when none is reported; the app does not encrypt the vault itself, and
   [`SECURITY.md`](../SECURITY.md) records the exact prompt-gated set path and limits;
   the app never runs `vowp secret upgrade` on its own.
 - D6 actions remain disabled. The live home read (`ss-37`, `39d8538`) records an online

@@ -982,7 +982,13 @@ not guess:
   not fall back to the bundled engine, the preview store or a local-only log.
 - The current `⇄ Run on server` / `Run on this Mac` button is removed. It is a label-only
   switch today; the real move is `vowp orchestrator move` (VOWP `0.5`, HANDOFF §5 step 6)
-  and is out of scope. The chip is read-only.
+  and is out of scope of this contract. The chip is read-only.
+- **Host control (cross-reference, not part of the engine contract).** The session host can
+  be moved explicitly with `vowp orchestrator move` through the chat `Host` control
+  (HANDOFF §5 step 6; `ss-97`, `ss-98`). It is distinct from the read-only transport
+  location chip: the chip only reports where the attached endpoint runs, while the Host
+  control asks VOWP to move the orchestrator. A successful move refreshes the card and asks
+  the user to reconnect.
 - If the host is disconnected, the chip shows the last known location with a disconnected
   state and the composer is disabled. No silent fallback.
 
@@ -994,7 +1000,7 @@ not guess:
 | `global`/`project` on the server, VOWP endpoint | Blocked | VOWP `0.5` `orchestrator endpoint` (not shipped) |
 | `global`/`project` on the server, app-owned forward | Not approved | Owner decision A (2026-11-19): designed but declined; Server chat waits for VOWP `0.5` `orchestrator endpoint` |
 | `global`/`project` Local on a VOWP local orchestrator | Implemented behind the VOWP 0.5 command gate; fake-`vowp` tests only here | `vowp agent orchestrator endpoint` (0.5). The installed `vowp 0.4.0` binary has no such subcommand, so the typed result there is `chat_not_configured`; the app attaches to the reported endpoint and never uses the bundled engine for this session |
-| Real Local/Server switch | Blocked | `vowp orchestrator move` (0.5) and HANDOFF §5 step 6 |
+| Explicit session host move | Landed (`ss-97`, `ss-98`); live Mac check pending | `vowp orchestrator move` through the chat `Host` control, HANDOFF §5 step 6; the transport chip stays read-only and the D6 gate stays `Waiting` until the owner's agent reports `0.4.0+` |
 | Live chat through the bundled engine for setup | Ready for the core job | §2 |
 
 ## 4. Bridge contract

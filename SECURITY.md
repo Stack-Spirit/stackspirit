@@ -67,9 +67,27 @@ password, token, hostname, path or secret value in an issue, report, screenshot 
   shows a prominent warning and requires the explicit checkbox "I understand this stores
   the key on the server". The acknowledgement is held in memory for the session and is not
   written to localStorage.
-- `storage: null` is shown as exactly that: VOWP 0.4.0 does not report whether the vault is
-  in basic or vault-user mode. StackSpirit does not guess and does not run
-  `vowp secret upgrade` on its own.
+- The storage-mode badge shows the `mode` that `secret ls --json` reports (`basic`,
+  `vault_user` or `encrypted`; an unknown safe token is shown verbatim). `storage: null` is
+  shown as exactly that when VOWP reports none (VOWP 0.4.0 reported none). StackSpirit does
+  not guess and does not run `vowp secret upgrade` on its own.
+
+### Project add
+
+The sidebar **Add project** dialog runs `vowp project add` on the home through the core
+crate. Its boundary:
+
+- `ProjectAddOutcome` never carries the home path. It reports the project name and the
+  outcome only, so no remote filesystem location reaches the renderer or the assistant.
+- When `project add` fails, the message and hint have absolute paths and `~` tokens replaced
+  with `[remote-path]` before they are returned.
+- A git URL with embedded credentials (for example `https://user:token@host/repo`) is
+  refused before any argv is built, so the credential is never placed in a process
+  argument list, a log or an error.
+- `vowp project add` has no `--branch`; VOWP clones the default branch and the dialog has no
+  branch field.
+- This was exercised with fake-`vowp` tests here; no live Mac add run was performed from
+  this Linux host.
 
 ### What the AI sees
 
