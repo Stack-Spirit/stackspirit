@@ -1114,7 +1114,7 @@ impl Supervisor {
                                 .results
                                 .iter()
                                 .filter(|gate| !gate.passed)
-                                .map(dispatch::gate_finding)
+                                .map(|gate| dispatch::gate_finding(&job, gate))
                                 .collect::<Vec<_>>();
                             self.apply_with(&job.id, JobEvent::GatesFailed, None, findings, None)?;
                         }
@@ -1306,7 +1306,7 @@ impl Supervisor {
                 let mut findings = results
                     .iter()
                     .filter(|result| !result.passed)
-                    .map(dispatch::gate_finding)
+                    .map(|result| dispatch::gate_finding(&current, result))
                     .collect::<Vec<_>>();
                 if findings.is_empty() {
                     findings.push(format!("merge checks failed for {}", current.id));
