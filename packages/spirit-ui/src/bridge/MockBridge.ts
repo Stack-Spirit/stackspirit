@@ -360,6 +360,9 @@ export class MockBridge implements SpiritBridge {
   private asifCalls: MockAsifCall[] = [];
   private localCalls: MockLocalCall[] = [];
   private projectAddCalls: ProjectAddInput[] = [];
+  /** Projects and orchestrator cards created by `projects.add`, kept across refreshes. */
+  private addedProjects: ProjectView[] = [];
+  private addedOrchestratorNames: string[] = [];
   private localState: MockLocalState;
   private keys = new Map<string, KeyStatus>();
   /** Providers whose preview key was typed as an invalid one; verification rejects it. */
@@ -1764,6 +1767,9 @@ export class MockBridge implements SpiritBridge {
       } else {
         throw errorDto("invalid_input", "Choose a Git URL or a folder.");
       }
+      if (this.fleetView?.projects.some((project) => project.name === input.name)) {
+        throw errorDto("conflict", "A project with this name already exists on this server.");
+      }
       this.projectAddCalls = [...this.projectAddCalls, clone(input)];
       const orchestrator: OrchestratorView | null =
         input.orchestrator === "chat"
@@ -1777,7 +1783,32 @@ export class MockBridge implements SpiritBridge {
               join: this.localJoin("01JCF5WQ8ZK3M2V7N4P6R8T0AH"),
             }
           : null;
-      return { project: input.name, initialized: true, orchestrator };
+      const project: ProjectView = {
+        name: input.name,
+        state: "active",
+        paused_reason: "",
+        jobs_by_state: {},
+        cost_today_usd: null,
+      };
+      this.addedProjects = [...this.addedProjects, project];
+      if (this.fleetView) {
+        this.fleetView = { ...this.fleetView, projects: [...this.fleetView.projects, clone(project)] };
+      }
+      if (orchestrator) {
+        const card: LocalOrchestratorView = {
+          ...orchestrator,
+          protocol: this.localState.agent.protocol,
+          agent_status: this.localState.agent.state,
+          lease_holder: null,
+          session_state: "running",
+        };
+        this.addedOrchestratorNames = [...this.addedOrchestratorNames, card.name];
+        this.localState = {
+          ...this.localState,
+          orchestrators: [...this.localState.orchestrators, card],
+        };
+      }
+      return { project: input.name, initialized: true, orchestrator: clone(orchestrator) };
     },
   };
   cluster = this.clusterApi;
@@ -3346,6 +3377,10 @@ export class MockBridge implements SpiritBridge {
   }
 
   private makeProjects(running: WorkerCardView[]): ProjectView[] {
+    return [...this.makeSeedProjects(running), ...this.addedProjects.map((project) => clone(project))];
+  }
+
+  private makeSeedProjects(running: WorkerCardView[]): ProjectView[] {
     const base: ProjectView = {
       name: "vowp",
       state: "active",
@@ -3671,6 +3706,15 @@ export class MockBridge implements SpiritBridge {
 
   /** The Global orchestrator exists only in the ownership scenarios. */
   private makeOrchestrators(): OrchestratorView[] {
+    const base = this.makeBaseOrchestrators();
+    const known = new Set(base.map((row) => row.name));
+    const added = this.localState.orchestrators
+      .filter((row) => this.addedOrchestratorNames.includes(row.name) && !known.has(row.name))
+      .map((row) => this.toOrchestrator(row));
+    return [...base, ...added];
+  }
+
+  private makeBaseOrchestrators(): OrchestratorView[] {
     if (this.scenario === "owner-project") {
       return this.localState.orchestrators.map((row) => this.toOrchestrator(row));
     }

@@ -424,23 +424,83 @@ describe("NextShell", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
-  it("adds a project from a Git repository through the global orchestrator", async () => {
-    const { user } = await renderConnected();
+  async function openAddProject(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByRole("button", { name: "Add project" }));
-    const dialog = screen.getByRole("dialog", { name: "Add a project" });
-    await user.type(within(dialog).getByLabelText("Repository URL"), "https://github.com/acme/billing-api.git");
-    expect(within(dialog).getByLabelText("Project name")).toHaveValue("billing-api");
+    return screen.findByRole("dialog", { name: "Add a project" });
+  }
 
+  it("has no branch field and says VOWP clones the default branch", async () => {
+    const { user } = await renderConnected();
+    const dialog = await openAddProject(user);
+    expect(within(dialog).queryByLabelText(/branch/i)).not.toBeInTheDocument();
+    expect(within(dialog).getByText("VOWP clones the repository's default branch.")).toBeInTheDocument();
+  });
+
+  it("disables the Local choice when no local agent is connected", async () => {
+    const { user } = await renderConnected("busy");
+    const dialog = await openAddProject(user);
+    const box = within(dialog).getByRole("checkbox", { name: /Create the chat on this Mac/ });
+    expect(box).toBeDisabled();
+    expect(box).not.toBeChecked();
+    expect(within(dialog).getByText(/No local agent is connected/)).toBeInTheDocument();
+  });
+
+  it("checks Local by default, creates the project, moves the chat and opens it", async () => {
+    const { user, bridge } = await renderConnected("owner-project");
+    const dialog = await openAddProject(user);
+    const box = within(dialog).getByRole("checkbox", { name: /Create the chat on this Mac/ });
+    expect(box).toBeChecked();
+    expect(box).toBeEnabled();
+
+    await user.type(within(dialog).getByLabelText("Repository URL"), "https://github.com/acme/billing-api.git");
     await user.click(within(dialog).getByRole("button", { name: "Create project" }));
-    expect(screen.queryByRole("dialog", { name: "Add a project" })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Global orchestrator", level: 1 })).toBeInTheDocument();
-    expect(screen.getByText(/Create the project "billing-api"/)).toBeInTheDocument();
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add a project" })).not.toBeInTheDocument());
+    const mock = bridge as MockBridge;
+    expect(mock.recordedProjectAdds()).toEqual([
+      { name: "billing-api", source: { kind: "git", url: "https://github.com/acme/billing-api.git" }, init: true, orchestrator: "chat" },
+    ]);
+    expect(mock.orchestratorMoves).toEqual([
+      { name: "billing-api-chat", target: { kind: "node", node: expect.any(String) } },
+    ]);
+    const fleet = await bridge.fleet.get();
+    expect(fleet?.projects.map((project) => project.name)).toContain("billing-api");
+    expect(fleet?.orchestrators.find((row) => row.name === "billing-api-chat")?.node).not.toBeNull();
+    await waitFor(() => expect(screen.getAllByText(/billing-api/).length).toBeGreaterThan(0));
+    expect(screen.queryByTestId("project-notice")).not.toBeInTheDocument();
+  });
+
+  it("keeps the dialog open and shows the message when the add fails", async () => {
+    const { user, bridge } = await renderConnected("owner-project");
+    const dialog = await openAddProject(user);
+    await user.click(within(dialog).getByRole("button", { name: "Folder on the server" }));
+    await user.type(within(dialog).getByLabelText(/Folder path on/), "~/code/relative-ok");
+    await user.clear(within(dialog).getByLabelText("Project name"));
+    await user.type(within(dialog).getByLabelText("Project name"), "folder-proj");
+    vi.spyOn(bridge.projects!, "add").mockRejectedValueOnce({ code: "invalid_input", message: "project folder: use an absolute path" });
+    await user.click(within(dialog).getByRole("button", { name: "Create project" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("project folder: use an absolute path");
+    expect(screen.getByRole("dialog", { name: "Add a project" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Create project" })).toBeEnabled();
+  });
+
+  it("still opens the project and reports Home when the Local move fails", async () => {
+    const { user, bridge } = await renderConnected("owner-project");
+    vi.spyOn(bridge.localOrchestrators!, "orchestratorMove").mockRejectedValueOnce({ code: "gate", message: "agent offline" });
+    const dialog = await openAddProject(user);
+    await user.type(within(dialog).getByLabelText("Repository URL"), "https://github.com/acme/ledger.git");
+    await user.click(within(dialog).getByRole("button", { name: "Create project" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add a project" })).not.toBeInTheDocument());
+    expect(await screen.findByTestId("project-notice")).toHaveTextContent(/ledger was created.*stayed on Home/);
+    const fleet = await bridge.fleet.get();
+    expect(fleet?.projects.map((project) => project.name)).toContain("ledger");
   });
 
   it("rejects a project name that already exists", async () => {
     const { user } = await renderConnected();
-    await user.click(screen.getByRole("button", { name: "Add project" }));
-    const dialog = screen.getByRole("dialog", { name: "Add a project" });
+    const dialog = await openAddProject(user);
     await user.type(within(dialog).getByLabelText("Repository URL"), "https://github.com/acme/vowp.git");
     expect(within(dialog).getByText(/already exists/)).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Create project" })).toBeDisabled();

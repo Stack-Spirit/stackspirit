@@ -2901,6 +2901,60 @@ button.nx-composer__start:hover {
   font-weight: 400;
 }
 
+.nx-form__hint {
+  color: var(--nx-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.nx-form__check {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  row-gap: 3px;
+  align-items: center;
+  color: var(--nx-text);
+  font-size: 13px;
+}
+
+.nx-form__check input {
+  margin: 0;
+  accent-color: var(--nx-accent, currentColor);
+}
+
+.nx-form__check input:disabled + label {
+  color: var(--nx-muted);
+}
+
+.nx-form__check .nx-form__hint {
+  grid-column: 2;
+}
+
+.nx-form__error--block {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--nx-danger);
+  border-radius: var(--nx-radius-sm);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.nx-form button:disabled,
+.nx-btn:disabled {
+  cursor: progress;
+}
+
+.nx-notice--status {
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--nx-line-strong);
+  border-radius: var(--nx-radius-sm);
+  background: var(--nx-raised);
+  color: var(--nx-text);
+  font-size: 13px;
+}
+
 /* ======================================================================
    Details panel (slides in from the right)
    ====================================================================== */

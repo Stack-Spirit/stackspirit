@@ -10,7 +10,7 @@ import { AddProjectDialog } from "./AddProjectDialog";
 import { ErrorNotice } from "./ErrorNotice";
 import { ChatView } from "./ChatView";
 import { useCluster, useClusterStore } from "./clusterStore";
-import { initializeConversations, useConversations } from "./conversations";
+import { initializeConversations } from "./conversations";
 import { ContextPanel } from "./ContextPanel";
 import { FormClusterDialog } from "./FormClusterDialog";
 import { PromoteBackupDialog } from "./PromoteBackupDialog";
@@ -23,6 +23,15 @@ import { useResizable } from "./useResizable";
 import { ConnectPrompt, Welcome } from "./Welcome";
 import { WorkersPage } from "./WorkersPage";
 import "./theme.css";
+
+async function resolveLocalNode(bridge: SpiritBridge): Promise<string | null> {
+  try {
+    const agent = await bridge.localOrchestrators?.agentStatus();
+    return agent && agent.state === "connected" && agent.node ? agent.node : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The redesigned desktop shell (Meadow theme, chat-first, DeepSeek Harness layout).
@@ -46,7 +55,6 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const connection = useConnection();
   const closePanel = useShellUi((state) => state.closePanel);
   const panelOpen = useShellUi((state) => state.panel !== null);
-  const requestProject = useConversations((state) => state.requestProject);
   const fleet = useFleet();
   const cluster = useCluster();
   const loadCluster = useClusterStore((state) => state.loadCluster);
@@ -54,6 +62,9 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const side = useResizable({ storageKey: "stackspirit.sidebarWidth", initial: 272, min: 220, max: 420, grows: "right" });
   const drawer = useResizable({ storageKey: "stackspirit.panelWidth", initial: 400, min: 320, max: 640, grows: "left" });
   const [addingProject, setAddingProject] = useState(false);
+  // The connected local node, resolved when the dialog opens; null without a connected agent.
+  const [localNode, setLocalNode] = useState<string | null>(null);
+  const [projectNotice, setProjectNotice] = useState<string | null>(null);
   const [clusterFormOpen, setClusterFormOpen] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);
   const [promoteTarget, setPromoteTarget] = useState<string | null>(null);
@@ -225,7 +236,14 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
         view={view}
         onNavigate={navigate}
         onAddServer={() => setAdding(true)}
-        onAddProject={() => setAddingProject(true)}
+        onAddProject={() => {
+          setLocalNode(null);
+          setProjectNotice(null);
+          void resolveLocalNode(bridge).then((node) => {
+            setLocalNode(node);
+            setAddingProject(true);
+          });
+        }}
         onFormCluster={() => setClusterFormOpen(true)}
         theme={theme}
         onTheme={setTheme}
@@ -236,6 +254,11 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
       <div className={`nx-stage${panelOpen ? " nx-stage--panel" : ""}`}>
         <div className="nx-column">
           <ErrorNotice />
+          {projectNotice ? (
+            <p className="nx-notice--status" role="status" data-testid="project-notice">
+              {projectNotice}
+            </p>
+          ) : null}
           {main}
         </div>
         {connected ? (
@@ -280,10 +303,25 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
           serverLabel={serverLabel}
           existing={(fleet?.projects ?? []).map((project) => project.name)}
           onClose={() => setAddingProject(false)}
-          onCreate={(request) => {
+          localNode={localNode}
+          onCreate={async (request, { local }) => {
+            if (!bridge.projects) throw { message: "This bridge cannot add projects." };
+            const outcome = await bridge.projects.add({ ...request, init: true, orchestrator: "chat" });
+            let notice: string | null = null;
+            if (local && localNode && outcome.orchestrator && bridge.localOrchestrators) {
+              try {
+                await bridge.localOrchestrators.orchestratorMove(outcome.orchestrator.name, {
+                  kind: "node",
+                  node: localNode,
+                });
+              } catch {
+                notice = `Project ${outcome.project} was created, but its chat could not move to ${localNode} and stayed on Home.`;
+              }
+            }
+            await bridge.fleet.refresh().catch(() => undefined);
+            setProjectNotice(notice);
             setAddingProject(false);
-            requestProject(request);
-            setView({ kind: "session", session: "global" });
+            setView({ kind: "session", session: `project:${outcome.project}` });
           }}
         />
       ) : null}

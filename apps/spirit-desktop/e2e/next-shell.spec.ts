@@ -391,14 +391,35 @@ test("server and workers pages meet WCAG 2.2 AA and open job details", async ({ 
 });
 
 test("add project dialog meets WCAG 2.2 AA", async ({ page }) => {
-  await page.goto(url("busy"));
+  await page.goto(url("owner-project"));
   await connect(page);
   await page.getByRole("button", { name: "Add project" }).click();
   const dialog = page.getByRole("dialog", { name: "Add a project" });
   await dialog.getByLabel("Repository URL").fill("https://github.com/acme/billing-api.git");
   await expect(dialog.getByLabel("Project name")).toHaveValue("billing-api");
+  await expect(dialog.getByLabel("Branch")).toHaveCount(0);
+  await expect(dialog.getByText("VOWP clones the repository's default branch.")).toBeVisible();
+  await expect(dialog.getByRole("checkbox", { name: /Create the chat on this Mac/ })).toBeChecked();
   await expectNoWcagViolations(page);
 });
+
+for (const theme of ["light", "dark"] as const) {
+  test(`creates a folder project from the sidebar plus in the ${theme} theme`, async ({ page }) => {
+    await page.goto(url("owner-project", theme));
+    await connect(page);
+    await page.getByRole("button", { name: "Add project" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add a project" });
+    await dialog.getByRole("button", { name: "Folder on the server" }).click();
+    await dialog.getByLabel(/Folder path on/).fill("/home/owner/code/ledger");
+    await dialog.getByLabel("Project name").fill("ledger");
+    await expectNoWcagViolations(page);
+    await dialog.getByRole("button", { name: "Create project" }).click();
+    await expect(dialog).toBeHidden();
+    const sidebar = page.getByRole("navigation", { name: "Sessions" });
+    await expect(sidebar.getByRole("button", { name: /^ledger/ })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1 })).toContainText("ledger");
+  });
+}
 
 test("model picker search stays inside the chat clip below the saved-server banner", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 480 });
