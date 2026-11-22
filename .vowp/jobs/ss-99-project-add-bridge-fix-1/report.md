@@ -2,7 +2,9 @@
 job: ss-99-project-add-bridge-fix-1
 status: done
 branch: job/ss-99-project-add-bridge
-commits: see git log on job/ss-99-project-add-bridge (fix(ss-99) commits)
+commits:
+  - 1559b1e
+  - 3d54a33
 tests: scripts/cargo-gate.sh fmt --all -- --check pass; scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings pass; scripts/cargo-gate.sh test -p spirit-core 433 passed, 0 failed; npm run typecheck pass; npm run lint pass; npm test 393 UI + 10 desktop + 73 web passed, 0 failed
 ---
 
