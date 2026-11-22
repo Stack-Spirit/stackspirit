@@ -1203,7 +1203,10 @@ fn estimates_use_exact_group_then_pool_then_default() {
     let exact = capacity::estimate_for(&store, &admit_request(&project, "exact")).unwrap();
     assert_eq!(exact.source, vowp_protocol::EstimateSource::Measured);
     assert_eq!(exact.samples, 5);
-    assert_eq!(exact.ram_p90_bytes, 500);
+    assert_eq!(
+        exact.ram_p90_bytes, 250,
+        "p90 uses the anon working set (peak / 2 in the fixture)"
+    );
 
     let other = ProjectName::parse("other").unwrap();
     for index in 0..5 {
@@ -1262,7 +1265,7 @@ fn estimates_pool_across_harnesses() {
     let pooled = capacity::estimate_for(&store, &request).unwrap();
     assert_eq!(pooled.source, vowp_protocol::EstimateSource::Pooled);
     assert_eq!(pooled.samples, 5);
-    assert_eq!(pooled.ram_p90_bytes, 600);
+    assert_eq!(pooled.ram_p90_bytes, 300);
 }
 
 #[test]
@@ -1380,4 +1383,48 @@ impl StreamParser for StubParser {
 #[allow(dead_code)]
 fn raw_path(root: &Path, run: &RunId) -> PathBuf {
     NodePaths::new(root).run_raw_path(run)
+}
+
+#[test]
+fn scope_working_set_tracks_anon_peak_not_cache() {
+    let tmp = tempdir().unwrap();
+    let deps = test_deps(&tmp.path().join("node"));
+    let cgroup = tmp.path().join("scope");
+    let mut fake = FakeProcFs::default();
+    // 9.6 GiB memory.peak, almost all reclaimable file cache from a cargo build.
+    fake.files
+        .insert(format!("{}/memory.peak", cgroup.display()), "10307921510\n".to_owned());
+    fake.files.insert(
+        format!("{}/memory.stat", cgroup.display()),
+        "anon 1500000000\nfile 8500000000\nkernel 100000000\n".to_owned(),
+    );
+    let run = RunId::new();
+    let scope = RunScope::begin_cgroup_with(&deps, Arc::new(fake), &run, cgroup);
+    let sample = scope.sample().unwrap();
+    assert_eq!(sample.anon_peak_bytes, Some(1_500_000_000));
+    assert_eq!(sample.file_peak_bytes, Some(8_500_000_000));
+}
+
+#[test]
+fn estimates_exclude_reclaimable_page_cache() {
+    let tmp = tempdir().unwrap();
+    let store = test_store(&tmp.path().join("node"));
+    let project = insert_project(&store);
+    for index in 0..5 {
+        let mut row = usage_row(&project, JobKind::Build, "cache", 9_600 * 1024 * 1024, index);
+        row.anon_peak_bytes = Some(1_400 * 1024 * 1024);
+        row.kernel_peak_bytes = Some(100 * 1024 * 1024);
+        row.file_peak_bytes = Some(8_000 * 1024 * 1024);
+        store.upsert_run_usage(&row).unwrap();
+    }
+    // A legacy row with only a file share still drops the cache.
+    let mut legacy = usage_row(&project, JobKind::Build, "cache", 9_600 * 1024 * 1024, 9);
+    legacy.anon_peak_bytes = None;
+    legacy.kernel_peak_bytes = None;
+    legacy.file_peak_bytes = Some(8_100 * 1024 * 1024);
+    assert_eq!(capacity::estimates::working_set_bytes(&legacy), 1_500 * 1024 * 1024);
+    capacity::recompute(&store, now()).unwrap();
+    let estimate = capacity::estimate_for(&store, &admit_request(&project, "cache")).unwrap();
+    assert_eq!(estimate.ram_p90_bytes, 1_500 * 1024 * 1024);
+    assert_eq!(estimate.ram_p50_bytes, 1_500 * 1024 * 1024);
 }

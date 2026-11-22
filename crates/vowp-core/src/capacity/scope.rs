@@ -574,9 +574,18 @@ impl CgroupScope {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if peak > state.peak {
             state.peak = peak;
-            state.anon = self.read_memory_stat("anon");
-            state.file = self.read_memory_stat("file");
-            state.kernel = self.read_memory_stat("kernel");
+        }
+        // `memory.peak` counts reclaimable page cache, so the breakdown follows the peak of
+        // the non-cache working set (`anon + kernel`), re-read on every tick.
+        if let Some(anon) = self.read_memory_stat("anon") {
+            let kernel = self.read_memory_stat("kernel");
+            let working_set = anon.saturating_add(kernel.unwrap_or(0));
+            let best = state.anon.map(|best| best.saturating_add(state.kernel.unwrap_or(0)));
+            if best.is_none_or(|best| working_set >= best) {
+                state.anon = Some(anon);
+                state.kernel = kernel;
+                state.file = self.read_memory_stat("file");
+            }
         }
         if cpu_usec >= state.cpu_usec {
             state.cpu_usec = cpu_usec;

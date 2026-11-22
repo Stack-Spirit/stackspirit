@@ -721,3 +721,46 @@ fn node_supervisor_tick_writes_capacity_advice() {
         "a node tick must write the Capacity inbox item"
     );
 }
+
+#[test]
+fn advisor_does_not_propose_one_worker_on_an_idle_big_box() {
+    let (_tmp, deps, store, project, _job) = fixture();
+    let mut host = sample(now(), 23 * GIB + GIB / 2, 20 * GIB, Some(8.0));
+    host.cpu_count = 8;
+    store.insert_host_sample(&host).unwrap();
+    // Cache-inflated peaks (9.6 GiB) around a ~1.5 GiB working set.
+    for index in 0..5_u64 {
+        store
+            .upsert_run_usage(&RunUsage {
+                run_id: RunId::new(),
+                project: project.clone(),
+                job_id: None,
+                job_kind: Some(JobKind::Build),
+                role: RunRole::Worker,
+                harness: Some(HarnessKind::Opencode),
+                model: Some("deepseek/deepseek-flash".to_owned()),
+                provider: Some("deepseek".to_owned()),
+                node: NodeName::parse("local").unwrap(),
+                started_at: now().minus(Duration::from_secs(600 - index)),
+                ended_at: now().minus(Duration::from_secs(590 - index)),
+                duration_ms: 10_000,
+                peak_rss_bytes: 9 * GIB + 600 * 1024 * 1024,
+                anon_peak_bytes: Some(GIB + GIB / 2),
+                file_peak_bytes: Some(8 * GIB),
+                kernel_peak_bytes: None,
+                cpu_usec: 1_000_000,
+                mean_cpu_cores: 1.0,
+                max_cpu_cores: 2.0,
+                build_mode: BuildMode::Unknown,
+                source: UsageSource::Cgroup,
+                oom_killed: false,
+                exit_code: Some(0),
+            })
+            .unwrap();
+    }
+    capacity::recompute(&store, now()).unwrap();
+    let advice = capacity::maybe_advise(&deps, &store, now(), capacity::AdviceTrigger::Timer)
+        .unwrap()
+        .expect("advice");
+    assert!(advice.proposed_target > 1, "proposed {}", advice.proposed_target);
+}

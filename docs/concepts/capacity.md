@@ -153,7 +153,7 @@ trips on measured conditions and clears after two clean samples:
 | Brake | Trips when |
 |---|---|
 | `memory_pressure` | `/proc/pressure/memory` `avg10` is above 10.0 for two consecutive samples. |
-| `swap_growth` | Swap used grew by more than 64 MiB per minute over the last three samples. |
+| `swap_growth` | Swap used grew by more than 64 MiB per minute over the last three samples **and** memory is tight: available RAM is at or below 30% of total or within twice the RAM reserve, or `/proc/pressure/memory` `avg10` is above 1.0. Swap growth with abundant available RAM is normal Linux cache-versus-cold-page balancing and does not brake. |
 | `disk_low` | Free disk on the home or worktree filesystem is below 5 GiB in the latest sample. One low sample trips it; the brake clears after two clean samples. |
 | `provider` | Every configured provider has an active limit. |
 
@@ -161,6 +161,16 @@ vowp `capacity show` prints the active reason and its start time, for example
 `brake: memory pressure (avg10 14.2)`. A kernel OOM kill is recorded on the run, the job is parked with
 a machine-inbox notice, and its estimate's p90 is raised for the next admission. The run itself is not
 retried by the brake; the normal job retry path decides.
+
+### Working-set RAM
+
+Run RAM is measured as the working set, not the cgroup `memory.peak`, because `memory.peak` counts
+reclaimable file/page cache that `cargo` builds fill with build artifacts. The cgroup sampler reads
+`memory.stat` (`anon`, `kernel`, `file`) every tick and keeps the breakdown at the highest
+`anon + kernel`. Estimates (`ram_p50_bytes`, `ram_p90_bytes`) use, in order: `anon + kernel`;
+`peak - file` when only the file share is known; the raw peak (adapter-only rows, gate runs, legacy
+rows). Legacy cache-inflated rows with no breakdown keep their raw peak until fresh samples push
+them out of the newest 50 runs of their group.
 
 ## Targets and advice
 
