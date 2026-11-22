@@ -619,6 +619,15 @@ export interface ProjectView {
   paused_reason: string;
   jobs_by_state: Record<string, number>;
   cost_today_usd: number | null;
+  /** Newest merge, when any. */
+  last_merge?: MergeView | null;
+}
+
+export interface MergeView {
+  job_id: string;
+  at: Timestamp;
+  commit: string;
+  branch: string;
 }
 
 export interface ExecutorView {

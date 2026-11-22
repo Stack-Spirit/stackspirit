@@ -112,6 +112,12 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
                 {summary?.done ?? 0} completed · {summary?.cancelled ?? 0} cancelled · {history.length} past gate
                 failures and cancellations listed
               </p>
+              {summary?.lastMerge ? (
+                <p className="nx-rows__empty" data-testid="history-last-merge">
+                  Last merge: {summary.lastMerge.job_id} · {summary.lastMerge.branch} ·{" "}
+                  {summary.lastMerge.commit.slice(0, 8)}
+                </p>
+              ) : null}
               {history.length === 0 ? null : (
                 <ul className="nx-rows__list">
                   {history.map((job, index) => (

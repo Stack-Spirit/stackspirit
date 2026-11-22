@@ -94,6 +94,22 @@ pub struct ProjectView {
     pub jobs_by_state: BTreeMap<String, u32>,
     /// Cost today, when known.
     pub cost_today_usd: Option<f64>,
+    /// Newest merge, when any.
+    #[serde(default)]
+    pub last_merge: Option<MergeView>,
+}
+
+/// The newest merge of a project, shown in History.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MergeView {
+    /// Merged job.
+    pub job_id: String,
+    /// When the merge happened.
+    pub at: Timestamp,
+    /// Commit sha.
+    pub commit: String,
+    /// Merged branch.
+    pub branch: String,
 }
 
 /// One running card in the worker grid.
@@ -386,6 +402,12 @@ fn project_view(project: &ProjectSnapshot) -> ProjectView {
         paused_reason: project.paused_reason.clone(),
         jobs_by_state: project.jobs_by_state.clone(),
         cost_today_usd: project.cost_today_usd,
+        last_merge: project.last_merge.as_ref().map(|merge| MergeView {
+            job_id: merge.job.as_str().to_owned(),
+            at: merge.at,
+            commit: merge.commit.clone(),
+            branch: merge.branch.clone(),
+        }),
     }
 }
 

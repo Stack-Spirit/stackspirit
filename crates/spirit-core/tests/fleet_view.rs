@@ -124,3 +124,44 @@ fn done_count_comes_from_jobs_by_state() {
     assert_eq!(fleet.lanes.counts.get("done"), Some(&37));
     assert_eq!(fleet.projects[0].jobs_by_state.get("done"), Some(&37));
 }
+
+#[test]
+fn gate_failure_of_a_running_job_is_live_review_not_history() {
+    let fleet = view_of(|project| {
+        project["gate_failures"] = json!([
+            failure("ss-2-desktop-shell", "2026-11-14T10:00:00.000Z"),
+            failure("ss-98-gone", "2026-11-14T09:00:00.000Z"),
+        ]);
+    });
+    let live: Vec<_> = fleet
+        .lanes
+        .review_fix
+        .iter()
+        .filter(|card| card.job_id == "ss-2-desktop-shell")
+        .collect();
+    assert_eq!(live.len(), 1, "{:?}", fleet.lanes.review_fix);
+    assert_eq!(live[0].kind, "build");
+    assert_eq!(live[0].role, "worker");
+    assert_eq!(live[0].gate.as_deref(), Some("secret_scan"));
+    let history: Vec<&str> = fleet
+        .lanes
+        .history
+        .iter()
+        .map(|c| c.job_id.as_str())
+        .collect();
+    assert!(!history.contains(&"ss-2-desktop-shell"), "{history:?}");
+    assert!(history.contains(&"ss-98-gone"));
+}
+
+#[test]
+fn last_merge_reaches_the_project_view() {
+    let fleet = view_of(|project| {
+        project["last_merge"] = json!({
+            "job": "ss-4-merged", "at": "2026-11-14T10:00:00.000Z",
+            "commit": "0123456789abcdef", "branch": "job/ss-4-merged"
+        });
+    });
+    let merge = fleet.projects[0].last_merge.as_ref().expect("merge");
+    assert_eq!(merge.job_id, "ss-4-merged");
+    assert_eq!(merge.branch, "job/ss-4-merged");
+}

@@ -1,4 +1,4 @@
-import type { FleetView, InboxItemView, JobCardView, JobLanes } from "../bridge/wire";
+import type { FleetView, MergeView, InboxItemView, JobCardView, JobLanes } from "../bridge/wire";
 
 /** What the sidebar tree and the server page show for one project. */
 export interface ProjectSummary {
@@ -11,6 +11,7 @@ export interface ProjectSummary {
   /** Real completed count from `jobs_by_state` (done + replanned). */
   done: number;
   cancelled: number;
+  lastMerge: MergeView | null;
   inbox: number;
 }
 
@@ -111,10 +112,14 @@ export function projectSummaries(fleet: FleetView | null): ProjectSummary[] {
     state: project.state,
     running: count(fleet.running, project.name),
     ready: count(fleet.lanes.ready, project.name),
-    review: count(fleet.lanes.review_fix, project.name),
+    review:
+      (project.jobs_by_state.gating ?? 0) +
+      (project.jobs_by_state.reviewing ?? 0) +
+      (project.jobs_by_state.fixing ?? 0),
     blocked: count(fleet.lanes.parked_blocked, project.name),
     done: (project.jobs_by_state.done ?? 0) + (project.jobs_by_state.replanned ?? 0),
     cancelled: project.jobs_by_state.cancelled ?? 0,
+    lastMerge: project.last_merge ?? null,
     inbox: openInbox(fleet, project.name).length,
   }));
 }

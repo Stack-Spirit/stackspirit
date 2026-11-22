@@ -3393,6 +3393,12 @@ export class MockBridge implements SpiritBridge {
         done: 37,
       },
       cost_today_usd: 1.37,
+      last_merge: {
+        job_id: "ss-4-merged-mock",
+        at: iso(this.nowMs - 3_600_000),
+        commit: "0123456789abcdef",
+        branch: "job/ss-4-merged-mock",
+      },
     };
     if (this.scenario === "owner-project") {
       return [
@@ -3530,6 +3536,25 @@ export class MockBridge implements SpiritBridge {
         },
       ],
       done: [],
+      history: [
+        {
+          job_id: "ss-3-old-failure",
+          project: "vowp",
+          title: "Earlier attempt",
+          kind: "build",
+          role: "worker",
+          state: "done",
+          priority: 0,
+          age_secs: 7200,
+          reason: null,
+          detail: null,
+          gate: "clippy",
+          gate_at: iso(this.nowMs - 7_200_000),
+          gate_evidence: "historical failure, since fixed",
+          executor: null,
+          session_id: null,
+        },
+      ],
       counts,
       queue_truncated: this.scenario === "queue-cap",
       queue_shown: this.scenario === "queue-cap" ? 200 : 3,

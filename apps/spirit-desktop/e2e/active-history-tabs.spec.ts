@@ -42,6 +42,12 @@ for (const theme of ["light", "dark"] as const) {
     await historyTab.click();
     await expect(page.getByTestId("history-view")).toBeVisible();
     await expect(page.getByTestId("history-summary")).toContainText("37 completed");
+    await expect(page.getByTestId("history-last-merge")).toContainText("ss-4-merged-mock");
+    // A historical gate failure is listed here, a live one is not.
+    const historyView = page.getByTestId("history-view");
+    await expect(historyView).toContainText("Gate failed: clippy");
+    await expect(historyView).not.toContainText("secret_scan");
+    await expect(page.getByText("unknown · unknown")).toHaveCount(0);
     await expect(jobs).toHaveCount(0);
     await expectNoWcagViolations(page);
 
