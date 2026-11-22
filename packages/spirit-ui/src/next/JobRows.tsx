@@ -1,7 +1,7 @@
 import { useId, useState } from "react";
 
 import { formatAge } from "../domain/format";
-import { jobName, jobTone, LANE_INFO, type LaneKey, type ProjectJob } from "./summary";
+import { jobName, jobPhase, jobTone, LANE_INFO, providerModel, type LaneKey, type ProjectJob, waitReason } from "./summary";
 
 export interface JobRowsProps {
   jobs: ProjectJob[];
@@ -32,6 +32,8 @@ export function JobRows({ jobs, selectedId, onSelect, showProject }: JobRowsProp
       .includes(needle);
   });
 
+  // Only lanes that have jobs get a filter, so an empty "Needs attention" never shows.
+  const filterKeys = LANE_INFO.map((lane) => lane.key).filter((key) => jobs.some((item) => item.lane === key));
   const count = (key: Filter) => (key === "all" ? jobs.length : jobs.filter((item) => item.lane === key).length);
 
   return (
@@ -49,7 +51,7 @@ export function JobRows({ jobs, selectedId, onSelect, showProject }: JobRowsProp
           onChange={(event) => setQuery(event.target.value)}
         />
         <div className="nx-segment" role="group" aria-label="Status">
-          {(["all", ...LANE_INFO.map((lane) => lane.key)] as Filter[]).map((key) => (
+          {(["all", ...filterKeys] as Filter[]).map((key) => (
             <button key={key} type="button" aria-pressed={filter === key} onClick={() => setFilter(key)}>
               {key === "all" ? "All" : LANE_INFO.find((lane) => lane.key === key)?.label}
               <span className="nx-segment__count">{count(key)}</span>
@@ -59,7 +61,7 @@ export function JobRows({ jobs, selectedId, onSelect, showProject }: JobRowsProp
       </div>
 
       {visible.length === 0 ? (
-        <p className="nx-rows__empty">{jobs.length === 0 ? "No jobs yet." : "No jobs match."}</p>
+        <p className="nx-rows__empty">{jobs.length === 0 ? "No active or queued jobs." : "No jobs match."}</p>
       ) : (
         <ul className="nx-rows__list">
           {visible.map((item) => {
@@ -68,12 +70,13 @@ export function JobRows({ jobs, selectedId, onSelect, showProject }: JobRowsProp
             const summary = [
               lane?.label,
               showProject ? job.project : null,
-              `${job.kind} · ${job.role}`,
-              job.executor?.display ?? null,
+              job.kind === "unknown" && job.role === "unknown" ? null : `${job.kind} · ${job.role}`,
               `${formatAge(job.age_secs)} old`,
             ]
               .filter(Boolean)
               .join(" · ");
+            const model = providerModel(job);
+            const phase = jobPhase(item);
             return (
               <li key={`${job.project}:${job.job_id}`}>
                 <button
@@ -86,7 +89,27 @@ export function JobRows({ jobs, selectedId, onSelect, showProject }: JobRowsProp
                   <span className="nx-row__text">
                     <span className="nx-row__title">{jobName(job)}</span>
                     <span className="nx-row__sub">{summary}</span>
-                    {job.reason ? <span className="nx-row__reason">{job.reason}</span> : null}
+                    {phase || model ? (
+                      <span className="nx-row__badges" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {phase ? (
+                          <span className="nx-chip nx-chip--muted" data-testid="job-phase">
+                            {phase}
+                          </span>
+                        ) : null}
+                        {model ? (
+                          <span className="nx-chip nx-chip--muted" data-testid="job-model">
+                            {model}
+                          </span>
+                        ) : null}
+                      </span>
+                    ) : null}
+                    {item.lane === "ready" ? (
+                      <span className="nx-row__reason" data-testid="job-wait-reason">
+                        Waiting: {waitReason(job)}
+                      </span>
+                    ) : job.reason ? (
+                      <span className="nx-row__reason">{job.reason}</span>
+                    ) : null}
                   </span>
                   <span className="nx-row__id">{job.job_id}</span>
                 </button>

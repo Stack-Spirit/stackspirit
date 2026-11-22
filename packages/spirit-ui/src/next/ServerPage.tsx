@@ -6,7 +6,7 @@ import { Meter, Slots, useServerHealth } from "./health";
 import { NodeMap, type MapBranch } from "./NodeMap";
 import { PageHeader } from "./PageHeader";
 import { useShellUi } from "./shellUi";
-import { jobName, projectJobs, projectSummaries } from "./summary";
+import { jobName, jobPhase, projectJobs, projectSummaries, providerModel, waitReason } from "./summary";
 
 const LEAVES_PER_PROJECT = 4;
 
@@ -35,7 +35,8 @@ export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromot
   const branches: MapBranch[] = projects.map((project) => {
     const running = projectJobs(fleet, project.name).filter((item) => item.lane === "running");
     const attention = projectJobs(fleet, project.name).filter((item) => item.lane === "parked_blocked");
-    const shown = [...running, ...attention].slice(0, LEAVES_PER_PROJECT);
+    const queuedJobs = projectJobs(fleet, project.name).filter((item) => item.lane === "ready" || item.lane === "review_fix");
+    const shown = [...running, ...queuedJobs, ...attention].slice(0, LEAVES_PER_PROJECT);
     const queued = project.ready + project.review;
     return {
       node: {
@@ -51,12 +52,19 @@ export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromot
       leaves: shown.map((item) => ({
         id: `${project.name}:${item.job.job_id}`,
         label: jobName(item.job),
-        sub: item.lane === "running" ? `${item.job.role} · running` : (item.job.reason ?? "needs attention"),
-        tone: item.lane === "running" ? "ok" : "warn",
+        sub:
+          item.lane === "running"
+            ? [jobPhase(item), providerModel(item.job)].filter(Boolean).join(" · ")
+            : item.lane === "ready"
+              ? `Waiting: ${waitReason(item.job)}`
+              : item.lane === "review_fix"
+                ? [jobPhase(item), providerModel(item.job)].filter(Boolean).join(" · ")
+                : (item.job.reason ?? "needs attention"),
+        tone: item.lane === "running" ? "ok" : item.lane === "parked_blocked" ? "warn" : "neutral",
         selected: panel?.kind === "job" && panel.jobId === item.job.job_id,
         onSelect: () => openPanel({ kind: "job", project: project.name, jobId: item.job.job_id }),
       })),
-      more: Math.max(0, running.length + attention.length - shown.length) || undefined,
+      more: Math.max(0, running.length + queuedJobs.length + attention.length - shown.length) || undefined,
       onMore: () => onOpenProject(project.name),
     };
   });
@@ -156,7 +164,7 @@ export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromot
                     <span className="nx-row__text">
                       <span className="nx-row__title">{project.name}</span>
                       <span className="nx-row__sub">
-                        {project.state} · {project.running} running · {project.ready} ready · {project.review} in review
+                        {project.state} · {project.running} running · {project.ready} queued · {project.review} in review
                         {project.blocked ? ` · ${project.blocked} need attention` : ""}
                         {project.inbox ? ` · ${project.inbox} in inbox` : ""}
                       </span>

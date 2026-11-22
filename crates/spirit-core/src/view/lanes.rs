@@ -69,10 +69,15 @@ pub struct JobLanes {
     pub ready: Vec<JobCardView>,
     /// Gate-failure cards; counts also include gating/reviewing/fixing.
     pub review_fix: Vec<JobCardView>,
-    /// Parked/failed/cancelled cards, blocked cards, and unknown states.
+    /// Parked/failed cards, blocked cards, and unknown states: stopped jobs that need
+    /// an owner decision. Cancelled jobs are history, never attention.
     pub parked_blocked: Vec<JobCardView>,
     /// Done/replanned counts; cards are summarized, not live.
     pub done: Vec<JobCardView>,
+    /// Historical work, kept out of the active lanes: cancelled jobs and gate failures of
+    /// jobs that are no longer live. Shown only behind the History tab.
+    #[serde(default)]
+    pub history: Vec<JobCardView>,
     /// Lane counts keyed by `running`, `ready`, `review_fix`, `parked_blocked`, `done`.
     pub counts: BTreeMap<String, u32>,
     /// True when any project's queue reached the 200-row cap.
@@ -92,12 +97,20 @@ pub fn build_lanes(snapshot: &Snapshot) -> JobLanes {
         review_fix: Vec::new(),
         parked_blocked: Vec::new(),
         done: Vec::new(),
+        history: Vec::new(),
         counts: BTreeMap::new(),
         queue_truncated: false,
         queue_shown: 0,
         queue_cap: u32::try_from(QUEUE_CAP).unwrap_or(u32::MAX),
     };
-    for key in ["running", "ready", "review_fix", "parked_blocked", "done"] {
+    for key in [
+        "running",
+        "ready",
+        "review_fix",
+        "parked_blocked",
+        "done",
+        "cancelled",
+    ] {
         lanes.counts.insert(key.to_owned(), 0);
     }
 
@@ -117,6 +130,11 @@ pub fn build_lanes(snapshot: &Snapshot) -> JobLanes {
 
 fn accumulate_counts(project: &ProjectSnapshot, counts: &mut BTreeMap<String, u32>) {
     for (state, count) in &project.jobs_by_state {
+        if JobState::parse(state) == JobState::Cancelled {
+            let entry = counts.entry("cancelled".to_owned()).or_default();
+            *entry = entry.saturating_add(*count);
+            continue;
+        }
         let lane = match JobState::parse(state) {
             JobState::Running | JobState::Stalled | JobState::Merging => "running",
             JobState::Pending | JobState::Ready => "ready",
@@ -171,12 +189,26 @@ fn build_project_cards(project: &ProjectSnapshot, lanes: &mut JobLanes) {
                 seen.insert(key);
                 lanes.ready.push(queue_card(&project_name, row));
             }
-            JobState::Parked | JobState::Failed | JobState::Cancelled => {
+            JobState::Parked | JobState::Failed => {
                 seen.insert(key);
                 lanes.parked_blocked.push(queue_card(&project_name, row));
             }
+            JobState::Cancelled => {
+                seen.insert(key);
+                lanes.history.push(queue_card(&project_name, row));
+            }
             JobState::Gating | JobState::Reviewing | JobState::Fixing => {
-                // Review cards come from gate failures, not from inventing live cards.
+                // Live review work: enriched with its gate failure when one exists.
+                seen.insert(key);
+                let failure = project
+                    .gate_failures
+                    .iter()
+                    .rev()
+                    .find(|f| f.job == row.job);
+                lanes.review_fix.push(match failure {
+                    Some(failure) => gate_card(&project_name, failure, Some(row)),
+                    None => queue_card(&project_name, row),
+                });
             }
             JobState::Done | JobState::Replanned => {
                 // Done cards are summarized by count only.
@@ -191,11 +223,25 @@ fn build_project_cards(project: &ProjectSnapshot, lanes: &mut JobLanes) {
         }
     }
 
-    for failure in &project.gate_failures {
-        let queue_row = queue_by_job.get(failure.job.as_str()).copied();
-        lanes
-            .review_fix
-            .push(gate_card(&project_name, failure, queue_row));
+    // Gate failures of jobs that are not live review work are history. One card per job
+    // (latest failure), enriched from the queue row; never an `unknown · unknown` row.
+    let mut history_seen: HashSet<&str> = HashSet::new();
+    for failure in project.gate_failures.iter().rev() {
+        let job = failure.job.as_str();
+        let live_review = queue_by_job.get(job).is_some_and(|row| {
+            matches!(
+                row.state,
+                JobState::Gating | JobState::Reviewing | JobState::Fixing
+            )
+        });
+        if live_review || !history_seen.insert(job) {
+            continue;
+        }
+        lanes.history.push(gate_card(
+            &project_name,
+            failure,
+            queue_by_job.get(job).copied(),
+        ));
     }
 }
 

@@ -8,7 +8,9 @@ export interface ProjectSummary {
   ready: number;
   review: number;
   blocked: number;
+  /** Real completed count from `jobs_by_state` (done + replanned). */
   done: number;
+  cancelled: number;
   inbox: number;
 }
 
@@ -18,11 +20,14 @@ export type NodeTone = "ok" | "neutral" | "info" | "warn" | "danger" | "faint";
 /** Lanes in the order the node map and row filters show them. */
 export const LANE_INFO: ReadonlyArray<{ key: LaneKey; label: string; tone: NodeTone }> = [
   { key: "running", label: "Running", tone: "ok" },
-  { key: "ready", label: "Ready", tone: "neutral" },
-  { key: "review_fix", label: "Review & fix", tone: "info" },
+  { key: "ready", label: "Queued / Waiting", tone: "neutral" },
+  { key: "review_fix", label: "In review / fixing", tone: "info" },
   { key: "parked_blocked", label: "Needs attention", tone: "warn" },
   { key: "done", label: "Done", tone: "faint" },
 ];
+
+/** Lanes shown by default; `done` lives behind the History tab. */
+export const ACTIVE_LANES: ReadonlyArray<LaneKey> = ["running", "ready", "review_fix", "parked_blocked"];
 
 export interface ProjectJob {
   lane: LaneKey;
@@ -43,10 +48,18 @@ function laneJobs(lanes: JobLanes, key: LaneKey): JobCardView[] {
 /** Every job of a project (or of all projects when `project` is null), tagged with its lane. */
 export function projectJobs(fleet: FleetView | null, project: string | null): ProjectJob[] {
   if (!fleet) return [];
-  return LANE_INFO.flatMap(({ key }) =>
+  return LANE_INFO.filter(({ key }) => ACTIVE_LANES.includes(key)).flatMap(({ key }) =>
     laneJobs(fleet.lanes, key)
       .filter((job) => project === null || job.project === project)
       .map((job) => ({ lane: key, job })),
+  );
+}
+
+/** Historical work for the History tab: cancelled jobs and past gate failures. */
+export function historyJobs(fleet: FleetView | null, project: string | null): JobCardView[] {
+  if (!fleet) return [];
+  return [...(fleet.lanes.history ?? []), ...fleet.lanes.done].filter(
+    (job) => project === null || job.project === project,
   );
 }
 
@@ -58,6 +71,31 @@ export function findJob(fleet: FleetView | null, project: string, jobId: string)
 export function jobTone(item: ProjectJob): NodeTone {
   if (item.lane === "parked_blocked" && /fail|error|crash/i.test(item.job.state)) return "danger";
   return LANE_INFO.find((lane) => lane.key === item.lane)?.tone ?? "neutral";
+}
+
+/** Concise provider and model for an active job, or null when no executor is known. */
+export function providerModel(job: JobCardView): string | null {
+  const executor = job.executor;
+  if (!executor) return null;
+  const display = executor.display || executor.model;
+  if (!display) return null;
+  const provider = executor.provider;
+  return provider && !display.toLowerCase().includes(provider.toLowerCase()) ? `${provider} · ${display}` : display;
+}
+
+/** Current phase of an active job: running, stalled, gating, reviewing or fixing. */
+export function jobPhase(item: ProjectJob): string | null {
+  const { job } = item;
+  if (item.lane === "running") return job.state === "stalled" ? "stalled" : "running";
+  if (item.lane === "review_fix") return /^(gating|reviewing|fixing)$/.test(job.state) ? job.state : "gating";
+  return null;
+}
+
+/** Why a queued job is waiting. Uses VOWP's `waiting_reason`, else the queue state. */
+export function waitReason(job: JobCardView): string {
+  const reason = job.reason?.trim();
+  if (reason) return reason;
+  return job.state === "pending" ? "Waiting on its dependencies" : "Waiting for a free worker slot";
 }
 
 export function jobName(job: JobCardView): string {
@@ -75,7 +113,8 @@ export function projectSummaries(fleet: FleetView | null): ProjectSummary[] {
     ready: count(fleet.lanes.ready, project.name),
     review: count(fleet.lanes.review_fix, project.name),
     blocked: count(fleet.lanes.parked_blocked, project.name),
-    done: count(fleet.lanes.done, project.name),
+    done: (project.jobs_by_state.done ?? 0) + (project.jobs_by_state.replanned ?? 0),
+    cancelled: project.jobs_by_state.cancelled ?? 0,
     inbox: openInbox(fleet, project.name).length,
   }));
 }
