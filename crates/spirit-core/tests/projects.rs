@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use spirit_core::engine::{EngineSupervisor, EngineSupervisorConfig, FakeEngineRuntime};
+use spirit_core::error::SpiritErrorCode;
 use spirit_core::host::{HostDraft, HostKeyPin, InMemoryHostStore, NewHostProfile};
 use spirit_core::service::SpiritCore;
 use spirit_core::ssh::command::{CommandOutput, CommandSpec};
@@ -219,6 +220,41 @@ async fn missing_command_maps_to_not_supported() {
             .unwrap_err();
         assert!(error.message.starts_with("not_supported:"), "{error}");
     }
+}
+
+#[tokio::test]
+async fn vowp_project_add_errors_do_not_leak_the_clone_target() {
+    let clone_target = "/tmp/opencode/ss99-verify/demo-app";
+    let document = format!(
+        r#"{{"error":{{"hint":"remove {clone_target} first","kind":"conflict","message":"clone target {clone_target} already exists"}}}}"#
+    );
+    let runner = Arc::new(FakeCommandRunner::new(vec![CommandOutput {
+        status: 4,
+        stdout: document.into_bytes(),
+        stderr: Vec::new(),
+        duration_ms: 0,
+        stderr_truncated: false,
+    }]));
+    let error = ssh_client(runner)
+        .project_add(git_request("https://example.invalid/org/demo-app.git"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, SpiritErrorCode::Conflict);
+    assert!(!error.message.contains(clone_target), "{}", error.message);
+    assert!(
+        !error.message.contains("/tmp/opencode"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("[remote-path] already exists"),
+        "{}",
+        error.message
+    );
+    let hint = error.hint.as_deref().unwrap_or_default();
+    assert!(!hint.contains(clone_target), "{hint}");
+    let serialized = serde_json::to_string(&error).unwrap();
+    assert!(!serialized.contains(clone_target), "{serialized}");
 }
 
 #[tokio::test]

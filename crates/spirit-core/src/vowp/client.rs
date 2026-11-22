@@ -1103,9 +1103,7 @@ impl VowpClient for SshVowpClient {
                 "the installed VOWP does not provide `project add`",
             ));
         }
-        let output = self
-            .check_output(output)
-            .map_err(scrub_project_add_error)?;
+        let output = self.check_output(output).map_err(scrub_project_add_error)?;
         parse_project_bootstrap(&output.stdout)
     }
 
@@ -1988,20 +1986,5 @@ impl VowpClient for MockVowpClient {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .warnings,
         )
-    }
-}
-
-#[cfg(test)]
-mod project_add_scrub_tests {
-    use super::*;
-
-    #[test]
-    fn project_add_error_drops_the_clone_target_path() {
-        let doc = br#"{"error":{"hint":"remove /home/owner/demo-app first","kind":"conflict","message":"clone target /home/owner/demo-app already exists"}}"#;
-        let parsed = parse_error_document(doc).expect("error document");
-        let error = scrub_project_add_error(parsed.to_spirit_error(4));
-        assert!(!error.message.contains("/home/owner"), "{}", error.message);
-        assert!(error.message.contains("[remote-path] already exists"));
-        assert!(!error.hint.unwrap_or_default().contains("/home/owner"));
     }
 }
