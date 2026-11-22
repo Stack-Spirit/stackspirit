@@ -118,7 +118,7 @@ fn build_snapshot_with_redactor(
     let orchestrators = orchestrator_cards(deps.paths.root());
     let target = crate::capacity::targets::current_for(deps, store, now)?;
     let capacity = CapacitySnapshot {
-        measured: None,
+        measured: crate::capacity::admit::latest_sample(store, None)?,
         running: RunningCapacity {
             runs: running_runs,
             ..RunningCapacity::default()

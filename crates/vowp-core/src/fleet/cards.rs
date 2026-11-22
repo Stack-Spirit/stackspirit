@@ -131,7 +131,12 @@ pub(crate) fn project_read(
     // 10 failures across the project, so walk every attempt the job has recorded. The newest
     // attempt is added as well, which keeps the card honest even if `job.attempts` is stale.
     let mut gate_failures = Vec::new();
-    for job in &jobs {
+    // Failures of jobs that are already done, cancelled or replanned are history, not
+    // attention items, so they stay out of the live list.
+    for job in jobs
+        .iter()
+        .filter(|job| !matches!(job.state, JobState::Done | JobState::Cancelled | JobState::Replanned))
+    {
         let mut results = Vec::new();
         for attempt in 0..=job.attempts {
             results.extend(store.gate_results_for(&job.id, attempt)?);

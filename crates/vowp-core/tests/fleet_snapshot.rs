@@ -17,6 +17,7 @@ use vowp_protocol::{
     RunPurpose, RunRole, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, SecretName, Session, SessionId, SessionRole, SessionState,
     Snapshot, TargetMode, Timestamp, Tokens,
 };
+use vowp_protocol::{HostSample, SampleSource};
 use vowp_protocol::{Lease, OwnershipMode, OwnershipState, SurfaceActivity, SurfaceId, SurfaceKind};
 use vowp_store::{NodePaths, StateChange, Store};
 use vowp_tmux::fake::FakeWindows;
@@ -1570,4 +1571,90 @@ fn snapshot_owner_reports_label_and_activity() {
     let waiting_owner = card_owner(&snapshot, &waiting).expect("waiting");
     assert_eq!(waiting_owner.label.as_deref(), Some("StackSpirit · local"));
     assert_eq!(waiting_owner.activity, SurfaceActivity::Waiting);
+}
+
+#[test]
+fn capacity_measured_carries_the_latest_host_sample() {
+    let fixture = Fixture::new();
+    let now = fixture.clock.now();
+    let sample = |age: u64, load1: f64| HostSample {
+        at: now.minus(Duration::from_secs(age)),
+        interval_secs: 5,
+        mem_total_bytes: 16 << 30,
+        mem_available_bytes: 8 << 30,
+        swap_used_bytes: 0,
+        load1,
+        load5: 0.5,
+        load15: 0.5,
+        cpu_count: 8,
+        cpu_quota_cores: None,
+        disk_free_home_bytes: 100 << 30,
+        disk_free_worktrees_bytes: None,
+        pressure_cpu_avg10: Some(0.25),
+        pressure_mem_avg10: None,
+        pressure_io_avg10: None,
+        source: SampleSource::Proc,
+    };
+    fixture
+        .store
+        .insert_host_sample(&sample(30, 3.0))
+        .expect("older sample");
+    fixture.store.insert_host_sample(&sample(5, 1.5)).expect("newer sample");
+
+    let snapshot = fixture.snapshot();
+    let measured = snapshot.capacity.measured.expect("measured sample is populated");
+    assert_eq!(measured.load1, 1.5, "the newest sample wins");
+    assert_eq!(measured.cpu_count, 8);
+    assert_eq!(measured.mem_total_bytes, 16 << 30);
+    assert_eq!(measured.disk_free_home_bytes, 100 << 30);
+    assert_eq!(measured.pressure_cpu_avg10, Some(0.25));
+}
+
+#[test]
+fn gate_failures_exclude_terminal_jobs() {
+    let fixture = Fixture::new();
+    let store = fixture.store_for(&fixture.alpha);
+    let now = fixture.clock.now();
+    let failing = |job: &Job| GateResult {
+        id: None,
+        job_id: job.id.clone(),
+        run_id: None,
+        attempt: 0,
+        gate_index: 0,
+        gate: Gate::Report(ReportGate::default()),
+        passed: false,
+        evidence: Evidence::Report {
+            front_matter: None,
+            missing_fields: vec!["status".to_owned()],
+            problems: Vec::new(),
+        },
+        output_blob: None,
+        duration_ms: 1,
+        ts: now.minus(Duration::from_secs(10)),
+    };
+    let no_change = || StateChange {
+        note: None,
+        parked_reason: None,
+    };
+    let live = fixture.job(&fixture.alpha, "t01-live", 50);
+    fixture.set_state(&fixture.alpha, &live, JobState::Failed, no_change());
+    store.insert_gate_result(&failing(&live)).expect("live failure");
+    for (id, state) in [
+        ("t02-done", JobState::Done),
+        ("t03-cancelled", JobState::Cancelled),
+        ("t04-replanned", JobState::Replanned),
+    ] {
+        let job = fixture.job(&fixture.alpha, id, 50);
+        store.insert_gate_result(&failing(&job)).expect("terminal failure");
+        fixture.set_state(&fixture.alpha, &job, state, no_change());
+    }
+
+    let snapshot = fixture.snapshot();
+    let alpha = snapshot
+        .projects
+        .iter()
+        .find(|project| project.name == fixture.alpha)
+        .expect("alpha card");
+    let jobs: Vec<&str> = alpha.gate_failures.iter().map(|failure| failure.job.as_str()).collect();
+    assert_eq!(jobs, vec!["t01-live"], "only the failed (live) job keeps its failure");
 }
