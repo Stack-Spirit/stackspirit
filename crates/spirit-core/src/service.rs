@@ -22,7 +22,8 @@ use crate::view::local::{AgentPathView, LocalAgentView, LocalOrchestratorView, L
 use crate::view::{FleetView, OrchestratorView};
 use crate::vowp::{
     AgentPairRequest, AgentPairing, AsifExport, AsifExportOptions, AsifImportOptions,
-    LocalAgentClient, OrchestratorMoveTarget, SurfacePairing, VowpClient,
+    LocalAgentClient, OrchestratorMoveTarget, ProjectAddOutcome, ProjectAddRequest, SurfacePairing,
+    VowpClient,
 };
 use crate::wire::{
     AgentPathAddRequest, AgentPathMap, AsifImportResponse, NodeCard, NodeName,
@@ -682,6 +683,21 @@ impl SpiritCore {
         )?;
         let card = client.orchestrator_move(name, target).await?;
         Ok(OrchestratorView::from_card(&card))
+    }
+
+    /// Adds a project (and optionally a home-hosted orchestrator) in one step.
+    ///
+    /// The D6 local-orchestrator guard does not apply: `project add` and
+    /// `--orchestrator` run on the home. Moving the created orchestrator to the local
+    /// node stays a separate explicit `orchestrator_move`.
+    pub async fn project_add(
+        &self,
+        client: &dyn VowpClient,
+        request: ProjectAddRequest,
+    ) -> Result<ProjectAddOutcome, SpiritError> {
+        request.validate()?;
+        self.require_connected_host()?;
+        client.project_add(request).await
     }
 
     /// Builds the honest local surface cards: node, protocol, agent status, lease

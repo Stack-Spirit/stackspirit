@@ -73,6 +73,8 @@ import type {
   OrchestratorMoveTarget,
   OrchestratorNewInput,
   OrchestratorView,
+  ProjectAddInput,
+  ProjectAddOutcome,
   ProjectView,
   RawDocument,
   SecretListView,
@@ -357,6 +359,7 @@ export class MockBridge implements SpiritBridge {
   private actions: MockJobAction[] = [];
   private asifCalls: MockAsifCall[] = [];
   private localCalls: MockLocalCall[] = [];
+  private projectAddCalls: ProjectAddInput[] = [];
   private localState: MockLocalState;
   private keys = new Map<string, KeyStatus>();
   /** Providers whose preview key was typed as an invalid one; verification rejects it. */
@@ -1729,6 +1732,54 @@ export class MockBridge implements SpiritBridge {
   hosts = this.hostsApi;
   onboarding = this.onboardingApi;
   secrets = this.secretsApi;
+  projects = {
+    add: async (input: ProjectAddInput): Promise<ProjectAddOutcome> => {
+      if (this.connectionState.state !== "connected") {
+        throw errorDto(
+          "conflict",
+          "Connect to a host before adding a project.",
+          "Connect a host first.",
+        );
+      }
+      this.validateProject(input.name);
+      const source = input.source;
+      if (source?.kind === "git") {
+        const credentialed = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)@/i.exec(source.url);
+        const webUser = credentialed !== null && /^https?$/i.test(credentialed[1] ?? "");
+        if (
+          !source.url ||
+          source.url.startsWith("-") ||
+          /\s/.test(source.url) ||
+          webUser ||
+          (credentialed !== null && (credentialed[2] ?? "").includes(":"))
+        ) {
+          throw errorDto("invalid_input", "git url: must be a URL without embedded credentials");
+        }
+      } else if (source?.kind === "folder") {
+        const absolute =
+          source.path.startsWith("/") || source.path === "~" || source.path.startsWith("~/");
+        if (!absolute || source.path === "/") {
+          throw errorDto("invalid_input", "project folder: use an absolute path");
+        }
+      } else {
+        throw errorDto("invalid_input", "Choose a Git URL or a folder.");
+      }
+      this.projectAddCalls = [...this.projectAddCalls, clone(input)];
+      const orchestrator: OrchestratorView | null =
+        input.orchestrator === "chat"
+          ? {
+              name: `${input.name}-chat`,
+              session_id: "01JCF5WQ8ZK3M2V7N4P6R8T0AH",
+              project: input.name,
+              app: "chat",
+              state: "running",
+              node: null,
+              join: this.localJoin("01JCF5WQ8ZK3M2V7N4P6R8T0AH"),
+            }
+          : null;
+      return { project: input.name, initialized: true, orchestrator };
+    },
+  };
   cluster = this.clusterApi;
   connection = this.connectionApi;
   fleet = this.fleetApi;
@@ -2299,6 +2350,11 @@ export class MockBridge implements SpiritBridge {
   /** Test hook: recorded D6 calls in order. */
   recordedLocalCalls(): MockLocalCall[] {
     return clone(this.localCalls);
+  }
+
+  /** Recorded `projects.add` inputs, for tests. */
+  recordedProjectAdds(): ProjectAddInput[] {
+    return clone(this.projectAddCalls);
   }
 
   private recordLocal(action: MockLocalCall["action"], name: string | null): void {

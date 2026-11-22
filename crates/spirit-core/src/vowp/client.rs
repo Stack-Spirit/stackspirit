@@ -14,6 +14,9 @@ use crate::ssh::command::{CommandOutput, INITIAL_TIMEOUT, READ_TIMEOUT, WRITE_TI
 use crate::ssh::{CommandRunner, SshOptions, SshRemote, SshTarget};
 use crate::vowp::asif::{AsifExport, AsifExportOptions, AsifImportOptions, AsifPackage};
 use crate::vowp::local::SurfacePairing;
+use crate::vowp::project::{
+    ProjectAddOutcome, ProjectAddRequest, ProjectSource, parse_project_bootstrap,
+};
 use crate::vowp::secret::{
     SecretListView, SecretRemoveOutcome, SecretSetOutcome, SecretSetRequest, parse_secret_list,
     parse_secret_remove, parse_secret_set, validate_secret_name,
@@ -232,6 +235,18 @@ pub trait VowpClient: Send + Sync {
             "local orchestrator move is unavailable for this client",
         )
         .with_hint("Connect with a VOWP client that implements the D6 orchestrator contract."))
+    }
+
+    /// Adds a project in one step through `vowp project add`.
+    ///
+    /// The default refuses so a client that cannot add never fakes a project.
+    async fn project_add(
+        &self,
+        _request: ProjectAddRequest,
+    ) -> Result<ProjectAddOutcome, SpiritError> {
+        Err(not_supported_project_add(
+            "project add is unavailable for this client",
+        ))
     }
 
     /// Reads one redacted `vowp node show --json` card.
@@ -534,6 +549,11 @@ fn not_supported_takeover(detail: &str) -> SpiritError {
 fn not_supported_move(detail: &str) -> SpiritError {
     SpiritError::new(SpiritErrorCode::Gate, format!("not_supported: {detail}"))
         .with_hint("Update VOWP to 0.5.1 or newer. The orchestrator stays where it is.")
+}
+
+fn not_supported_project_add(detail: &str) -> SpiritError {
+    SpiritError::new(SpiritErrorCode::Gate, format!("not_supported: {detail}"))
+        .with_hint("Update VOWP to 0.5.1 or newer. No project was created.")
 }
 
 /// Where `vowp orchestrator move` puts an orchestrator.
@@ -1026,6 +1046,39 @@ impl VowpClient for SshVowpClient {
             .map_err(|err| SpiritError::parse("orchestrator move", err))
     }
 
+    async fn project_add(
+        &self,
+        request: ProjectAddRequest,
+    ) -> Result<ProjectAddOutcome, SpiritError> {
+        request.validate()?;
+        let mut argv = self.base_argv();
+        push_json(&mut argv);
+        argv.extend(["project".to_owned(), "add".to_owned()]);
+        match &request.source {
+            ProjectSource::Folder { path } => argv.push(path.clone()),
+            ProjectSource::Git { url } => argv.extend(["--git".to_owned(), url.clone()]),
+        }
+        argv.extend([
+            "--name".to_owned(),
+            request.name.clone(),
+            "--init".to_owned(),
+        ]);
+        if request.orchestrator == Some(OrchestratorApp::Chat) {
+            argv.extend([
+                "--orchestrator".to_owned(),
+                orchestrator_app_arg(&OrchestratorApp::Chat)?.to_owned(),
+            ]);
+        }
+        let output = self.run(&argv, WRITE_TIMEOUT).await?;
+        if !output.success() && takeover_unsupported(&output) {
+            return Err(not_supported_project_add(
+                "the installed VOWP does not provide `project add`",
+            ));
+        }
+        let output = self.check_output(output)?;
+        parse_project_bootstrap(&output.stdout)
+    }
+
     async fn node_card(&self, project: Option<&str>, node: &str) -> Result<NodeCard, SpiritError> {
         NodeName::parse(node)?;
         let mut argv = self.base_argv();
@@ -1170,6 +1223,7 @@ struct MockState {
     orchestrator_stop_calls: Vec<String>,
     orchestrator_resume_calls: Vec<String>,
     orchestrator_move_calls: Vec<(String, OrchestratorMoveTarget)>,
+    project_add_calls: Vec<ProjectAddRequest>,
     node_cards: Vec<NodeCard>,
     secrets: SecretListView,
 }
@@ -1218,6 +1272,7 @@ impl MockVowpClient {
                 orchestrator_stop_calls: Vec::new(),
                 orchestrator_resume_calls: Vec::new(),
                 orchestrator_move_calls: Vec::new(),
+                project_add_calls: Vec::new(),
                 node_cards: Vec::new(),
                 secrets: SecretListView {
                     secrets: Vec::new(),
@@ -1454,6 +1509,16 @@ impl MockVowpClient {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .orchestrator_move_calls
+            .clone()
+    }
+
+    /// Returns recorded project-add requests.
+    #[must_use]
+    pub fn project_add_calls(&self) -> Vec<ProjectAddRequest> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .project_add_calls
             .clone()
     }
 
@@ -1776,6 +1841,23 @@ impl VowpClient for MockVowpClient {
             .ok_or_else(|| SpiritError::not_found(&format!("orchestrator {name}")))?;
         card.node = new_node;
         Ok(card.clone())
+    }
+
+    async fn project_add(
+        &self,
+        request: ProjectAddRequest,
+    ) -> Result<ProjectAddOutcome, SpiritError> {
+        request.validate()?;
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .project_add_calls
+            .push(request.clone());
+        Ok(ProjectAddOutcome {
+            project: request.name,
+            initialized: true,
+            orchestrator: None,
+        })
     }
 
     async fn node_card(&self, _project: Option<&str>, node: &str) -> Result<NodeCard, SpiritError> {

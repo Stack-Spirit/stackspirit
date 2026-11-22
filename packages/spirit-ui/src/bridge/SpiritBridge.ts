@@ -53,6 +53,8 @@ import type {
   OrchestratorMoveTarget,
   OrchestratorNewInput,
   OrchestratorView,
+  ProjectAddInput,
+  ProjectAddOutcome,
   RawDocument,
   SecretListView,
   SecretRemoveOutcome,
@@ -207,6 +209,15 @@ export interface SpiritBridge {
     set(input: SecretSetInput): Promise<SecretSetOutcome>;
     /** Removes one secret through `vowp secret rm NAME --yes`. */
     remove(name: string): Promise<SecretRemoveOutcome>;
+  };
+
+  /**
+   * One-step project bootstrap through `vowp project add`. Absent on the read-only Web
+   * bridge. The outcome never carries the home-side path, and the call only happens on
+   * an explicit user action, never on connect or render.
+   */
+  projects?: {
+    add(input: ProjectAddInput): Promise<ProjectAddOutcome>;
   };
 
   connection: {

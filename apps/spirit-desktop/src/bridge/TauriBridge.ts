@@ -55,6 +55,8 @@ import type {
   OrchestratorMoveTarget,
   OrchestratorNewInput,
   OrchestratorView,
+  ProjectAddInput,
+  ProjectAddOutcome,
   RawDocument,
   SecretListView,
   SecretRemoveOutcome,
@@ -160,6 +162,11 @@ export class TauriBridge implements SpiritBridge {
       }
       return call("secrets_remove", { name });
     },
+  };
+
+  projects = {
+    add: (input: ProjectAddInput): Promise<ProjectAddOutcome> =>
+      call("project_add", { input }),
   };
 
   cluster = {

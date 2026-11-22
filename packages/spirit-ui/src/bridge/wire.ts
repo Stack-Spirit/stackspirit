@@ -785,6 +785,27 @@ export type OrchestratorMoveTarget =
   | { kind: "home" }
   | { kind: "node"; node: string };
 
+/** Where a new project comes from; matches the serde tagged enum in spirit-core. */
+export type ProjectSource = { kind: "git"; url: string } | { kind: "folder"; path: string };
+
+/**
+ * A one-step `vowp project add` request. There is no branch: VOWP clones the
+ * repository's default branch.
+ */
+export interface ProjectAddInput {
+  name: string;
+  source: ProjectSource;
+  init?: boolean;
+  orchestrator?: "chat" | "opencode" | "claude_code" | null;
+}
+
+/** The result of `project add`. The home-side path VOWP prints is never included. */
+export interface ProjectAddOutcome {
+  project: string;
+  initialized: boolean;
+  orchestrator: OrchestratorView | null;
+}
+
 export interface OrchestratorView {
   name: string;
   session_id: string;
