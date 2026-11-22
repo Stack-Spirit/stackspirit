@@ -646,32 +646,10 @@ async function installLiveBridge(page: Page, host: LiveEngineHost) {
   });
 }
 
-/**
- * KNOWN OPEN DEFECT (reported by ss-88, not fixable from this job's `owns`): with a long
- * model list axe flags the picker's scroll container (`.nx-model-menu__scroll`) as
- * `scrollable-region-focusable`. The mock-bridge specs never see it because the preview
- * list is too short to overflow. The carve-out below is limited to exactly that rule on
- * exactly that element; every other rule, and that rule anywhere else, still fails.
- * Remove it once `ComposerBar.tsx`/`theme.css` give the scroll region `tabIndex={0}`.
- */
-const KNOWN_PICKER_SCROLL_DEFECT = {
-  id: "scrollable-region-focusable",
-  target: ".nx-model-menu__scroll",
-};
-
 async function expectNoWcagViolations(page: Page) {
   const results = await new AxeBuilder({ page }).withTags(WCAG_TAGS).analyze();
-  const violations = results.violations.filter(
-    (violation) =>
-      !(
-        violation.id === KNOWN_PICKER_SCROLL_DEFECT.id &&
-        violation.nodes.every(
-          (node) => node.target.join(" ") === KNOWN_PICKER_SCROLL_DEFECT.target,
-        )
-      ),
-  );
   expect(
-    violations.map((violation) => ({
+    results.violations.map((violation) => ({
       id: violation.id,
       targets: violation.nodes.map((node) => node.target.join(" ")),
     })),

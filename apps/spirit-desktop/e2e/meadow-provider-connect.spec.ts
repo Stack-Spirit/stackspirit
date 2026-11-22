@@ -196,10 +196,7 @@ for (const theme of THEMES) {
     await page.keyboard.press("Home");
     await expect.poll(() => scroller.evaluate((n) => n.scrollTop)).toBe(0);
 
-    const results = await new AxeBuilder({ page })
-      .withRules(["scrollable-region-focusable"])
-      .analyze();
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(page);
   });
 }
 
