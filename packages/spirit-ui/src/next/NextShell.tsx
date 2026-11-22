@@ -8,6 +8,8 @@ import { InboxDrawer } from "../views/inbox/InboxDrawer";
 import { SessionsDrawer } from "../views/sessions/SessionsDrawer";
 import { AddProjectDialog } from "./AddProjectDialog";
 import { ErrorNotice } from "./ErrorNotice";
+import { InboxView } from "./InboxView";
+import { PageHeader } from "./PageHeader";
 import { ChatView } from "./ChatView";
 import { useCluster, useClusterStore } from "./clusterStore";
 import { initializeConversations } from "./conversations";
@@ -121,7 +123,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
     if (connected && view.kind === "session" && view.session === "setup") {
       setView({ kind: "session", session: "global" });
     }
-    if (!connected && (view.kind === "server" || view.kind === "workers")) {
+    if (!connected && (view.kind === "server" || view.kind === "workers" || view.kind === "inbox")) {
       setView({ kind: "session", session: "global" });
     }
   }
@@ -189,11 +191,23 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
         serverLabel={serverLabel}
         onOpenProject={openWorkers}
         onFormCluster={() => setClusterFormOpen(true)}
+        onOpenInbox={() => setView({ kind: "inbox" })}
         onPromote={(target) => {
           setPromoteTarget(target);
           setPromoteOpen(true);
         }}
       />
+    );
+  } else if (view.kind === "inbox" && serverLabel) {
+    main = (
+      <section className="nx-main" aria-label="Inbox">
+        <PageHeader title="Inbox" sub="Everything waiting for you, across the server and its projects" />
+        <div className="nx-page">
+          <div className="nx-page__inner">
+            <InboxView scope="all" />
+          </div>
+        </div>
+      </section>
     );
   } else if (view.kind === "workers" && serverLabel) {
     main = <WorkersPage key={`workers:${view.project}`} project={view.project} onOpenSession={() => openSession(view.project)} />;

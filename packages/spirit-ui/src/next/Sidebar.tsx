@@ -81,11 +81,6 @@ export function Sidebar({
                 <OrchestratorIcon />
               </span>
               <span className="nx-row-item__text">Global orchestrator</span>
-              {globalInbox > 0 ? (
-                <span className="nx-count" aria-label={`${globalInbox} open in inbox`}>
-                  {globalInbox}
-                </span>
-              ) : null}
             </button>
           ) : (
             <button
@@ -101,6 +96,26 @@ export function Sidebar({
               <span className="nx-chip nx-chip--local nx-chip--tiny">Local</span>
             </button>
           )}
+
+          {connected ? (
+            <button
+              type="button"
+              className="nx-row-item"
+              aria-current={view.kind === "inbox" ? "page" : undefined}
+              onClick={() => onNavigate({ kind: "inbox" })}
+              data-testid="nav-inbox"
+            >
+              <span className="nx-row-item__icon" aria-hidden="true">
+                <InboxIcon />
+              </span>
+              <span className="nx-row-item__text">Inbox</span>
+              {globalInbox > 0 ? (
+                <span className="nx-count" data-testid="nav-inbox-count" aria-label={`${globalInbox} open`}>
+                  {globalInbox}
+                </span>
+              ) : null}
+            </button>
+          ) : null}
 
           <div className="nx-section">
             <span className="nx-section__label">Projects</span>
@@ -602,6 +617,15 @@ function OrchestratorIcon() {
   return (
     <Icon>
       <path d="M3 3.5h10c.6 0 1 .4 1 1v6c0 .6-.4 1-1 1H8.5L5.5 14v-2.5H3c-.6 0-1-.4-1-1v-6c0-.6.4-1 1-1Z" />
+    </Icon>
+  );
+}
+
+function InboxIcon() {
+  return (
+    <Icon>
+      <path d="M2.5 9.5 4 3.5h8l1.5 6v3c0 .6-.4 1-1 1h-9c-.6 0-1-.4-1-1Z" />
+      <path d="M2.5 9.5h3.2l.8 1.6h3l.8-1.6h3.2" />
     </Icon>
   );
 }

@@ -867,6 +867,14 @@ export class MockBridge implements SpiritBridge {
         answered_at: this.now(),
       };
       this.inboxItems = this.inboxItems.map((candidate) => (candidate.id === id ? answered : candidate));
+      if (this.fleetView) {
+        this.fleetView = {
+          ...this.fleetView,
+          inbox: this.fleetView.inbox.map((entry) =>
+            entry.id === id ? { ...entry, state: "answered", answer, answered_by: "stackspirit", answered_at: answered.answered_at } : entry,
+          ),
+        };
+      }
       return clone(answered);
     },
     setTarget: async (input: SetTargetInput): Promise<CapacityTargetView> => {
@@ -3717,6 +3725,25 @@ export class MockBridge implements SpiritBridge {
         answered_at: null,
         age_secs: 600,
       },
+      ...(this.scenario === "busy"
+        ? [
+            {
+              id: "01MOCKINBOX000000000000000002",
+              project: null,
+              job_id: null,
+              kind: "decision",
+              title: "Raise the worker target to 6?",
+              body: "Memory has been under 60% for a day. Capacity advises 6 workers.",
+              options: ["Apply", "Keep"],
+              state: "open",
+              answer: null,
+              answered_by: null,
+              created_at: iso(this.nowMs - 1_200_000),
+              answered_at: null,
+              age_secs: 1200,
+            },
+          ]
+        : []),
     ];
   }
 

@@ -4615,3 +4615,129 @@ button.nx-node:hover {
   margin: 0;
   color: var(--nx-danger);
 }
+
+/* ---------- Inbox (global and per project) ---------- */
+.nx-inbox {
+  display: grid;
+  gap: 12px;
+}
+
+.nx-inbox__chips {
+  flex-wrap: wrap;
+  justify-self: start;
+  height: auto;
+}
+
+.nx-segment__badge {
+  margin-left: 6px;
+}
+
+.nx-inbox__list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nx-inbox__item {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius);
+  background: var(--nx-panel);
+}
+
+.nx-inbox__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.nx-inbox__kind--decision {
+  background: var(--nx-warn-soft);
+  color: var(--nx-warn);
+}
+
+.nx-inbox__kind--question {
+  background: var(--nx-local-soft);
+  color: var(--nx-local);
+}
+
+.nx-inbox__kind--notice {
+  background: var(--nx-raised);
+  color: var(--nx-muted);
+}
+
+.nx-inbox__age {
+  margin-left: auto;
+  color: var(--nx-muted);
+  font-size: 12px;
+}
+
+.nx-inbox__title {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.nx-inbox__body {
+  margin: 0;
+  color: var(--nx-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.nx-inbox__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.nx-inbox__answer {
+  display: flex;
+  gap: 8px;
+}
+
+.nx-inbox__input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--nx-line-strong);
+  border-radius: var(--nx-radius-sm);
+  background: var(--nx-page);
+  color: var(--nx-text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.nx-inbox__input:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.nx-inbox__empty {
+  margin: 0;
+  padding: 28px 16px;
+  border: 1px dashed var(--nx-line-strong);
+  border-radius: var(--nx-radius);
+  color: var(--nx-muted);
+  text-align: center;
+}
+
+.nx-inbox__confirmations {
+  display: grid;
+  gap: 6px;
+}
+
+.nx-inbox__confirmed {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: var(--nx-radius-sm);
+  background: var(--nx-accent-soft);
+  color: var(--nx-accent-soft-ink);
+  font-size: 13px;
+}

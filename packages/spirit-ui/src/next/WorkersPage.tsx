@@ -2,11 +2,12 @@ import { useEffect, useState } from "react";
 
 import { useFleet, useFleetStore } from "../state/fleetStore";
 import { FleetCanvas } from "../views/fleet/FleetCanvas";
+import { InboxView } from "./InboxView";
 import { JobRows } from "./JobRows";
 import { NodeMap, type MapBranch } from "./NodeMap";
 import { PageHeader } from "./PageHeader";
 import { useShellUi } from "./shellUi";
-import { historyJobs, jobName, jobPhase, jobTone, LANE_INFO, projectJobs, projectSummaries, providerModel, waitReason } from "./summary";
+import { historyJobs, openInbox, jobName, jobPhase, jobTone, LANE_INFO, projectJobs, projectSummaries, providerModel, waitReason } from "./summary";
 
 const LEAVES_PER_LANE = 6;
 
@@ -22,7 +23,7 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
   const openPanel = useShellUi((state) => state.openPanel);
   const [mode, setMode] = useState<"map" | "board">("map");
   // Active work by default; history is one explicit click away.
-  const [tab, setTab] = useState<"active" | "history">("active");
+  const [tab, setTab] = useState<"active" | "history" | "inbox">("active");
   // The board filters the shared store by project; clear that when leaving.
   useEffect(() => () => setProject(null), [setProject]);
   const jobs = projectJobs(fleet, project);
@@ -30,6 +31,7 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
   const selectedId = panel?.kind === "job" && panel.project === project ? panel.jobId : null;
 
   const history = historyJobs(fleet, project);
+  const inboxCount = openInbox(fleet, project).length;
   const activeLanes = LANE_INFO.filter(
     (lane) =>
       lane.key !== "done" && (lane.key !== "parked_blocked" || jobs.some((item) => item.lane === "parked_blocked")),
@@ -94,6 +96,12 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
                   {summary?.done ?? 0}
                 </span>
               </button>
+              <button type="button" aria-pressed={tab === "inbox"} onClick={() => setTab("inbox")} data-testid="project-inbox-tab">
+                Inbox
+                <span className="nx-count nx-segment__badge" data-testid="project-inbox-count" aria-label={`${inboxCount} open`}>
+                  {inboxCount}
+                </span>
+              </button>
             </div>
             <button type="button" className="nx-btn nx-btn--quiet nx-btn--sm" onClick={onOpenSession}>
               Open orchestrator
@@ -102,7 +110,11 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
         }
       />
       <div className="nx-page">
-        {tab === "history" ? (
+        {tab === "inbox" ? (
+          <div className="nx-page__inner" data-testid="project-inbox">
+            <InboxView scope={{ project }} />
+          </div>
+        ) : tab === "history" ? (
           <div className="nx-page__inner" data-testid="history-view">
             <div className="nx-block">
               <div className="nx-block__head">

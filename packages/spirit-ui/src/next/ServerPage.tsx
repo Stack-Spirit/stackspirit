@@ -6,7 +6,7 @@ import { Meter, Slots, useServerHealth } from "./health";
 import { NodeMap, type MapBranch } from "./NodeMap";
 import { PageHeader } from "./PageHeader";
 import { useShellUi } from "./shellUi";
-import { jobName, jobPhase, projectJobs, projectSummaries, providerModel, waitReason } from "./summary";
+import { jobName, openInbox, jobPhase, projectJobs, projectSummaries, providerModel, waitReason } from "./summary";
 
 const LEAVES_PER_PROJECT = 4;
 
@@ -14,7 +14,7 @@ const LEAVES_PER_PROJECT = 4;
  * Full-page server view: health in detail, then a node map of every project and
  * what its workers are doing, then the projects as rows.
  */
-export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromote }: { serverLabel: string; onOpenProject: (project: string) => void; onFormCluster: () => void; onPromote: (target: string | null) => void }) {
+export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromote, onOpenInbox }: { serverLabel: string; onOpenProject: (project: string) => void; onFormCluster: () => void; onPromote: (target: string | null) => void; onOpenInbox?: () => void }) {
   const fleet = useFleet();
   const connection = useConnection();
   const refresh = useFleetStore((state) => state.refresh);
@@ -23,6 +23,8 @@ export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromot
   const openPanel = useShellUi((state) => state.openPanel);
   const projects = projectSummaries(fleet);
   const supervisor = fleet?.supervisor;
+  const globalInbox = openInbox(fleet, null);
+  const totalInbox = openInbox(fleet).length;
 
   const status = [
     health.stale ? "Data is stale" : "Connected",
@@ -113,6 +115,34 @@ export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromot
               <Meter label="Load" ratio={health.cpuRatio} value={health.cpuText} />
             </div>
           </div>
+
+          {onOpenInbox ? (
+            <div className="nx-block" data-testid="server-inbox">
+              <div className="nx-block__head">
+                <h2>Needs you</h2>
+                <button type="button" className="nx-btn nx-btn--quiet nx-btn--sm" onClick={onOpenInbox} data-testid="server-inbox-link">
+                  Open Inbox{totalInbox > 0 ? ` (${totalInbox})` : ""} →
+                </button>
+              </div>
+              {globalInbox.length === 0 ? (
+                <p className="nx-rows__empty">No server-level items waiting. Project items are in the Inbox.</p>
+              ) : (
+                <ul className="nx-rows__list">
+                  {globalInbox.slice(0, 3).map((item) => (
+                    <li key={item.id}>
+                      <button type="button" className="nx-row" onClick={onOpenInbox}>
+                        <span className="nx-row__dot nx-tone--warn" aria-hidden="true" />
+                        <span className="nx-row__text">
+                          <span className="nx-row__title">{item.title}</span>
+                          <span className="nx-row__sub">{item.body ?? item.kind}</span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : null}
 
           <ClusterSection onFormCluster={onFormCluster} onPromote={onPromote} />
 

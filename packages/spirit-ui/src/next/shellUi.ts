@@ -9,7 +9,9 @@ export type NextView =
   /** Full page: server health, node map of projects, project rows. */
   | { kind: "server" }
   /** Full page: one project's workers and jobs as a node map and rows. */
-  | { kind: "workers"; project: string };
+  | { kind: "workers"; project: string }
+  /** Full page: every open inbox item, Global and per project. */
+  | { kind: "inbox" };
 
 /** What the slide-in details panel shows. The bridge owns the target type. */
 export type PanelContent = ChatPanelTarget;
