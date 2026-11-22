@@ -873,6 +873,17 @@ impl ProbeGuard {
         Self { child, sentinel }
     }
 
+    /// Spawns `args[0]` with `args[1..]` (stdout discarded) under the same drop guard.
+    fn spawn_args(args: &[String], sentinel: Option<PathBuf>) -> Self {
+        let child = std::process::Command::new(&args[0])
+            .args(&args[1..])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        Self { child, sentinel }
+    }
+
     fn id(&self) -> u32 {
         self.child.id()
     }
@@ -949,6 +960,44 @@ fn scope_leaves_no_probe_child_after_drop() {
             .iter()
             .all(|path| path.extension().is_none_or(|ext| ext != "hold")),
         "hold files survived the drop: {leftovers:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn holder_loop_exits_when_its_parent_is_gone() {
+    let tmp = tempdir().unwrap();
+    let hold = tmp.path().join("probe.hold");
+    std::fs::write(&hold, b"hold").unwrap();
+    // A reaped child's pid is dead, so `kill -0` fails while the hold file still exists.
+    let mut dead = std::process::Command::new("true").spawn().unwrap();
+    let dead_pid = dead.id();
+    dead.wait().unwrap();
+    let args = scope::holder_args(&hold.display().to_string(), dead_pid);
+    let mut holder = ProbeGuard::spawn_args(&args, Some(hold.clone()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exited = loop {
+        if holder.child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(exited, "the holder outlived its dead parent");
+    assert!(
+        hold.exists(),
+        "the hold file must still exist: the exit was the parent check"
+    );
+
+    // With a live parent (this process) and the hold file present it keeps running.
+    let args = scope::holder_args(&hold.display().to_string(), std::process::id());
+    let mut live = ProbeGuard::spawn_args(&args, None);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        live.child.try_wait().unwrap().is_none(),
+        "the holder exited although its parent is alive"
     );
 }
 
