@@ -1551,3 +1551,178 @@ async fn provisioning_rejects_an_unsafe_project_name() {
     assert_eq!(err.code, SpiritErrorCode::InvalidInput);
     assert_eq!(server.created_sessions(), 0);
 }
+
+/// A bundled engine whose port and usable models can change, like a sidecar restart
+/// after a provider key is saved.
+struct RestartableEngine {
+    port: std::sync::atomic::AtomicU16,
+    models: Mutex<Vec<spirit_core::engine::chat::ChatModelView>>,
+}
+
+impl RestartableEngine {
+    fn restart(&self, port: u16, models: Vec<spirit_core::engine::chat::ChatModelView>) {
+        *self
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = models;
+        self.port.store(port, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl ChatEngine for RestartableEngine {
+    async fn ensure_ready(&self) -> Result<u16, SpiritError> {
+        Ok(self.port.load(Ordering::SeqCst))
+    }
+
+    fn selected_model(&self) -> Option<spirit_core::engine::chat::ChatModelView> {
+        Some(model())
+    }
+
+    fn available_models(&self) -> Vec<spirit_core::engine::chat::ChatModelView> {
+        self.models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+fn deepseek_model() -> spirit_core::engine::chat::ChatModelView {
+    spirit_core::engine::chat::ChatModelView {
+        id: "deepseek/deepseek-chat".to_owned(),
+        label: "DeepSeek Chat".to_owned(),
+        provider: "deepseek".to_owned(),
+        tier: spirit_core::engine::chat::ChatModelTier::Included,
+        context_tokens: Some(64_000),
+    }
+}
+
+/// A second engine process that already holds the first one's persisted sessions.
+fn restarted_engine_with_sessions() -> FakeEngine {
+    FakeEngine::with(|state| {
+        state.sse = SseScript::Deltas;
+        for id in ["ses_fake_1", "ses_fake_2"] {
+            state.sessions.insert(id.to_owned(), Vec::new());
+            state.order.push(id.to_owned());
+        }
+        state.next_session = 3;
+    })
+}
+
+async fn bundled_setup_and_project(
+    old: &FakeEngine,
+    workspace: &Path,
+) -> (
+    LocalChatProvider,
+    Arc<RestartableEngine>,
+    tokio::sync::broadcast::Receiver<ChatEvent>,
+) {
+    let engine = Arc::new(RestartableEngine {
+        port: std::sync::atomic::AtomicU16::new(old.port()),
+        models: Mutex::new(vec![model()]),
+    });
+    let provider = unconfigured(
+        LocalChatProvider::new(engine.clone(), workspace.to_path_buf())
+            .with_stream_support(StreamSupport::Pinned),
+    );
+    let receiver = provider.subscribe();
+    provider.start(&setup_input()).await.unwrap();
+    provider
+        .provision_orchestrator("stackspirit")
+        .await
+        .unwrap();
+    wait_until(|| old.event_connections() >= 1, Duration::from_secs(2)).await;
+    (provider, engine, receiver)
+}
+
+fn drain_events(receiver: &mut tokio::sync::broadcast::Receiver<ChatEvent>) -> Vec<ChatEvent> {
+    let mut events = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+fn assert_rebound(provider_views: &[(ChatSessionId, ChatSessionState, usize)]) {
+    for (session, state, models) in provider_views {
+        assert_eq!(*state, ChatSessionState::Ready, "{session:?}");
+        assert_eq!(*models, 2, "{session:?} must list the new model");
+    }
+}
+
+async fn views_of(provider: &LocalChatProvider) -> Vec<(ChatSessionId, ChatSessionState, usize)> {
+    let mut out = Vec::new();
+    for session in [SETUP, project_session("stackspirit")] {
+        let view = provider.attach(&session).await.unwrap();
+        assert!(view.error.is_none(), "{view:?}");
+        out.push((
+            session,
+            view.state,
+            view.available_models.map_or(0, |models| models.len()),
+        ));
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn key_save_restart_rebinds_setup_and_project_sessions_without_stream_lost() {
+    let old = FakeEngine::sse(SseScript::Deltas);
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, engine, mut receiver) = bundled_setup_and_project(&old, workspace.path()).await;
+    drain_events(&mut receiver);
+
+    let new = restarted_engine_with_sessions();
+    engine.restart(new.port(), vec![model(), deepseek_model()]);
+    drop(old);
+    provider.refresh_setup_models().await;
+    wait_until(|| new.event_connections() >= 1, Duration::from_secs(3)).await;
+    // Give a stale pump the full reconnect window to wrongly report stream_lost.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let events = drain_events(&mut receiver);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ChatEvent::Error { .. })),
+        "{events:#?}"
+    );
+    for session in [SETUP, project_session("stackspirit")] {
+        let view = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                ChatEvent::Session { session: view, .. } if view.session == session => {
+                    Some(view.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no refreshed view for {session:?}: {events:#?}"));
+        assert_eq!(view.state, ChatSessionState::Ready);
+        assert_eq!(view.available_models.as_ref().map(Vec::len), Some(2));
+    }
+    assert_rebound(&views_of(&provider).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dead_bundled_port_pump_probes_the_engine_and_rebinds_instead_of_stream_lost() {
+    let old = FakeEngine::sse(SseScript::Deltas);
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, engine, mut receiver) = bundled_setup_and_project(&old, workspace.path()).await;
+    drain_events(&mut receiver);
+
+    // The engine restarts without anyone calling refresh: only the pump notices.
+    let new = restarted_engine_with_sessions();
+    engine.restart(new.port(), vec![model(), deepseek_model()]);
+    drop(old);
+    wait_until(|| new.event_connections() >= 1, Duration::from_secs(5)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let events = drain_events(&mut receiver);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ChatEvent::Error { .. })),
+        "{events:#?}"
+    );
+    assert_rebound(&views_of(&provider).await);
+}

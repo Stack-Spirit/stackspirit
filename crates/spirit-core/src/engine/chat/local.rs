@@ -398,39 +398,15 @@ impl LocalChatProvider {
         self.inner.stream_support.reason()
     }
 
-    /// Re-points the setup session at the (possibly restarted) bundled engine and
-    /// broadcasts a fresh `ChatEvent::Session` carrying the current model list.
+    /// Re-points every bundled-engine session (the setup assistant and any project
+    /// orchestrator that fell back to the bundled engine) at the possibly restarted
+    /// engine and broadcasts a fresh `ChatEvent::Session` carrying the current model list.
     ///
     /// A key change restarts the sidecar on a new port. Without this, mounted chat views
-    /// keep the stale `available_models` until the owner restarts the app. Does nothing
-    /// when no setup session has been registered.
+    /// keep the stale `available_models` and a stale-port pump would report
+    /// `stream_lost`. Does nothing when no bundled-engine session has been registered.
     pub async fn refresh_setup_models(&self) {
-        let setup = ChatSessionId::Setup;
-        if !self.inner.state.lock().await.sessions.contains_key(&setup) {
-            return;
-        }
-        // An unready or external engine still gets a fresh model list below.
-        if let Ok(port) = self.inner.engine.ensure_ready().await
-            && !matches!(
-                self.inner.engine.status().choice,
-                EngineChoice::External { .. }
-            )
-        {
-            let endpoint = ChatEndpoint::engine(port, &self.inner.workspace);
-            let attached = {
-                let mut state = self.inner.state.lock().await;
-                state.sessions.get_mut(&setup).is_some_and(|record| {
-                    record.endpoint = Some(endpoint.clone());
-                    record.attached
-                })
-            };
-            if attached {
-                ensure_pump(&self.inner, &endpoint);
-            }
-        }
-        if let Some(view) = self.inner.current_view(&setup).await {
-            self.inner.clone().emit_session(view).await;
-        }
+        self.inner.clone().rebind_engine_sessions().await;
     }
 
     /// Lists the native engine sessions. Core-only; the renderer never receives these ids.
@@ -1187,6 +1163,80 @@ impl Inner {
         }
     }
 
+    /// Rebinds every bundled-engine session to the engine's current port, replaces the
+    /// stale-port pump, and emits refreshed `Ready` views with the current model list.
+    async fn rebind_engine_sessions(self: Arc<Self>) {
+        let sessions: Vec<ChatSessionId> = {
+            let state = self.state.lock().await;
+            state
+                .sessions
+                .iter()
+                .filter(|(session, record)| {
+                    matches!(session, ChatSessionId::Setup) || record.engine_backed
+                })
+                .map(|(session, _)| session.clone())
+                .collect()
+        };
+        if sessions.is_empty() {
+            return;
+        }
+        // An unready or external engine still gets a fresh model list below.
+        if let Ok(port) = self.engine.ensure_ready().await
+            && !matches!(self.engine.status().choice, EngineChoice::External { .. })
+        {
+            let endpoint = ChatEndpoint::engine(port, &self.workspace);
+            let mut moved = Vec::new();
+            let mut attached = false;
+            {
+                let mut state = self.state.lock().await;
+                for session in &sessions {
+                    if let Some(record) = state.sessions.get_mut(session) {
+                        if record.endpoint.as_ref().map(|e| e.port) != Some(port) {
+                            moved.push(session.clone());
+                        }
+                        record.endpoint = Some(endpoint.clone());
+                        attached |= record.attached;
+                    }
+                }
+            }
+            if attached {
+                ensure_pump(&self, &endpoint);
+            }
+            // A session left in Connecting/Error by the dead port is Ready again once the
+            // new stream is up; the pump's connect handler reloads the log and syncs.
+            let now = self.clock.now();
+            let mut state = self.state.lock().await;
+            for session in &moved {
+                if let Some(record) = state.sessions.get_mut(session)
+                    && record.attached
+                    && matches!(
+                        record.state,
+                        ChatSessionState::Connecting | ChatSessionState::Error
+                    )
+                    && record.error.as_ref().is_none_or(is_stream_lost)
+                {
+                    record.state = ChatSessionState::Ready;
+                    record.error = None;
+                    record.last_event_at = Some(now);
+                }
+            }
+        }
+        for session in &sessions {
+            if let Some(view) = self.current_view(session).await {
+                self.clone().emit_session(view).await;
+            }
+        }
+    }
+
+    /// True when the bundled engine is now reachable on a port other than `port`.
+    async fn engine_moved_from(&self, port: u16) -> bool {
+        self.engine
+            .ensure_ready()
+            .await
+            .is_ok_and(|current| current != port)
+            && !matches!(self.engine.status().choice, EngineChoice::External { .. })
+    }
+
     async fn current_view(&self, session: &ChatSessionId) -> Option<ChatSessionView> {
         let state = self.state.lock().await;
         state
@@ -1764,7 +1814,11 @@ impl Inner {
         let body = match self.read_log(&endpoint, &native).await {
             Ok(body) => body,
             Err(error) => {
-                if fail_on_error {
+                if endpoint.setup && self.engine_moved_from(endpoint.port).await {
+                    // The bundled engine restarted on another port; rebind instead of
+                    // failing the session on the dead one.
+                    tokio::spawn(self.clone().rebind_engine_sessions());
+                } else if fail_on_error {
                     self.fail_session(session, error).await;
                 }
                 return;
@@ -2441,6 +2495,13 @@ async fn run_pump(
             return;
         }
         attempts = attempts.saturating_add(1);
+        // A dead bundled-engine port usually means the engine restarted on a new one.
+        // Probe it; when the port moved, hand every bundled session to the new port from
+        // a separate task (rebinding stops this pump) and never report `stream_lost`.
+        if setup && provider.engine_moved_from(port).await {
+            tokio::spawn(provider.clone().rebind_engine_sessions());
+            return;
+        }
         if attempts > MAX_SSE_ATTEMPTS {
             provider.stream_lost(port, setup).await;
             return;
@@ -3784,6 +3845,10 @@ fn turn_timeout_error() -> SpiritError {
     )
     .retryable()
     .with_hint("Stop the turn and retry.")
+}
+
+fn is_stream_lost(error: &SpiritError) -> bool {
+    error.message.starts_with("stream_lost")
 }
 
 fn stream_lost_error() -> SpiritError {

@@ -790,10 +790,11 @@ impl VowpClient for SshVowpClient {
         }
         InboxId::parse(id)?;
         let mut argv = self.base_argv();
-        if let Some(project) = project {
-            ProjectName::parse(project)?;
-            argv.extend(["--project".to_owned(), project.to_owned()]);
-        }
+        // Global inbox items have no project; SSH runs in the login home, so use
+        // the reserved `_node` project like `session_takeover` does.
+        let project = project.unwrap_or("_node");
+        ProjectName::parse(project)?;
+        argv.extend(["--project".to_owned(), project.to_owned()]);
         push_json(&mut argv);
         argv.extend([
             "inbox".to_owned(),
@@ -1997,5 +1998,50 @@ impl VowpClient for MockVowpClient {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .warnings,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ssh::FakeCommandRunner;
+
+    const ITEM_ID: &str = "01JCF5WQ8ZK3M2V7N4P6R8T0AD";
+    const ITEM_JSON: &str = r#"{"id":"01JCF5WQ8ZK3M2V7N4P6R8T0AD","project":null,"job_id":null,"kind":"question","title":"Capacity: 1 workers","body":"b","options":["keep","apply"],"state":"answered","answer":"keep","answered_by":"stackspirit","created_at":"2026-11-14T10:00:00.000Z","answered_at":"2026-11-14T10:01:00.000Z"}"#;
+
+    fn client(home: Option<&str>) -> (Arc<FakeCommandRunner>, SshVowpClient) {
+        let fake = Arc::new(FakeCommandRunner::new(vec![CommandOutput::ok(ITEM_JSON)]));
+        let target = SshTarget::new("owner", "192.0.2.10", 2222).unwrap();
+        let client = SshVowpClient::new(
+            fake.clone(),
+            target,
+            SshOptions::new("/tmp/opencode/known_hosts"),
+            home.map(str::to_owned),
+        );
+        (fake, client)
+    }
+
+    #[tokio::test]
+    async fn answer_inbox_without_project_passes_the_node_project() {
+        let (fake, client) = client(Some("/home/dev"));
+        client.answer_inbox(None, ITEM_ID, "keep").await.unwrap();
+        let calls = fake.calls();
+        let command = calls[0].args.last().cloned().unwrap();
+        assert!(
+            command.contains("'--project' '_node' '--json' 'inbox' 'answer'"),
+            "{command}"
+        );
+        assert!(command.contains("'--by' 'stackspirit'"));
+    }
+
+    #[tokio::test]
+    async fn answer_inbox_with_project_keeps_that_project() {
+        let (fake, client) = client(None);
+        client
+            .answer_inbox(Some("vowp"), ITEM_ID, "keep")
+            .await
+            .unwrap();
+        let command = fake.calls()[0].args.last().cloned().unwrap();
+        assert!(command.contains("'--project' 'vowp' '--json'"), "{command}");
     }
 }
