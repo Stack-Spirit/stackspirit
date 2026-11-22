@@ -1,3 +1,4 @@
+import { harnessLabel, executorProviderLabel } from "../domain/executor";
 import type { FleetView, MergeView, InboxItemView, JobCardView, JobLanes } from "../bridge/wire";
 
 /** What the sidebar tree and the server page show for one project. */
@@ -80,8 +81,10 @@ export function providerModel(job: JobCardView): string | null {
   if (!executor) return null;
   const display = executor.display || executor.model;
   if (!display) return null;
-  const provider = executor.provider;
-  return provider && !display.toLowerCase().includes(provider.toLowerCase()) ? `${provider} · ${display}` : display;
+  const parts = [executorProviderLabel(executor.provider), harnessLabel(executor.harness), display].filter(
+    (part, index, all) => part && part !== "unknown" && all.indexOf(part) === index,
+  );
+  return parts.join(" · ");
 }
 
 /** Current phase of an active job: running, stalled, gating, reviewing or fixing. */

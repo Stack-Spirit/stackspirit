@@ -76,6 +76,53 @@ impl ExecutorView {
     }
 }
 
+/// Friendly provider name: `claude`/`anthropic` are both Anthropic, otherwise a known
+/// brand or the capitalised raw key.
+#[must_use]
+pub fn provider_label(provider: &str) -> String {
+    match provider.to_ascii_lowercase().as_str() {
+        "" => String::new(),
+        "claude" | "anthropic" => "Anthropic".to_owned(),
+        "deepseek" => "DeepSeek".to_owned(),
+        "openrouter" => "OpenRouter".to_owned(),
+        "openai" => "OpenAI".to_owned(),
+        "google" | "gemini" => "Google".to_owned(),
+        "opencode" => "OpenCode".to_owned(),
+        _ => {
+            let mut chars = provider.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().collect::<String>() + chars.as_str()
+            })
+        }
+    }
+}
+
+/// Friendly harness name, or the raw value when unknown.
+#[must_use]
+pub fn harness_label(harness: &str) -> String {
+    match harness {
+        "claude-code" => "Claude Code".to_owned(),
+        "opencode" => "OpenCode".to_owned(),
+        "cli" => "CLI".to_owned(),
+        "acp" => "ACP".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+impl ExecutorView {
+    /// Friendly provider label for this executor.
+    #[must_use]
+    pub fn provider_label(&self) -> String {
+        provider_label(&self.provider)
+    }
+
+    /// Friendly harness label for this executor.
+    #[must_use]
+    pub fn harness_label(&self) -> String {
+        harness_label(&self.harness)
+    }
+}
+
 /// Returns a friendly label for a few common models, otherwise the raw model id.
 #[must_use]
 pub fn friendly_model_name(model: &str) -> String {
@@ -85,6 +132,43 @@ pub fn friendly_model_name(model: &str) -> String {
         "anthropic/claude-sonnet-4" => "Claude Sonnet 4".to_owned(),
         "anthropic/claude-opus-4" => "Claude Opus 4".to_owned(),
         "openai/gpt-5" => "GPT-5".to_owned(),
+        "claude-sonnet-5-5" => "Claude Sonnet 5.5".to_owned(),
+        "claude-opus-5-5" => "Claude Opus 5.5".to_owned(),
+        "claude-haiku-5-5" => "Claude Haiku 5.5".to_owned(),
+        "claude-fable-5-1" => "Claude Fable 5.1".to_owned(),
         other => other.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_code_executor_has_friendly_fields() {
+        let view = ExecutorView::parse("claude-code:claude-sonnet-5-5@medium");
+        assert_eq!(view.harness, "claude-code");
+        assert_eq!(view.provider, "claude");
+        assert_eq!(view.display, "Claude Sonnet 5.5 · medium");
+        assert_eq!(view.harness_label(), "Claude Code");
+        assert_eq!(view.provider_label(), "Anthropic");
+    }
+
+    #[test]
+    fn opencode_executor_has_friendly_fields() {
+        let view = ExecutorView::parse("opencode:deepseek/deepseek-flash#max");
+        assert_eq!(view.harness, "opencode");
+        assert_eq!(view.provider, "deepseek");
+        assert_eq!(view.display, "DeepSeek V4.1 Flash · max");
+        assert_eq!(view.harness_label(), "OpenCode");
+        assert_eq!(view.provider_label(), "DeepSeek");
+    }
+
+    #[test]
+    fn labels_fall_back() {
+        assert_eq!(provider_label("mistral"), "Mistral");
+        assert_eq!(provider_label("anthropic"), "Anthropic");
+        assert_eq!(harness_label("weird"), "weird");
+        assert_eq!(harness_label("acp"), "ACP");
     }
 }

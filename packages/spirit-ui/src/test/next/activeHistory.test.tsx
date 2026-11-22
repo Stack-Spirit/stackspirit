@@ -78,7 +78,7 @@ describe("active versus history", () => {
 
   it("shows provider/model, phase and wait reasons", () => {
     const view = fleet();
-    expect(providerModel(view.lanes.running[0]!)).toBe("Anthropic · Claude Sonnet 5.5");
+    expect(providerModel(view.lanes.running[0]!)).toBe("Anthropic · Claude Code · Claude Sonnet 5.5");
     expect(providerModel(card())).toBeNull();
     expect(jobPhase(projectJobs(view, "demo")[2]!)).toBe("reviewing");
     expect(waitReason(card({ reason: "capacity brake" }))).toBe("capacity brake");

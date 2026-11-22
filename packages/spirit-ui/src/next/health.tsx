@@ -33,8 +33,8 @@ export interface CpuSample {
 }
 
 /**
- * CPU numbers for display. `ratio` is the 1-minute load average divided by cores,
- * clamped to 1 for the bar only; `text` always keeps the real figures, so
+ * CPU numbers for display. `ratio` is Linux PSI CPU pressure (avg10 / 100) when present,
+ * else the 1-minute load average divided by cores, clamped to 1 for the bar only; `text` always keeps the real figures, so
  * `10.3 / 8 cores` is never shown as a flat 100%. No sample (or no core count) gives
  * `null` and `—`, never a made-up `0%`.
  */
@@ -48,9 +48,17 @@ export function cpuDisplay(sample: CpuSample | null | undefined): {
   }
   const raw = sample.load1 / sample.cpu_count;
   const pressure = sample.pressure_cpu_avg10;
-  const parts = [`load ${sample.load1.toFixed(1)} / ${sample.cpu_count} cores`];
-  if (pressure != null && Number.isFinite(pressure)) parts.push(`${Math.round(pressure)}% CPU pressure`);
-  return { ratio: Math.min(1, Math.max(0, raw)), text: parts.join(" · "), over: raw > 1 };
+  const load = `load ${sample.load1.toFixed(1)} / ${sample.cpu_count} cores`;
+  if (pressure != null && Number.isFinite(pressure)) {
+    // Real stall time (PSI) drives the bar: load1 counts runnable threads, so parallel
+    // builds can read 100% load while the CPU is barely stalled.
+    return {
+      ratio: Math.min(1, Math.max(0, pressure / 100)),
+      text: `${Math.round(pressure)}% pressure · ${load}`,
+      over: raw > 1,
+    };
+  }
+  return { ratio: Math.min(1, Math.max(0, raw)), text: load, over: raw > 1 };
 }
 
 export function useServerHealth(): ServerHealth {
@@ -63,7 +71,8 @@ export function useServerHealth(): ServerHealth {
   // only honest source here; a missing sample gives "unknown", never "0 B free".
   const diskFree = sample?.disk_free_home_bytes ?? null;
   const ramRatio = usedRatio(sample?.mem_available_bytes, sample?.mem_total_bytes);
-  const cpu = cpuDisplay(sample);
+  const cpuPressure = capacity?.cpu?.pressure_avg10 ?? null;
+  const cpu = cpuDisplay(sample && sample.pressure_cpu_avg10 == null && cpuPressure != null ? { ...sample, pressure_cpu_avg10: cpuPressure } : sample);
   const cpuRatio = cpu.ratio;
   const load =
     ramRatio == null && cpuRatio == null

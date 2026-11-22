@@ -3627,6 +3627,10 @@ export class MockBridge implements SpiritBridge {
           since: null,
         };
     const advised = this.scenario === "idle" ? 4 : 8;
+    // `busy` models parallel builds: many runnable threads, little real CPU stall.
+    const builds = this.scenario === "busy";
+    const load1 = builds ? 9.7 : 2.1;
+    const cpuPressure = builds ? 22 : 4.2;
     return {
       generated_at: this.now(),
       measured_at: this.now(),
@@ -3637,14 +3641,14 @@ export class MockBridge implements SpiritBridge {
         mem_total_bytes: 16 * GIB,
         mem_available_bytes: pressure ? 1.4 * GIB : 12.4 * GIB,
         swap_used_bytes: 0,
-        load1: 2.1,
+        load1,
         load5: 1.8,
         load15: 1.6,
         cpu_count: 8,
         cpu_quota_cores: null,
         disk_free_home_bytes: freeHome,
         disk_free_worktrees_bytes: storageLow ? null : 38.7 * GIB,
-        pressure_cpu_avg10: 4.2,
+        pressure_cpu_avg10: cpuPressure,
         pressure_mem_avg10: pressure ? 28.4 : 1.1,
         pressure_io_avg10: 0.8,
         source: "proc",
@@ -3679,10 +3683,10 @@ export class MockBridge implements SpiritBridge {
         state: pressure ? "critical" : "ok",
       },
       cpu: {
-        load1: 2.1,
+        load1,
         cpu_count: 8,
-        load_ratio: 0.2625,
-        pressure_avg10: 4.2,
+        load_ratio: load1 / 8,
+        pressure_avg10: cpuPressure,
         state: "ok",
       },
       estimates: [

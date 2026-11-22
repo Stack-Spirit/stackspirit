@@ -77,7 +77,7 @@ describe("CPU load display", () => {
 
   it("appends CPU pressure when reported", () => {
     expect(cpuDisplay(sample({ pressure_cpu_avg10: 12.4 })).text).toBe(
-      "load 2.1 / 8 cores · 12% CPU pressure",
+      "12% pressure · load 2.1 / 8 cores",
     );
   });
 

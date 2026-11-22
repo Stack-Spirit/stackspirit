@@ -9,7 +9,40 @@ const FRIENDLY_MODELS: Record<string, string> = {
   "anthropic/claude-opus-4": "Claude Opus 4",
   "openai/gpt-5": "GPT-5",
   "openai/gpt-5-mini": "GPT-5 mini",
+  "claude-sonnet-5-5": "Claude Sonnet 5.5",
+  "claude-opus-5-5": "Claude Opus 5.5",
+  "claude-haiku-5-5": "Claude Haiku 5.5",
+  "claude-fable-5-1": "Claude Fable 5.1",
 };
+
+const PROVIDER_LABELS: Record<string, string> = {
+  claude: "Anthropic",
+  anthropic: "Anthropic",
+  deepseek: "DeepSeek",
+  openrouter: "OpenRouter",
+  openai: "OpenAI",
+  google: "Google",
+  gemini: "Google",
+  opencode: "OpenCode",
+};
+
+const HARNESS_LABELS: Record<string, string> = {
+  "claude-code": "Claude Code",
+  opencode: "OpenCode",
+  cli: "CLI",
+  acp: "ACP",
+};
+
+/** Mirrors `spirit-core::view::executor::provider_label`. */
+export function executorProviderLabel(provider: string): string {
+  if (!provider) return "";
+  return PROVIDER_LABELS[provider.toLowerCase()] ?? provider.charAt(0).toUpperCase() + provider.slice(1);
+}
+
+/** Mirrors `spirit-core::view::executor::harness_label`. */
+export function harnessLabel(harness: string): string {
+  return HARNESS_LABELS[harness] ?? harness;
+}
 
 function splitModifier(
   input: string,

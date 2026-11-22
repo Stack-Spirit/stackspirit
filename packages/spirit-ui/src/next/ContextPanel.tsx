@@ -1,5 +1,6 @@
 import { useState, type HTMLAttributes } from "react";
 
+import { harnessLabel, executorProviderLabel } from "../domain/executor";
 import { formatAge } from "../domain/format";
 import { useFleet } from "../state/fleetStore";
 import { Meter, Slots, useServerHealth } from "./health";
@@ -243,6 +244,14 @@ function JobDetail({
         <dd>{formatAge(job.age_secs)}</dd>
         {job.executor ? (
           <>
+            {job.executor.provider ? (
+              <>
+                <dt>Provider</dt>
+                <dd>{executorProviderLabel(job.executor.provider)}</dd>
+              </>
+            ) : null}
+            <dt>Harness</dt>
+            <dd>{harnessLabel(job.executor.harness)}</dd>
             <dt>Model</dt>
             <dd>{job.executor.display}</dd>
           </>

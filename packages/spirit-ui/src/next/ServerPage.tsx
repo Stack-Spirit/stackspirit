@@ -37,8 +37,10 @@ export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromot
   const branches: MapBranch[] = projects.map((project) => {
     const running = projectJobs(fleet, project.name).filter((item) => item.lane === "running");
     const attention = projectJobs(fleet, project.name).filter((item) => item.lane === "parked_blocked");
-    const queuedJobs = projectJobs(fleet, project.name).filter((item) => item.lane === "ready" || item.lane === "review_fix");
-    const shown = [...running, ...queuedJobs, ...attention].slice(0, LEAVES_PER_PROJECT);
+    const reviewing = projectJobs(fleet, project.name).filter((item) => item.lane === "review_fix");
+    const ready = projectJobs(fleet, project.name).filter((item) => item.lane === "ready");
+    const queuedJobs = [...reviewing, ...ready];
+    const shown = [...running, ...reviewing, ...attention, ...ready].slice(0, LEAVES_PER_PROJECT);
     const queued = project.ready + project.review;
     return {
       node: {
@@ -58,7 +60,7 @@ export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromot
           item.lane === "running"
             ? [jobPhase(item), providerModel(item.job)].filter(Boolean).join(" · ")
             : item.lane === "ready"
-              ? `Waiting: ${waitReason(item.job)}`
+              ? `queued · ${waitReason(item.job)}`
               : item.lane === "review_fix"
                 ? [jobPhase(item), providerModel(item.job)].filter(Boolean).join(" · ")
                 : (item.job.reason ?? "needs attention"),
