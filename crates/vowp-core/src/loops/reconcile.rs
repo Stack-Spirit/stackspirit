@@ -186,6 +186,14 @@ pub(crate) fn stale_job_windows(deps: &Deps, store: &Store, project: &ProjectNam
     let session = vowp_tmux::session_name_for_project(project.as_str());
     let windows = deps.windows.list_windows(&session).map_err(CoreError::Tmux)?;
     let mut closed = 0;
+    // Window names of active jobs, computed forward: a long id's hashed name cannot be parsed
+    // back into the id, so compare against `window_name_for_job` instead.
+    let active_names: HashSet<String> = store
+        .list_jobs(&vowp_store::JobFilter::default())?
+        .into_iter()
+        .filter(|job| job.state.needs_window())
+        .map(|job| vowp_tmux::window_name_for_job(job.id.as_str()))
+        .collect();
     for window in windows {
         if !window.tagged {
             continue;
@@ -193,11 +201,10 @@ pub(crate) fn stale_job_windows(deps: &Deps, store: &Store, project: &ProjectNam
         let Some(raw_id) = window.name.strip_prefix("job-") else {
             continue;
         };
-        let Ok(job_id) = JobId::parse(raw_id) else {
+        if JobId::parse(raw_id).is_err() {
             continue;
-        };
-        let active = store.job(&job_id)?.is_some_and(|job| job.state.needs_window());
-        if active {
+        }
+        if active_names.contains(&window.name) {
             continue;
         }
         match deps.windows.kill_window(&session, &window.name) {

@@ -264,3 +264,54 @@ fn gc_dry_run_lists_orphan_job_windows_and_apply_closes_them() {
         );
     }
 }
+
+#[test]
+fn long_id_job_keeps_its_hashed_window_across_ticks_and_gc() {
+    let node = TestNode::new();
+    // Incident shape: a 57-char id plus `-fix-1` makes `job-<id>` exceed the 64-char name cap.
+    let long_id = format!("{}-fix-1", "a".repeat(57));
+    let active = job(&node, &long_id, JobState::Running);
+    let done_id = format!("{}-fix-2", "a".repeat(57));
+    let done = job(&node, &done_id, JobState::Done);
+    setup_layout(&node);
+    let active_name = vowp_tmux::window_name_for_job(active.id.as_str());
+    let done_name = vowp_tmux::window_name_for_job(done.id.as_str());
+    assert_ne!(active_name, format!("job-{}", active.id), "the id must be hashed");
+    assert_ne!(active_name, done_name);
+    for name in [&active_name, &done_name] {
+        node.windows
+            .new_window(&session(&node), name, &sleep_spec())
+            .expect("long job window");
+    }
+
+    let mut supervisor = node.supervisor();
+    supervisor.tick().expect("first tick");
+    supervisor.tick().expect("second tick");
+
+    assert_eq!(
+        killed_names(&node),
+        vec![done_name.clone()],
+        "only the done job's window closes"
+    );
+    assert!(
+        node.windows
+            .window_exists(&session(&node), &active_name)
+            .expect("active window"),
+        "an active long-id job keeps its window"
+    );
+
+    let dry = lifecycle::gc(
+        &node.deps,
+        &node.store(),
+        &GcOptions {
+            now: Some(ts()),
+            ..GcOptions::default()
+        },
+    )
+    .expect("gc dry run");
+    let listed: Vec<&String> = dry.classes.iter().flat_map(|class| class.sample_paths.iter()).collect();
+    assert!(
+        listed.iter().all(|path| !path.contains(&active_name)),
+        "gc must not list the active long-id window: {listed:?}"
+    );
+}

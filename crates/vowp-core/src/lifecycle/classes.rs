@@ -496,7 +496,15 @@ impl<'a> Classifier<'a> {
                 let Ok(job_id) = JobId::parse(raw_id) else {
                     continue;
                 };
-                let state = self.jobs.get(&job_id).copied();
+                // Hashed long names do not parse back to the id; match them forward.
+                let owner = self
+                    .jobs
+                    .iter()
+                    .find(|(id, _)| vowp_tmux::window_name_for_job(id.as_str()) == window.name);
+                let (job_id, state) = match owner {
+                    Some((id, state)) => (id.clone(), Some(*state)),
+                    None => (job_id, None),
+                };
                 if state.is_some_and(|state| state.needs_window()) {
                     continue;
                 }
