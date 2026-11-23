@@ -4,7 +4,7 @@ import { useFleet, useFleetStore } from "../state/fleetStore";
 import { FleetCanvas } from "../views/fleet/FleetCanvas";
 import { InboxView } from "./InboxView";
 import { JobRows } from "./JobRows";
-import { DagMap, Whiteboard } from "./DagMap";
+import { DagMap, Whiteboard } from "./NodeMap";
 import { PageHeader } from "./PageHeader";
 import { useShellUi } from "./shellUi";
 import { historyJobs, openInbox, jobName, LANE_INFO, projectJobs, projectSummaries } from "./summary";

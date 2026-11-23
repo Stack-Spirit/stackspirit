@@ -2,8 +2,8 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { JobCardView } from "../../bridge/wire";
-import { DagMap, Whiteboard } from "../../next/DagMap";
-import { COMPACT_JOB_THRESHOLD, layoutDag } from "../../next/dagMap";
+import { DagMap, Whiteboard } from "../../next/NodeMap";
+import { COMPACT_JOB_THRESHOLD, layoutDag } from "../../next/summary";
 import type { ProjectJob } from "../../next/summary";
 
 function card(job_id: string, overrides: Partial<JobCardView> = {}): JobCardView {
