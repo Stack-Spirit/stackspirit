@@ -845,8 +845,9 @@ impl ProcessEngineRuntime {
             Ok(response) if matches!(response.status, 401 | 403) => {
                 ProbeOutcome::Final(KeyVerification::Invalid)
             }
-            Ok(response) if matches!(response.status, 400 | 404) => ProbeOutcome::TryNext,
-            Ok(_) | Err(_) => ProbeOutcome::Final(KeyVerification::Unverified),
+            Ok(response) if is_model_specific_status(response.status) => ProbeOutcome::TryNext,
+            // A timeout on one slow model must not stop the probe of the next candidate.
+            Ok(_) | Err(_) => ProbeOutcome::TryNext,
         };
         let delete_path = format!("/session/{session_id}");
         let _ = http_request(port, "DELETE", &delete_path, None, Duration::from_secs(3));
@@ -1198,6 +1199,12 @@ fn verify_candidates(
     KeyVerification::Unverified
 }
 
+/// Statuses that describe one model (unknown id, privacy gate, credits, rate limit, upstream
+/// outage) rather than the key, so the next candidate is tried.
+fn is_model_specific_status(status: u16) -> bool {
+    matches!(status, 400 | 402 | 404 | 408 | 409 | 422 | 429) || (500..=599).contains(&status)
+}
+
 fn classify_probe_response(body: &[u8]) -> ProbeOutcome {
     match classify_message_response(body) {
         KeyVerification::Unverified => {
@@ -1207,7 +1214,7 @@ fn classify_probe_response(body: &[u8]) -> ProbeOutcome {
             let Some(error) = find_error(&document) else {
                 return ProbeOutcome::Final(KeyVerification::Unverified);
             };
-            let model_specific = matches!(error_status(error), Some(400 | 404))
+            let model_specific = error_status(error).is_some_and(is_model_specific_status)
                 || error.to_string().contains("ProviderModelNotFoundError")
                 || error.as_object().is_some_and(serde_json::Map::is_empty);
             if model_specific {
@@ -1888,8 +1895,12 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         let empty = br#"{"info":{"error":{}}}"#;
         assert_eq!(classify_probe_response(empty), ProbeOutcome::TryNext);
         let rate = br#"{"info":{"error":{"statusCode":429}}}"#;
+        assert_eq!(classify_probe_response(rate), ProbeOutcome::TryNext);
+        let credits = br#"{"info":{"error":{"statusCode":402}}}"#;
+        assert_eq!(classify_probe_response(credits), ProbeOutcome::TryNext);
+        let other = br#"{"info":{"error":{"message":"boom"}}}"#;
         assert_eq!(
-            classify_probe_response(rate),
+            classify_probe_response(other),
             ProbeOutcome::Final(KeyVerification::Unverified)
         );
         let rejected = br#"{"info":{"error":{"statusCode":401}}}"#;

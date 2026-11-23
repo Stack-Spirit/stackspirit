@@ -1451,7 +1451,8 @@ fn project_session(name: &str) -> ChatSessionId {
 async fn project_without_a_local_record_is_a_dead_end_until_it_is_provisioned() {
     let server = FakeEngine::sse(SseScript::Deltas);
     let workspace = tempfile::tempdir().unwrap();
-    let (provider, _engine) = build_provider(&server, workspace.path(), true);
+    let (provider, _engine) =
+        build_provider(&server, &workspace.path().join("workspaces/setup"), true);
     let provider = unconfigured(provider);
     let session = project_session("stackspirit");
 
@@ -1497,7 +1498,8 @@ async fn project_without_a_local_record_is_a_dead_end_until_it_is_provisioned() 
 async fn provisioned_project_chats_and_is_reused_without_chat_not_configured() {
     let server = FakeEngine::sse(SseScript::Deltas);
     let workspace = tempfile::tempdir().unwrap();
-    let (provider, engine) = build_provider(&server, workspace.path(), true);
+    let (provider, engine) =
+        build_provider(&server, &workspace.path().join("workspaces/setup"), true);
     let provider = unconfigured(provider);
     let session = project_session("stackspirit");
     let mut receiver = provider.subscribe();
@@ -1725,4 +1727,99 @@ async fn dead_bundled_port_pump_probes_the_engine_and_rebinds_instead_of_stream_
         "{events:#?}"
     );
     assert_rebound(&views_of(&provider).await);
+}
+
+struct RecordingProvisioner {
+    calls: Mutex<Vec<String>>,
+    result: fn() -> Result<(), SpiritError>,
+}
+
+#[async_trait::async_trait]
+impl spirit_core::engine::ChatOrchestratorProvisioner for RecordingProvisioner {
+    async fn ensure_orchestrator(&self, project: &str) -> Result<(), SpiritError> {
+        self.calls.lock().unwrap().push(project.to_owned());
+        (self.result)()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provision_creates_the_vowp_orchestrator_before_the_endpoint_lookup() {
+    let server = FakeEngine::sse(SseScript::Deltas);
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, _engine) =
+        build_provider(&server, &workspace.path().join("workspaces/setup"), true);
+    let provisioner = Arc::new(RecordingProvisioner {
+        calls: Mutex::new(Vec::new()),
+        result: || Ok(()),
+    });
+    let provider = unconfigured(provider).with_orchestrator_provisioner(provisioner.clone());
+    provider
+        .provision_orchestrator("stackspirit")
+        .await
+        .unwrap();
+    assert_eq!(*provisioner.calls.lock().unwrap(), vec!["stackspirit"]);
+
+    // A real provisioning failure is shown to the owner, not hidden by the local fallback.
+    let (provider, _engine) =
+        build_provider(&server, &workspace.path().join("workspaces/setup"), true);
+    let failing = Arc::new(RecordingProvisioner {
+        calls: Mutex::new(Vec::new()),
+        result: || {
+            Err(SpiritError::new(
+                SpiritErrorCode::Engine,
+                "vowp orchestrator new failed",
+            ))
+        },
+    });
+    let provider = unconfigured(provider).with_orchestrator_provisioner(failing);
+    let err = provider
+        .provision_orchestrator("stackspirit")
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.contains("vowp orchestrator new failed"),
+        "{err:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_backed_project_session_is_not_the_setup_assistant() {
+    let server = FakeEngine::sse(SseScript::Deltas);
+    let workspace = tempfile::tempdir().unwrap();
+    let setup = workspace.path().join("workspaces/setup");
+    let (provider, _engine) = build_provider(&server, &setup, true);
+    let provider = unconfigured(provider);
+    let session = project_session("stackspirit");
+    let mut receiver = provider.subscribe();
+    provider
+        .provision_orchestrator("stackspirit")
+        .await
+        .unwrap();
+    wait_until(|| server.event_connections() >= 1, Duration::from_secs(2)).await;
+
+    let project_dir = workspace.path().join("workspaces/project/stackspirit");
+    let agents = std::fs::read_to_string(project_dir.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("stackspirit"));
+    assert!(!agents.contains("setup assistant"));
+
+    let created = server
+        .requests()
+        .into_iter()
+        .find(|r| r.method == "POST" && r.path == "/session")
+        .unwrap();
+    assert_eq!(created.directory.as_deref(), project_dir.to_str());
+    let body: Value = serde_json::from_str(&created.body).unwrap();
+    assert_eq!(body["permission"][0]["action"], "ask", "{body}");
+
+    provider.send(&session, "Hello?").await.unwrap();
+    let _ = collect_until_done(&mut receiver, Duration::from_secs(5)).await;
+    let message = server
+        .requests()
+        .into_iter()
+        .find(|r| r.method == "POST" && r.path.ends_with("/message"))
+        .unwrap();
+    let body: Value = serde_json::from_str(&message.body).unwrap();
+    let system = body["system"].as_str().unwrap();
+    assert!(system.contains("orchestrator") && !system.contains("setup assistant"));
+    assert_eq!(message.directory.as_deref(), project_dir.to_str());
 }

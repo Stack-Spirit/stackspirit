@@ -121,6 +121,8 @@ struct ServerState {
     next_session: usize,
     requests: Vec<RequestRecord>,
     assistant_text: String,
+    /// Emulates OpenCode 2.x: HTML on unprefixed paths, JSON under `/api`.
+    api_mode: bool,
 }
 
 struct FakeServer {
@@ -160,6 +162,7 @@ impl FakeServer {
             next_session: 1,
             requests: Vec::new(),
             assistant_text: "Hello world".to_owned(),
+            api_mode: false,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_state = Arc::clone(&state);
@@ -191,6 +194,13 @@ impl FakeServer {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .next_session
             .saturating_sub(1)
+    }
+
+    fn set_api_mode(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .api_mode = true;
     }
 
     fn set_list(&self, list: Vec<Value>) {
@@ -321,6 +331,27 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.requests.push(request.clone());
     }
+    let api_mode = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .api_mode;
+    let mut path = path;
+    let mut wrap = false;
+    if api_mode && path != "/api/session" && path != "/global/health" {
+        if let Some(rest) = path.strip_prefix("/api") {
+            path = rest;
+            wrap = true;
+        } else {
+            let html = b"<!doctype html><html></html>";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                html.len()
+            );
+            let _ = stream.write_all(html);
+            return;
+        }
+    }
     match (request.method.as_str(), path) {
         ("GET", "/global/health") => {
             write_json(
@@ -363,7 +394,14 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) {
         ("GET", "/event") => {
             write_json(&mut stream, 404, &json!({}));
         }
-        _ => handle_session_route(&mut stream, &state, &request.method, path, &request.body),
+        _ => handle_session_route(
+            &mut stream,
+            &state,
+            &request.method,
+            path,
+            &request.body,
+            wrap,
+        ),
     }
 }
 
@@ -373,6 +411,7 @@ fn handle_session_route(
     method: &str,
     path: &str,
     body: &str,
+    wrap: bool,
 ) {
     let Some(rest) = path.strip_prefix("/session/") else {
         write_json(stream, 404, &json!({}));
@@ -467,6 +506,7 @@ fn handle_session_route(
             state.sessions.get(id).cloned()
         };
         match messages {
+            Some(messages) if wrap => write_json(stream, 200, &json!({ "data": messages })),
             Some(messages) => write_json(stream, 200, &Value::Array(messages)),
             None => write_json(stream, 404, &json!({})),
         }
@@ -1558,4 +1598,55 @@ async fn server_and_setup_server_gates_are_unchanged() {
     let error = provider.start(&setup_server).await.unwrap_err();
     assert_eq!(error.code, SpiritErrorCode::Gate);
     assert!(error.message.contains("chat_gated"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opencode_2x_api_prefix_is_detected_and_applied_to_every_call() {
+    let server = FakeServer::new(None);
+    server.set_api_mode();
+    let workspace = tempfile::tempdir().unwrap();
+    let vowp_dir = tempfile::tempdir().unwrap();
+    let url = format!("http://127.0.0.1:{}", server.port());
+    let document = endpoint_document(
+        "global",
+        "opencode",
+        "running",
+        Some(&url),
+        Some(NATIVE),
+        HOME_SESSION,
+    );
+    write_endpoint_vowp(vowp_dir.path(), &document);
+    let provider = provider_with_vowp(Arc::new(PanicEngine), workspace.path(), vowp_dir.path());
+    let mut receiver = provider.subscribe();
+
+    let view = provider.start(&global_input()).await.unwrap();
+    assert_eq!(view.state, ChatSessionState::Ready);
+    // The `{"data": [...]}` envelope is unwrapped into the real log.
+    let page = provider
+        .log(
+            &ChatSessionId::Global,
+            &ChatLogQuery {
+                cursor: None,
+                limit: Some(50),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].joined_text(), "Welcome back");
+
+    provider
+        .send(&ChatSessionId::Global, "Hello?")
+        .await
+        .unwrap();
+    let _ = collect_until_done(&mut receiver, Duration::from_secs(5)).await;
+    let paths: Vec<String> = server.requests().into_iter().map(|r| r.path).collect();
+    assert!(
+        paths.contains(&format!("/api/session/{NATIVE}/message")),
+        "{paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|path| path.starts_with("/session/")),
+        "no unprefixed JSON call may reach a 2.x host: {paths:?}"
+    );
 }

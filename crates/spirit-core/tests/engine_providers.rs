@@ -407,3 +407,35 @@ async fn the_core_connect_path_the_desktop_commands_call_refreshes_models_and_st
         "missing"
     );
 }
+
+#[test]
+fn openrouter_verification_probes_paid_models_before_rate_limited_free_ones() {
+    let document = br#"{"providers":[{"id":"openrouter","models":{
+        "meta/free-a:free": {"cost": {"input": 0}},
+        "vendor/cheap": {"cost": {"input": 0.1}},
+        "vendor/pricey": {"cost": {"input": 3}}
+    }}]}"#;
+    let chosen = spirit_core::engine::process::select_verification_models(document, "openrouter");
+    assert_eq!(
+        chosen,
+        ["vendor/cheap", "vendor/pricey", "meta/free-a:free"]
+    );
+}
+
+#[test]
+fn openrouter_key_verdicts_follow_the_provider_answer_not_the_first_non_200() {
+    use spirit_core::engine::process::classify_message_response;
+    let ok = br#"{"info":{"role":"assistant"},"parts":[{"type":"text","text":"OK"}]}"#;
+    assert_eq!(classify_message_response(ok), KeyVerification::Verified);
+    let rejected = br#"{"info":{"error":{"statusCode":401}}}"#;
+    assert_eq!(
+        classify_message_response(rejected),
+        KeyVerification::Invalid
+    );
+    // A model-level 402/429 is not a verdict on the key.
+    let limited = br#"{"info":{"error":{"statusCode":429}}}"#;
+    assert_eq!(
+        classify_message_response(limited),
+        KeyVerification::Unverified
+    );
+}

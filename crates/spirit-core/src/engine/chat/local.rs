@@ -95,6 +95,8 @@ struct ChatEndpoint {
     setup: bool,
     /// The loopback credential; `None` for the unauthenticated bundled engine.
     auth: Option<Arc<LoopbackAuth>>,
+    /// True when an OpenCode 2.x host serves its JSON/SSE API under `/api`.
+    api_prefix: bool,
 }
 
 impl ChatEndpoint {
@@ -105,6 +107,15 @@ impl ChatEndpoint {
             directory: Some(workspace.to_path_buf()),
             setup: true,
             auth: None,
+            api_prefix: false,
+        }
+    }
+
+    /// A bundled-engine endpoint rooted in a session's own workspace directory.
+    fn engine_in(port: u16, directory: PathBuf) -> Self {
+        Self {
+            directory: Some(directory),
+            ..Self::engine(port, Path::new(""))
         }
     }
 
@@ -115,6 +126,7 @@ impl ChatEndpoint {
             directory: endpoint.workspace,
             setup: false,
             auth: endpoint.auth.map(Arc::new),
+            api_prefix: false,
         }
     }
 
@@ -219,6 +231,17 @@ pub struct NativeSession {
     pub title: String,
 }
 
+/// Creates the real VOWP universal orchestrator session for a project on the connected VPS
+/// (`vowp orchestrator new --name <project> --project <project> --app opencode --node
+/// <local>` plus local pairing). The desktop injects a VOWP-backed implementation; core-only.
+#[async_trait]
+pub trait ChatOrchestratorProvisioner: Send + Sync {
+    /// Ensures the orchestrator exists and is running. An error whose message starts with
+    /// `chat_not_configured` means no VPS host or enrolled local node is connected, so the
+    /// caller falls back to the local engine; any other error is returned to the owner.
+    async fn ensure_orchestrator(&self, project: &str) -> Result<(), SpiritError>;
+}
+
 /// One discovered native session and the workspace that owns it. Core-only.
 struct DiscoveredSession {
     id: String,
@@ -234,6 +257,7 @@ struct Inner {
     engine: Arc<dyn ChatEngine>,
     workspace: PathBuf,
     resolver: Arc<dyn ChatEndpointResolver>,
+    provisioner: Option<Arc<dyn ChatOrchestratorProvisioner>>,
     stream_support: StreamSupport,
     bus: ChatEventBus,
     state: Mutex<ProviderState>,
@@ -338,6 +362,7 @@ impl LocalChatProvider {
                 engine,
                 workspace,
                 resolver: Arc::new(VowpEndpointResolver::new()),
+                provisioner: None,
                 stream_support: StreamSupport::default(),
                 bus: ChatEventBus::new(EVENT_CAPACITY),
                 state: Mutex::new(ProviderState::default()),
@@ -356,6 +381,18 @@ impl LocalChatProvider {
         let inner = Arc::get_mut(&mut self.inner)
             .expect("the endpoint resolver must be configured before the provider is shared");
         inner.resolver = resolver;
+        self
+    }
+
+    /// Installs the VOWP orchestrator provisioner used by one-click Start.
+    #[must_use]
+    pub fn with_orchestrator_provisioner(
+        mut self,
+        provisioner: Arc<dyn ChatOrchestratorProvisioner>,
+    ) -> Self {
+        let inner = Arc::get_mut(&mut self.inner)
+            .expect("the provisioner must be configured before the provider is shared");
+        inner.provisioner = Some(provisioner);
         self
     }
 
@@ -477,6 +514,13 @@ impl LocalChatProvider {
                 .get(&session)
                 .and_then(|record| record.vowp_session_id.clone())
         };
+        if let Some(provisioner) = &self.inner.provisioner {
+            match provisioner.ensure_orchestrator(project).await {
+                Ok(()) => {}
+                Err(error) if error.message.starts_with("chat_not_configured") => {}
+                Err(error) => return Err(error),
+            }
+        }
         match self
             .inner
             .resolve_local_endpoint(project, existing.as_deref())
@@ -497,11 +541,13 @@ impl LocalChatProvider {
     ) -> Result<ChatSessionView, SpiritError> {
         let port = self.inner.ensure_engine().await?;
         self.inner.check_health(port).await?;
-        let endpoint = ChatEndpoint::engine(port, &self.inner.workspace);
+        let directory = self.inner.engine_directory(session);
+        prepare_orchestrator_workspace(&directory, session, project)?;
+        let endpoint = self.inner.engine_endpoint(session, port);
         let _ = self.inner.resolve_setup_model().await;
         let native = self
             .inner
-            .create_native_session_titled(&endpoint, &format!("{project} orchestrator"))
+            .create_orchestrator_session(&endpoint, &format!("{project} orchestrator"))
             .await?;
         let body = self.inner.read_log(&endpoint, &native).await?;
         let usage = parse_usage(&body, self.inner.selected_context_limit());
@@ -645,6 +691,7 @@ impl LocalChatProvider {
         let reported_native = resolved.native_session_id.clone();
         let vowp_session_id = resolved.session_id.clone();
         let mut endpoint = ChatEndpoint::orchestrator(resolved);
+        endpoint.api_prefix = self.inner.detect_api_prefix(&endpoint).await;
         let native = match reported_native {
             Some(native) => native,
             None => {
@@ -728,7 +775,7 @@ impl LocalChatProvider {
         .ok_or_else(chat_not_started_error)?;
         let port = self.inner.ensure_engine().await?;
         self.inner.check_health(port).await?;
-        let endpoint = ChatEndpoint::engine(port, &self.inner.workspace);
+        let endpoint = self.inner.engine_endpoint(session, port);
         let _ = self.inner.resolve_setup_model().await;
         match self.inner.get_native_session(&endpoint, &native).await {
             Ok(()) => {}
@@ -839,7 +886,7 @@ impl LocalChatProvider {
         let endpoint = if setup {
             let port = self.inner.ensure_engine().await?;
             self.inner.check_health(port).await?;
-            let endpoint = ChatEndpoint::engine(port, &self.inner.workspace);
+            let endpoint = self.inner.engine_endpoint(session, port);
             if endpoint.port != stored_endpoint.port {
                 match self.inner.get_native_session(&endpoint, &native).await {
                     Ok(()) => {}
@@ -916,7 +963,10 @@ impl LocalChatProvider {
             .emit_with(move |events| events.message(session_for_event, user_event))
             .await;
 
-        let body = message_body(model.as_ref(), &text, &user.id);
+        let mut body = message_body(model.as_ref(), &text, &user.id);
+        if setup && !matches!(session, ChatSessionId::Setup) {
+            body = with_system_prompt(&body, &orchestrator_system_prompt(session));
+        }
         ensure_pump(&self.inner, &endpoint);
         spawn_turn(
             self.inner.clone(),
@@ -1194,7 +1244,7 @@ impl Inner {
                         if record.endpoint.as_ref().map(|e| e.port) != Some(port) {
                             moved.push(session.clone());
                         }
-                        record.endpoint = Some(endpoint.clone());
+                        record.endpoint = Some(self.engine_endpoint(session, port));
                         attached |= record.attached;
                     }
                 }
@@ -1501,6 +1551,25 @@ impl Inner {
         self.engine.ensure_ready().await
     }
 
+    /// The workspace directory of one bundled-engine session: `workspaces/setup` for the
+    /// setup chat, `workspaces/global` and `workspaces/project/<name>` for orchestrators.
+    fn engine_directory(&self, session: &ChatSessionId) -> PathBuf {
+        let root = self.workspace.parent().map(Path::to_path_buf);
+        match (session, root) {
+            (ChatSessionId::Global, Some(root)) => root.join("global"),
+            (ChatSessionId::Project(name), Some(root)) => root.join("project").join(name),
+            _ => self.workspace.clone(),
+        }
+    }
+
+    fn engine_endpoint(&self, session: &ChatSessionId, port: u16) -> ChatEndpoint {
+        if matches!(session, ChatSessionId::Setup) {
+            ChatEndpoint::engine(port, &self.workspace)
+        } else {
+            ChatEndpoint::engine_in(port, self.engine_directory(session))
+        }
+    }
+
     async fn resolve_local_endpoint(
         &self,
         name: &str,
@@ -1595,12 +1664,39 @@ impl Inner {
             .await
     }
 
+    /// Creates a project/global orchestrator session on the bundled engine. Unlike the setup
+    /// chat it keeps OpenCode's default tool access: every permission is `ask`, so the
+    /// owner answers each prompt in the permission card instead of the tools being denied.
+    async fn create_orchestrator_session(
+        &self,
+        endpoint: &ChatEndpoint,
+        title: &str,
+    ) -> Result<String, SpiritError> {
+        self.create_native_session_with(
+            endpoint,
+            json!({
+                "title": title,
+                "permission": [{ "permission": "*", "pattern": "*", "action": "ask" }],
+            }),
+        )
+        .await
+    }
+
     async fn create_native_session_titled(
         &self,
         endpoint: &ChatEndpoint,
         title: &str,
     ) -> Result<String, SpiritError> {
-        let body = serde_json::to_vec(&json!({ "title": title })).map_err(|_| {
+        self.create_native_session_with(endpoint, json!({ "title": title }))
+            .await
+    }
+
+    async fn create_native_session_with(
+        &self,
+        endpoint: &ChatEndpoint,
+        request: Value,
+    ) -> Result<String, SpiritError> {
+        let body = serde_json::to_vec(&request).map_err(|_| {
             SpiritError::new(
                 SpiritErrorCode::Internal,
                 "the setup session request could not be encoded",
@@ -1659,7 +1755,48 @@ impl Inner {
             return Err(session_lost_error());
         }
         ensure_success(&response)?;
-        Ok(response.body)
+        Ok(if endpoint.api_prefix {
+            unwrap_data_envelope(response.body)
+        } else {
+            response.body
+        })
+    }
+
+    /// Detects an OpenCode 2.x host: its HTML shell answers `/session`, while real JSON is
+    /// served under `/api/session`. Any doubt keeps the unprefixed 1.x paths.
+    async fn detect_api_prefix(&self, endpoint: &ChatEndpoint) -> bool {
+        let is_json = |response: &ChatResponse| {
+            (200..300).contains(&response.status)
+                && serde_json::from_slice::<Value>(&response.body).is_ok()
+        };
+        let plain = self
+            .request(
+                "GET",
+                endpoint.clone(),
+                "/session".to_owned(),
+                None,
+                SESSION_TIMEOUT,
+            )
+            .await;
+        // The 2.x signal is a 2xx non-JSON (HTML) answer on `/session`; JSON or any error
+        // means a 1.x host.
+        let html_shell = plain.as_ref().is_ok_and(|response| {
+            (200..300).contains(&response.status)
+                && serde_json::from_slice::<Value>(&response.body).is_err()
+        });
+        if !html_shell {
+            return false;
+        }
+        self.request(
+            "GET",
+            endpoint.clone(),
+            "/api/session".to_owned(),
+            None,
+            SESSION_TIMEOUT,
+        )
+        .await
+        .as_ref()
+        .is_ok_and(is_json)
     }
 
     async fn abort(&self, endpoint: &ChatEndpoint, native: &str) -> Result<bool, SpiritError> {
@@ -2091,7 +2228,7 @@ impl Inner {
             let mut state = self.state.lock().await;
             for (session, record) in &mut state.sessions {
                 if matches!(session, ChatSessionId::Setup) || record.engine_backed {
-                    record.endpoint = Some(ChatEndpoint::engine(port, &self.workspace));
+                    record.endpoint = Some(self.engine_endpoint(session, port));
                 }
             }
         }
@@ -2679,6 +2816,26 @@ impl ChunkedStreamDecoder {
 ///
 /// The returned string can carry the loopback credential, so it is zeroized on drop.
 /// It is written straight to the socket and never logged.
+/// Applies the OpenCode 2.x `/api` prefix to a request path when the endpoint uses it.
+fn prefixed_path(endpoint: &ChatEndpoint, path: &str) -> String {
+    if endpoint.api_prefix && path != "/api" && !path.starts_with("/api/") {
+        format!("/api{path}")
+    } else {
+        path.to_owned()
+    }
+}
+
+/// Unwraps the OpenCode 2.x `{"data": [...]}` message-list envelope into a bare array.
+fn unwrap_data_envelope(body: Vec<u8>) -> Vec<u8> {
+    let Ok(Value::Object(mut map)) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    match map.remove("data") {
+        Some(data @ Value::Array(_)) => serde_json::to_vec(&data).unwrap_or(body),
+        _ => body,
+    }
+}
+
 fn request_head(
     endpoint: &ChatEndpoint,
     method: &str,
@@ -2689,7 +2846,7 @@ fn request_head(
     let mut head = Zeroizing::new(String::with_capacity(256));
     head.push_str(method);
     head.push(' ');
-    head.push_str(path);
+    head.push_str(&prefixed_path(endpoint, path));
     head.push_str(" HTTP/1.1\r\nHost: ");
     head.push_str(endpoint.host.host_header());
     head.push_str("\r\nAccept: ");
@@ -2958,6 +3115,54 @@ fn validate_model_id(model_id: &str) -> Result<String, SpiritError> {
         ));
     }
     Ok(model_id.to_owned())
+}
+
+/// The project-orchestrator instructions. The pinned engine ignores workspace `AGENTS.md`
+/// (project config is disabled), so they travel as the per-message system prompt.
+fn orchestrator_system_prompt(session: &ChatSessionId) -> String {
+    let scope = match session {
+        ChatSessionId::Project(name) => format!("the project `{name}`"),
+        _ => "the user's whole StackSpirit fleet".to_owned(),
+    };
+    format!(
+        "You are the StackSpirit orchestrator for {scope}. Work in your own workspace, use \
+your tools when they help (the user approves each sensitive action), and keep replies \
+direct and practical. Never ask for or print passwords, API keys or tokens."
+    )
+}
+
+fn with_system_prompt(body: &[u8], prompt: &str) -> Vec<u8> {
+    match serde_json::from_slice::<Value>(body) {
+        Ok(mut document) => {
+            document["system"] = Value::String(prompt.to_owned());
+            serde_json::to_vec(&document).unwrap_or_else(|_| body.to_vec())
+        }
+        Err(_) => body.to_vec(),
+    }
+}
+
+/// Creates `workspaces/{global,project/<name>}` with a project-orchestrator `AGENTS.md`.
+fn prepare_orchestrator_workspace(
+    directory: &Path,
+    session: &ChatSessionId,
+    project: &str,
+) -> Result<(), SpiritError> {
+    let fail = || {
+        SpiritError::new(
+            SpiritErrorCode::Engine,
+            "could not prepare the orchestrator workspace",
+        )
+    };
+    std::fs::create_dir_all(directory).map_err(|_| fail())?;
+    let agents = directory.join("AGENTS.md");
+    if !agents.exists() {
+        let text = format!(
+            "# {project} orchestrator\n\n{}\n",
+            orchestrator_system_prompt(session)
+        );
+        std::fs::write(agents, text).map_err(|_| fail())?;
+    }
+    Ok(())
 }
 
 fn message_body(model: Option<&ChatModelView>, text: &str, message_id: &str) -> Vec<u8> {
