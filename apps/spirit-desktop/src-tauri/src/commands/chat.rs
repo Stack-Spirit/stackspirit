@@ -36,6 +36,10 @@ pub async fn chat_provision_orchestrator(
     state: State<'_, AppState>,
     project: String,
 ) -> CommandResult<ChatSessionView> {
+    // Create the real VOWP universal session on the VPS first when a host and an enrolled
+    // local node are connected; otherwise core falls back to the bundled engine.
+    crate::commands::local_orchestrator::ensure_project_orchestrator(state.inner(), &project)
+        .await?;
     let chat = state.chat();
     chat.provision_orchestrator(&project).await
 }

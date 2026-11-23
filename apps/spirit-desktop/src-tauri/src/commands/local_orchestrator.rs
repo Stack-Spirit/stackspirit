@@ -529,3 +529,39 @@ pub async fn local_orchestrator_move(
     core.set_gates(gates);
     core.orchestrator_move(client.as_ref(), &name, target).await
 }
+
+/// Ensures the real VOWP universal orchestrator session for `project` exists on the
+/// connected VPS (`vowp orchestrator new --name <project> --project <project> --app
+/// opencode --node <local>`). Returns `Ok(false)` when no host or enrolled local node is
+/// connected, so the caller falls back to the bundled engine; an existing orchestrator is
+/// reused and never replaced.
+pub(crate) async fn ensure_project_orchestrator(
+    state: &AppState,
+    project: &str,
+) -> Result<bool, spirit_core::error::SpiritError> {
+    let gates = current_local_gates(state).await;
+    let LocalOrchestratorGate::Ready {
+        node: Some(node), ..
+    } = &gates.local_orchestrator
+    else {
+        return Ok(false);
+    };
+    let Ok(client) = state.client() else {
+        return Ok(false);
+    };
+    let existing = client.orchestrator_list().await?;
+    if existing.iter().any(|card| {
+        card.name == project || card.project.as_ref().is_some_and(|p| p.as_str() == project)
+    }) {
+        return Ok(true);
+    }
+    let request = OrchestratorNewRequest {
+        node: node.to_string(),
+        app: OrchestratorApp::Opencode,
+        project: Some(project.to_owned()),
+        name: Some(project.to_owned()),
+        force: false,
+    };
+    client.orchestrator_new(request).await?;
+    Ok(true)
+}
