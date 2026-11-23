@@ -38,6 +38,7 @@ for (const theme of ["light", "dark"] as const) {
     await page.goto(`/?scenario=empty&theme=${theme}`);
     await page.getByRole("button", { name: /Set up with AI/ }).click();
     await page.getByTestId("composer-model").click();
+    await page.getByTestId("composer-model-row").click();
     await page.getByTestId("composer-connect-provider").click();
     const dialog = page.getByRole("dialog", { name: "Engine & Models" });
     await expect(dialog.getByTestId("engine-models-settings")).toContainText(/Default · \S/);

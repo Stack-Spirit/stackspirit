@@ -693,6 +693,7 @@ for (const theme of THEMES) {
       const trigger = page.getByTestId("composer-model");
       await expect(trigger).toContainText("OpenCode free");
       await trigger.click();
+      await page.getByTestId("composer-model-row").click();
       const menu = page.getByTestId("model-picker-popover");
       await expect(menu).toBeVisible();
       await expect(menu.getByRole("group", { name: "OpenCode Free" })).toBeVisible();
@@ -748,6 +749,7 @@ for (const theme of THEMES) {
       // 5. The composer picker lists the live OpenRouter catalog next to OpenCode Free.
       await dialog.getByRole("button", { name: "Close dialog" }).click();
       await trigger.click();
+      await page.getByTestId("composer-model-row").click();
       await expect(menu).toBeVisible();
       await expect(menu.getByRole("group", { name: "OpenCode Free" })).toBeVisible();
       const openrouter = menu.getByRole("group", { name: "OpenRouter" });

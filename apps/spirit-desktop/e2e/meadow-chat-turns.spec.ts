@@ -49,11 +49,11 @@ for (const theme of ["light", "dark"] as const) {
   test(`the SpiritLoader shows while a turn is replying (${theme})`, async ({ page }) => {
     await startTurn(page, "chat-permission", theme);
     await expect(page.getByTestId("session-state")).toContainText("Replying…");
-    const loader = page.getByTestId("spirit-loader");
+    const loader = page.getByTestId("turn-loader");
     await expect(loader).toBeVisible();
-    await expect(loader.getByRole("status")).toHaveCount(0);
-    await expect(loader).toContainText("StackSpirit is replying");
-    await expect(loader.locator("svg .nx-loader__eye")).toHaveCount(2);
+    await expect(loader.getByTestId("turn-loader-text")).toContainText(/Thinking/);
+    await expect(loader.locator("svg circle")).toHaveCount(3);
+    await expect(loader.locator("svg .nx-turn-loader__orbit")).toHaveCount(1);
     await expectNoWcagViolations(page);
   });
 }

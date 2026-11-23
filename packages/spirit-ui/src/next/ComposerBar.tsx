@@ -35,6 +35,17 @@ export function modelDisplayLabel(model: ChatModelView | null): string {
 }
 
 /**
+ * The reasoning effort a model starts on, like OpenCode: `medium`, else `high`, else the
+ * first variant the model declares. A model without variants has no effort (`null`).
+ */
+export function defaultVariant(variants: string[]): string | null {
+  if (variants.length === 0) return null;
+  if (variants.includes("medium")) return "medium";
+  if (variants.includes("high")) return "high";
+  return variants[0]!;
+}
+
+/**
  * Provider order the connect dialog uses (mirrors `POPULAR_PROVIDER_IDS` in
  * `crates/spirit-core/src/engine/providers.rs`). Connected sections follow it, then
  * fall back to alphabetical by display label.
@@ -316,7 +327,8 @@ export function ComposerBar({
     return found?.variants ?? [];
   }, [models, model]);
   const chosen = model ? variantByModel[model.id] : undefined;
-  const activeVariant = chosen && modelVariants.includes(chosen) ? chosen : null;
+  const activeVariant =
+    chosen && modelVariants.includes(chosen) ? chosen : defaultVariant(modelVariants);
 
   async function addFiles(files: File[]) {
     if (files.length === 0) return;
@@ -656,15 +668,19 @@ function ModelPicker({
   const [query, setQuery] = useState("");
   const [active, setActive] = useState<string | null>(null);
   const [maxHeight, setMaxHeight] = useState<number | null>(null);
+  const [view, setView] = useState<"root" | "models" | "effort">("root");
   const id = useId();
+  const modelRow = useRef<HTMLButtonElement>(null);
+  const effortRow = useRef<HTMLButtonElement>(null);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const search = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
 
-  function openPicker() {
+  function openPicker(initial: "root" | "models" = "root") {
     setQuery("");
     setActive(null);
+    setView(initial);
     setOpen(true);
   }
 
@@ -672,7 +688,7 @@ function ModelPicker({
     if (openRequest <= 0) return;
     // A recovery notice asks for the picker after its click handler; defer one tick so
     // the popover can measure the trigger before it opens.
-    const timer = setTimeout(openPicker, 0);
+    const timer = setTimeout(() => openPicker("models"), 0);
     return () => clearTimeout(timer);
   }, [openRequest]);
 
@@ -697,9 +713,16 @@ function ModelPicker({
     return () => window.removeEventListener("resize", measure);
   }, [open]);
 
+  const focusRowAfterBack = useRef<"model" | "effort" | null>(null);
   useEffect(() => {
-    if (open) search.current?.focus();
-  }, [open]);
+    if (!open) return;
+    if (view === "models") search.current?.focus();
+    else if (view === "root") {
+      const row = focusRowAfterBack.current === "effort" ? effortRow : modelRow;
+      focusRowAfterBack.current = null;
+      row.current?.focus();
+    }
+  }, [open, view]);
 
   useEffect(() => {
     if (!open) return;
@@ -708,6 +731,11 @@ function ModelPicker({
     };
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (view !== "root") {
+          focusRowAfterBack.current = view === "effort" ? "effort" : "model";
+          setView("root");
+          return;
+        }
         setOpen(false);
         trigger.current?.focus();
       }
@@ -718,12 +746,12 @@ function ModelPicker({
       document.removeEventListener("pointerdown", onPointer);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+  }, [open, view]);
 
   const groups = useMemo(
     () =>
-      open ? groupChatModels(filterChatModels(models, query)) : [],
-    [open, models, query],
+      open && view === "models" ? groupChatModels(filterChatModels(models, query)) : [],
+    [open, view, models, query],
   );
   const visible = useMemo(() => groups.flatMap((group) => group.models), [groups]);
   const highlighted =
@@ -794,6 +822,58 @@ function ModelPicker({
           data-testid="model-picker-popover"
           style={maxHeight === null ? undefined : { maxHeight }}
         >
+          {view === "root" ? (
+            <div className="nx-model-menu__root" role="group" aria-label="Model and effort">
+              <button
+                ref={modelRow}
+                type="button"
+                className="nx-model-menu__row"
+                data-testid="composer-model-row"
+                aria-label={`Model: ${current}`}
+                onClick={() => {
+                  setQuery("");
+                  setActive(null);
+                  setView("models");
+                }}
+              >
+                <span className="nx-model-menu__row-title">Model</span>
+                <span className="nx-model-menu__row-value">{current}</span>
+                <RowChevron />
+              </button>
+              {variants.length > 0 ? (
+                <button
+                  ref={effortRow}
+                  type="button"
+                  className="nx-model-menu__row"
+                  data-testid="composer-effort-row"
+                  aria-label={`Effort: ${variant ? capitalize(variant) : ""}`}
+                  onClick={() => setView("effort")}
+                >
+                  <span className="nx-model-menu__row-title">Effort</span>
+                  <span className="nx-model-menu__row-value">
+                    {variant ? capitalize(variant) : ""}
+                  </span>
+                  <RowChevron />
+                </button>
+              ) : null}
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="nx-model-menu__back"
+              data-testid="composer-menu-back"
+              aria-label="Back"
+              onClick={() => {
+                focusRowAfterBack.current = view === "effort" ? "effort" : "model";
+                setView("root");
+              }}
+            >
+              <span aria-hidden="true">‹</span>
+              <span>{view === "effort" ? "Effort" : "Model"}</span>
+            </button>
+          )}
+          {view === "models" ? (
+            <>
           <div className="nx-model-menu__search">
             <input
               ref={search}
@@ -882,31 +962,39 @@ function ModelPicker({
               </div>
             )}
           </div>
-          {variants.length > 0 ? (
+            </>
+          ) : null}
+          {view === "effort" && variants.length > 0 ? (
             <div
               className="nx-model-menu__effort"
               role="radiogroup"
               aria-label="Reasoning effort"
               data-testid="reasoning-effort"
             >
-              <span className="nx-model-menu__effort-title">Reasoning effort</span>
-              <div className="nx-model-menu__effort-options">
-                {variants.map((name) => (
-                  <button
-                    key={name}
-                    type="button"
-                    role="radio"
-                    aria-checked={variant === name}
-                    className={`nx-effort${variant === name ? " is-selected" : ""}`}
-                    data-testid={`reasoning-${name}`}
-                    onClick={() => onSelectVariant?.(name)}
-                  >
-                    {capitalize(name)}
-                  </button>
-                ))}
-              </div>
+              {variants.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  role="radio"
+                  aria-checked={variant === name}
+                  className={`nx-effort${variant === name ? " is-selected" : ""}`}
+                  data-testid={`reasoning-${name}`}
+                  onClick={() => {
+                    onSelectVariant?.(name);
+                    focusRowAfterBack.current = "effort";
+                    setView("root");
+                  }}
+                >
+                  <span className="nx-menu__icon" aria-hidden="true">
+                    {variant === name ? "✓" : ""}
+                  </span>
+                  {capitalize(name)}
+                </button>
+              ))}
             </div>
           ) : null}
+          {view === "models" ? (
+            <>
           <div className="nx-model-menu__footer">
             <button
               type="button"
@@ -936,9 +1024,33 @@ function ModelPicker({
               <span className="nx-menu__text">Connect another provider…</span>
             </button>
           </div>
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>
+  );
+}
+
+function RowChevron(): ReactNode {
+  return (
+    <svg
+      className="nx-model-menu__row-chevron"
+      width="10"
+      height="10"
+      viewBox="0 0 10 10"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path
+        d="M3.5 2l3 3-3 3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 

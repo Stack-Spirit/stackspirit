@@ -35,6 +35,7 @@ for (const theme of THEMES) {
     await model.click();
     const menu = page.getByTestId("model-picker-popover");
     await expect(menu).toBeVisible();
+    await page.getByTestId("composer-model-row").click();
     await expect(menu.getByTestId("composer-model-search")).toBeFocused();
     await expect(menu.getByRole("group", { name: "OpenCode Free" })).toContainText("Free");
     await expect(menu.getByRole("group", { name: "DeepSeek" })).toContainText("Connected");
@@ -99,6 +100,7 @@ for (const theme of THEMES) {
     await expectNoWcagViolations(page);
     await page.keyboard.press("Escape");
     await model.click();
+    await page.getByTestId("composer-model-row").click();
     await page.getByTestId("composer-connect-provider").click();
 
     // Removing the key refreshes the live list through the mock engine's restart path.
@@ -128,6 +130,7 @@ for (const theme of THEMES) {
 
     // Connect three preview providers so the list is long enough to scroll.
     await model.click();
+    await page.getByTestId("composer-model-row").click();
     await page.getByTestId("composer-connect-provider").click();
     const dialog = page.getByRole("dialog", { name: "Engine & Models" });
     const card = dialog.getByTestId("engine-models-settings");
@@ -147,6 +150,7 @@ for (const theme of THEMES) {
     await dialog.getByRole("button", { name: "Close dialog" }).click();
 
     await model.click();
+    await page.getByTestId("composer-model-row").click();
     const menu = page.getByTestId("model-picker-popover");
     const scroller = menu.getByRole("region", { name: "Models" });
     await expect(menu.getByTestId("composer-model-search")).toBeFocused();

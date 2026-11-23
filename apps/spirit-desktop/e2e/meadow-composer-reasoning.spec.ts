@@ -42,19 +42,31 @@ for (const theme of THEMES) {
     await page.getByRole("button", { name: "Remove notes.txt" }).click();
     await expect(chips).toHaveCount(0);
 
-    // A non-reasoning model shows no Reasoning effort selector.
+    // Two-row menu: a non-reasoning model shows Model only, with no Effort row.
     const model = page.getByTestId("composer-model");
     await model.click();
     const menu = page.getByTestId("model-picker-popover");
     await expect(menu).toBeVisible();
+    await expect(page.getByTestId("composer-model-row")).toContainText("Model");
+    await expect(page.getByTestId("composer-effort-row")).toHaveCount(0);
     await expect(page.getByTestId("reasoning-effort")).toHaveCount(0);
+    await expectNoWcagViolations(page);
 
-    // A reasoning-capable model shows it; picking High updates the trigger.
+    // Drill into Model, pick a reasoning-capable model: Effort defaults to an active
+    // effort (never None) and Escape steps back.
+    await page.getByTestId("composer-model-row").click();
     await menu.getByTestId("composer-model-search").fill("deepseek flash");
     await menu.getByRole("option", { name: /^DeepSeek V4\.1 Flash(?! Free)/ }).click();
+    await expect(model).toContainText(/DeepSeek V4\.1 Flash · (Medium|High|\w+)/);
+    await expect(model).not.toContainText(/None/i);
     await model.click();
-    const effort = page.getByTestId("reasoning-effort");
-    await expect(effort).toBeVisible();
+    const effortRow = page.getByTestId("composer-effort-row");
+    await expect(effortRow).toContainText("Effort");
+    await expect(effortRow).not.toContainText(/None/i);
+    await expectNoWcagViolations(page);
+    await effortRow.click();
+    await expect(page.getByTestId("reasoning-effort")).toBeVisible();
+    await expect(page.getByRole("radio", { checked: true })).toHaveCount(1);
     await page.getByTestId("reasoning-high").click();
     await expect(page.getByTestId("composer-model")).toContainText("DeepSeek V4.1 Flash · High");
     await expectNoWcagViolations(page);

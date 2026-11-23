@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 // Sprite data below is generated from design/brand/mark/grid.json (rows run-length encoded into
 // SVG paths); the pixel art is the owner's exact StackSpirit sprout. Do not edit by hand.
 const SPRITE_W = 101;
@@ -108,5 +110,49 @@ export function SpiritLoader({
       ) : null}
       <span className="nx-sr-only">{label}</span>
     </span>
+  );
+}
+
+/**
+ * The inline chat-turn indicator: three Meadow green dots orbiting in a 16px mark next to
+ * shimmering elapsed text (`Thinking…` then `Thinking for 3s ···`). It fades in after a
+ * short delay so an instant reply never flashes it, and is static under
+ * `prefers-reduced-motion`. The text is visible and is the accessible name.
+ */
+export function TurnLoader({ startedAt }: { startedAt?: number }) {
+  const [origin] = useState(() => startedAt ?? Date.now());
+  const [seconds, setSeconds] = useState(() =>
+    Math.max(0, Math.floor((Date.now() - origin) / 1000)),
+  );
+  useEffect(() => {
+    const timer = setInterval(
+      () => setSeconds(Math.max(0, Math.floor((Date.now() - origin) / 1000))),
+      1000,
+    );
+    return () => clearInterval(timer);
+  }, [origin]);
+  const text = seconds < 1 ? "Thinking…" : `Thinking for ${seconds}s`;
+  return (
+    <div className="nx-turn-loader" role="status" data-testid="turn-loader">
+      <svg
+        className="nx-turn-loader__dots"
+        width="16"
+        height="16"
+        viewBox="0 0 16 16"
+        aria-hidden="true"
+        focusable="false"
+        data-testid="turn-loader-dots"
+      >
+        <g className="nx-turn-loader__orbit">
+          <circle cx="8" cy="2.5" r="2" fill="#2f8547" />
+          <circle cx="12.76" cy="10.75" r="2" fill="#52b86d" />
+          <circle cx="3.24" cy="10.75" r="2" fill="#78c462" />
+        </g>
+      </svg>
+      <span className="nx-turn-loader__text" data-testid="turn-loader-text">
+        {text}
+        {seconds >= 1 ? <span aria-hidden="true"> ···</span> : null}
+      </span>
+    </div>
   );
 }

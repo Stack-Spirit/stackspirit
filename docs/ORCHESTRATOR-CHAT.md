@@ -2783,5 +2783,5 @@ Verified by ss-119 against the merged ss-116..ss-118 state (results in the job r
 - **Reasoning effort selector** is driven by OpenCode: the model catalog carries
   `variants` (for example `low`, `high`) and the selected value is sent as `variant`. The selector
   is hidden for models with no declared variants.
-- Coverage: `composerAttachments.test.tsx` and `e2e/composer-attach-reasoning.spec.ts` (light
+- Coverage: `composerAttachments.test.tsx` and `e2e/meadow-composer-reasoning.spec.ts` (light
   and dark).

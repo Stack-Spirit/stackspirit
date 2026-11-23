@@ -82,6 +82,12 @@ describe("inline permission card", () => {
     expect(within(card).getByRole("button", { name: "Allow once" })).toBeEnabled();
     expect(within(card).getByRole("button", { name: "Always allow" })).toBeEnabled();
     expect(within(card).getByRole("button", { name: "Reject" })).toBeEnabled();
+    expect(card).toHaveClass("nx-permission-card");
+    expect(card).toHaveTextContent("Waiting for approval");
+    const order = within(card)
+      .getAllByRole("button")
+      .map((button) => button.textContent);
+    expect(order).toEqual(["Reject", "Always allow", "Allow once"]);
     expect(screen.getByTestId("session-state")).toHaveTextContent("Replying…");
     expect((await screen.findAllByTestId("tool-row")).at(-1)).toHaveAttribute(
       "data-status",

@@ -116,6 +116,7 @@ describe("Meadow composer", () => {
 
     const setModel = vi.spyOn(bridge.chat!, "setModel");
     await user.click(model);
+    await user.click(screen.getByTestId("composer-model-row"));
     const popover = screen.getByTestId("model-picker-popover");
     expect(popover).toHaveAttribute("role", "dialog");
     expect(screen.getByTestId("composer-model-search")).toHaveFocus();
@@ -138,6 +139,7 @@ describe("Meadow composer", () => {
   it("groups the picker by OpenCode Free and named provider sections", async () => {
     const { user } = await openSetup();
     await user.click(await screen.findByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-model-row"));
     const popover = screen.getByTestId("model-picker-popover");
     const groups = within(popover).getAllByRole("group");
     expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual([
@@ -154,6 +156,7 @@ describe("Meadow composer", () => {
   it("Manage models opens Engine & Models in place and closes the picker", async () => {
     const { user } = await openSetup();
     await user.click(await screen.findByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-model-row"));
     await user.click(screen.getByTestId("composer-manage-models"));
     expect(screen.queryByTestId("model-picker-popover")).not.toBeInTheDocument();
     const dialog = await screen.findByRole("dialog", { name: "Engine & Models" });
@@ -163,6 +166,7 @@ describe("Meadow composer", () => {
   it("Connect another provider opens Engine & Models", async () => {
     const { user } = await openSetup();
     await user.click(await screen.findByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-model-row"));
     await user.click(screen.getByTestId("composer-connect-provider"));
     const dialog = await screen.findByRole("dialog", { name: "Engine & Models" });
     expect(within(dialog).getByTestId("engine-models-settings")).toBeInTheDocument();
@@ -285,6 +289,7 @@ describe("Searchable model picker", () => {
   it("shows provider sections with badges, counts, clean names and secondary ids", async () => {
     const { user } = renderPicker();
     await user.click(screen.getByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-model-row"));
     const router = screen.getByRole("group", { name: "OpenRouter" });
     expect(router).toHaveTextContent("Connected");
     expect(router).toHaveTextContent("2");
@@ -299,6 +304,7 @@ describe("Searchable model picker", () => {
   it("filters by model name, model id and provider name", async () => {
     const { user } = renderPicker();
     await user.click(screen.getByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-model-row"));
     const search = screen.getByTestId("composer-model-search");
     expect(search).toHaveAttribute("type", "search");
     expect(search).toHaveAttribute("placeholder", "Search models…");
@@ -329,6 +335,7 @@ describe("Searchable model picker", () => {
   it("navigates with ArrowDown/ArrowUp, selects with Enter and closes with Escape", async () => {
     const { user, onSelect } = renderPicker();
     await user.click(screen.getByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-model-row"));
     const search = screen.getByTestId("composer-model-search");
     expect(search).toHaveFocus();
     // Highlight starts on the active model (Big Pickle), then moves across groups.
@@ -347,6 +354,11 @@ describe("Searchable model picker", () => {
     expect(screen.queryByTestId("model-picker-popover")).not.toBeInTheDocument();
 
     await user.click(screen.getByTestId("composer-model"));
+
+    await user.click(screen.getByTestId("composer-model-row"));
+    // First Escape steps back to the two-row menu, the second closes it.
+    await user.keyboard("{Escape}");
+    expect(screen.getByTestId("composer-model-row")).toBeInTheDocument();
     await user.keyboard("{Escape}");
     expect(screen.queryByTestId("model-picker-popover")).not.toBeInTheDocument();
     expect(screen.getByTestId("composer-model")).toHaveFocus();
@@ -355,6 +367,7 @@ describe("Searchable model picker", () => {
   it("exposes a focusable, labelled scroll region that owns the listbox", async () => {
     const { user } = renderPicker();
     await user.click(screen.getByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-model-row"));
     const scroller = screen.getByRole("region", { name: "Models" });
     expect(scroller).toHaveAttribute("tabindex", "0");
     expect(within(scroller).getByRole("listbox")).toBeInTheDocument();
@@ -366,6 +379,7 @@ describe("Searchable model picker", () => {
   it("keeps the search header outside the scroll region so it cannot cover the first heading", async () => {
     const { user } = renderPicker();
     await user.click(screen.getByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-model-row"));
     const scroller = screen.getByRole("region", { name: "Models" });
     const header = screen
       .getByTestId("composer-model-search")
@@ -382,6 +396,7 @@ describe("Searchable model picker", () => {
   it("still navigates with the keyboard and selects with the mouse", async () => {
     const { user, onSelect } = renderPicker();
     await user.click(screen.getByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-model-row"));
     const search = screen.getByTestId("composer-model-search");
     await user.keyboard("{ArrowDown}");
     expect(
@@ -394,6 +409,7 @@ describe("Searchable model picker", () => {
   it("Manage models opens Engine & Models in place (not onOpenEngineSettings)", async () => {
     const { user, onOpenEngineSettings } = renderPicker();
     await user.click(screen.getByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-model-row"));
     await user.click(screen.getByTestId("composer-manage-models"));
     expect(screen.queryByTestId("model-picker-popover")).not.toBeInTheDocument();
     expect(await screen.findByRole("dialog", { name: "Engine & Models" })).toBeInTheDocument();

@@ -309,6 +309,7 @@ test("empty hero, inline model picker and context meter meet WCAG 2.2 AA", async
     await expectNoWcagViolations(page);
 
     await page.getByTestId("composer-model").click();
+    await page.getByTestId("composer-model-row").click();
     const models = page.getByTestId("model-picker-popover");
     await expect(models).toBeVisible();
     await expect(models).toContainText("DeepSeek V4.1 Flash Free");
@@ -452,6 +453,7 @@ test("model picker search stays inside the chat clip below the saved-server bann
   // Docked, the saved-server banner is pinned above the clipping container.
   await expect(page.getByTestId("saved-server-card")).toBeVisible();
   await page.getByTestId("composer-model").click();
+  await page.getByTestId("composer-model-row").click();
   const popover = page.getByTestId("model-picker-popover");
   await expect(popover).toBeVisible();
   const search = page.getByTestId("composer-model-search");

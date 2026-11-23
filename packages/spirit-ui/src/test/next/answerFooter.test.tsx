@@ -1,12 +1,12 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SpiritBridge } from "../../bridge/SpiritBridge";
 import { MockBridge } from "../../bridge/MockBridge";
 import { resetConversations } from "../../next/conversations";
 import { NextShell } from "../../next/NextShell";
-import { SpiritLoader } from "../../next/SpiritLoader";
+import { SpiritLoader, TurnLoader } from "../../next/SpiritLoader";
 import { resetShellUi } from "../../next/shellUi";
 import { resetFleetStore, useFleetStore } from "../../state/fleetStore";
 
@@ -54,5 +54,28 @@ describe("SpiritLoader", () => {
     expect(svg.querySelectorAll(".nx-loader__leaf")).toHaveLength(2);
     expect(svg.querySelectorAll(".nx-loader__eye")).toHaveLength(2);
     expect(svg.querySelectorAll("path").length).toBeGreaterThan(10);
+  });
+});
+
+describe("TurnLoader", () => {
+  it("shows rotating Meadow dots and visible, ticking Thinking text", () => {
+    vi.useFakeTimers();
+    try {
+      render(<TurnLoader />);
+      const status = screen.getByTestId("turn-loader");
+      expect(status).toHaveAttribute("role", "status");
+      expect(screen.getByTestId("turn-loader-text")).toHaveTextContent("Thinking…");
+      const dots = screen.getByTestId("turn-loader-dots");
+      expect(dots).toHaveAttribute("width", "16");
+      const fills = [...dots.querySelectorAll("circle")].map((c) => c.getAttribute("fill"));
+      expect(fills).toEqual(["#2f8547", "#52b86d", "#78c462"]);
+      expect(dots.querySelector(".nx-turn-loader__orbit")).not.toBeNull();
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+      expect(screen.getByTestId("turn-loader-text")).toHaveTextContent("Thinking for 3s ···");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

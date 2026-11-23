@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ChatModelView } from "../../bridge/wire";
-import { ComposerBar, MAX_ATTACHMENT_BYTES } from "../../next/ComposerBar";
+import { ComposerBar, MAX_ATTACHMENT_BYTES, defaultVariant } from "../../next/ComposerBar";
 
 const FLASH: ChatModelView = {
   id: "deepseek/flash",
@@ -84,22 +84,39 @@ describe("composer attachments", () => {
 });
 
 describe("reasoning effort", () => {
-  it("shows the selector only for reasoning-capable models and sends the variant", async () => {
+  it("opens a two-row menu, defaults to Medium-or-better effort and sends the variant", async () => {
     const { user, onSend } = setup(FLASH);
-    await user.click(screen.getByTestId("composer-model"));
-    expect(screen.getByTestId("reasoning-effort")).toBeInTheDocument();
-    await user.click(screen.getByTestId("reasoning-high"));
+    // Default effort is never None: FLASH declares low/high, so it starts on High.
     expect(screen.getByTestId("composer-model")).toHaveTextContent("DeepSeek-V4.1-Flash · High");
+    await user.click(screen.getByTestId("composer-model"));
+    expect(screen.getByTestId("composer-model-row")).toHaveTextContent("Model");
+    const effortRow = screen.getByTestId("composer-effort-row");
+    expect(effortRow).toHaveTextContent("Effort");
+    expect(effortRow).toHaveTextContent("High");
+    await user.click(effortRow);
+    expect(screen.getByTestId("reasoning-effort")).toBeInTheDocument();
+    expect(screen.getByTestId("reasoning-high")).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByTestId("reasoning-low"));
+    expect(screen.getByTestId("composer-model")).toHaveTextContent("DeepSeek-V4.1-Flash · Low");
     await user.keyboard("{Escape}");
     await user.type(screen.getByLabelText("Message"), "go{Enter}");
     await waitFor(() => expect(onSend).toHaveBeenCalled());
-    expect(onSend.mock.calls[0]![1].variant).toBe("high");
+    expect(onSend.mock.calls[0]![1].variant).toBe("low");
   });
 
-  it("hides the selector for models without reasoning variants", async () => {
+  it("prefers medium, then high, then the first declared variant", () => {
+    expect(defaultVariant(["low", "medium", "high"])).toBe("medium");
+    expect(defaultVariant(["low", "high"])).toBe("high");
+    expect(defaultVariant(["minimal", "max"])).toBe("minimal");
+    expect(defaultVariant([])).toBeNull();
+  });
+
+  it("hides the Effort row for models without reasoning variants", async () => {
     const { user } = setup(PLAIN);
     await user.click(screen.getByTestId("composer-model"));
     expect(screen.getByTestId("model-picker-popover")).toBeInTheDocument();
+    expect(screen.getByTestId("composer-model-row")).toBeInTheDocument();
+    expect(screen.queryByTestId("composer-effort-row")).not.toBeInTheDocument();
     expect(screen.queryByTestId("reasoning-effort")).not.toBeInTheDocument();
   });
 });

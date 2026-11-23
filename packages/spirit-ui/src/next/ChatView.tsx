@@ -31,7 +31,7 @@ import {
 } from "./conversations";
 import { EmptyHero } from "./EmptyHero";
 import { PageHeader } from "./PageHeader";
-import { SpiritLoader } from "./SpiritLoader";
+import { TurnLoader } from "./SpiritLoader";
 import { openInbox, projectSummaries } from "./summary";
 
 export interface ChatViewProps {
@@ -895,7 +895,7 @@ export function ChatView({
               ))}
               {state === "streaming" && !retry ? (
                 <div className="nx-msg__thinking">
-                  <SpiritLoader label="StackSpirit is replying" />
+                  <TurnLoader />
                 </div>
               ) : null}
               {pendingPermissions.map((prompt) => (
@@ -1542,7 +1542,7 @@ function PermissionCard({
   const titleId = useId();
   return (
     <section
-      className="nx-perm"
+      className="nx-perm nx-permission-card"
       aria-labelledby={titleId}
       data-testid="permission-card"
       data-permission={prompt.permission}
@@ -1550,10 +1550,11 @@ function PermissionCard({
       <span className="nx-sr" role="alert">
         Permission needed: StackSpirit wants to {describePermission(prompt.permission)}.
       </span>
+      <div className="nx-perm__status" aria-hidden="true">
+        <span className="nx-perm__dot" />
+        Waiting for approval
+      </div>
       <h2 className="nx-perm__title" id={titleId}>
-        <span className="nx-perm__icon" aria-hidden="true">
-          !
-        </span>
         Permission needed
       </h2>
       <p className="nx-perm__what">
@@ -1580,16 +1581,15 @@ function PermissionCard({
       <div className="nx-perm__actions">
         <button
           type="button"
-          className="nx-btn nx-btn--sm"
+          className="nx-btn nx-btn--quiet nx-btn--sm nx-perm__reject"
           disabled={locked}
-          aria-busy={busy}
-          onClick={() => onReply("once")}
+          onClick={() => onReply("reject")}
         >
-          Allow once
+          Reject
         </button>
         <button
           type="button"
-          className="nx-btn nx-btn--quiet nx-btn--sm"
+          className="nx-btn nx-btn--quiet nx-btn--sm nx-perm__always"
           disabled={locked}
           onClick={() => onReply("always")}
         >
@@ -1597,11 +1597,12 @@ function PermissionCard({
         </button>
         <button
           type="button"
-          className="nx-btn nx-btn--quiet nx-btn--sm nx-perm__reject"
+          className="nx-btn nx-btn--sm nx-perm__once"
           disabled={locked}
-          onClick={() => onReply("reject")}
+          aria-busy={busy}
+          onClick={() => onReply("once")}
         >
-          Reject
+          Allow once
         </button>
       </div>
     </section>

@@ -1407,6 +1407,86 @@ button.nx-node:focus-visible {
   outline-offset: 1px;
 }
 
+/* ---- TurnLoader: rotating Meadow dots + shimmering elapsed text ---- */
+.nx-turn-loader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--nx-line);
+  color: var(--nx-muted);
+  font-size: 13px;
+  animation: nx-turn-fade 180ms ease-out 150ms both;
+}
+
+.nx-turn-loader__dots {
+  flex: none;
+}
+
+.nx-turn-loader__orbit {
+  transform-box: view-box;
+  transform-origin: 8px 8px;
+  animation: nx-turn-orbit 1.1s linear infinite;
+}
+
+.nx-turn-loader__text {
+  background: linear-gradient(
+    90deg,
+    var(--nx-muted) 0%,
+    var(--nx-muted) 35%,
+    var(--nx-text) 50%,
+    var(--nx-muted) 65%,
+    var(--nx-muted) 100%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: nx-turn-shimmer 2s linear infinite;
+}
+
+@keyframes nx-turn-orbit {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes nx-turn-shimmer {
+  from {
+    background-position: 125% 0;
+  }
+  to {
+    background-position: -125% 0;
+  }
+}
+
+@keyframes nx-turn-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nx-turn-loader {
+    animation: none;
+  }
+
+  .nx-turn-loader__orbit,
+  .nx-turn-loader__text {
+    animation: none;
+  }
+
+  .nx-turn-loader__text {
+    background: none;
+    color: var(--nx-muted);
+  }
+}
+
 /* ---- SpiritLoader: the pixel sprout, animated in CSS ---- */
 .nx-loader {
   display: inline-flex;
@@ -4024,36 +4104,40 @@ button.nx-node:hover {
 .nx-perm {
   display: grid;
   gap: 10px;
-  padding: 14px 16px;
-  border: 1px solid var(--nx-warn);
-  border-left-width: 4px;
+  padding: 0 16px 14px;
+  border: 1px solid var(--nx-line);
   border-radius: var(--nx-radius);
-  background: var(--nx-warn-soft);
+  background: var(--nx-panel);
+  box-shadow: var(--nx-shadow);
   color: var(--nx-text);
   font-size: 14px;
   line-height: 1.5;
 }
 
-.nx-perm__title {
+.nx-perm__status {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0;
-  color: var(--nx-warn);
-  font-size: 15px;
-  font-weight: 700;
+  margin: 0 -16px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--nx-line);
+  color: var(--nx-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.nx-perm__icon {
-  display: inline-grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
+.nx-perm__dot {
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: var(--nx-warn);
-  color: var(--nx-warn-soft);
-  font-size: 13px;
-  font-weight: 800;
+  background: var(--nx-accent);
+}
+
+.nx-perm__title {
+  margin: 0;
+  color: var(--nx-text);
+  font-size: 15px;
+  font-weight: 650;
 }
 
 .nx-perm__what {
@@ -4084,10 +4168,11 @@ button.nx-node:hover {
 .nx-perm__patterns code {
   display: block;
   overflow-wrap: anywhere;
-  padding: 5px 8px;
-  border: 1px solid var(--nx-line-strong);
+  padding: 6px 10px;
+  border: 1px solid var(--nx-line);
   border-radius: var(--nx-radius-sm);
-  background: var(--nx-panel);
+  background: var(--nx-hover);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: var(--nx-text);
   font-size: 12.5px;
 }
@@ -4102,7 +4187,13 @@ button.nx-node:hover {
 .nx-perm__actions {
   display: flex;
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
+}
+
+.nx-perm__reject,
+.nx-perm__always {
+  border-color: var(--nx-line-strong);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -4924,35 +5015,101 @@ button.nx-composer__attach:disabled {
   font-size: 12px;
 }
 
-.nx-model-menu__effort {
+.nx-model-menu__root {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 12px;
-  border-top: 1px solid var(--nx-border, rgba(127, 127, 127, 0.25));
+  padding: 4px;
 }
 
-.nx-model-menu__effort-title {
-  color: var(--nx-muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.nx-model-menu__effort-options {
+.nx-model-menu__row {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.nx-effort {
-  height: 26px;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
   padding: 0 10px;
-  border: 1px solid var(--nx-border, rgba(127, 127, 127, 0.3));
-  border-radius: 999px;
+  border: 0;
+  border-radius: var(--nx-radius-sm);
   background: transparent;
   color: var(--nx-text);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nx-model-menu__row:hover,
+.nx-model-menu__row:focus-visible {
+  background: var(--nx-hover);
+}
+
+.nx-model-menu__row:focus-visible,
+.nx-model-menu__back:focus-visible,
+.nx-effort:focus-visible {
+  outline: 2px solid var(--nx-accent);
+  outline-offset: -2px;
+}
+
+.nx-model-menu__row-title {
+  flex: none;
+  font-weight: 600;
+}
+
+.nx-model-menu__row-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--nx-muted);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nx-model-menu__row-chevron {
+  flex: none;
+  color: var(--nx-muted);
+}
+
+.nx-model-menu__back {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 1px solid var(--nx-line);
+  background: transparent;
+  color: var(--nx-text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nx-model-menu__back:hover {
+  background: var(--nx-hover);
+}
+
+.nx-model-menu__effort {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+
+.nx-effort {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--nx-radius-sm);
+  background: transparent;
+  color: var(--nx-text);
+  font-family: inherit;
+  font-size: 14px;
+  text-align: left;
   cursor: pointer;
 }
 
@@ -4961,8 +5118,6 @@ button.nx-composer__attach:disabled {
 }
 
 .nx-effort.is-selected {
-  border-color: var(--nx-accent);
-  background: var(--nx-hover);
   font-weight: 600;
 }
 

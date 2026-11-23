@@ -25,6 +25,7 @@ async function openProviderPanel(scenario: "empty" | "stopped" = "empty") {
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: /Set up with AI/ }));
   await user.click(await screen.findByTestId("composer-model"));
+  await user.click(screen.getByTestId("composer-model-row"));
   await user.click(screen.getByTestId("composer-connect-provider"));
   const dialog = await screen.findByRole("dialog", { name: "Engine & Models" });
   return { bridge, user, dialog, ...rendered };
@@ -275,6 +276,7 @@ describe("Composer → Engine & Models", () => {
       ).not.toBeInTheDocument(),
     );
     await user.click(screen.getByTestId("composer-model"));
+    await user.click(screen.getByTestId("composer-model-row"));
     const section = screen.getByRole("group", { name: "OpenRouter" });
     expect(section).toHaveTextContent("Connected");
     await user.type(

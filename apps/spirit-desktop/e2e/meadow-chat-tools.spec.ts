@@ -48,6 +48,16 @@ for (const theme of ["light", "dark"] as const) {
     await expect(card).toBeVisible();
     await expect(card.getByRole("heading", { name: "Permission needed" })).toBeVisible();
     await expect(card).toContainText("/srv/shared/*");
+    await expect(card).toContainText("Waiting for approval");
+    // Calm neutral surface: no amber fill and no thick left stripe.
+    const look = await card.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return { bg: style.backgroundColor, left: style.borderLeftWidth };
+    });
+    expect(look.left).toBe("1px");
+    const [r, g, b] = look.bg.match(/\d+/g)!.map(Number) as [number, number, number];
+    expect(Math.abs(r - g)).toBeLessThan(40);
+    expect(Math.abs(g - b)).toBeLessThan(40);
     await expect(page.getByTestId("session-state")).toContainText("Replying…");
     await expectNoWcagViolations(page);
 
