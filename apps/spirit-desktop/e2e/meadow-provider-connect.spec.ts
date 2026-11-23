@@ -62,11 +62,13 @@ for (const theme of THEMES) {
 
     // Manage models opens Engine & Models in place and closes the picker.
     await model.click();
+    await page.getByTestId("composer-model-row").click();
     await page.getByTestId("composer-manage-models").click();
     await expect(page.getByTestId("model-picker-popover")).toHaveCount(0);
     await expect(page.getByRole("dialog", { name: "Engine & Models" })).toBeVisible();
     await page.getByRole("dialog", { name: "Engine & Models" }).getByRole("button", { name: "Close dialog" }).click();
     await model.click();
+    await page.getByTestId("composer-model-row").click();
     await menu.getByTestId("composer-connect-provider").click();
     const dialog = page.getByRole("dialog", { name: "Engine & Models" });
     await expect(dialog).toBeVisible();
@@ -94,11 +96,14 @@ for (const theme of THEMES) {
     // The composer picker shows the newly unlocked model without re-opening the chat.
     await dialog.getByRole("button", { name: "Close dialog" }).click();
     await model.click();
+    await page.getByTestId("composer-model-row").click();
     await expect(
       page.getByTestId("model-picker-popover").getByRole("group", { name: "Anthropic" }),
     ).toContainText("Claude Sonnet 4");
     await expectNoWcagViolations(page);
     await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("model-picker-popover")).toHaveCount(0);
     await model.click();
     await page.getByTestId("composer-model-row").click();
     await page.getByTestId("composer-connect-provider").click();
@@ -114,6 +119,7 @@ for (const theme of THEMES) {
     // Closing the panel returns to the picker, which dropped the removed key's model.
     await dialog.getByRole("button", { name: "Close dialog" }).click();
     await model.click();
+    await page.getByTestId("composer-model-row").click();
     await expect(page.getByTestId("model-picker-popover")).not.toContainText(
       "Claude Sonnet 4",
     );
