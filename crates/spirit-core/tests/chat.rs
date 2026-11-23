@@ -1945,13 +1945,18 @@ async fn send_and_read_system(
     server: &FakeEngine,
     session: &ChatSessionId,
 ) -> String {
-    let before = server
-        .requests()
-        .iter()
-        .filter(|r| r.method == "POST" && r.path.ends_with("/message"))
-        .count();
+    let count_messages = || {
+        server
+            .requests()
+            .iter()
+            .filter(|r| r.method == "POST" && r.path.ends_with("/message"))
+            .count()
+    };
+    let before = count_messages();
     let mut receiver = provider.subscribe();
     provider.send(session, "Hello?").await.unwrap();
+    // `send` returns before the message POST is issued; wait for it to be recorded.
+    wait_until(|| count_messages() > before, Duration::from_secs(5)).await;
     let _ = collect_until_done(&mut receiver, Duration::from_secs(5)).await;
     let requests = server.requests();
     let message = requests
