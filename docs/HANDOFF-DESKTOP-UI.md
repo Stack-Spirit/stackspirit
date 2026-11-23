@@ -522,7 +522,7 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
 
 ### 5.2 Chat UX landed (ss-116..ss-118, verified by ss-119, 2026-11-23)
 
-Details and limits live in `docs/ORCHESTRATOR-CHAT.md` §10.
+Details and limits live in `docs/ORCHESTRATOR-CHAT.md` §12.
 
 - **Real orchestrator provisioning:** one-click Start creates, reuses, moves or resumes the real
   VOWP universal project orchestrator on the connected VPS (`vowp orchestrator new ... --app

@@ -40,7 +40,7 @@ user-message log preservation or other real-turn runtime behavior into a claim.
 Contents: §1 vocabulary and rules; §2 local engine and v1 HTTP/SSE contract; §3 server
 endpoint and SSH forward; §4 bridge types, methods and state machine; §5 security; §6
 error states; §7 what can land now; §8 follow-up jobs; §9 owner verification; §10 open
-questions; §11 references.
+questions; §11 references; §12 chat UX state after ss-116..ss-118.
 
 | Surface | State on 2026-11-19 |
 |---|---|
@@ -2687,16 +2687,18 @@ No ss-88 open defects remain. The three items the Xvfb run found are fixed on lo
 3. **Settings notice read `Openrouter`** — fixed by `ss-103` (`24bb5cf`): Settings uses the
    shared `domain/engine` `providerLabel`, so it reads `OpenRouter`.
 
-## 10. Chat UX state after ss-116..ss-118 (2026-11-23)
+## 12. Chat UX state after ss-116..ss-118 (2026-11-23)
 
 Verified by ss-119 against the merged ss-116..ss-118 state (results in the job report).
 
-### 10.1 Real VOWP universal project orchestrator and OpenCode 2.x `/api` prefix (ss-116, ss-116b)
+### 12.1 Real VOWP universal project orchestrator and OpenCode 2.x `/api` prefix (ss-116, ss-116b)
 
 - **Project sessions are real orchestrators.** One-click Start provisions the real VOWP universal
   orchestrator for a project on the connected VPS (`vowp orchestrator new --name <project>
-  --project <project> --app opencode --node <local>` plus local pairing) through a
-  desktop-injected provisioner (`commands/local_orchestrator.rs`). An existing orchestrator is
+  --project <project> --app opencode --node <local>`) through a
+  desktop-injected provisioner (`commands/local_orchestrator.rs`). It only lists, creates, moves
+  and resumes the orchestrator; it never pairs a local surface or agent, so a paired local surface
+  is a prerequisite and pairing stays a separate Settings step. An existing orchestrator is
   reused and never replaced; one on another node (or home-hosted) is moved; a stopped, failed or
   degraded one is resumed; an offline node is reported, not hidden.
 - **Engine fallback is explicit.** Only an error starting with `chat_not_configured` (no VPS host
@@ -2714,7 +2716,7 @@ Verified by ss-119 against the merged ss-116..ss-118 state (results in the job r
 - OpenRouter provider verification retries transient failures (ss-116).
 - Gates stay: `LocalOrchestratorGate` and `AsifGate` are unchanged by this work.
 
-### 10.2 DeepSeek-Harness message chrome and telemetry strip (ss-117b)
+### 12.2 DeepSeek-Harness message chrome and telemetry strip (ss-117b)
 
 - **User message:** a **Copy** button and a local-time `MM/DD HH:MM` stamp under the bubble.
 - **Assistant message:** a **Completed** header (duration and step count when known) and a footer
@@ -2725,7 +2727,7 @@ Verified by ss-119 against the merged ss-116..ss-118 state (results in the job r
 - Coverage: `chatMessages.test.tsx` and `e2e/meadow-chat-messages.spec.ts` (axe WCAG 2.2 AA,
   light and dark).
 
-### 10.3 Attachments and reasoning effort (ss-118)
+### 12.3 Attachments and reasoning effort (ss-118)
 
 - **Left-aligned `+`** in the composer attaches images and files (chips with remove). There is no
   Workspace Write dropdown. Limits: at most 8 attachments per turn and 8 MiB per `data:` URI
