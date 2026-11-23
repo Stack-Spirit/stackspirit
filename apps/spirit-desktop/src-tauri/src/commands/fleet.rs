@@ -108,10 +108,7 @@ pub async fn answer_inbox(
 }
 
 #[tauri::command]
-pub async fn dismiss_inbox(
-    state: State<'_, AppState>,
-    id: String,
-) -> CommandResult<InboxItemView> {
+pub async fn dismiss_inbox(state: State<'_, AppState>, id: String) -> CommandResult<InboxItemView> {
     let client = state.client()?;
     let item = client.dismiss_inbox(None, &id).await?;
     Ok(InboxItemView::from_item(
