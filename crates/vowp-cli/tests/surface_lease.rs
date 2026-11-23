@@ -1,7 +1,62 @@
 //! `vowp session lease` / `session takeover` / `surface rename` ownership output.
 //! Spec: `docs/design/v0.5.1/session-ownership.md` §2.4 and §2.6. Hermetic: a temporary home.
 
+use std::os::unix::fs::PermissionsExt;
+
 mod common;
+
+/// Writes a hermetic fake `opencode` binary that probes cleanly and emits one valid
+/// handoff capsule so CI runners without a host `opencode` binary can run `session takeover`.
+fn configure_fake_opencode(env: &common::TestEnv) {
+    let dir = env.home_path().join("fake-bin");
+    std::fs::create_dir_all(&dir).expect("fake bin dir");
+    let draft = serde_json::json!({
+        "intent": "continue the session",
+        "constraints": [],
+        "decisions": [],
+        "state": {"done": ["started"], "in_progress": [], "blocked": [], "next_steps": ["finish"]},
+        "files": [],
+        "gotchas": [],
+        "open_questions": []
+    });
+    let events = [
+        serde_json::json!({
+            "type": "text",
+            "timestamp": 1_794_168_421_621_i64,
+            "sessionID": "ses_fake",
+            "part": {"text": draft.to_string()}
+        }),
+        serde_json::json!({
+            "type": "step_finish",
+            "timestamp": 1_794_168_421_622_i64,
+            "sessionID": "ses_fake",
+            "part": {"cost": 0.0, "tokens": {"input": 1, "output": 1}, "reason": "stop"}
+        }),
+    ];
+    let fixture = dir.join("capsule.jsonl");
+    let text = events.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    std::fs::write(&fixture, format!("{text}\n")).expect("fixture");
+    let script = dir.join("opencode");
+    let body = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' '2.0.28'; exit 0; fi\ncat '{}'\n",
+        fixture.display()
+    );
+    std::fs::write(&script, body).expect("fake script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let mut config = env.config.clone();
+    config.harnesses.insert(
+        "opencode".to_owned(),
+        vowp_protocol::HarnessConfig {
+            binary: Some(script.display().to_string()),
+            ..vowp_protocol::HarnessConfig::default()
+        },
+    );
+    std::fs::write(
+        env.project_path().join("vowp.toml"),
+        toml::to_string_pretty(&config).expect("config"),
+    )
+    .expect("write config");
+}
 
 /// Creates a session and returns its id.
 fn create(env: &common::TestEnv) -> String {
@@ -63,6 +118,7 @@ fn session_lease_accepts_desktop_ui_and_prints_mode_state_epoch() {
 #[test]
 fn session_takeover_increments_the_epoch_and_names_the_new_owner() {
     let env = common::TestEnv::new();
+    configure_fake_opencode(&env);
     let id = create(&env);
     let (code, _, stderr) = env.run(&["session", "lease", &id, "--acquire", "chat", "--holder", "laptop"]);
     assert_eq!(code, 0, "{stderr}");
