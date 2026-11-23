@@ -643,6 +643,171 @@ fn lease_sweep_drops_dead_surface() {
     );
 }
 
+/// Reader that yields queued bytes, then waits for more until the sender hangs up.
+struct ChannelReader {
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    buf: std::collections::VecDeque<u8>,
+}
+
+impl std::io::Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.buf.is_empty() {
+            match self.rx.recv() {
+                Ok(bytes) => self.buf.extend(bytes),
+                Err(_) => return Ok(0),
+            }
+        }
+        let count = out.len().min(self.buf.len());
+        for slot in out.iter_mut().take(count) {
+            *slot = self.buf.pop_front().expect("queued byte");
+        }
+        Ok(count)
+    }
+}
+
+/// Writer whose bytes the test can read while the gateway still runs.
+#[derive(Clone, Default)]
+struct SharedWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("writer lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serves one real gateway connection for the enrolled `local` node: handshake, one
+/// `Heartbeat` frame, then hang-up. Returns once the gateway has handled the heartbeat.
+fn drive_heartbeat(deps: &Deps, store: &Store, clock: &FakeClock) {
+    use ed25519_dalek::{Signer, SigningKey};
+    use vowp_core::agent::gateway::{self, GatewayOptions, GatewayOutcome};
+    use vowp_core::agent::{EnrollRequest, auth, create_pending, redeem};
+    use vowp_protocol::{AgentCapabilities, AgentCapacity, AgentFrame};
+
+    let hex = |bytes: &[u8]| bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let key = SigningKey::from_bytes(&[9_u8; 32]);
+    let capabilities = AgentCapabilities {
+        os: "linux".to_owned(),
+        arch: "x86_64".to_owned(),
+        agent_version: "0.3.0".to_owned(),
+        harnesses: std::collections::BTreeMap::new(),
+        git_version: None,
+        labels: Vec::new(),
+        secret_names: Vec::new(),
+        projects: Vec::new(),
+    };
+    let pending = create_pending(store, &local(), &[], clock.now()).expect("pending node");
+    redeem(
+        store,
+        &EnrollRequest {
+            code: pending.code,
+            public_key: hex(key.verifying_key().as_bytes()),
+            agent_version: "0.3.0".to_owned(),
+            capabilities: capabilities.clone(),
+            paths: Vec::new(),
+        },
+        clock.now(),
+    )
+    .expect("redeem");
+
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let send = |tx: &std::sync::mpsc::Sender<Vec<u8>>, frame: &AgentFrame| {
+        let mut line = serde_json::to_vec(frame).expect("frame json");
+        line.push(b'\n');
+        tx.send(line).expect("send frame");
+    };
+    let output = SharedWriter::default();
+    let reader = std::io::BufReader::new(ChannelReader {
+        rx,
+        buf: std::collections::VecDeque::new(),
+    });
+    let options = GatewayOptions {
+        home_id: "home-1".to_owned(),
+        heartbeat_secs: 10,
+        max_frame_bytes: 1024 * 1024,
+        handshake_timeout: Duration::from_secs(30),
+    };
+    let frames = |output: &SharedWriter| -> Vec<AgentFrame> {
+        let bytes = output.0.lock().expect("writer lock").clone();
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    let wait_for = |output: &SharedWriter, predicate: &dyn Fn(&AgentFrame) -> bool| -> AgentFrame {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(frame) = frames(output).into_iter().find(|frame| predicate(frame)) {
+                return frame;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for a gateway frame");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    std::thread::scope(|scope| {
+        let writer = output.clone();
+        let gateway_deps = deps.clone();
+        let handle = scope.spawn(move || {
+            // `Store` is not `Sync`: the gateway thread opens its own handle on the same home.
+            let gateway_store = gateway_deps.open_store().expect("gateway store");
+            gateway::serve_with_options(&gateway_store, &gateway_deps, reader, writer, options)
+        });
+        send(
+            &tx,
+            &AgentFrame::AgentHello {
+                node: local(),
+                key_id: hex(key.verifying_key().as_bytes()),
+                agent_version: "0.3.0".to_owned(),
+                os: "linux".to_owned(),
+                arch: "x86_64".to_owned(),
+                labels: Vec::new(),
+                capabilities,
+            },
+        );
+        let AgentFrame::HomeChallenge {
+            nonce,
+            home_id,
+            connection_id,
+            ..
+        } = wait_for(&output, &|frame| matches!(frame, AgentFrame::HomeChallenge { .. }))
+        else {
+            panic!("expected HomeChallenge");
+        };
+        let signature = hex(&key
+            .sign(&auth::handshake_payload(&nonce, &home_id, &connection_id))
+            .to_bytes());
+        send(&tx, &AgentFrame::AgentAuth { signature });
+        wait_for(&output, &|frame| matches!(frame, AgentFrame::HomeWelcome { .. }));
+        send(
+            &tx,
+            &AgentFrame::Heartbeat {
+                at: clock.now(),
+                capacity: AgentCapacity {
+                    cpu_cores: 4,
+                    load1: 0.1,
+                    mem_total_bytes: 1024,
+                    mem_free_bytes: 512,
+                    disk_free_bytes: 1024,
+                    busy_slots: 0,
+                    max_slots: 2,
+                    on_battery: Some(false),
+                    thermal_state: Some("nominal".to_owned()),
+                },
+                pending_spool_bytes: 0,
+            },
+        );
+        // Hanging up after the heartbeat makes the gateway finish its frame before it closes.
+        drop(tx);
+        let outcome = handle.join().expect("gateway thread").expect("gateway result");
+        assert!(matches!(outcome, GatewayOutcome::Closed { node: Some(_) }));
+    });
+}
+
 #[test]
 fn agent_heartbeat_renews_a_running_orchestrator_lease() {
     let tmp = tempdir().expect("tempdir");
@@ -667,9 +832,13 @@ fn agent_heartbeat_renews_a_running_orchestrator_lease() {
     );
     assert!(store.lease(&session).expect("lease").expect("kept").heartbeat_at < now);
 
-    let renewed = vowp_core::surface::lease::renew_running_orchestrator_leases(&store, &local(), now).expect("renew");
-    assert_eq!(renewed, 1);
-    assert_eq!(store.lease(&session).expect("lease").expect("kept").heartbeat_at, now);
+    let owner = store.lease(&session).expect("lease").expect("kept");
+    let before = owner.surface_id.clone();
+    drive_heartbeat(&deps, &store, &clock);
+    let renewed = store.lease(&session).expect("lease").expect("renewed");
+    assert_eq!(renewed.heartbeat_at, now, "the Heartbeat frame refreshed the owner row");
+    assert_eq!(renewed.surface_id, before, "the owner is unchanged");
+    assert_eq!(renewed.surface_id.as_ref(), Some(&target.id));
 
     // Another node's agent, or a session that stopped running, renews nothing.
     let other = NodeName::parse("other").expect("node");

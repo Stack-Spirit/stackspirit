@@ -519,6 +519,9 @@ fn run_connection_inner(
                 }
                 // Dispatch on the heartbeat so the slot count is the node's latest
                 // report. Expired run leases are fenced before they can be resumed.
+                // A running orchestrator's paired surface is renewed from the same heartbeat so
+                // its owner row stays `active` while the node is alive.
+                lease::renew_running_orchestrator_leases(store, &session.node, now)?;
                 let lost = dispatch::sweep_expired(deps, store, &session.node, now)?;
                 for assignment in lost {
                     // The fenced run's ingest stream goes with it, so a later line from the
