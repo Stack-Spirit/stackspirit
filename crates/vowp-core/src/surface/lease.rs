@@ -577,6 +577,12 @@ pub fn sweep_leases(deps: &Deps, store: &Store, now: Timestamp) -> Result<u32, C
     let before = stale_before(now);
     let mut dropped = 0_u32;
     for lease in store.stale_leases(before)? {
+        // A running orchestrator keeps its stale row so the owner card still names the
+        // paired surface (state `stale`) instead of dropping to `null` while a sleeping
+        // laptop is away. An explicit release or a takeover still removes it.
+        if is_live_orchestrator(store, &lease.session_id)? {
+            continue;
+        }
         if store.release_stale_lease(&lease.session_id, &lease.token, before)? {
             dropped = dropped.saturating_add(1);
         }
@@ -589,6 +595,43 @@ pub fn sweep_leases(deps: &Deps, store: &Store, now: Timestamp) -> Result<u32, C
         );
     }
     Ok(dropped)
+}
+
+/// Returns whether `session` is an orchestrator that is still running or switching.
+fn is_live_orchestrator(store: &Store, session: &SessionId) -> Result<bool, CoreError> {
+    Ok(store.session(session)?.is_some_and(|row| {
+        row.role == Some(SessionRole::Orchestrator)
+            && matches!(
+                row.state,
+                vowp_protocol::SessionState::Running | vowp_protocol::SessionState::Switching
+            )
+    }))
+}
+
+/// Renews the interactive lease of every running orchestrator paired to `node`.
+///
+/// The node agent calls this on each heartbeat: while the agent is connected and the
+/// orchestrator session is running, the paired surface (OpenCode desktop) still owns it,
+/// so its lease heartbeat is advanced and the owner stays `active`. Returns how many
+/// leases were renewed.
+pub fn renew_running_orchestrator_leases(
+    store: &Store,
+    node: &vowp_protocol::NodeName,
+    now: Timestamp,
+) -> Result<u32, CoreError> {
+    let mut renewed = 0_u32;
+    for lease in store.list_leases()? {
+        let Some(surface) = lease.surface_id.as_ref() else {
+            continue;
+        };
+        if lease.node != *node || !is_live_orchestrator(store, &lease.session_id)? {
+            continue;
+        }
+        if store.heartbeat_surface_lease(&lease.session_id, surface, node, now)? {
+            renewed = renewed.saturating_add(1);
+        }
+    }
+    Ok(renewed)
 }
 
 /// Appends one free-form note event and indexes it.

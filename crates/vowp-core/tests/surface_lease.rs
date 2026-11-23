@@ -644,6 +644,49 @@ fn lease_sweep_drops_dead_surface() {
 }
 
 #[test]
+fn agent_heartbeat_renews_a_running_orchestrator_lease() {
+    let tmp = tempdir().expect("tempdir");
+    let clock = FakeClock::at(ts());
+    let deps = deps(&tmp, &clock);
+    let service = SessionService::new(deps.clone());
+    let session = create_session(&service, &tmp, None);
+    let store = deps.open_store().expect("store");
+    let mut row = store.session(&session).expect("read").expect("session");
+    row.role = Some(SessionRole::Orchestrator);
+    row.state = SessionState::Running;
+    store.upsert_session(&row).expect("orchestrator row");
+    let target = surface(SurfaceKind::Opencode, "macbook", ts());
+    let _guard = acquire(&deps, &store, &session, &target).expect("lease");
+
+    clock.advance(STALE_AFTER * 3);
+    let now = clock.now();
+    assert_eq!(
+        vowp_core::surface::sweep_leases(&deps, &store, now).expect("sweep"),
+        0,
+        "the running orchestrator's lease is never swept"
+    );
+    assert!(store.lease(&session).expect("lease").expect("kept").heartbeat_at < now);
+
+    let renewed = vowp_core::surface::lease::renew_running_orchestrator_leases(&store, &local(), now).expect("renew");
+    assert_eq!(renewed, 1);
+    assert_eq!(store.lease(&session).expect("lease").expect("kept").heartbeat_at, now);
+
+    // Another node's agent, or a session that stopped running, renews nothing.
+    let other = NodeName::parse("other").expect("node");
+    assert_eq!(
+        vowp_core::surface::lease::renew_running_orchestrator_leases(&store, &other, now).expect("renew"),
+        0
+    );
+    row.state = SessionState::Idle;
+    store.upsert_session(&row).expect("idle row");
+    clock.advance(Duration::from_secs(5));
+    assert_eq!(
+        vowp_core::surface::lease::renew_running_orchestrator_leases(&store, &local(), clock.now()).expect("renew"),
+        0
+    );
+}
+
+#[test]
 fn lease_sweep_does_not_drop_a_heartbeated_lease() {
     let tmp = tempdir().expect("tempdir");
     let clock = FakeClock::at(ts());

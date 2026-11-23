@@ -1533,6 +1533,27 @@ fn session_card_shows_a_stale_owner_before_the_sweep() {
 }
 
 #[test]
+fn stale_lease_on_a_running_orchestrator_still_populates_the_owner() {
+    let fixture = Fixture::new();
+    let session = owned_session(&fixture, SessionRole::Orchestrator, SessionState::Running);
+    own(&fixture, &session, SurfaceKind::Opencode, "macbook", 8 * 3600);
+    let dropped = vowp_core::surface::sweep_leases(&fixture.deps, &fixture.store, fixture.clock.now()).expect("sweep");
+    assert_eq!(dropped, 0, "a running orchestrator's lease survives the sweep");
+    let owner = card_owner(&fixture.snapshot(), &session).expect("owner is never null");
+    assert_eq!(owner.state, OwnershipState::Stale);
+    assert_eq!(owner.label.as_deref(), Some("OpenCode · local"));
+    assert_eq!(owner.node.as_str(), "local");
+    assert_eq!(owner.holder, "macbook");
+
+    // A stale lease on a session that is not a running orchestrator is still swept.
+    let worker = owned_session(&fixture, SessionRole::Worker, SessionState::Idle);
+    own(&fixture, &worker, SurfaceKind::Chat, "laptop", 8 * 3600);
+    let dropped = vowp_core::surface::sweep_leases(&fixture.deps, &fixture.store, fixture.clock.now()).expect("sweep");
+    assert_eq!(dropped, 1);
+    assert!(card_owner(&fixture.snapshot(), &worker).is_none());
+}
+
+#[test]
 fn snapshot_owner_never_contains_a_token_or_password() {
     let fixture = Fixture::new();
     let session = owned_session(&fixture, SessionRole::User, SessionState::Idle);
