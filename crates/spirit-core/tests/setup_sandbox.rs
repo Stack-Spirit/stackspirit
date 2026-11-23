@@ -43,19 +43,12 @@ fn setup_engine_config_denies_every_host_tool_and_never_asks() {
 }
 
 #[test]
-fn setup_prompt_is_not_a_global_agents_md_and_has_no_secrets_or_paths() {
+fn setup_agents_md_describes_real_flows_without_secrets_or_paths() {
     let temp = tempfile::tempdir().unwrap();
     let tree = PrivateEngineTree::prepare(temp.path()).unwrap();
     let path = tree.opencode_config_dir().join("AGENTS.md");
-    assert!(
-        !path.exists(),
-        "the engine loads this file for every session"
-    );
-    // A stale file from an earlier version is removed on prepare.
-    std::fs::write(&path, "# StackSpirit setup assistant").unwrap();
-    PrivateEngineTree::prepare(temp.path()).unwrap();
-    assert!(!path.exists());
-    let text = spirit_core::engine::process::SETUP_SYSTEM_PROMPT;
+    assert_eq!(mode(&path), 0o600);
+    let text = std::fs::read_to_string(&path).unwrap();
     for needle in [
         "+ Connect a new server",
         "Add server",
@@ -176,13 +169,15 @@ fn captured_model_requests(temp: &std::path::Path) -> Option<String> {
 }
 
 #[test]
-fn live_engine_does_not_load_the_setup_prompt_globally() {
+fn live_engine_sends_the_setup_prompt_to_the_model() {
     let temp = tempfile::tempdir().unwrap();
     let Some(requests) = captured_model_requests(temp.path()) else {
         return;
     };
-    assert!(
-        !requests.contains("+ Connect a new server"),
-        "the engine loaded the setup instructions for a non-setup session"
-    );
+    for needle in ["StackSpirit", "+ Connect a new server", "Form a cluster"] {
+        assert!(
+            requests.contains(needle),
+            "the engine did not deliver the setup AGENTS.md ({needle} missing from the model request)"
+        );
+    }
 }
