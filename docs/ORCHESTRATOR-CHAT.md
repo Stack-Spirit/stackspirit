@@ -2693,14 +2693,60 @@ Verified by ss-119 against the merged ss-116..ss-118 state (results in the job r
 
 ### 12.1 Real VOWP universal project orchestrator and OpenCode 2.x `/api` prefix (ss-116, ss-116b)
 
-- **Project sessions are real orchestrators.** One-click Start provisions the real VOWP universal
-  orchestrator for a project on the connected VPS (`vowp orchestrator new --name <project>
-  --project <project> --app opencode --node <local>`) through a
-  desktop-injected provisioner (`commands/local_orchestrator.rs`). It only lists, creates, moves
-  and resumes the orchestrator; it never pairs a local surface or agent, so a paired local surface
-  is a prerequisite and pairing stays a separate Settings step. An existing orchestrator is
-  reused and never replaced; one on another node (or home-hosted) is moved; a stopped, failed or
-  degraded one is resumed; an offline node is reported, not hidden.
+- **Project sessions are real orchestrators (ss-122b).** One-click Start
+  (`chat_provision_orchestrator`) runs `ensure_project_orchestrator` in
+  `commands/local_orchestrator.rs` when a host and an enrolled local node are connected
+  (`LocalOrchestratorGate::Ready { node: Some(..) }`), then passes the result to
+  `LocalChatProvider::provision_orchestrator_with(project, Some(KnownOrchestratorSession))`:
+  1. **Home record.** `orchestrator_list`; if no card matches (`name == project` or
+     `project == project`), `orchestrator_new { node, app: opencode, project, name: project,
+     force: false }`. VOWP persists the home record (with its fresh `session_id`) *before*
+     `vowp-agent` tries to start the app, and the agent may refuse with `surface_missing` or
+     `surface_ambiguous`. A failed `orchestrator_new` therefore re-reads the list and recovers the
+     card; only a failure with no persisted record is reported.
+  2. **Dedicated `opencode` surface.** The Mac agent state (`surfaces/<id>/session` and `state`)
+     identifies an active surface bound to `card.session_id`; it is reused only when home
+     `surface ls --node` still lists it as a non-revoked `opencode` surface. Otherwise home
+     `surface pair` mints a one-time code and the Mac runs `vowp --json agent pair --code-file -
+     --surface <id> --session <id> --app opencode` with the code on **stdin**. The code is never
+     logged, stored, put in argv or returned.
+  3. **Binding.** `<agent state>/orchestrators/<project>/config.json` (`$VOWP_AGENT_HOME`, else
+     `~/.vowp-agent`; directory `0700`, atomic `0600` write, existing fields preserved) gets
+     `"surface"` and `"session"`, which is what `vowp-agent`'s `resolve_binding` reads. With
+     `global` already paired on the same Mac the project is bound to its own surface and never hits
+     `surface_ambiguous`.
+  4. **Move / resume.** A card on another node is moved to the local node; one that is not
+     `running`/`starting` (including a `failed` one left by a refused `new`) is resumed. An offline
+     node is reported, not hidden. `vowp-agent` then writes `orchestrators/<project>/opencode.json`
+     with `vowp mcp --agent-socket <socket> --surface <surface>` and serves
+     `vowp agent orchestrator endpoint <project> --json`, which core resolves and attaches to.
+- **Start never trusts a stale fallback.** `provision_orchestrator_with` always re-checks VOWP's
+  endpoint first. A project session that earlier fell back to the bundled engine is upgraded to
+  the real endpoint as soon as one resolves (it stops being engine-backed). Without an endpoint
+  the fallback session is reused (no second native session) while its VOWP context, `AGENTS.md`
+  and MCP registration are refreshed.
+- **`vowp` MCP command.** Only `["vowp","mcp","--agent-socket",<socket>,"--surface",<surface>]`
+  is ever produced, and only when both values are known (`KnownOrchestratorSession::mcp_command`).
+  The installed CLI rejects `--agent` and requires `--surface`; `vowp mcp --help` is the contract.
+- **Bundled-engine fallback context.** With a known universal session a `project:<name>` session on
+  the bundled engine (a) registers the `vowp` MCP server with `POST /mcp` scoped to the project
+  workspace directory, (b) carries the project name, the universal `session_id` and the
+  `session_resume` / `fleet_status` / `fleet_queue` / `inbox_list` instructions (or an honest
+  "tools not wired" line) in the per-message system prompt, and (c) refreshes
+  `workspaces/project/<name>/AGENTS.md` with the same non-secret text (only a file StackSpirit
+  wrote; an owner-authored one is left alone). No secret, token, pairing code, surface id or path
+  is in any of them. `POST /mcp` is never sent for Setup, and the Setup `opencode.json`
+  (deny-all, `OPENCODE_DISABLE_PROJECT_CONFIG=1`, no MCP) is unchanged (`setup_sandbox.rs`).
+- **Verified against the real pinned sidecar (`opencode` 1.19.5, Setup's isolated env).** The
+  global config reports every tool `deny`; a session created with
+  `"permission":[{"permission":"*","pattern":"*","action":"ask"}]` still got a pending `bash`
+  permission request while a plain session got none, so the per-session `ask` rule overrides
+  Setup's deny-all for project sessions. `POST /mcp {name, config:{type:"local",command,
+  enabled:true}}` with `x-opencode-directory` answered `{"vowp":{"status":"connected"}}`. A
+  restarted engine forgets the registration, so core re-registers it on the next turn after a
+  port change.
+- **Not claimed live.** The live `vowp` tool calls need a running `vowp-agent`; tests use mock
+  VOWP/agent clients and the fake engine, not a VPS. `LocalOrchestratorGate` and `AsifGate` stay.
 - **Engine fallback is explicit.** Only an error starting with `chat_not_configured` (no VPS host
   or enrolled local node connected) falls back to the bundled engine. Any other provisioning error
   is shown to the owner.

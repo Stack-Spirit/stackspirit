@@ -247,7 +247,61 @@ pub trait ChatOrchestratorProvisioner: Send + Sync {
     /// Ensures the orchestrator exists and is running. An error whose message starts with
     /// `chat_not_configured` means no VPS host or enrolled local node is connected, so the
     /// caller falls back to the local engine; any other error is returned to the owner.
-    async fn ensure_orchestrator(&self, project: &str) -> Result<(), SpiritError>;
+    async fn ensure_orchestrator(
+        &self,
+        project: &str,
+    ) -> Result<Option<KnownOrchestratorSession>, SpiritError>;
+}
+
+/// The real VOWP universal session a project orchestrator is bound to, as ensured on the
+/// VPS and paired on this Mac. Core-only: none of these values is serialized into a chat DTO.
+#[derive(Clone, PartialEq, Eq)]
+pub struct KnownOrchestratorSession {
+    /// The VOWP universal session id.
+    pub session_id: String,
+    /// The paired `opencode` surface bound to that session on this Mac, when known.
+    pub surface_id: Option<String>,
+    /// The Mac agent socket `vowp mcp --agent-socket` connects to, when known.
+    pub agent_socket_path: Option<PathBuf>,
+}
+
+impl KnownOrchestratorSession {
+    /// A session with no surface wiring yet.
+    #[must_use]
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            surface_id: None,
+            agent_socket_path: None,
+        }
+    }
+
+    /// The valid `vowp mcp` argv, or `None` unless both the surface and the agent socket are
+    /// known. The installed CLI requires `--surface` and has no `--agent` flag, so nothing
+    /// unstartable is ever produced.
+    #[must_use]
+    pub fn mcp_command(&self) -> Option<Vec<String>> {
+        let surface = self.surface_id.as_deref()?;
+        let socket = self.agent_socket_path.as_deref()?;
+        crate::wire::ensure_surface_id(surface).ok()?;
+        if !socket.is_absolute() || socket.to_string_lossy().contains('\0') {
+            return None;
+        }
+        Some(crate::vowp::local::vowp_mcp_argv(socket, surface))
+    }
+}
+
+impl fmt::Debug for KnownOrchestratorSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KnownOrchestratorSession")
+            .field("session_id", &"[redacted]")
+            .field("surface_id", &self.surface_id)
+            .field(
+                "agent_socket_path",
+                &self.agent_socket_path.as_ref().map(|_| "[redacted]"),
+            )
+            .finish()
+    }
 }
 
 /// One discovered native session and the workspace that owns it. Core-only.
@@ -287,6 +341,10 @@ struct SessionRecord {
     /// True when a project session runs on the bundled engine because VOWP has no local
     /// endpoint for it yet (the one-click Start fallback). It behaves like the setup session.
     engine_backed: bool,
+    /// The VOWP universal session wired into a bundled-engine project session. Core-only.
+    known: Option<KnownOrchestratorSession>,
+    /// True once the `vowp` MCP server was registered with the bundled engine for it.
+    vowp_mcp_wired: bool,
     state: ChatSessionState,
     attached: bool,
     started_at: Option<Timestamp>,
@@ -316,6 +374,8 @@ impl SessionRecord {
             endpoint: None,
             vowp_session_id: None,
             engine_backed: false,
+            known: None,
+            vowp_mcp_wired: false,
             state: ChatSessionState::Idle,
             attached: false,
             started_at: None,
@@ -511,24 +571,40 @@ impl LocalChatProvider {
         project: &str,
     ) -> Result<ChatSessionView, SpiritError> {
         validate_project_name(project)?;
-        let session = ChatSessionId::Project(project.to_owned());
-        if self.is_engine_backed(&session).await {
-            return self.attach_setup(&session).await;
+        let mut known = None;
+        if let Some(provisioner) = &self.inner.provisioner {
+            match provisioner.ensure_orchestrator(project).await {
+                Ok(ensured) => known = ensured,
+                Err(error) if error.message.starts_with("chat_not_configured") => {}
+                Err(error) => return Err(error),
+            }
         }
+        self.provision_orchestrator_with(project, known).await
+    }
+
+    /// One-click Start with the VOWP universal session the caller already ensured.
+    ///
+    /// It never short-circuits a session that fell back to the bundled engine: every Start
+    /// first looks for VOWP's local endpoint again, so a session stuck in the fallback is
+    /// upgraded to the real orchestrator as soon as one exists. Without an endpoint, the
+    /// bundled-engine session is kept (idempotently) and its VOWP context, `AGENTS.md` and
+    /// `vowp` MCP registration are refreshed from `known`.
+    pub async fn provision_orchestrator_with(
+        &self,
+        project: &str,
+        known: Option<KnownOrchestratorSession>,
+    ) -> Result<ChatSessionView, SpiritError> {
+        validate_project_name(project)?;
+        let session = ChatSessionId::Project(project.to_owned());
         let existing = {
             let state = self.inner.state.lock().await;
             state
                 .sessions
                 .get(&session)
+                .filter(|record| !record.engine_backed)
                 .and_then(|record| record.vowp_session_id.clone())
-        };
-        if let Some(provisioner) = &self.inner.provisioner {
-            match provisioner.ensure_orchestrator(project).await {
-                Ok(()) => {}
-                Err(error) if error.message.starts_with("chat_not_configured") => {}
-                Err(error) => return Err(error),
-            }
         }
+        .or_else(|| known.as_ref().map(|known| known.session_id.clone()));
         match self
             .inner
             .resolve_local_endpoint(project, existing.as_deref())
@@ -536,22 +612,61 @@ impl LocalChatProvider {
         {
             Ok(resolved) => self.open_orchestrator(project, &session, resolved).await,
             Err(error) if error.message.starts_with("chat_not_configured") => {
-                self.start_engine_backed(&session, project).await
+                if self.is_engine_backed(&session).await {
+                    self.refresh_engine_context(&session, project, known)
+                        .await?;
+                    self.attach_setup(&session).await
+                } else {
+                    self.start_engine_backed(&session, project, known).await
+                }
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Re-writes the VOWP context of an existing bundled-engine project session.
+    async fn refresh_engine_context(
+        &self,
+        session: &ChatSessionId,
+        project: &str,
+        known: Option<KnownOrchestratorSession>,
+    ) -> Result<(), SpiritError> {
+        let port = self.inner.ensure_engine().await?;
+        self.inner.check_health(port).await?;
+        let directory = self.inner.engine_directory(session);
+        prepare_orchestrator_workspace(&directory, session, project, known.as_ref())?;
+        let wired = match &known {
+            Some(known) => {
+                let endpoint = self.inner.engine_endpoint(session, port);
+                self.inner.register_vowp_mcp(&endpoint, known).await
+            }
+            None => false,
+        };
+        let mut state = self.inner.state.lock().await;
+        if let Some(record) = state.sessions.get_mut(session) {
+            record.known = known;
+            record.vowp_mcp_wired = wired;
+        }
+        Ok(())
     }
 
     async fn start_engine_backed(
         &self,
         session: &ChatSessionId,
         project: &str,
+        known: Option<KnownOrchestratorSession>,
     ) -> Result<ChatSessionView, SpiritError> {
         let port = self.inner.ensure_engine().await?;
         self.inner.check_health(port).await?;
         let directory = self.inner.engine_directory(session);
-        prepare_orchestrator_workspace(&directory, session, project)?;
+        prepare_orchestrator_workspace(&directory, session, project, known.as_ref())?;
         let endpoint = self.inner.engine_endpoint(session, port);
+        // `POST /mcp` is only ever sent for a project session, never for Setup, and only
+        // when the surface and agent socket make the `vowp mcp` command startable.
+        let wired = match &known {
+            Some(known) => self.inner.register_vowp_mcp(&endpoint, known).await,
+            None => false,
+        };
         let _ = self.inner.resolve_setup_model().await;
         let native = self
             .inner
@@ -565,6 +680,9 @@ impl LocalChatProvider {
             let mut record = SessionRecord::new(native);
             record.endpoint = Some(endpoint.clone());
             record.engine_backed = true;
+            record.vowp_session_id = known.as_ref().map(|known| known.session_id.clone());
+            record.known = known;
+            record.vowp_mcp_wired = wired;
             record.state = ChatSessionState::Ready;
             record.attached = true;
             record.started_at = Some(now);
@@ -733,6 +851,11 @@ impl LocalChatProvider {
             record.native_session_id = native;
             record.endpoint = Some(endpoint.clone());
             record.vowp_session_id = Some(vowp_session_id);
+            // A session that was stuck on the bundled-engine fallback is now the real
+            // orchestrator; it must stop behaving like the setup chat.
+            record.engine_backed = false;
+            record.known = None;
+            record.vowp_mcp_wired = false;
             if !preserve_turn {
                 record.state = ChatSessionState::Ready;
                 record.active_turn = None;
@@ -885,7 +1008,7 @@ impl LocalChatProvider {
         if let Some(variant) = variant {
             super::validate_variant(variant)?;
         }
-        let (native, stored_endpoint, setup) = {
+        let (native, stored_endpoint, setup, vowp_context) = {
             let state = self.inner.state.lock().await;
             let record = state
                 .sessions
@@ -904,13 +1027,30 @@ impl LocalChatProvider {
                 .endpoint
                 .clone()
                 .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
-            (record.native_session_id.clone(), endpoint, setup)
+            let context = record
+                .engine_backed
+                .then(|| {
+                    record
+                        .known
+                        .clone()
+                        .map(|known| (known, record.vowp_mcp_wired))
+                })
+                .flatten();
+            (record.native_session_id.clone(), endpoint, setup, context)
         };
         let endpoint = if setup {
             let port = self.inner.ensure_engine().await?;
             self.inner.check_health(port).await?;
             let endpoint = self.inner.engine_endpoint(session, port);
             if endpoint.port != stored_endpoint.port {
+                // A restarted engine forgot the dynamically registered `vowp` MCP server.
+                if let Some((known, _)) = &vowp_context {
+                    let wired = self.inner.register_vowp_mcp(&endpoint, known).await;
+                    let mut state = self.inner.state.lock().await;
+                    if let Some(record) = state.sessions.get_mut(session) {
+                        record.vowp_mcp_wired = wired;
+                    }
+                }
                 match self.inner.get_native_session(&endpoint, &native).await {
                     Ok(()) => {}
                     Err(error) if error.code == SpiritErrorCode::NotFound => {
@@ -990,7 +1130,8 @@ impl LocalChatProvider {
         if matches!(session, ChatSessionId::Setup) {
             body = with_system_prompt(&body, crate::engine::process::SETUP_SYSTEM_PROMPT);
         } else if setup {
-            body = with_system_prompt(&body, &orchestrator_system_prompt(session));
+            let context = vowp_context.as_ref().map(|(known, wired)| (known, *wired));
+            body = with_system_prompt(&body, &orchestrator_system_prompt(session, context));
         }
         ensure_pump(&self.inner, &endpoint);
         spawn_turn(
@@ -1697,6 +1838,43 @@ impl Inner {
     async fn create_native_session(&self, endpoint: &ChatEndpoint) -> Result<String, SpiritError> {
         self.create_native_session_titled(endpoint, SETUP_TITLE)
             .await
+    }
+
+    /// Registers the `vowp` MCP server with the bundled engine for one project workspace
+    /// (`POST /mcp`, scoped by the endpoint's directory). Returns false, without error, when
+    /// the surface/socket are unknown or the engine refuses; the prompt then says so.
+    ///
+    /// Verified against the pinned OpenCode 1.19.5 sidecar: the dynamic registration works
+    /// while the Setup deny-all config stays untouched, and a per-session `ask` rule
+    /// overrides that deny-all for project sessions only.
+    async fn register_vowp_mcp(
+        &self,
+        endpoint: &ChatEndpoint,
+        known: &KnownOrchestratorSession,
+    ) -> bool {
+        let Some(command) = known.mcp_command() else {
+            return false;
+        };
+        let body = json!({
+            "name": "vowp",
+            "config": { "type": "local", "command": command, "enabled": true },
+        });
+        let Ok(body) = serde_json::to_vec(&body) else {
+            return false;
+        };
+        match self
+            .request(
+                "POST",
+                endpoint.clone(),
+                "/mcp".to_owned(),
+                Some(body),
+                SESSION_TIMEOUT,
+            )
+            .await
+        {
+            Ok(response) => (200..300).contains(&response.status),
+            Err(_) => false,
+        }
     }
 
     /// Creates a project/global orchestrator session on the bundled engine. Unlike the setup
@@ -3152,18 +3330,50 @@ fn validate_model_id(model_id: &str) -> Result<String, SpiritError> {
     Ok(model_id.to_owned())
 }
 
+/// Marks an `AGENTS.md` StackSpirit wrote, so a refresh may replace it but never an
+/// owner-authored file.
+const AGENTS_MARKER: &str = "<!-- stackspirit:orchestrator-context -->";
+
 /// The project-orchestrator instructions. The pinned engine ignores workspace `AGENTS.md`
 /// (project config is disabled), so they travel as the per-message system prompt.
-fn orchestrator_system_prompt(session: &ChatSessionId) -> String {
+///
+/// With a known VOWP universal session it names the project and session id and, when the
+/// `vowp` MCP server is wired, tells the model to read the real fleet state through it.
+/// It never carries a secret, a token, a pairing code or a path.
+fn orchestrator_system_prompt(
+    session: &ChatSessionId,
+    context: Option<(&KnownOrchestratorSession, bool)>,
+) -> String {
     let scope = match session {
         ChatSessionId::Project(name) => format!("the project `{name}`"),
         _ => "the user's whole StackSpirit fleet".to_owned(),
     };
-    format!(
+    let mut prompt = format!(
         "You are the StackSpirit orchestrator for {scope}. Work in your own workspace, use \
 your tools when they help (the user approves each sensitive action), and keep replies \
-direct and practical. Never ask for or print passwords, API keys or tokens."
-    )
+direct and practical. Never ask for or print passwords, API keys, tokens or pairing codes."
+    );
+    if let (ChatSessionId::Project(name), Some((known, wired))) = (session, context) {
+        prompt.push_str(&format!(
+            "\n\nYou are connected to the VOWP universal session `{}` for the project `{name}` \
+on the user's VPS.",
+            known.session_id
+        ));
+        if wired {
+            prompt.push_str(
+                " Your `vowp` MCP tools are live. At the start of a conversation call \
+`session_resume` to load the session context, then use `fleet_status`, `fleet_queue` and \
+`inbox_list` for the real fleet state before you answer questions about jobs, workers or \
+the inbox. Do not guess what those tools return.",
+            );
+        } else {
+            prompt.push_str(
+                " The `vowp` MCP tools are not wired into this chat yet, so you cannot read \
+the live fleet state; say so plainly instead of guessing.",
+            );
+        }
+    }
+    prompt
 }
 
 fn with_system_prompt(body: &[u8], prompt: &str) -> Vec<u8> {
@@ -3177,10 +3387,15 @@ fn with_system_prompt(body: &[u8], prompt: &str) -> Vec<u8> {
 }
 
 /// Creates `workspaces/{global,project/<name>}` with a project-orchestrator `AGENTS.md`.
+///
+/// A file StackSpirit wrote earlier (the bare fallback text or a previous refresh) is
+/// replaced so it carries the current non-secret VOWP context; an owner-authored file is
+/// left alone.
 fn prepare_orchestrator_workspace(
     directory: &Path,
     session: &ChatSessionId,
     project: &str,
+    known: Option<&KnownOrchestratorSession>,
 ) -> Result<(), SpiritError> {
     let fail = || {
         SpiritError::new(
@@ -3190,10 +3405,18 @@ fn prepare_orchestrator_workspace(
     };
     std::fs::create_dir_all(directory).map_err(|_| fail())?;
     let agents = directory.join("AGENTS.md");
-    if !agents.exists() {
+    let replaceable = match std::fs::read_to_string(&agents) {
+        Ok(existing) => {
+            existing.starts_with(AGENTS_MARKER)
+                || existing.starts_with(&format!("# {project} orchestrator\n"))
+        }
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    };
+    if replaceable {
+        let context = known.map(|known| (known, known.mcp_command().is_some()));
         let text = format!(
-            "# {project} orchestrator\n\n{}\n",
-            orchestrator_system_prompt(session)
+            "{AGENTS_MARKER}\n# {project} orchestrator\n\n{}\n",
+            orchestrator_system_prompt(session, context)
         );
         std::fs::write(agents, text).map_err(|_| fail())?;
     }

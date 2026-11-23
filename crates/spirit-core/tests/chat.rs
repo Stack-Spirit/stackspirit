@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use spirit_core::engine::chat::{
     ApplyOutcome, ChatEndpointResolver, ChatEngine, ChatEvent, ChatEventApplier, ChatEventBus,
     ChatLogQuery, ChatMessage, ChatSessionId, ChatSessionLocation, ChatSessionState,
-    ChatStartInput, LocalChatProvider, ResolvedEndpoint, StreamSupport,
+    ChatStartInput, KnownOrchestratorSession, LocalChatProvider, ResolvedEndpoint, StreamSupport,
 };
 use spirit_core::engine::{
     EngineChoice, EngineRuntime, EngineStatus, ExternalHarnessKind, PrivateEngineTree,
@@ -419,6 +419,7 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<FakeState>>, stop: 
                 }),
             );
         }
+        ("POST", "/mcp") => write_json(&mut stream, 200, &json!({"vowp": {"status": "connected"}})),
         ("GET", "/event") => handle_event(stream, state, stop),
         _ => handle_session_route(stream, state, stop, &request.method, path, &body),
     }
@@ -1728,12 +1729,15 @@ async fn dead_bundled_port_pump_probes_the_engine_and_rebinds_instead_of_stream_
 
 struct RecordingProvisioner {
     calls: Mutex<Vec<String>>,
-    result: fn() -> Result<(), SpiritError>,
+    result: fn() -> Result<Option<KnownOrchestratorSession>, SpiritError>,
 }
 
 #[async_trait::async_trait]
 impl spirit_core::engine::ChatOrchestratorProvisioner for RecordingProvisioner {
-    async fn ensure_orchestrator(&self, project: &str) -> Result<(), SpiritError> {
+    async fn ensure_orchestrator(
+        &self,
+        project: &str,
+    ) -> Result<Option<KnownOrchestratorSession>, SpiritError> {
         self.calls.lock().unwrap().push(project.to_owned());
         (self.result)()
     }
@@ -1747,7 +1751,7 @@ async fn provision_creates_the_vowp_orchestrator_before_the_endpoint_lookup() {
         build_provider(&server, &workspace.path().join("workspaces/setup"), true);
     let provisioner = Arc::new(RecordingProvisioner {
         calls: Mutex::new(Vec::new()),
-        result: || Ok(()),
+        result: || Ok(None),
     });
     let provider = unconfigured(provider).with_orchestrator_provisioner(provisioner.clone());
     provider
@@ -1912,4 +1916,306 @@ async fn send_turn_rejects_bad_attachments_and_variants() {
             .await
             .is_err()
     );
+}
+
+// --- VOWP universal session wiring (ss-122b) ---------------------------------------------
+
+const VOWP_SESSION: &str = "01JCF5WQ8ZK3M2V7N4P6R8T0AE";
+const VOWP_SURFACE: &str = "01JCF5WQ8ZK3M2V7N4P6R8T0AF";
+const VOWP_SOCKET: &str = "/home/owner/.vowp-agent/agent.sock";
+
+fn wired_session() -> KnownOrchestratorSession {
+    KnownOrchestratorSession {
+        session_id: VOWP_SESSION.to_owned(),
+        surface_id: Some(VOWP_SURFACE.to_owned()),
+        agent_socket_path: Some(PathBuf::from(VOWP_SOCKET)),
+    }
+}
+
+fn mcp_requests(server: &FakeEngine) -> Vec<RequestRecord> {
+    server
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "POST" && r.path == "/mcp")
+        .collect()
+}
+
+async fn send_and_read_system(
+    provider: &LocalChatProvider,
+    server: &FakeEngine,
+    session: &ChatSessionId,
+) -> String {
+    let before = server
+        .requests()
+        .iter()
+        .filter(|r| r.method == "POST" && r.path.ends_with("/message"))
+        .count();
+    let mut receiver = provider.subscribe();
+    provider.send(session, "Hello?").await.unwrap();
+    let _ = collect_until_done(&mut receiver, Duration::from_secs(5)).await;
+    let requests = server.requests();
+    let message = requests
+        .iter()
+        .filter(|r| r.method == "POST" && r.path.ends_with("/message"))
+        .nth(before)
+        .expect("a message request");
+    let body: Value = serde_json::from_str(&message.body).unwrap();
+    body["system"].as_str().unwrap_or_default().to_owned()
+}
+
+#[test]
+fn vowp_mcp_command_matches_the_installed_cli_contract() {
+    // `vowp mcp --help`: `--surface <ID>` is required; `--agent-socket <PATH>` selects the
+    // Mac proxy; there is no `--agent` flag.
+    assert_eq!(
+        wired_session().mcp_command().unwrap(),
+        [
+            "vowp",
+            "mcp",
+            "--agent-socket",
+            VOWP_SOCKET,
+            "--surface",
+            VOWP_SURFACE
+        ]
+    );
+    let mut missing_socket = wired_session();
+    missing_socket.agent_socket_path = None;
+    assert!(missing_socket.mcp_command().is_none());
+    let mut missing_surface = wired_session();
+    missing_surface.surface_id = None;
+    assert!(missing_surface.mcp_command().is_none());
+    let mut relative = wired_session();
+    relative.agent_socket_path = Some(PathBuf::from("agent.sock"));
+    assert!(relative.mcp_command().is_none());
+    let mut bad_surface = wired_session();
+    bad_surface.surface_id = Some("--agent".to_owned());
+    assert!(bad_surface.mcp_command().is_none());
+    assert!(
+        !wired_session()
+            .mcp_command()
+            .unwrap()
+            .iter()
+            .any(|arg| arg == "--agent")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fallback_registers_the_vowp_mcp_and_carries_the_session_in_every_prompt() {
+    let server = FakeEngine::sse(SseScript::Deltas);
+    let workspace = tempfile::tempdir().unwrap();
+    let setup = workspace.path().join("workspaces/setup");
+    let (provider, _engine) = build_provider(&server, &setup, true);
+    let provider = unconfigured(provider);
+    let session = project_session("stackspirit");
+    let project_dir = workspace.path().join("workspaces/project/stackspirit");
+
+    // Setup never gets an MCP server or VOWP context.
+    provider.start(&setup_input()).await.unwrap();
+    assert!(mcp_requests(&server).is_empty());
+
+    provider
+        .provision_orchestrator_with("stackspirit", Some(wired_session()))
+        .await
+        .unwrap();
+    let mcp = mcp_requests(&server);
+    assert_eq!(mcp.len(), 1, "{mcp:#?}");
+    assert_eq!(mcp[0].directory.as_deref(), project_dir.to_str());
+    let body: Value = serde_json::from_str(&mcp[0].body).unwrap();
+    assert_eq!(body["name"], "vowp");
+    assert_eq!(body["config"]["type"], "local");
+    assert_eq!(body["config"]["enabled"], true);
+    assert_eq!(
+        body["config"]["command"],
+        json!([
+            "vowp",
+            "mcp",
+            "--agent-socket",
+            VOWP_SOCKET,
+            "--surface",
+            VOWP_SURFACE
+        ])
+    );
+
+    // Tool permissions stay `ask` on the session; Setup's deny-all config is untouched.
+    let created = server
+        .requests()
+        .into_iter()
+        .rfind(|r| r.method == "POST" && r.path == "/session")
+        .unwrap();
+    let created: Value = serde_json::from_str(&created.body).unwrap();
+    assert_eq!(created["permission"][0]["action"], "ask");
+
+    let system = send_and_read_system(&provider, &server, &session).await;
+    for needle in [
+        VOWP_SESSION,
+        "stackspirit",
+        "session_resume",
+        "fleet_status",
+        "fleet_queue",
+        "inbox_list",
+        "Never ask for or print passwords, API keys, tokens or pairing codes",
+    ] {
+        assert!(system.contains(needle), "missing {needle}: {system}");
+    }
+    assert!(!system.contains(VOWP_SURFACE) && !system.contains(VOWP_SOCKET));
+
+    let agents = std::fs::read_to_string(project_dir.join("AGENTS.md")).unwrap();
+    assert!(agents.contains(VOWP_SESSION) && agents.contains("session_resume"));
+    assert!(!agents.contains(VOWP_SOCKET));
+
+    // The Setup assistant is still the Setup assistant, with no VOWP text.
+    let setup_system = send_and_read_system(&provider, &server, &SETUP).await;
+    assert!(!setup_system.contains(VOWP_SESSION));
+    assert_eq!(mcp_requests(&server).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fallback_without_a_startable_vowp_command_never_registers_or_claims_the_tools() {
+    let server = FakeEngine::sse(SseScript::Deltas);
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, _engine) =
+        build_provider(&server, &workspace.path().join("workspaces/setup"), true);
+    let provider = unconfigured(provider);
+    let mut known = wired_session();
+    known.agent_socket_path = None;
+    provider
+        .provision_orchestrator_with("stackspirit", Some(known))
+        .await
+        .unwrap();
+    assert!(mcp_requests(&server).is_empty());
+    let system = send_and_read_system(&provider, &server, &project_session("stackspirit")).await;
+    assert!(system.contains(VOWP_SESSION));
+    assert!(system.contains("not wired"), "{system}");
+    assert!(!system.contains("session_resume"), "{system}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_again_refreshes_a_bare_fallback_instead_of_keeping_it_stale() {
+    let server = FakeEngine::sse(SseScript::Deltas);
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, _engine) =
+        build_provider(&server, &workspace.path().join("workspaces/setup"), true);
+    let provider = unconfigured(provider);
+    let project_dir = workspace.path().join("workspaces/project/stackspirit");
+    let session = project_session("stackspirit");
+
+    provider
+        .provision_orchestrator_with("stackspirit", None)
+        .await
+        .unwrap();
+    let bare = std::fs::read_to_string(project_dir.join("AGENTS.md")).unwrap();
+    assert!(!bare.contains(VOWP_SESSION));
+    assert!(mcp_requests(&server).is_empty());
+    let sessions_before = server
+        .requests()
+        .iter()
+        .filter(|r| r.method == "POST" && r.path == "/session")
+        .count();
+
+    // A later Start with a real VOWP session refreshes AGENTS.md, registers the MCP server
+    // and reuses the native session instead of short-circuiting or creating another.
+    provider
+        .provision_orchestrator_with("stackspirit", Some(wired_session()))
+        .await
+        .unwrap();
+    let refreshed = std::fs::read_to_string(project_dir.join("AGENTS.md")).unwrap();
+    assert!(refreshed.contains(VOWP_SESSION), "{refreshed}");
+    assert_eq!(mcp_requests(&server).len(), 1);
+    let sessions_after = server
+        .requests()
+        .iter()
+        .filter(|r| r.method == "POST" && r.path == "/session")
+        .count();
+    assert_eq!(sessions_before, sessions_after);
+    let system = send_and_read_system(&provider, &server, &session).await;
+    assert!(system.contains(VOWP_SESSION) && system.contains("fleet_status"));
+
+    // An owner-authored AGENTS.md is never overwritten.
+    std::fs::write(project_dir.join("AGENTS.md"), "my own rules\n").unwrap();
+    provider
+        .provision_orchestrator_with("stackspirit", Some(wired_session()))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(project_dir.join("AGENTS.md")).unwrap(),
+        "my own rules\n"
+    );
+}
+
+/// Reports no endpoint until [`Self::enable`] is called, then delegates to a fake `vowp`
+/// whose `agent orchestrator endpoint` document points at the fake engine.
+struct SwitchableResolver {
+    live: AtomicBool,
+    inner: spirit_core::engine::chat::VowpEndpointResolver,
+}
+
+#[async_trait]
+impl ChatEndpointResolver for SwitchableResolver {
+    async fn resolve(
+        &self,
+        name: &str,
+        expected_session_id: Option<&str>,
+    ) -> Result<ResolvedEndpoint, SpiritError> {
+        if self.live.load(Ordering::SeqCst) {
+            self.inner.resolve(name, expected_session_id).await
+        } else {
+            NoLocalRecord.resolve(name, expected_session_id).await
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provisioning_upgrades_a_stuck_fallback_session_to_the_resolved_vowp_endpoint() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = FakeEngine::sse(SseScript::Deltas);
+    let workspace = tempfile::tempdir().unwrap();
+    let vowp_dir = tempfile::tempdir().unwrap();
+    let document = json!({
+        "name": "stackspirit", "app": "opencode", "session_id": VOWP_SESSION,
+        "location": "node", "node": "mac-studio", "state": "running",
+        "url": format!("http://127.0.0.1:{}", server.port()),
+        "native_session_id": "ses_fake_1", "auth": null,
+    });
+    let binary = vowp_dir.path().join("vowp");
+    std::fs::write(
+        &binary,
+        format!("#!/bin/sh\ncat <<'EOF'\n{document}\nEOF\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut paths = vec![vowp_dir.path().to_path_buf()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let resolver = Arc::new(SwitchableResolver {
+        live: AtomicBool::new(false),
+        inner: spirit_core::engine::chat::VowpEndpointResolver::with_path_env(
+            std::env::join_paths(paths).unwrap(),
+        ),
+    });
+    let (provider, _engine) =
+        build_provider(&server, &workspace.path().join("workspaces/setup"), true);
+    let provider = provider.with_endpoint_resolver(resolver.clone());
+    let session = project_session("stackspirit");
+
+    // 1. No endpoint yet: the bare bundled-engine fallback (setup-style, with a system prompt).
+    provider
+        .provision_orchestrator_with("stackspirit", None)
+        .await
+        .unwrap();
+    let system = send_and_read_system(&provider, &server, &session).await;
+    assert!(system.contains("orchestrator") && !system.contains(VOWP_SESSION));
+
+    // 2. VOWP now has an endpoint: Start upgrades instead of returning the stale fallback.
+    resolver.live.store(true, Ordering::SeqCst);
+    let view = provider
+        .provision_orchestrator_with("stackspirit", Some(wired_session()))
+        .await
+        .unwrap();
+    assert!(view.error.is_none(), "{view:?}");
+    let system = send_and_read_system(&provider, &server, &session).await;
+    assert!(
+        system.is_empty(),
+        "an attached VOWP orchestrator owns its own prompt: {system}"
+    );
+    // The upgrade never registers an MCP server on the bundled engine.
+    assert!(mcp_requests(&server).is_empty());
 }

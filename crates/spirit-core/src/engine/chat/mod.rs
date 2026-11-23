@@ -13,8 +13,8 @@ pub mod sse;
 
 pub use endpoint::{ChatEndpointResolver, ResolvedEndpoint, VowpEndpointResolver};
 pub use local::{
-    ChatEngine, ChatOrchestratorProvisioner, ChatTransport, LocalChatProvider, NativeSession,
-    map_http_status, map_provider_error,
+    ChatEngine, ChatOrchestratorProvisioner, ChatTransport, KnownOrchestratorSession,
+    LocalChatProvider, NativeSession, map_http_status, map_provider_error,
 };
 pub use model::{
     ChatAttachment, ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage,

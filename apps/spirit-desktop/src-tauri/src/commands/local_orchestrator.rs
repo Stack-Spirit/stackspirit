@@ -15,19 +15,27 @@
 //! and only on the direct `local_surface_pair` result so the owner can hand it to the
 //! Mac agent. It is never logged, stored in a view, or included in an event.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use spirit_core::engine::GateSnapshot;
+use spirit_core::engine::chat::KnownOrchestratorSession;
 use spirit_core::engine::gate::LocalOrchestratorGate;
+use spirit_core::error::{SpiritError, SpiritErrorCode};
 use spirit_core::time::Timestamp;
 use spirit_core::view::{
     AgentPathView, LocalAgentView, LocalOrchestratorView, LocalSurfaceView, OrchestratorView,
 };
+use spirit_core::vowp::local::{
+    agent_socket_path, agent_state_dir, bind_orchestrator_surface, find_paired_surface,
+};
 use spirit_core::vowp::{
-    AgentPairRequest, AgentPairing, OrchestratorMoveTarget, SurfacePairingView,
+    AgentPairRequest, AgentPairing, LocalAgentClient, OrchestratorMoveTarget, SurfacePairingView,
+    VowpClient,
 };
 use spirit_core::wire::{
-    AgentPathAddRequest, NodeCard, OrchestratorApp, OrchestratorNewRequest, SurfaceEntry,
-    SurfaceKind, SurfacePairRequest, SurfaceRevokeResult, SurfaceRotateRequest,
+    AgentPathAddRequest, NodeCard, OrchestratorApp, OrchestratorCard, OrchestratorNewRequest,
+    SurfaceEntry, SurfaceKind, SurfacePairRequest, SurfaceRevokeResult, SurfaceRotateRequest,
     SurfaceRotateResult,
 };
 use tauri::State;
@@ -530,52 +538,82 @@ pub async fn local_orchestrator_move(
     core.orchestrator_move(client.as_ref(), &name, target).await
 }
 
-/// Ensures the real VOWP universal orchestrator session for `project` exists on the
-/// connected VPS (`vowp orchestrator new --name <project> --project <project> --app
-/// opencode --node <local>`). Returns `Ok(false)` when no host or enrolled local node is
-/// connected, so the caller falls back to the bundled engine; an existing orchestrator is
-/// reused and never replaced.
+/// Ensures the real VOWP universal orchestrator session for `project` on the connected VPS
+/// and wires it to this Mac: the home record, a paired `opencode` surface, the local agent's
+/// `orchestrators/<project>/config.json` binding, and a running app host.
+///
+/// Returns `Ok(None)` when no host or enrolled local node is connected, so the caller falls
+/// back to the bundled engine without VOWP context. The returned session is passed straight
+/// into `LocalChatProvider::provision_orchestrator_with`.
 pub(crate) async fn ensure_project_orchestrator(
     state: &AppState,
     project: &str,
-) -> Result<bool, spirit_core::error::SpiritError> {
+) -> Result<Option<KnownOrchestratorSession>, SpiritError> {
     let gates = current_local_gates(state).await;
     let LocalOrchestratorGate::Ready {
         node: Some(node), ..
     } = &gates.local_orchestrator
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let Ok(client) = state.client() else {
-        return Ok(false);
+        return Ok(None);
     };
-    ensure_on_client(client.as_ref(), &node.to_string(), project).await?;
-    Ok(true)
+    let Some(state_dir) = agent_state_dir() else {
+        return Ok(None);
+    };
+    let local = state.local_agent();
+    ensure_on_client(
+        client.as_ref(),
+        local.as_ref(),
+        &state_dir,
+        &node.to_string(),
+        project,
+    )
+    .await
+    .map(Some)
 }
 
-/// Makes sure the project's orchestrator exists, runs on `node` and is live. A missing one is
-/// created; one on another node (or home-hosted) is moved; a stopped, failed or degraded one is
-/// resumed. An offline node cannot be fixed from here and is reported.
+/// Finds the home orchestrator card for `project`.
+async fn find_card(
+    client: &dyn VowpClient,
+    project: &str,
+) -> Result<Option<OrchestratorCard>, SpiritError> {
+    Ok(client.orchestrator_list().await?.into_iter().find(|card| {
+        card.name == project || card.project.as_ref().is_some_and(|p| p.as_str() == project)
+    }))
+}
+
+/// Makes sure the project's orchestrator exists, owns a paired and bound surface, runs on
+/// `node` and is live.
+///
+/// `vowp orchestrator new --node` persists the home record (with its fresh `session_id`)
+/// before `vowp-agent` tries to start the app, and the agent refuses with `surface_missing`
+/// or `surface_ambiguous` while no surface is paired for the new session. That refusal is
+/// therefore recovered by re-reading the list; pairing, binding and `resume` follow.
 async fn ensure_on_client(
-    client: &dyn spirit_core::vowp::VowpClient,
+    client: &dyn VowpClient,
+    local: &dyn LocalAgentClient,
+    state_dir: &Path,
     node: &str,
     project: &str,
-) -> Result<(), spirit_core::error::SpiritError> {
-    use spirit_core::error::{SpiritError, SpiritErrorCode};
-    let existing = client.orchestrator_list().await?;
-    let found = existing.into_iter().find(|card| {
-        card.name == project || card.project.as_ref().is_some_and(|p| p.as_str() == project)
-    });
-    let Some(mut card) = found else {
-        let request = OrchestratorNewRequest {
-            node: node.to_owned(),
-            app: OrchestratorApp::Opencode,
-            project: Some(project.to_owned()),
-            name: Some(project.to_owned()),
-            force: false,
-        };
-        client.orchestrator_new(request).await?;
-        return Ok(());
+) -> Result<KnownOrchestratorSession, SpiritError> {
+    let mut card = match find_card(client, project).await? {
+        Some(card) => card,
+        None => {
+            let request = OrchestratorNewRequest {
+                node: node.to_owned(),
+                app: OrchestratorApp::Opencode,
+                project: Some(project.to_owned()),
+                name: Some(project.to_owned()),
+                force: false,
+            };
+            match client.orchestrator_new(request).await {
+                Ok(card) => card,
+                // The record exists even though the start was refused; recover it.
+                Err(error) => find_card(client, project).await?.ok_or(error)?,
+            }
+        }
     };
     if card.state == "node_offline" {
         return Err(SpiritError::new(
@@ -583,6 +621,9 @@ async fn ensure_on_client(
             format!("the orchestrator node for {project} is offline"),
         ));
     }
+    let session = card.session_id.to_string();
+    let surface = ensure_paired_surface(client, local, state_dir, node, &session).await?;
+    bind_orchestrator_surface(state_dir, project, &session, &surface)?;
     if card.node.as_ref().map(ToString::to_string).as_deref() != Some(node) {
         card = client
             .orchestrator_move(
@@ -596,15 +637,87 @@ async fn ensure_on_client(
     if !matches!(card.state.as_str(), "running" | "starting") {
         client.orchestrator_resume(&card.name).await?;
     }
-    Ok(())
+    Ok(KnownOrchestratorSession {
+        session_id: session,
+        surface_id: Some(surface),
+        agent_socket_path: Some(agent_socket_path(state_dir)),
+    })
+}
+
+/// Returns the active `opencode` surface bound to `session` on this Mac, pairing one when
+/// none exists: home `surface pair`, then the Mac's `agent pair` with the one-time code on
+/// stdin. The code is never logged, stored or returned.
+async fn ensure_paired_surface(
+    client: &dyn VowpClient,
+    local: &dyn LocalAgentClient,
+    state_dir: &Path,
+    node: &str,
+    session: &str,
+) -> Result<String, SpiritError> {
+    if let Some(surface) = find_paired_surface(state_dir, session) {
+        let listed = client.surface_list(Some(node)).await?;
+        if listed.iter().any(|entry| {
+            entry.id == surface && entry.kind == SurfaceKind::Opencode && !entry.is_revoked()
+        }) {
+            return Ok(surface);
+        }
+    }
+    let pairing = client
+        .surface_pair(SurfacePairRequest {
+            session: session.to_owned(),
+            node: node.to_owned(),
+            kind: SurfaceKind::Opencode,
+            app: Some("opencode".to_owned()),
+            replace: None,
+        })
+        .await?;
+    let request = AgentPairRequest::new(
+        pairing.code().clone(),
+        pairing.surface.clone(),
+        pairing.session.clone(),
+        Some("opencode".to_owned()),
+    );
+    local.pair(&request).await?;
+    Ok(pairing.surface)
 }
 
 #[cfg(test)]
 mod ensure_tests {
     use super::*;
     use spirit_core::fixtures::{Scenario, capacity_report, fleet_status};
-    use spirit_core::vowp::MockVowpClient;
-    use spirit_core::wire::OrchestratorCard;
+    use spirit_core::vowp::{MockLocalAgentClient, MockVowpClient};
+    use spirit_core::wire::{AgentPairOutput, OrchestratorCard, SurfacePairOutput};
+
+    const SESSION: &str = "01JCF5WQ8ZK3M2V7N4P6R8T0AE";
+    const SURFACE: &str = "01JCF5WQ8ZK3M2V7N4P6R8T0AF";
+    const CODE: &str = "one-time-code-never-logged";
+
+    /// A private scratch agent-state directory removed on drop (the desktop crate has no
+    /// `tempfile` dev-dependency).
+    struct TempState(std::path::PathBuf);
+
+    impl TempState {
+        fn new() -> Self {
+            static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "spirit-ensure-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempState {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn mock(cards: Vec<OrchestratorCard>) -> MockVowpClient {
         MockVowpClient::new(
@@ -612,12 +725,34 @@ mod ensure_tests {
             capacity_report(Scenario::Idle).expect("capacity"),
         )
         .with_orchestrators(cards)
+        .with_surface_pairing(pairing_output())
+    }
+
+    fn pairing_output() -> SurfacePairOutput {
+        serde_json::from_value(serde_json::json!({
+            "surface": SURFACE, "node": "mac", "session": SESSION, "kind": "opencode",
+            "app": "opencode", "code": CODE,
+            "expires_at": "2026-12-01T00:00:00.000Z",
+            "command": "vowp agent pair --code-file -",
+        }))
+        .unwrap()
+    }
+
+    fn agent() -> MockLocalAgentClient {
+        MockLocalAgentClient::connected().with_pair(
+            serde_json::from_value::<AgentPairOutput>(serde_json::json!({
+                "surface_id": SURFACE,
+                "scopes": [],
+                "expires_at": "2026-12-01T00:00:00.000Z",
+            }))
+            .unwrap(),
+        )
     }
 
     fn card(state: &str, node: Option<&str>) -> OrchestratorCard {
         serde_json::from_value(serde_json::json!({
             "name": "stackspirit",
-            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AE",
+            "session_id": SESSION,
             "project": "stackspirit",
             "app": "opencode",
             "state": state,
@@ -627,10 +762,25 @@ mod ensure_tests {
         .unwrap()
     }
 
+    fn mark_paired(state_dir: &Path) {
+        let dir = state_dir.join("surfaces").join(SURFACE);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("session"), format!("{SESSION}\n")).unwrap();
+    }
+
+    fn listed_surface() -> spirit_core::wire::SurfaceEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": SURFACE, "node": "mac", "kind": "opencode", "state": "attached",
+        }))
+        .unwrap()
+    }
+
     #[tokio::test]
-    async fn creates_a_missing_orchestrator_with_the_vowp_new_path() {
-        let client = mock(Vec::new()).with_orchestrator_new_result(card("running", Some("mac")));
-        ensure_on_client(&client, "mac", "stackspirit")
+    async fn creates_pairs_binds_and_resumes_a_missing_orchestrator() {
+        let state = TempState::new();
+        let client = mock(Vec::new()).with_orchestrator_new_result(card("failed", Some("mac")));
+        let local = agent();
+        let known = ensure_on_client(&client, &local, state.path(), "mac", "stackspirit")
             .await
             .unwrap();
         let calls = client.orchestrator_new_calls();
@@ -638,24 +788,119 @@ mod ensure_tests {
         assert_eq!(calls[0].node, "mac");
         assert_eq!(calls[0].project.as_deref(), Some("stackspirit"));
         assert!(!calls[0].force);
+
+        let pairs = client.surface_pair_calls();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].session, SESSION);
+        assert_eq!(pairs[0].kind, SurfaceKind::Opencode);
+        let agent_pairs = local.pair_calls();
+        assert_eq!(agent_pairs.len(), 1);
+        assert_eq!(agent_pairs[0].surface, SURFACE);
+        assert_eq!(agent_pairs[0].session, SESSION);
+        assert_eq!(agent_pairs[0].app.as_deref(), Some("opencode"));
+        // The code only travels in the request object (stdin on the real client).
+        assert!(!format!("{agent_pairs:?}").contains(CODE));
+
+        let config = state.path().join("orchestrators/stackspirit/config.json");
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        assert_eq!(value["surface"], SURFACE);
+        assert_eq!(value["session"], SESSION);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&config).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        assert_eq!(known.session_id, SESSION);
+        assert_eq!(known.surface_id.as_deref(), Some(SURFACE));
+        assert_eq!(
+            known.agent_socket_path.as_deref(),
+            Some(state.path().join("agent.sock").as_path())
+        );
+        assert!(known.mcp_command().is_some());
+        assert_eq!(client.orchestrator_resume_calls(), vec!["stackspirit"]);
     }
 
     #[tokio::test]
-    async fn leaves_a_running_orchestrator_on_the_node_alone() {
-        let client = mock(vec![card("running", Some("mac"))]);
-        ensure_on_client(&client, "mac", "stackspirit")
+    async fn recovers_the_record_after_a_surface_missing_refusal() {
+        for code in ["surface_missing", "surface_ambiguous"] {
+            let state = TempState::new();
+            let client = mock(Vec::new())
+                .with_orchestrator_new_result(card("failed", Some("mac")))
+                .with_orchestrator_new_refusal(SpiritError::new(
+                    SpiritErrorCode::Engine,
+                    format!("{code}: pair a surface for this orchestrator"),
+                ));
+            let known = ensure_on_client(&client, &agent(), state.path(), "mac", "stackspirit")
+                .await
+                .unwrap();
+            assert_eq!(known.session_id, SESSION, "{code}");
+            assert_eq!(client.orchestrator_new_calls().len(), 1);
+            assert_eq!(client.surface_pair_calls().len(), 1);
+            assert_eq!(client.orchestrator_resume_calls(), vec!["stackspirit"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_without_a_persisted_record_is_reported() {
+        let state = TempState::new();
+        let client = mock(Vec::new()).with_orchestrator_new_refusal(SpiritError::new(
+            SpiritErrorCode::Engine,
+            "vowp orchestrator new failed",
+        ));
+        let err = ensure_on_client(&client, &agent(), state.path(), "mac", "stackspirit")
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("orchestrator new failed"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn reuses_an_active_paired_surface_without_pairing_again() {
+        let state = TempState::new();
+        mark_paired(state.path());
+        let client = mock(vec![card("running", Some("mac"))]).with_surfaces(vec![listed_surface()]);
+        let local = agent();
+        let known = ensure_on_client(&client, &local, state.path(), "mac", "stackspirit")
             .await
             .unwrap();
         assert!(client.orchestrator_new_calls().is_empty());
+        assert!(client.surface_pair_calls().is_empty());
+        assert!(local.pair_calls().is_empty());
         assert!(client.orchestrator_resume_calls().is_empty());
         assert!(client.orchestrator_move_calls().is_empty());
+        assert_eq!(known.surface_id.as_deref(), Some(SURFACE));
+        // The binding is rewritten so a second paired surface (`global`) never makes the
+        // agent report `surface_ambiguous`.
+        assert!(
+            state
+                .path()
+                .join("orchestrators/stackspirit/config.json")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn pairs_again_when_home_no_longer_lists_the_surface() {
+        let state = TempState::new();
+        mark_paired(state.path());
+        let client = mock(vec![card("running", Some("mac"))]);
+        let local = agent();
+        ensure_on_client(&client, &local, state.path(), "mac", "stackspirit")
+            .await
+            .unwrap();
+        assert_eq!(client.surface_pair_calls().len(), 1);
+        assert_eq!(local.pair_calls().len(), 1);
     }
 
     #[tokio::test]
     async fn resumes_a_stopped_or_failed_orchestrator() {
-        for state in ["stopped", "failed", "degraded"] {
-            let client = mock(vec![card(state, Some("mac"))]);
-            ensure_on_client(&client, "mac", "stackspirit")
+        for state_name in ["stopped", "failed", "degraded"] {
+            let state = TempState::new();
+            mark_paired(state.path());
+            let client =
+                mock(vec![card(state_name, Some("mac"))]).with_surfaces(vec![listed_surface()]);
+            ensure_on_client(&client, &agent(), state.path(), "mac", "stackspirit")
                 .await
                 .unwrap();
             assert_eq!(client.orchestrator_resume_calls(), vec!["stackspirit"]);
@@ -665,8 +910,11 @@ mod ensure_tests {
 
     #[tokio::test]
     async fn moves_an_orchestrator_on_another_node() {
-        let client = mock(vec![card("running", Some("other"))]);
-        ensure_on_client(&client, "mac", "stackspirit")
+        let state = TempState::new();
+        mark_paired(state.path());
+        let client =
+            mock(vec![card("running", Some("other"))]).with_surfaces(vec![listed_surface()]);
+        ensure_on_client(&client, &agent(), state.path(), "mac", "stackspirit")
             .await
             .unwrap();
         let moves = client.orchestrator_move_calls();
@@ -676,9 +924,10 @@ mod ensure_tests {
 
     #[tokio::test]
     async fn reports_an_offline_node() {
+        let state = TempState::new();
         let client = mock(vec![card("node_offline", Some("mac"))]);
         assert!(
-            ensure_on_client(&client, "mac", "stackspirit")
+            ensure_on_client(&client, &agent(), state.path(), "mac", "stackspirit")
                 .await
                 .is_err()
         );

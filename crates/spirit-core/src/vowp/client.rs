@@ -1274,6 +1274,7 @@ struct MockState {
     surface_revoke_calls: Vec<String>,
     orchestrators: Vec<OrchestratorCard>,
     orchestrator_new_result: Option<OrchestratorCard>,
+    orchestrator_new_refusal: Option<SpiritError>,
     orchestrator_new_calls: Vec<OrchestratorNewRequest>,
     orchestrator_stop_calls: Vec<String>,
     orchestrator_resume_calls: Vec<String>,
@@ -1324,6 +1325,7 @@ impl MockVowpClient {
                 surface_revoke_calls: Vec::new(),
                 orchestrators: Vec::new(),
                 orchestrator_new_result: None,
+                orchestrator_new_refusal: None,
                 orchestrator_new_calls: Vec::new(),
                 orchestrator_stop_calls: Vec::new(),
                 orchestrator_resume_calls: Vec::new(),
@@ -1475,6 +1477,18 @@ impl MockVowpClient {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .orchestrator_new_result = Some(card);
+        self
+    }
+
+    /// Makes `orchestrator new` behave like VOWP when `vowp-agent` refuses to start the app
+    /// (`surface_missing` / `surface_ambiguous`): the home record is persisted first, then
+    /// the call fails. The card from [`Self::with_orchestrator_new_result`] is the record.
+    #[must_use]
+    pub fn with_orchestrator_new_refusal(self, error: SpiritError) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .orchestrator_new_refusal = Some(error);
         self
     }
 
@@ -1863,6 +1877,20 @@ impl VowpClient for MockVowpClient {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.orchestrator_new_calls.push(request);
+        if let Some(error) = state.orchestrator_new_refusal.clone() {
+            if let Some(card) = state.orchestrator_new_result.clone() {
+                if !state.orchestrators.iter().any(|c| c.name == card.name) {
+                    state.orchestrators.push(card);
+                }
+            }
+            return Err(error);
+        }
+        if let Some(card) = state.orchestrator_new_result.clone() {
+            // Like VOWP, the created home record is listed afterwards.
+            if !state.orchestrators.iter().any(|c| c.name == card.name) {
+                state.orchestrators.push(card);
+            }
+        }
         state.orchestrator_new_result.clone().ok_or_else(|| {
             SpiritError::new(
                 SpiritErrorCode::Internal,

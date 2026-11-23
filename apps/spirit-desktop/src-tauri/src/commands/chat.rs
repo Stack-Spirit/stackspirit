@@ -6,9 +6,8 @@
 //! No reply contains an endpoint URL, port, credential, native session id, workspace or
 //! binary path; none is logged here.
 //!
-//! `global` and `project:<name>` stay gated in core until VOWP 0.5's orchestrator
-//! endpoint (or the owner-approved forward) lands; these adapters do not special-case
-//! them.
+//! `global` and `project:<name>` stay gated in core until VOWP's orchestrator endpoint
+//! resolves; these adapters only hand the ensured VOWP universal session to core.
 
 use spirit_core::engine::chat::{
     ChatLogPage, ChatLogQuery, ChatPermissionDecision, ChatSendInput, ChatSendReceipt,
@@ -38,10 +37,11 @@ pub async fn chat_provision_orchestrator(
 ) -> CommandResult<ChatSessionView> {
     // Create the real VOWP universal session on the VPS first when a host and an enrolled
     // local node are connected; otherwise core falls back to the bundled engine.
-    crate::commands::local_orchestrator::ensure_project_orchestrator(state.inner(), &project)
-        .await?;
+    let known =
+        crate::commands::local_orchestrator::ensure_project_orchestrator(state.inner(), &project)
+            .await?;
     let chat = state.chat();
-    chat.provision_orchestrator(&project).await
+    chat.provision_orchestrator_with(&project, known).await
 }
 
 /// Reuses the stored native session. Core never creates a session here.
