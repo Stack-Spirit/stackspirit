@@ -152,6 +152,9 @@ pub struct QueueJobCard {
     pub age_secs: u64,
     /// Last admission or brake reason.
     pub waiting_reason: Option<String>,
+    /// Upstream jobs this job needs, from the job graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<JobId>,
 }
 
 /// The newest merge recorded for a project.

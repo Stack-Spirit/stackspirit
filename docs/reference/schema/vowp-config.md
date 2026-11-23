@@ -384,7 +384,7 @@ Exported by `vowp schema VowpConfig` and generated from the protocol types in
       "type": "object"
     },
     "JobId": {
-      "description": "Job id slug, for example `example-job`.",
+      "description": "Job id slug, for example `example-job`, at most 120 characters.",
       "type": "string"
     },
     "JobKind": {

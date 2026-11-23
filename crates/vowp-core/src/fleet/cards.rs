@@ -115,17 +115,20 @@ pub(crate) fn project_read(
     queued.truncate(200);
     let queue = queued
         .into_iter()
-        .map(|job| QueueJobCard {
-            job: job.id.clone(),
-            title: full_title(redactor, &job.title),
-            kind: job.kind,
-            role: job.role,
-            priority: job.priority,
-            state: job.state,
-            age_secs: now.since(job.created_at).as_secs(),
-            waiting_reason: waiting_reason(redactor, job),
+        .map(|job| {
+            Ok(QueueJobCard {
+                job: job.id.clone(),
+                title: full_title(redactor, &job.title),
+                kind: job.kind,
+                role: job.role,
+                priority: job.priority,
+                state: job.state,
+                age_secs: now.since(job.created_at).as_secs(),
+                waiting_reason: waiting_reason(redactor, job),
+                needs: store.needs_of(&job.id)?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, CoreError>>()?;
 
     // `latest_gate_results` only sees the newest attempt. The card is specified as the last
     // 10 failures across the project, so walk every attempt the job has recorded. The newest

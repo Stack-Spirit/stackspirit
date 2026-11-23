@@ -72,7 +72,7 @@ Exported by `vowp schema ProjectSnapshot` and generated from the protocol types 
       "type": "object"
     },
     "JobId": {
-      "description": "Job id slug, for example `example-job`.",
+      "description": "Job id slug, for example `example-job`, at most 120 characters.",
       "type": "string"
     },
     "JobKind": {
@@ -282,6 +282,13 @@ Exported by `vowp schema ProjectSnapshot` and generated from the protocol types 
         "kind": {
           "$ref": "#/$defs/JobKind",
           "description": "Job kind."
+        },
+        "needs": {
+          "description": "Upstream jobs this job needs, from the job graph.",
+          "items": {
+            "$ref": "#/$defs/JobId"
+          },
+          "type": "array"
         },
         "priority": {
           "description": "Dispatch priority.",

@@ -1679,3 +1679,45 @@ fn gate_failures_exclude_terminal_jobs() {
     let jobs: Vec<&str> = alpha.gate_failures.iter().map(|failure| failure.job.as_str()).collect();
     assert_eq!(jobs, vec!["t01-live"], "only the failed (live) job keeps its failure");
 }
+
+#[test]
+fn queue_card_needs_carries_real_upstream_dependencies() {
+    let fixture = Fixture::new();
+    let up_one = fixture.job(&fixture.alpha, "up-one", 10);
+    let up_two = fixture.job(&fixture.alpha, "up-two", 10);
+    let waiting = fixture.job(&fixture.alpha, "waiting", 20);
+    let independent = fixture.job(&fixture.alpha, "independent", 5);
+    let store = fixture.store_for(&fixture.alpha);
+    for upstream in [&up_one, &up_two] {
+        store
+            .add_edge(&vowp_protocol::Edge {
+                src: waiting.id.clone(),
+                dst: upstream.id.clone(),
+                kind: vowp_protocol::EdgeKind::Needs,
+            })
+            .expect("needs edge");
+    }
+    for job in [&waiting, &independent] {
+        fixture.set_state(
+            &fixture.alpha,
+            job,
+            JobState::Ready,
+            StateChange {
+                note: None,
+                parked_reason: None,
+            },
+        );
+    }
+
+    let snapshot = fixture.snapshot();
+    let alpha = snapshot
+        .projects
+        .iter()
+        .find(|project| project.name == fixture.alpha)
+        .expect("alpha card");
+    let card = |id: &JobId| alpha.queue.iter().find(|card| &card.job == id).expect("queue card");
+    assert_eq!(card(&waiting.id).needs, vec![up_one.id.clone(), up_two.id.clone()]);
+    assert!(card(&independent.id).needs.is_empty());
+    let json = serde_json::to_value(card(&independent.id)).expect("json");
+    assert!(json.get("needs").is_none(), "empty needs is not serialized");
+}
