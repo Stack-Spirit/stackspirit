@@ -561,6 +561,7 @@ mod tests {
             label: "Big Pickle".to_owned(),
             context_tokens: None,
             free: true,
+            variants: Vec::new(),
         }]));
         let mut supervisor = EngineSupervisor::new(
             runtime,
@@ -628,6 +629,7 @@ mod tests {
             label: id.to_owned(),
             context_tokens: None,
             free: true,
+            variants: Vec::new(),
         }
     }
 

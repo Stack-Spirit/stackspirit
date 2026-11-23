@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { toSpiritError } from "../bridge/errors";
 import type { SpiritBridge } from "../bridge/SpiritBridge";
 import type {
+  ChatAttachment,
   ChatCloseReason,
   ChatEvent,
   ChatLogPage,
@@ -120,7 +121,11 @@ interface ConversationState {
    */
   provision: (session: SessionId) => Promise<void>;
   /** Accept one user turn through `bridge.chat`; assistant text arrives as events. */
-  send: (session: SessionId, text: string) => Promise<void>;
+  send: (
+    session: SessionId,
+    text: string,
+    options?: { variant?: string | null; attachments?: ChatAttachment[] },
+  ) => Promise<void>;
   /** Abort the current turn through `bridge.chat`; never stops an engine or host. */
   stop: (session: SessionId) => Promise<void>;
   /** Switch the setup assistant's model inline; an orchestrator-owned session rejects. */
@@ -736,7 +741,7 @@ export const useConversations = create<ConversationState>((set, get) => ({
       false,
     ),
 
-  send: async (session, text) => {
+  send: async (session, text, options) => {
     const trimmed = text.trim();
     if (!trimmed) return;
     const bridge = currentBridge();
@@ -756,7 +761,12 @@ export const useConversations = create<ConversationState>((set, get) => ({
     if (!view || view.state !== "ready") return;
 
     try {
-      const receipt = await chat.send({ session, text: trimmed });
+      const receipt = await chat.send({
+        session,
+        text: trimmed,
+        ...(options?.variant ? { variant: options.variant } : {}),
+        ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
+      });
       if (!bridge.preview && receipt.message.origin === "preview") return;
       const message: ChatMessageView = {
         ...normalizeMessage(receipt.message),

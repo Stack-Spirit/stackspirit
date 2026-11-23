@@ -312,6 +312,7 @@ impl LiveChatEngine {
                     return None;
                 };
                 Some(ChatModelView {
+                    variants: None,
                     label: if model.label.is_empty() {
                         model.id.clone()
                     } else {

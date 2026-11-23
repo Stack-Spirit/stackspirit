@@ -60,6 +60,7 @@ impl ModelCatalog {
                 label: String::new(),
                 context_tokens: None,
                 free: true,
+                variants: Vec::new(),
             })
             .collect::<Vec<_>>();
         self.verify_runtime(&models, verified_at)
@@ -152,6 +153,7 @@ mod tests {
             label: entry.label.clone(),
             context_tokens: entry.context_tokens,
             free,
+            variants: Vec::new(),
         }
     }
 

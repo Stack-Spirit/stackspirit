@@ -216,6 +216,7 @@ impl EngineRuntime for KeychainRuntime {
             label: "Big Pickle".to_owned(),
             context_tokens: None,
             free: true,
+            variants: Vec::new(),
         }];
         if self.configured("deepseek") {
             models.push(RuntimeModel {
@@ -224,6 +225,7 @@ impl EngineRuntime for KeychainRuntime {
                 label: "DeepSeek Flash".to_owned(),
                 context_tokens: Some(128_000),
                 free: false,
+                variants: Vec::new(),
             });
         }
         Ok(models)

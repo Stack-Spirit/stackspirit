@@ -1381,6 +1381,11 @@ export interface ChatModelView {
   tier?: ChatModelTier;
   /** Context window when the engine reports it; otherwise null/absent. */
   context_tokens?: number | null;
+  /**
+   * Reasoning-effort variants the engine declares for this model (for example `low`,
+   * `high`). Absent or empty means the model has no reasoning support.
+   */
+  variants?: string[];
 }
 
 /**
@@ -1469,9 +1474,19 @@ export interface ChatStartInput {
   resume?: boolean;
 }
 
+/** One image/file attached to a user turn; `url` is a `data:` URI. */
+export interface ChatAttachment {
+  filename: string;
+  mime: string;
+  url: string;
+}
+
 export interface ChatSendInput {
   session: SessionId;
   text: string;
+  /** Selected reasoning-effort variant, forwarded to OpenCode as `variant`. */
+  variant?: string | null;
+  attachments?: ChatAttachment[];
 }
 
 export interface ChatSendReceipt {

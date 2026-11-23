@@ -45,6 +45,7 @@ fn model() -> spirit_core::engine::chat::ChatModelView {
         provider: "opencode".to_owned(),
         tier: spirit_core::engine::chat::ChatModelTier::Included,
         context_tokens: Some(128_000),
+        variants: None,
     }
 }
 
@@ -1591,6 +1592,7 @@ fn deepseek_model() -> spirit_core::engine::chat::ChatModelView {
         provider: "deepseek".to_owned(),
         tier: spirit_core::engine::chat::ChatModelTier::Included,
         context_tokens: Some(64_000),
+        variants: None,
     }
 }
 
@@ -1817,4 +1819,97 @@ async fn engine_backed_project_session_is_not_the_setup_assistant() {
     let system = body["system"].as_str().unwrap();
     assert!(system.contains("orchestrator") && !system.contains("setup assistant"));
     assert_eq!(message.directory.as_deref(), project_dir.to_str());
+}
+
+#[test]
+fn provider_variants_are_parsed_into_runtime_models() {
+    let body = json!({
+        "all": [{"id": "deepseek", "models": {
+            "v4-flash": {"name": "V4 Flash", "variants": {"low": {}, "high": {}, "max": {"disabled": true}}},
+            "plain": {"name": "Plain"}
+        }}],
+        "connected": ["deepseek"]
+    })
+    .to_string();
+    let models = spirit_core::engine::process::parse_models(body.as_bytes());
+    let flash = models.iter().find(|m| m.id == "deepseek/v4-flash").unwrap();
+    let mut variants = flash.variants.clone();
+    variants.sort();
+    assert_eq!(variants, vec!["high", "low"]);
+    let plain = models.iter().find(|m| m.id == "deepseek/plain").unwrap();
+    assert!(plain.variants.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_turn_forwards_variant_and_file_parts() {
+    use spirit_core::engine::chat::ChatAttachment;
+    let server = FakeEngine::sse(SseScript::Deltas);
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, _engine) = build_provider(&server, workspace.path(), true);
+    provider.start(&setup_input()).await.unwrap();
+    let attachments = vec![
+        ChatAttachment {
+            filename: "shot.png".into(),
+            mime: "image/png".into(),
+            url: "data:image/png;base64,AAAA".into(),
+        },
+        ChatAttachment {
+            filename: "notes.txt".into(),
+            mime: "text/plain".into(),
+            url: "data:text/plain;base64,aGk=".into(),
+        },
+    ];
+    provider
+        .send_turn(&SETUP, "look", Some("high"), &attachments)
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            server
+                .requests()
+                .iter()
+                .any(|r| r.method == "POST" && r.path.ends_with("/message"))
+        },
+        Duration::from_secs(3),
+    )
+    .await;
+    let requests = server.requests();
+    let message = requests
+        .iter()
+        .find(|r| r.method == "POST" && r.path.ends_with("/message"))
+        .expect("message request");
+    let body: Value = serde_json::from_str(&message.body).unwrap();
+    assert_eq!(body["variant"], "high");
+    assert_eq!(body["parts"][0], json!({"type": "text", "text": "look"}));
+    assert_eq!(
+        body["parts"][1],
+        json!({"type": "file", "mime": "image/png", "filename": "shot.png", "url": "data:image/png;base64,AAAA"})
+    );
+    assert_eq!(body["parts"][2]["filename"], "notes.txt");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_turn_rejects_bad_attachments_and_variants() {
+    use spirit_core::engine::chat::ChatAttachment;
+    let server = FakeEngine::sse(SseScript::Deltas);
+    let workspace = tempfile::tempdir().unwrap();
+    let (provider, _engine) = build_provider(&server, workspace.path(), true);
+    provider.start(&setup_input()).await.unwrap();
+    let remote = vec![ChatAttachment {
+        filename: "x".into(),
+        mime: "image/png".into(),
+        url: "https://example.com/x.png".into(),
+    }];
+    assert!(
+        provider
+            .send_turn(&SETUP, "hi", None, &remote)
+            .await
+            .is_err()
+    );
+    assert!(
+        provider
+            .send_turn(&SETUP, "hi", Some("a b"), &[])
+            .await
+            .is_err()
+    );
 }

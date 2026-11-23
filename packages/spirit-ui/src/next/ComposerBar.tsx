@@ -5,11 +5,18 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent,
+  type DragEvent,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
 
-import type { ChatModelView, ChatUsageView, SessionId } from "../bridge/wire";
+import type {
+  ChatAttachment,
+  ChatModelView,
+  ChatUsageView,
+  SessionId,
+} from "../bridge/wire";
 import { Modal } from "../components/Modal";
 import { ContextMeter, UsageStats } from "./ContextMeter";
 import { SettingsPage } from "./SettingsPage";
@@ -140,6 +147,37 @@ function tierBadge(tier: ChatModelGroup["tier"]): string {
   return "Connected";
 }
 
+/** Largest single attachment, in bytes. */
+export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+/** Most attachments on one turn. */
+export const MAX_ATTACHMENTS = 8;
+const ACCEPT =
+  "image/*,application/pdf,text/*,.md,.json,.yaml,.yml,.toml,.rs,.ts,.tsx,.js,.jsx,.py,.go,.java,.c,.cpp,.h,.sh,.css,.html,.sql,.log";
+
+/** Reads one file as a `data:` URI attachment. */
+function readAttachment(file: File): Promise<ChatAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
+    reader.onload = () => {
+      const mime = file.type || "text/plain";
+      let url = String(reader.result);
+      // Some platforms leave the MIME empty in the data URI.
+      if (url.startsWith("data:;")) url = `data:${mime};${url.slice(6)}`;
+      resolve({ filename: file.name || "pasted-image", mime, url });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+interface PendingAttachment extends ChatAttachment {
+  key: string;
+}
+
 export interface ComposerBarProps {
   session: SessionId;
   placeholder: string;
@@ -168,7 +206,10 @@ export interface ComposerBarProps {
   hero?: boolean;
   usage?: ChatUsageView | null;
   /** May return the acceptance promise so the primary button can show a spinner. */
-  onSend: (text: string) => void | Promise<void>;
+  onSend: (
+    text: string,
+    options?: { variant?: string | null; attachments?: ChatAttachment[] },
+  ) => void | Promise<void>;
   onStop: () => void;
   onStart: () => void;
   onSelectModel?: (modelId: string) => void;
@@ -217,6 +258,11 @@ export function ComposerBar({
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [providerSettingsOpen, setProviderSettingsOpen] = useState(false);
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [variantByModel, setVariantByModel] = useState<Record<string, string>>({});
+  const fileInput = useRef<HTMLInputElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   /** True while the Message field owns (or is about to regain) focus. */
   const restoreFocus = useRef(false);
@@ -264,12 +310,71 @@ export function ComposerBar({
     }
   }, [draft, onDraftApplied]);
 
+  // Reasoning effort is strictly the selected model's own declared variants.
+  const modelVariants = useMemo(() => {
+    const found = models?.find((candidate) => candidate.id === model?.id) ?? model;
+    return found?.variants ?? [];
+  }, [models, model]);
+  const chosen = model ? variantByModel[model.id] : undefined;
+  const activeVariant = chosen && modelVariants.includes(chosen) ? chosen : null;
+
+  async function addFiles(files: File[]) {
+    if (files.length === 0) return;
+    setAttachError(null);
+    const next: PendingAttachment[] = [];
+    for (const file of files) {
+      if (attachments.length + next.length >= MAX_ATTACHMENTS) {
+        setAttachError(`You can attach up to ${MAX_ATTACHMENTS} files per message.`);
+        break;
+      }
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setAttachError(
+          `${file.name || "File"} is too large. The limit is ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB per file.`,
+        );
+        continue;
+      }
+      try {
+        const item = await readAttachment(file);
+        next.push({ ...item, key: `${Date.now()}-${Math.random().toString(36).slice(2)}` });
+      } catch (caught) {
+        setAttachError(caught instanceof Error ? caught.message : "Could not read the file.");
+      }
+    }
+    if (next.length > 0) setAttachments((current) => [...current, ...next]);
+  }
+
+  function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(event.clipboardData?.files ?? []).filter((file) =>
+      file.type.startsWith("image/"),
+    );
+    if (files.length === 0) return;
+    event.preventDefault();
+    void addFiles(files);
+  }
+
+  function onDrop(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setDragging(false);
+    if (disabled) return;
+    void addFiles(Array.from(event.dataTransfer?.files ?? []));
+  }
+
   async function submit() {
     if (disabled || streaming || sending || submitting) return;
     const trimmed = text.trim();
     if (!trimmed) return;
     setText("");
-    const pending = onSend(trimmed);
+    const sentAttachments = attachments.map(({ filename, mime, url }) => ({
+      filename,
+      mime,
+      url,
+    }));
+    setAttachments([]);
+    setAttachError(null);
+    const pending = onSend(trimmed, {
+      variant: activeVariant,
+      ...(sentAttachments.length > 0 ? { attachments: sentAttachments } : {}),
+    });
     if (pending) {
       setSubmitting(true);
       try {
@@ -296,13 +401,56 @@ export function ComposerBar({
   return (
     <div className="nx-composer-shell">
       <form
-        className={`nx-composer${disabled ? " nx-composer--disabled" : ""}`}
+        className={`nx-composer${disabled ? " nx-composer--disabled" : ""}${
+          dragging ? " nx-composer--drag" : ""
+        }`}
         aria-busy={sending}
+        data-testid="composer-form"
+        onDragOver={(event) => {
+          if (disabled) return;
+          event.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={onDrop}
         onSubmit={(event) => {
           event.preventDefault();
           void submit();
         }}
       >
+      {attachments.length > 0 ? (
+        <ul className="nx-attachments" aria-label="Attachments" data-testid="composer-attachments">
+          {attachments.map((item) => (
+            <li key={item.key} className="nx-attachment">
+              {item.mime.startsWith("image/") ? (
+                <img className="nx-attachment__thumb" src={item.url} alt="" />
+              ) : (
+                <span className="nx-attachment__icon" aria-hidden="true">
+                  ▤
+                </span>
+              )}
+              <span className="nx-attachment__name" title={item.filename}>
+                {item.filename}
+              </span>
+              <button
+                type="button"
+                className="nx-attachment__remove"
+                aria-label={`Remove ${item.filename}`}
+                onClick={() =>
+                  setAttachments((current) => current.filter((entry) => entry.key !== item.key))
+                }
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {attachError ? (
+        <p className="nx-attachments__error" role="alert" data-testid="composer-attach-error">
+          {attachError}
+        </p>
+      ) : null}
       <label htmlFor={id} className="nx-sr">
         Message
       </label>
@@ -324,9 +472,36 @@ export function ComposerBar({
           if (!event.currentTarget.disabled) restoreFocus.current = false;
         }}
         onKeyDown={onKeyDown}
+        onPaste={onPaste}
       />
       <div className="nx-composer__controls">
         <div className="nx-composer__left">
+          <input
+            ref={fileInput}
+            type="file"
+            multiple
+            hidden
+            accept={ACCEPT}
+            data-testid="composer-file-input"
+            aria-label="Attach files"
+            tabIndex={-1}
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? []);
+              event.target.value = "";
+              void addFiles(files);
+            }}
+          />
+          <button
+            type="button"
+            className="nx-composer__attach"
+            data-testid="composer-attach"
+            aria-label="Attach images or files"
+            title="Attach images or files"
+            disabled={disabled}
+            onClick={() => fileInput.current?.click()}
+          >
+            <span aria-hidden="true">+</span>
+          </button>
           {modelMissing ? (
             <button
               type="button"
@@ -342,6 +517,11 @@ export function ComposerBar({
             <ModelPicker
               model={model}
               models={models}
+              variants={modelVariants}
+              variant={activeVariant}
+              onSelectVariant={(value) =>
+                model && setVariantByModel((current) => ({ ...current, [model.id]: value }))
+              }
               disabled={disabled && !allowModelSwitch}
               openRequest={openModelPickerRequest}
               onSelect={onSelectModel}
@@ -360,6 +540,7 @@ export function ComposerBar({
               }
             >
               {model ? modelDisplayLabel(model) : "Orchestrator default"}
+              {activeVariant ? ` · ${capitalize(activeVariant)}` : ""}
             </span>
           ) : null}
           {connect ? (
@@ -451,6 +632,9 @@ export function ComposerDock({ usage }: { usage?: ChatUsageView | null }) {
 function ModelPicker({
   model,
   models,
+  variants = [],
+  variant = null,
+  onSelectVariant,
   disabled,
   openRequest = 0,
   onSelect,
@@ -459,6 +643,9 @@ function ModelPicker({
 }: {
   model: ChatModelView | null;
   models: ChatModelView[];
+  variants?: string[];
+  variant?: string | null;
+  onSelectVariant?: (variant: string) => void;
   disabled: boolean;
   openRequest?: number;
   onSelect?: (modelId: string) => void;
@@ -577,6 +764,7 @@ function ModelPicker({
   }
 
   const current = model ? modelDisplayLabel(model) : "Choose a model";
+  const currentWithEffort = variant ? `${current} · ${capitalize(variant)}` : current;
   const trimmed = query.trim();
 
   return (
@@ -588,13 +776,13 @@ function ModelPicker({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? id : undefined}
-        aria-label={`Model: ${current}`}
+        aria-label={`Model: ${currentWithEffort}`}
         data-testid="composer-model"
-        title={current}
+        title={currentWithEffort}
         disabled={disabled || !onSelect}
         onClick={() => (open ? setOpen(false) : openPicker())}
       >
-        <span className="nx-model-picker__label">{current}</span>
+        <span className="nx-model-picker__label">{currentWithEffort}</span>
         <Chevron />
       </button>
       {open ? (
@@ -694,6 +882,31 @@ function ModelPicker({
               </div>
             )}
           </div>
+          {variants.length > 0 ? (
+            <div
+              className="nx-model-menu__effort"
+              role="radiogroup"
+              aria-label="Reasoning effort"
+              data-testid="reasoning-effort"
+            >
+              <span className="nx-model-menu__effort-title">Reasoning effort</span>
+              <div className="nx-model-menu__effort-options">
+                {variants.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    role="radio"
+                    aria-checked={variant === name}
+                    className={`nx-effort${variant === name ? " is-selected" : ""}`}
+                    data-testid={`reasoning-${name}`}
+                    onClick={() => onSelectVariant?.(name)}
+                  >
+                    {capitalize(name)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="nx-model-menu__footer">
             <button
               type="button"

@@ -46,6 +46,7 @@ impl ChatEngine for Engine {
             provider: "opencode".to_owned(),
             tier: spirit_core::engine::chat::ChatModelTier::Included,
             context_tokens: Some(128_000),
+            variants: None,
         })
     }
 

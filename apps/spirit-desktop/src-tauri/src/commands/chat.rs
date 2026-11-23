@@ -62,7 +62,13 @@ pub async fn chat_send(
     input: ChatSendInput,
 ) -> CommandResult<ChatSendReceipt> {
     let chat = state.chat();
-    chat.send(&input.session, &input.text).await
+    chat.send_turn(
+        &input.session,
+        &input.text,
+        input.variant.as_deref(),
+        &input.attachments,
+    )
+    .await
 }
 
 /// Switches the setup assistant's model. The core validates the session and the engine

@@ -4830,3 +4830,138 @@ button.nx-node:hover {
   color: var(--nx-accent-soft-ink);
   font-size: 13px;
 }
+
+/* ss-118: attach button, attachment chips, reasoning-effort selector. */
+button.nx-composer__attach {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-right: 2px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--nx-muted);
+  font-family: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+button.nx-composer__attach:hover:not(:disabled) {
+  background: var(--nx-hover);
+  color: var(--nx-text);
+}
+
+button.nx-composer__attach:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.nx-composer--drag {
+  outline: 2px dashed var(--nx-accent);
+  outline-offset: -2px;
+}
+
+.nx-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 8px 0;
+  list-style: none;
+}
+
+.nx-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  height: 32px;
+  padding: 0 4px 0 6px;
+  border: 1px solid var(--nx-border, rgba(127, 127, 127, 0.3));
+  border-radius: 8px;
+  background: var(--nx-hover);
+  color: var(--nx-text);
+  font-size: 12px;
+}
+
+.nx-attachment__thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.nx-attachment__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nx-attachment__remove {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--nx-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.nx-attachment__remove:hover {
+  background: var(--nx-hover);
+  color: var(--nx-text);
+}
+
+.nx-attachments__error {
+  margin: 6px 12px 0;
+  color: var(--nx-danger, #b42318);
+  font-size: 12px;
+}
+
+.nx-model-menu__effort {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--nx-border, rgba(127, 127, 127, 0.25));
+}
+
+.nx-model-menu__effort-title {
+  color: var(--nx-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.nx-model-menu__effort-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.nx-effort {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--nx-border, rgba(127, 127, 127, 0.3));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--nx-text);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.nx-effort:hover {
+  background: var(--nx-hover);
+}
+
+.nx-effort.is-selected {
+  border-color: var(--nx-accent);
+  background: var(--nx-hover);
+  font-weight: 600;
+}

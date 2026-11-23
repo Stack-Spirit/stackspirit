@@ -241,6 +241,7 @@ impl EngineHost {
                 provider: runtime.provider.clone(),
                 tier,
                 context_tokens,
+                variants: (!runtime.variants.is_empty()).then(|| runtime.variants.clone()),
             };
             let choice = ModelChoice {
                 id: runtime.id,
@@ -330,6 +331,7 @@ fn chat_model_view(model: &ModelChoice) -> ChatModelView {
             ChatModelTier::Byok
         },
         context_tokens: model.context_tokens,
+        variants: None,
     }
 }
 

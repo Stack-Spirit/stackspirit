@@ -17,13 +17,14 @@ pub use local::{
     map_http_status, map_provider_error,
 };
 pub use model::{
-    ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage, ChatMessageOrigin,
-    ChatModelTier, ChatModelView, ChatPermissionDecision, ChatPermissionPrompt, ChatRetryAction,
-    ChatRetryStatus, ChatRole, ChatSendInput, ChatSendReceipt, ChatSessionId, ChatSessionLocation,
-    ChatSessionState, ChatSessionView, ChatStartInput, ChatToolActivity, ChatToolStatus,
-    ChatUsageView, DEFAULT_LOG_LIMIT, MAX_ACTIVITY_CHARS, MAX_ACTIVITY_ITEMS, MAX_LOG_LIMIT,
-    MAX_MESSAGE_CHARS, MAX_USER_MESSAGE_CHARS, cap_text, display_snippet, normalize_text,
-    paragraphs, validate_project_name, validate_user_text,
+    ChatAttachment, ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage,
+    ChatMessageOrigin, ChatModelTier, ChatModelView, ChatPermissionDecision, ChatPermissionPrompt,
+    ChatRetryAction, ChatRetryStatus, ChatRole, ChatSendInput, ChatSendReceipt, ChatSessionId,
+    ChatSessionLocation, ChatSessionState, ChatSessionView, ChatStartInput, ChatToolActivity,
+    ChatToolStatus, ChatUsageView, DEFAULT_LOG_LIMIT, MAX_ACTIVITY_CHARS, MAX_ACTIVITY_ITEMS,
+    MAX_ATTACHMENT_URL_BYTES, MAX_ATTACHMENTS, MAX_LOG_LIMIT, MAX_MESSAGE_CHARS,
+    MAX_USER_MESSAGE_CHARS, cap_text, display_snippet, normalize_text, paragraphs,
+    validate_attachments, validate_project_name, validate_user_text, validate_variant,
 };
 pub use pump::{
     ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper, retry_status,

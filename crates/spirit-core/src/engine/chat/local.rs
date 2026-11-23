@@ -202,6 +202,14 @@ pub trait ChatTransport: Send + Sync {
         session: &ChatSessionId,
         text: &str,
     ) -> Result<ChatSendReceipt, SpiritError>;
+    /// Accepts one user turn with an optional reasoning variant and attachments.
+    async fn send_turn(
+        &self,
+        session: &ChatSessionId,
+        text: &str,
+        variant: Option<&str>,
+        attachments: &[super::ChatAttachment],
+    ) -> Result<ChatSendReceipt, SpiritError>;
     /// Aborts the turn when supported and returns the stopped view.
     async fn stop(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError>;
     /// One-click Start for a project orchestrator: attaches VOWP's local endpoint or falls
@@ -861,7 +869,22 @@ impl LocalChatProvider {
         session: &ChatSessionId,
         text: &str,
     ) -> Result<ChatSendReceipt, SpiritError> {
+        self.send_turn(session, text, None, &[]).await
+    }
+
+    /// Like [`send`](Self::send) with an optional reasoning `variant` and attachments.
+    pub async fn send_turn(
+        &self,
+        session: &ChatSessionId,
+        text: &str,
+        variant: Option<&str>,
+        attachments: &[super::ChatAttachment],
+    ) -> Result<ChatSendReceipt, SpiritError> {
         let text = validate_user_text(text)?;
+        super::validate_attachments(attachments)?;
+        if let Some(variant) = variant {
+            super::validate_variant(variant)?;
+        }
         let (native, stored_endpoint, setup) = {
             let state = self.inner.state.lock().await;
             let record = state
@@ -963,7 +986,7 @@ impl LocalChatProvider {
             .emit_with(move |events| events.message(session_for_event, user_event))
             .await;
 
-        let mut body = message_body(model.as_ref(), &text, &user.id);
+        let mut body = message_body(model.as_ref(), &text, &user.id, variant, attachments);
         if matches!(session, ChatSessionId::Setup) {
             body = with_system_prompt(&body, crate::engine::process::SETUP_SYSTEM_PROMPT);
         } else if setup {
@@ -1156,6 +1179,16 @@ impl ChatTransport for LocalChatProvider {
         text: &str,
     ) -> Result<ChatSendReceipt, SpiritError> {
         LocalChatProvider::send(self, session, text).await
+    }
+
+    async fn send_turn(
+        &self,
+        session: &ChatSessionId,
+        text: &str,
+        variant: Option<&str>,
+        attachments: &[super::ChatAttachment],
+    ) -> Result<ChatSendReceipt, SpiritError> {
+        LocalChatProvider::send_turn(self, session, text, variant, attachments).await
     }
 
     async fn stop(&self, session: &ChatSessionId) -> Result<ChatSessionView, SpiritError> {
@@ -3167,14 +3200,29 @@ fn prepare_orchestrator_workspace(
     Ok(())
 }
 
-fn message_body(model: Option<&ChatModelView>, text: &str, message_id: &str) -> Vec<u8> {
+fn message_body(
+    model: Option<&ChatModelView>,
+    text: &str,
+    message_id: &str,
+    variant: Option<&str>,
+    attachments: &[super::ChatAttachment],
+) -> Vec<u8> {
+    let mut parts = vec![json!({ "type": "text", "text": text })];
+    for item in attachments {
+        parts.push(json!({
+            "type": "file",
+            "mime": item.mime,
+            "filename": item.filename,
+            "url": item.url,
+        }));
+    }
     let mut body = json!({
         "messageID": message_id,
-        "parts": [{
-            "type": "text",
-            "text": text,
-        }],
+        "parts": parts,
     });
+    if let Some(variant) = variant {
+        body["variant"] = json!(variant);
+    }
     if let Some(model) = model {
         let (provider, model_id) = model
             .id

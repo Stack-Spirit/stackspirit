@@ -1454,6 +1454,18 @@ fn runtime_model(provider_id: &str, model_id: &str, model: &Value) -> RuntimeMod
             .and_then(|limit| limit.get("context"))
             .and_then(Value::as_u64),
         free: matches!(provider_id, "opencode" | "opencode-go") && input_cost(model) == Some(0.0),
+        variants: model
+            .get("variants")
+            .and_then(Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .filter(|(_, value)| {
+                        value.get("disabled").and_then(Value::as_bool) != Some(true)
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 

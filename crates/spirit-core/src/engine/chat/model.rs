@@ -214,6 +214,10 @@ pub struct ChatModelView {
     /// Context window, when the engine reports one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
+    /// Reasoning-effort variants the engine declares for this model. Absent when the model
+    /// has no reasoning support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variants: Option<Vec<String>>,
 }
 
 /// Token and context usage reported by the OpenCode session.
@@ -648,6 +652,66 @@ pub struct ChatSendInput {
     pub session: ChatSessionId,
     /// The user text.
     pub text: String,
+    /// Selected reasoning-effort variant, forwarded to OpenCode as `variant`.
+    #[serde(default)]
+    pub variant: Option<String>,
+    /// Image/file attachments forwarded as OpenCode `file` parts.
+    #[serde(default)]
+    pub attachments: Vec<ChatAttachment>,
+}
+
+/// One attachment on a user turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatAttachment {
+    /// File name shown to the model.
+    pub filename: String,
+    /// MIME type, e.g. `image/png`.
+    pub mime: String,
+    /// `data:<mime>;base64,...` URI.
+    pub url: String,
+}
+
+/// Maximum attachments per turn.
+pub const MAX_ATTACHMENTS: usize = 8;
+/// Maximum bytes of one attachment data URI.
+pub const MAX_ATTACHMENT_URL_BYTES: usize = 8 * 1024 * 1024;
+
+/// Validates attachments: bounded count and size, `data:` URIs only.
+pub fn validate_attachments(items: &[ChatAttachment]) -> Result<(), SpiritError> {
+    let bad = |msg: &str| {
+        SpiritError::new(
+            SpiritErrorCode::InvalidInput,
+            format!("invalid_attachment: {msg}"),
+        )
+    };
+    if items.len() > MAX_ATTACHMENTS {
+        return Err(bad("too many attachments"));
+    }
+    for item in items {
+        if !item.url.starts_with("data:") || item.mime.is_empty() || item.filename.is_empty() {
+            return Err(bad("attachment must be a named data URI with a mime type"));
+        }
+        if item.url.len() > MAX_ATTACHMENT_URL_BYTES {
+            return Err(bad("attachment is too large"));
+        }
+    }
+    Ok(())
+}
+
+/// Validates a variant token (engine-declared names are short identifiers).
+pub fn validate_variant(variant: &str) -> Result<(), SpiritError> {
+    if variant.is_empty()
+        || variant.len() > 32
+        || !variant
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(SpiritError::new(
+            SpiritErrorCode::InvalidInput,
+            "invalid_variant: unknown reasoning effort",
+        ));
+    }
+    Ok(())
 }
 
 /// The immediate receipt for an accepted turn.
@@ -831,6 +895,7 @@ mod tests {
                 provider: "opencode".to_owned(),
                 tier: ChatModelTier::Included,
                 context_tokens: Some(128_000),
+                variants: None,
             }),
             available_models: Some(Vec::new()),
             usage: Some(ChatUsageView {

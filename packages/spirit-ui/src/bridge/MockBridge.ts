@@ -398,6 +398,7 @@ export class MockBridge implements SpiritBridge {
       provider: "deepseek",
       tier: "byok",
       context_tokens: 128_000,
+      variants: ["low", "medium", "high", "max"],
     },
   ];
   /** Preview-only chat state. Nothing here talks to an engine, host or model. */

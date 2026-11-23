@@ -43,6 +43,7 @@ fn model(id: &str, label: &str, tier: ChatModelTier, context_tokens: Option<u64>
             .to_owned(),
         tier,
         context_tokens,
+        variants: None,
     }
 }
 

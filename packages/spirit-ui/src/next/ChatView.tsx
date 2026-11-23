@@ -966,7 +966,7 @@ export function ChatView({
             }
             onDraftApplied={clearComposerDraft}
             usage={view?.usage}
-            onSend={(text) => send(session, text)}
+            onSend={(text, options) => send(session, text, options)}
             onStop={() => void stop(session)}
             onStart={() => void open(session, project, "local")}
             onSelectModel={

@@ -40,6 +40,8 @@ pub struct RuntimeModel {
     pub context_tokens: Option<u64>,
     /// True only when the engine reports that the model needs no user key.
     pub free: bool,
+    /// Reasoning-effort variants the engine declares for this model (e.g. `low`, `high`).
+    pub variants: Vec<String>,
 }
 
 /// The result of asking the local engine to check a stored provider key.
@@ -295,6 +297,7 @@ mod tests {
                 label: "Big Pickle".to_owned(),
                 context_tokens: None,
                 free: true,
+                variants: Vec::new(),
             }])
             .with_key_verification(KeyVerification::Invalid);
         let info = runtime.spawn(0).await.unwrap();
