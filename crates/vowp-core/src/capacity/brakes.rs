@@ -15,6 +15,9 @@ use crate::deps::Deps;
 /// `/proc/pressure/memory` `avg10` above which memory pressure counts as high.
 pub const MEMORY_PRESSURE_AVG10: f64 = 10.0;
 
+/// Memory pressure avg10 at which swap growth counts as a real warning (half the brake level).
+pub const TIGHT_PRESSURE_AVG10: f64 = MEMORY_PRESSURE_AVG10 / 2.0;
+
 /// Swap growth per minute above which the swap brake trips.
 pub const SWAP_GROWTH_BYTES_PER_MIN: u64 = 64 * 1024 * 1024;
 
@@ -163,7 +166,7 @@ fn sample_reasons(samples: &[HostSample]) -> Vec<BrakeReason> {
 ///
 /// Linux swaps idle cold pages out to keep file cache warm even with plenty of RAM free; that
 /// is normal balancing. Swap growth only counts when available memory is below 30% of total
-/// or within twice the admission reserve, or when memory pressure is elevated (above 1.0).
+/// or within twice the admission reserve, or when memory pressure is elevated (avg10 at or above [`TIGHT_PRESSURE_AVG10`]).
 fn memory_is_tight(sample: &HostSample) -> bool {
     if sample.mem_total_bytes == 0 {
         return true;
@@ -171,7 +174,7 @@ fn memory_is_tight(sample: &HostSample) -> bool {
     let reserve = super::targets::reserve_ram_bytes(sample.mem_total_bytes);
     let abundant = sample.mem_available_bytes as f64 > sample.mem_total_bytes as f64 * SWAP_BENIGN_AVAILABLE_FRACTION
         && sample.mem_available_bytes > reserve.saturating_mul(2);
-    let pressured = sample.pressure_mem_avg10.is_some_and(|avg| avg > 1.0);
+    let pressured = sample.pressure_mem_avg10.is_some_and(|avg| avg >= TIGHT_PRESSURE_AVG10);
     !abundant || pressured
 }
 

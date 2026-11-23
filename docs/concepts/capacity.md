@@ -153,7 +153,7 @@ trips on measured conditions and clears after two clean samples:
 | Brake | Trips when |
 |---|---|
 | `memory_pressure` | `/proc/pressure/memory` `avg10` is above 10.0 for two consecutive samples. |
-| `swap_growth` | Swap used grew by more than 64 MiB per minute over the last three samples **and** memory is tight: available RAM is at or below 30% of total or within twice the RAM reserve, or `/proc/pressure/memory` `avg10` is above 1.0. Swap growth with abundant available RAM is normal Linux cache-versus-cold-page balancing and does not brake. |
+| `swap_growth` | Swap used grew by more than 64 MiB per minute over the last three samples **and** memory is tight: available RAM is at or below 30% of total or within twice the RAM reserve, or `/proc/pressure/memory` `avg10` is at or above 5.0 (half the 10.0 memory-pressure brake level). A 1–2 blip never trips it while RAM is abundant. Swap growth with abundant available RAM is normal Linux cache-versus-cold-page balancing and does not brake. |
 | `disk_low` | Free disk on the home or worktree filesystem is below 5 GiB in the latest sample. One low sample trips it; the brake clears after two clean samples. |
 | `provider` | Every configured provider has an active limit. |
 
@@ -206,6 +206,11 @@ advisor reads the same report as vowp `capacity report --json` and writes:
 - one `capacity_advice` row with the current and proposed target, mode, reasons and expected effect;
 - one machine-inbox `decision` item titled `Capacity: <n> workers (advised <a>)` with the options
   `apply` and `keep`.
+
+**`keep` is remembered.** When the owner answers `keep` (or dismisses the item), the advisor records the
+`(target, proposed)` pair. While the target and the proposal are both unchanged, timer, idle, new-project
+and ordinary brake turns do not open another `Capacity:` item. A fresh item is still raised at once for an
+OOM kill, a `disk_low` brake, a changed target, or any other proposal than the kept one (a lower one in particular).
 
 The advisor **never changes the target itself**. Applying a proposal is the owner's
 vowp `capacity set --target N`, through the CLI or the `capacity_set` MCP tool. The tool records the actor.

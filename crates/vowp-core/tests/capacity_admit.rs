@@ -985,8 +985,17 @@ fn swap_growth_brakes_when_available_ram_is_tight() {
 #[test]
 fn swap_growth_brakes_under_elevated_memory_pressure_even_with_ram_available() {
     let (_tmp, _deps, store, _project, _job) = fixture();
-    seed_swap_growth(&store, 20 * GIB, 4.0, 2000 * 1024 * 1024);
+    seed_swap_growth(&store, 20 * GIB, 10.0, 2000 * 1024 * 1024);
     let brake = capacity::brakes::evaluate(&store, now()).unwrap();
     assert!(brake.active);
     assert_eq!(brake.reasons[0].code, vowp_protocol::BrakeCode::SwapGrowth);
+}
+
+#[test]
+fn swap_growth_ignores_a_pressure_blip_while_ram_is_abundant() {
+    // Live feedback: 20.5 / 23.5 GiB available and avg10 1-2 must not raise `swap growing`.
+    let (_tmp, _deps, store, _project, _job) = fixture();
+    seed_swap_growth(&store, 20 * GIB + GIB / 2, 2.0, 2000 * 1024 * 1024);
+    let brake = capacity::brakes::evaluate(&store, now()).unwrap();
+    assert!(!brake.active, "reasons: {:?}", brake.reasons);
 }
