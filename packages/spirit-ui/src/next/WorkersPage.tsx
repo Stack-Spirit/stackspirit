@@ -4,12 +4,10 @@ import { useFleet, useFleetStore } from "../state/fleetStore";
 import { FleetCanvas } from "../views/fleet/FleetCanvas";
 import { InboxView } from "./InboxView";
 import { JobRows } from "./JobRows";
-import { NodeMap, type MapBranch } from "./NodeMap";
+import { DagMap, Whiteboard } from "./DagMap";
 import { PageHeader } from "./PageHeader";
 import { useShellUi } from "./shellUi";
-import { historyJobs, openInbox, jobName, jobPhase, jobTone, LANE_INFO, projectJobs, projectSummaries, providerModel, waitReason } from "./summary";
-
-const LEAVES_PER_LANE = 6;
+import { historyJobs, openInbox, jobName, LANE_INFO, projectJobs, projectSummaries } from "./summary";
 
 /**
  * Full-page view of one project's workers: a node map from the project's
@@ -21,6 +19,7 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
   const setProject = useFleetStore((state) => state.setProject);
   const panel = useShellUi((state) => state.panel);
   const openPanel = useShellUi((state) => state.openPanel);
+  const [whiteboard, setWhiteboard] = useState(false);
   const [mode, setMode] = useState<"map" | "board">("map");
   // Active work by default; history is one explicit click away.
   const [tab, setTab] = useState<"active" | "history" | "inbox">("active");
@@ -36,27 +35,6 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
     (lane) =>
       lane.key !== "done" && (lane.key !== "parked_blocked" || jobs.some((item) => item.lane === "parked_blocked")),
   );
-
-  const branches: MapBranch[] = activeLanes.map((lane) => {
-    const inLane = jobs.filter((item) => item.lane === lane.key);
-    const shown = inLane.slice(0, LEAVES_PER_LANE);
-    return {
-      node: { id: lane.key, label: lane.label, sub: `${inLane.length}`, tone: inLane.length ? lane.tone : "faint" },
-      leaves: shown.map((item) => ({
-        id: item.job.job_id,
-        label: jobName(item.job),
-        sub:
-          item.lane === "ready"
-            ? `Waiting: ${waitReason(item.job)}`
-            : [jobPhase(item), providerModel(item.job)].filter(Boolean).join(" · ") ||
-              (item.job.kind === "unknown" ? (item.job.reason ?? "needs attention") : `${item.job.kind} · ${item.job.role}`),
-        tone: jobTone(item),
-        selected: selectedId === item.job.job_id,
-        onSelect: () => openPanel({ kind: "job", project, jobId: item.job.job_id }),
-      })),
-      more: inLane.length - shown.length || undefined,
-    };
-  });
 
   return (
     <section className="nx-main" aria-label={`${project} workers`}>
@@ -171,11 +149,23 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
                     </span>
                   ))}
                 </span>
+                <button
+                  type="button"
+                  className="nx-btn nx-btn--quiet nx-btn--sm"
+                  data-testid="expand-map"
+                  onClick={() => setWhiteboard(true)}
+                >
+                  Expand map
+                </button>
               </div>
-              <NodeMap
+              <DagMap
                 label={`${project} structure`}
-                root={{ id: "orchestrator", label: `${project} orchestrator`, sub: summary?.state ?? "", tone: "ok", onSelect: onOpenSession }}
-                branches={branches}
+                project={project}
+                rootSub={summary?.state ?? ""}
+                jobs={jobs}
+                selectedId={selectedId}
+                onSelectJob={(jobId) => openPanel({ kind: "job", project, jobId })}
+                onSelectRoot={onOpenSession}
               />
             </div>
             <div className="nx-block">
@@ -192,6 +182,16 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
           </div>
         )}
       </div>
+      {whiteboard ? (
+        <Whiteboard
+          project={project}
+          rootSub={summary?.state ?? ""}
+          jobs={jobs}
+          onClose={() => setWhiteboard(false)}
+          onOpenJob={(jobId) => openPanel({ kind: "job", project, jobId })}
+          onOpenSession={onOpenSession}
+        />
+      ) : null}
     </section>
   );
 }

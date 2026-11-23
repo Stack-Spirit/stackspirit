@@ -50,6 +50,10 @@ pub struct JobCardView {
     pub executor: Option<ExecutorView>,
     /// Session id, when a running card carries one.
     pub session_id: Option<String>,
+    /// Upstream job ids this job waits on (explicit `needs`, else derived for
+    /// `-verify-N` / `-fix-N` child jobs). Empty when unknown.
+    #[serde(default)]
+    pub needs: Vec<String>,
 }
 
 impl JobCardView {
@@ -124,8 +128,63 @@ pub fn build_lanes(snapshot: &Snapshot) -> JobLanes {
             .saturating_add(u32::try_from(project.queue.len()).unwrap_or(u32::MAX));
         build_project_cards(project, &mut lanes);
     }
+    derive_child_needs(&mut lanes);
 
     lanes
+}
+
+/// Splits `<parent>-verify-N` / `<parent>-fix-N` into `(parent, is_fix, N)`.
+fn child_parts(job: &str) -> Option<(&str, bool, u32)> {
+    for (marker, is_fix) in [("-verify-", false), ("-fix-", true)] {
+        if let Some(at) = job.rfind(marker) {
+            let round = job[at + marker.len()..].parse::<u32>().ok()?;
+            return Some((&job[..at], is_fix, round));
+        }
+    }
+    None
+}
+
+/// Chains Build -> Review -> Fix for child sessions whose `needs` is empty:
+/// `<parent>-verify-N` needs `<parent>-fix-N` (N > 0, when present) else `<parent>`, and
+/// `<parent>-fix-N` needs `<parent>-verify-(N-1)` when present, else `<parent>`.
+fn derive_child_needs(lanes: &mut JobLanes) {
+    let known: HashSet<(String, String)> = [
+        &lanes.running,
+        &lanes.ready,
+        &lanes.review_fix,
+        &lanes.parked_blocked,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|card| (card.project.clone(), card.job_id.clone()))
+    .collect();
+    let has = |project: &str, job: &str| known.contains(&(project.to_owned(), job.to_owned()));
+    for card in lanes
+        .running
+        .iter_mut()
+        .chain(lanes.ready.iter_mut())
+        .chain(lanes.review_fix.iter_mut())
+        .chain(lanes.parked_blocked.iter_mut())
+    {
+        if !card.needs.is_empty() {
+            continue;
+        }
+        let Some((parent, is_fix, round)) = child_parts(&card.job_id) else {
+            continue;
+        };
+        let project = card.project.as_str();
+        // Rounds run verify-0, fix-1, verify-1, fix-2, ...
+        let prior_verify = format!("{parent}-verify-{}", round.saturating_sub(1));
+        let same_fix = format!("{parent}-fix-{round}");
+        let upstream = if is_fix && round > 0 && has(project, &prior_verify) {
+            prior_verify
+        } else if !is_fix && round > 0 && has(project, &same_fix) {
+            same_fix
+        } else {
+            parent.to_owned()
+        };
+        card.needs = vec![upstream];
+    }
 }
 
 fn accumulate_counts(project: &ProjectSnapshot, counts: &mut BTreeMap<String, u32>) {
@@ -295,6 +354,7 @@ fn running_card(project: &str, card: &RunningJobCard, stalled: bool) -> JobCardV
         gate_evidence: None,
         executor: card.executor.as_deref().map(ExecutorView::parse),
         session_id: card.session_id.as_ref().map(ToString::to_string),
+        needs: Vec::new(),
     }
 }
 
@@ -315,6 +375,7 @@ fn blocked_card(project: &str, card: &BlockedJobCard) -> JobCardView {
         gate_evidence: None,
         executor: None,
         session_id: None,
+        needs: Vec::new(),
     }
 }
 
@@ -335,6 +396,7 @@ fn queue_card(project: &str, row: &QueueJobCard) -> JobCardView {
         gate_evidence: None,
         executor: None,
         session_id: None,
+        needs: row.needs.iter().map(|id| id.as_str().to_owned()).collect(),
     }
 }
 
@@ -359,5 +421,8 @@ fn gate_card(
         gate_evidence: Some(failure.evidence.clone()),
         executor: None,
         session_id: None,
+        needs: queue_row.map_or_else(Vec::new, |row| {
+            row.needs.iter().map(|id| id.as_str().to_owned()).collect()
+        }),
     }
 }

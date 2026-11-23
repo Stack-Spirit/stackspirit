@@ -94,6 +94,9 @@ pub struct QueueJobCard {
     pub age_secs: u64,
     /// Last admission or brake reason.
     pub waiting_reason: Option<String>,
+    /// Upstream jobs this job waits on. Absent in older VOWP builds.
+    #[serde(default)]
+    pub needs: Vec<JobId>,
 }
 
 /// The newest merge recorded for a project.

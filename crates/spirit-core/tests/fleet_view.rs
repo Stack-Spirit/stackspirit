@@ -257,3 +257,82 @@ fn history_uses_the_newest_gate_failure_in_any_input_order() {
         );
     }
 }
+
+fn queue_row(job: &str, kind: &str, state: &str, extra: Value) -> Value {
+    let mut row = json!({
+        "job": job, "title": job, "kind": kind, "role": "worker",
+        "priority": 50, "state": state, "age_secs": 5, "waiting_reason": null
+    });
+    if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
+        row.extend(extra.clone());
+    }
+    row
+}
+
+fn ready_card<'a>(fleet: &'a FleetView, job: &str) -> &'a spirit_core::view::JobCardView {
+    fleet
+        .lanes
+        .ready
+        .iter()
+        .find(|card| card.job_id == job)
+        .unwrap_or_else(|| panic!("{job} not in ready lane"))
+}
+
+#[test]
+fn queue_needs_deserialize_onto_job_cards() {
+    let fleet = view_of(|project| {
+        project["queue"].as_array_mut().unwrap().push(queue_row(
+            "ss-118",
+            "build",
+            "pending",
+            json!({"needs": ["ss-116b", "ss-117"]}),
+        ));
+    });
+    assert_eq!(ready_card(&fleet, "ss-118").needs, ["ss-116b", "ss-117"]);
+}
+
+#[test]
+fn queue_rows_without_needs_stay_compatible() {
+    // The fresh fixture rows carry no `needs` key at all.
+    let fleet = view_of(|_| {});
+    assert!(!fleet.lanes.ready.is_empty());
+    assert!(fleet.lanes.ready.iter().all(|card| card.needs.is_empty()));
+}
+
+#[test]
+fn verify_and_fix_children_chain_behind_their_parents() {
+    let fleet = view_of(|project| {
+        let queue = project["queue"].as_array_mut().unwrap();
+        queue.push(queue_row("ss-116b", "build", "ready", json!({})));
+        queue.push(queue_row(
+            "ss-116b-verify-0",
+            "verify",
+            "pending",
+            json!({}),
+        ));
+        queue.push(queue_row("ss-116b-fix-1", "fix", "pending", json!({})));
+        queue.push(queue_row(
+            "ss-116b-verify-1",
+            "verify",
+            "pending",
+            json!({}),
+        ));
+        queue.push(queue_row(
+            "ss-9-verify-0",
+            "verify",
+            "pending",
+            json!({"needs": ["explicit"]}),
+        ));
+    });
+    assert!(ready_card(&fleet, "ss-116b").needs.is_empty());
+    assert_eq!(ready_card(&fleet, "ss-116b-verify-0").needs, ["ss-116b"]);
+    assert_eq!(
+        ready_card(&fleet, "ss-116b-fix-1").needs,
+        ["ss-116b-verify-0"]
+    );
+    assert_eq!(
+        ready_card(&fleet, "ss-116b-verify-1").needs,
+        ["ss-116b-fix-1"]
+    );
+    assert_eq!(ready_card(&fleet, "ss-9-verify-0").needs, ["explicit"]);
+}

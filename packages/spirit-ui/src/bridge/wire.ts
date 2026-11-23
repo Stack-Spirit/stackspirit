@@ -1156,6 +1156,8 @@ export interface JobCardView {
   gate_evidence: string | null;
   executor: ExecutorView | null;
   session_id: string | null;
+  /** Upstream job ids; explicit `needs`, else derived for verify/fix child jobs. */
+  needs?: string[];
 }
 
 export interface JobLanes {

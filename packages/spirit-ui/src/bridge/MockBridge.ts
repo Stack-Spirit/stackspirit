@@ -55,6 +55,7 @@ import type {
   JobAction,
   JobDetailView,
   JobGateView,
+  JobCardView,
   JobLanes,
   JobRunView,
   KeyStatus,
@@ -129,6 +130,7 @@ export const MOCK_SCENARIOS = [
   "asif-conflict",
   "job-detail-error",
   "inbox-notice",
+  "dag",
   "gate-d6-waiting",
   "gate-d6-incompatible",
   "gate-d6-ready",
@@ -3499,6 +3501,61 @@ export class MockBridge implements SpiritBridge {
     ];
   }
 
+  /** A dependency graph: two builders, a reviewer, a converging build, a chain, and a Fix round. */
+  private makeDagLanes(counts: Record<string, number>): JobLanes {
+    const card = (
+      job_id: string,
+      kind: string,
+      state: string,
+      needs: string[],
+      extra: Partial<JobCardView> = {},
+    ): JobCardView => ({
+      job_id,
+      project: "vowp",
+      title: null,
+      kind,
+      role: kind === "verify" ? "verifier" : "worker",
+      state,
+      priority: 50,
+      age_secs: 300,
+      reason: null,
+      detail: null,
+      gate: null,
+      gate_at: null,
+      gate_evidence: null,
+      executor: null,
+      session_id: null,
+      needs,
+      ...extra,
+    });
+    return {
+      running: [
+        card("ss-116b", "build", "active", [], {
+          executor: parseExecutor("opencode:deepseek/deepseek-flash#max"),
+        }),
+        card("ss-117", "build", "active", [], { executor: parseExecutor("claude-code:model-a@medium") }),
+        card("ss-115-verify-0", "verify", "active", [], {
+          executor: parseExecutor("claude-code:model-a@medium"),
+        }),
+      ],
+      ready: [
+        card("ss-118", "build", "pending", ["ss-116b", "ss-117"], { title: "Composer and attachments" }),
+        card("ss-119", "build", "pending", ["ss-118"], { title: "Settings polish" }),
+        card("ss-120", "build", "ready", [], { title: "Inbox dismiss", reason: "RAM 1.2 GB short" }),
+        card("ss-116b-verify-0", "verify", "pending", ["ss-116b"], { title: "Review ss-116b" }),
+        card("ss-116b-fix-1", "fix", "pending", ["ss-116b-verify-0"], { title: "Fix ss-116b review findings" }),
+      ],
+      review_fix: [],
+      parked_blocked: [],
+      done: [],
+      history: [],
+      counts,
+      queue_truncated: false,
+      queue_shown: 5,
+      queue_cap: 200,
+    };
+  }
+
   private makeLanes(projects: ProjectView[], running: WorkerCardView[]): JobLanes {
     const counts: Record<string, number> = {
       running: 0,
@@ -3558,6 +3615,7 @@ export class MockBridge implements SpiritBridge {
       executor: null,
       session_id: null,
     }));
+    if (this.scenario === "dag") return this.makeDagLanes(counts);
     return {
       running: runningCards,
       ready: readyCards,
