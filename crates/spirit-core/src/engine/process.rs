@@ -259,7 +259,7 @@ impl EngineLogBuffer {
 
 /// The app-private tree from `docs/ORCHESTRATOR-CHAT.md` §2.1.3.
 ///
-/// All directories are created `0700`; the setup `AGENTS.md` and `opencode.json` (both in `engine/config/opencode`) are `0600`. The renderer
+/// All directories are created `0700`; the setup `opencode.json` (in `engine/config/opencode`) is `0600`. The renderer
 /// never receives these paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateEngineTree {
@@ -304,7 +304,7 @@ impl PrivateEngineTree {
         }
         let opencode_dir = tree.opencode_config_dir();
         create_private_directory(&opencode_dir)?;
-        write_setup_agents(&opencode_dir)?;
+        remove_stale_setup_agents(&opencode_dir)?;
         write_setup_opencode_config(&opencode_dir)?;
         Ok(tree)
     }
@@ -338,8 +338,10 @@ impl PrivateEngineTree {
         ["OPENCODE_CONFIG_CONTENT", "OPENCODE_PERMISSION"];
 }
 
-/// The setup workspace prompt. It contains no secret and no machine path.
-const SETUP_AGENTS_MD: &str = "\
+/// The setup assistant prompt. It contains no secret and no machine path. It is sent only as
+/// the setup session's per-message system prompt, never as a global `AGENTS.md`, because the
+/// pinned engine loads `$OPENCODE_CONFIG_DIR/AGENTS.md` for every session on the engine.
+pub const SETUP_SYSTEM_PROMPT: &str = "\
 # StackSpirit setup assistant
 
 You are the StackSpirit setup assistant. You run locally on the user's Mac with OpenCode \
@@ -415,14 +417,17 @@ fn create_private_directory(path: &Path) -> Result<(), SpiritError> {
     Ok(())
 }
 
-/// The pinned engine ignores the workspace `AGENTS.md` once project config is disabled and loads
-/// only `$OPENCODE_CONFIG_DIR/AGENTS.md`, so the setup prompt lives beside `opencode.json`.
-fn write_setup_agents(config_dir: &Path) -> Result<(), SpiritError> {
-    write_private_file_atomic(
-        &config_dir.join("AGENTS.md"),
-        SETUP_AGENTS_MD.as_bytes(),
-        "the private setup workspace instructions",
-    )
+/// Removes a global `AGENTS.md` written by earlier versions so no project or global session
+/// inherits the setup-assistant instructions.
+fn remove_stale_setup_agents(config_dir: &Path) -> Result<(), SpiritError> {
+    match std::fs::remove_file(config_dir.join("AGENTS.md")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(SpiritError::new(
+            SpiritErrorCode::Engine,
+            "could not remove the stale global engine instructions",
+        )),
+    }
 }
 
 fn write_setup_opencode_config(config_dir: &Path) -> Result<(), SpiritError> {

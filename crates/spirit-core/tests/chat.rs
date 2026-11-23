@@ -1398,14 +1398,9 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             directory.display()
         );
     }
-    let agents = tree.opencode_config_dir().join("AGENTS.md");
-    let prompt = std::fs::read_to_string(&agents).unwrap();
-    assert!(prompt.contains("StackSpirit setup assistant"));
-    assert!(!prompt.contains("/home/"));
-    assert!(!prompt.contains("/Users/"));
-    assert_eq!(
-        std::fs::metadata(&agents).unwrap().permissions().mode() & 0o777,
-        0o600
+    assert!(
+        !tree.opencode_config_dir().join("AGENTS.md").exists(),
+        "a global AGENTS.md would be loaded by every engine session"
     );
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         assert!(!tree.data.starts_with(home.join(".local/share")));

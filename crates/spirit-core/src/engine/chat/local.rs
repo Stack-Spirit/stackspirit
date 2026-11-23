@@ -964,7 +964,9 @@ impl LocalChatProvider {
             .await;
 
         let mut body = message_body(model.as_ref(), &text, &user.id);
-        if setup && !matches!(session, ChatSessionId::Setup) {
+        if matches!(session, ChatSessionId::Setup) {
+            body = with_system_prompt(&body, crate::engine::process::SETUP_SYSTEM_PROMPT);
+        } else if setup {
             body = with_system_prompt(&body, &orchestrator_system_prompt(session));
         }
         ensure_pump(&self.inner, &endpoint);

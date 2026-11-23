@@ -549,19 +549,138 @@ pub(crate) async fn ensure_project_orchestrator(
     let Ok(client) = state.client() else {
         return Ok(false);
     };
-    let existing = client.orchestrator_list().await?;
-    if existing.iter().any(|card| {
-        card.name == project || card.project.as_ref().is_some_and(|p| p.as_str() == project)
-    }) {
-        return Ok(true);
-    }
-    let request = OrchestratorNewRequest {
-        node: node.to_string(),
-        app: OrchestratorApp::Opencode,
-        project: Some(project.to_owned()),
-        name: Some(project.to_owned()),
-        force: false,
-    };
-    client.orchestrator_new(request).await?;
+    ensure_on_client(client.as_ref(), &node.to_string(), project).await?;
     Ok(true)
+}
+
+/// Makes sure the project's orchestrator exists, runs on `node` and is live. A missing one is
+/// created; one on another node (or home-hosted) is moved; a stopped, failed or degraded one is
+/// resumed. An offline node cannot be fixed from here and is reported.
+async fn ensure_on_client(
+    client: &dyn spirit_core::vowp::VowpClient,
+    node: &str,
+    project: &str,
+) -> Result<(), spirit_core::error::SpiritError> {
+    use spirit_core::error::{SpiritError, SpiritErrorCode};
+    let existing = client.orchestrator_list().await?;
+    let found = existing.into_iter().find(|card| {
+        card.name == project || card.project.as_ref().is_some_and(|p| p.as_str() == project)
+    });
+    let Some(mut card) = found else {
+        let request = OrchestratorNewRequest {
+            node: node.to_owned(),
+            app: OrchestratorApp::Opencode,
+            project: Some(project.to_owned()),
+            name: Some(project.to_owned()),
+            force: false,
+        };
+        client.orchestrator_new(request).await?;
+        return Ok(());
+    };
+    if card.state == "node_offline" {
+        return Err(SpiritError::new(
+            SpiritErrorCode::Engine,
+            format!("the orchestrator node for {project} is offline"),
+        ));
+    }
+    if card.node.as_ref().map(ToString::to_string).as_deref() != Some(node) {
+        card = client
+            .orchestrator_move(
+                &card.name,
+                OrchestratorMoveTarget::Node {
+                    node: node.to_owned(),
+                },
+            )
+            .await?;
+    }
+    if !matches!(card.state.as_str(), "running" | "starting") {
+        client.orchestrator_resume(&card.name).await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod ensure_tests {
+    use super::*;
+    use spirit_core::fixtures::{Scenario, capacity_report, fleet_status};
+    use spirit_core::vowp::MockVowpClient;
+    use spirit_core::wire::OrchestratorCard;
+
+    fn mock(cards: Vec<OrchestratorCard>) -> MockVowpClient {
+        MockVowpClient::new(
+            fleet_status(Scenario::Idle).expect("status"),
+            capacity_report(Scenario::Idle).expect("capacity"),
+        )
+        .with_orchestrators(cards)
+    }
+
+    fn card(state: &str, node: Option<&str>) -> OrchestratorCard {
+        serde_json::from_value(serde_json::json!({
+            "name": "stackspirit",
+            "session_id": "01JCF5WQ8ZK3M2V7N4P6R8T0AE",
+            "project": "stackspirit",
+            "app": "opencode",
+            "state": state,
+            "node": node,
+            "join": {"desktop": "d", "phone": "p", "chat": "c"}
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn creates_a_missing_orchestrator_with_the_vowp_new_path() {
+        let client = mock(Vec::new()).with_orchestrator_new_result(card("running", Some("mac")));
+        ensure_on_client(&client, "mac", "stackspirit")
+            .await
+            .unwrap();
+        let calls = client.orchestrator_new_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].node, "mac");
+        assert_eq!(calls[0].project.as_deref(), Some("stackspirit"));
+        assert!(!calls[0].force);
+    }
+
+    #[tokio::test]
+    async fn leaves_a_running_orchestrator_on_the_node_alone() {
+        let client = mock(vec![card("running", Some("mac"))]);
+        ensure_on_client(&client, "mac", "stackspirit")
+            .await
+            .unwrap();
+        assert!(client.orchestrator_new_calls().is_empty());
+        assert!(client.orchestrator_resume_calls().is_empty());
+        assert!(client.orchestrator_move_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resumes_a_stopped_or_failed_orchestrator() {
+        for state in ["stopped", "failed", "degraded"] {
+            let client = mock(vec![card(state, Some("mac"))]);
+            ensure_on_client(&client, "mac", "stackspirit")
+                .await
+                .unwrap();
+            assert_eq!(client.orchestrator_resume_calls(), vec!["stackspirit"]);
+            assert!(client.orchestrator_new_calls().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn moves_an_orchestrator_on_another_node() {
+        let client = mock(vec![card("running", Some("other"))]);
+        ensure_on_client(&client, "mac", "stackspirit")
+            .await
+            .unwrap();
+        let moves = client.orchestrator_move_calls();
+        assert_eq!(moves.len(), 1);
+        assert!(matches!(&moves[0].1, OrchestratorMoveTarget::Node { node } if node == "mac"));
+    }
+
+    #[tokio::test]
+    async fn reports_an_offline_node() {
+        let client = mock(vec![card("node_offline", Some("mac"))]);
+        assert!(
+            ensure_on_client(&client, "mac", "stackspirit")
+                .await
+                .is_err()
+        );
+    }
 }
