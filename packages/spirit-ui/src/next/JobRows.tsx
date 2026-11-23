@@ -111,7 +111,11 @@ export function JobRows({ jobs, selectedId, onSelect, showProject }: JobRowsProp
                       <span className="nx-row__reason">{job.reason}</span>
                     ) : null}
                   </span>
-                  <span className="nx-row__id">{job.job_id}</span>
+                  {jobName(job) !== job.job_id ? (
+                    <span className="nx-row__id" title={job.job_id}>
+                      {job.job_id}
+                    </span>
+                  ) : null}
                 </button>
               </li>
             );

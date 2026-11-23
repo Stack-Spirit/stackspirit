@@ -242,6 +242,8 @@ export interface SpiritBridge {
     jobAction(jobId: string, action: JobAction, reason?: string | null): Promise<ActionResult>;
     inbox(all: boolean): Promise<InboxItemView[]>;
     answerInbox(id: string, answer: string): Promise<InboxItemView>;
+    /** Dismisses an item without an answer (`vowp inbox dismiss`); the only way to clear a notice. */
+    dismissInbox(id: string): Promise<InboxItemView>;
     setTarget(input: SetTargetInput): Promise<CapacityTargetView>;
     /**
      * Optional read-only detail for one job: the full `Job` fields the drawer needs, its

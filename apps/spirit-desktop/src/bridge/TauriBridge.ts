@@ -219,6 +219,7 @@ export class TauriBridge implements SpiritBridge {
     inbox: (all: boolean): Promise<InboxItemView[]> => call("fleet_inbox", { all }),
     answerInbox: (id: string, answer: string): Promise<InboxItemView> =>
       call("answer_inbox", { id, answer }),
+    dismissInbox: (id: string): Promise<InboxItemView> => call("dismiss_inbox", { id }),
     setTarget: (input: SetTargetInput): Promise<CapacityTargetView> =>
       call("set_target", { input }),
     rawDocument: (): Promise<RawDocument | null> => call("fleet_raw_document"),

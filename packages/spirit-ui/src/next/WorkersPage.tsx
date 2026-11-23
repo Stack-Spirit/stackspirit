@@ -112,7 +112,10 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
       <div className="nx-page">
         {tab === "inbox" ? (
           <div className="nx-page__inner" data-testid="project-inbox">
-            <InboxView scope={{ project }} />
+            <InboxView
+              scope={{ project }}
+              onOpenSession={() => onOpenSession()}
+            />
           </div>
         ) : tab === "history" ? (
           <div className="nx-page__inner" data-testid="history-view">

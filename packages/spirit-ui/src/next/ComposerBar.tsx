@@ -176,6 +176,9 @@ export interface ComposerBarProps {
   onConnectServer?: () => void;
   showConnectServer?: boolean;
   onOpenEngineSettings?: () => void;
+  /** An editable draft to place in the field (e.g. an inbox discussion). Applied once per nonce. */
+  draft?: { text: string; nonce: number } | null;
+  onDraftApplied?: () => void;
 }
 
 /**
@@ -208,6 +211,8 @@ export function ComposerBar({
   onConnectServer,
   showConnectServer = false,
   onOpenEngineSettings,
+  draft = null,
+  onDraftApplied,
 }: ComposerBarProps) {
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -245,6 +250,19 @@ export function ComposerBar({
     stopRequested.current = false;
     element.focus();
   }, [disabled]);
+
+  const appliedDraft = useRef(0);
+  useEffect(() => {
+    if (!draft || draft.nonce === appliedDraft.current) return;
+    appliedDraft.current = draft.nonce;
+    setText(draft.text);
+    onDraftApplied?.();
+    const element = textarea.current;
+    if (element && !element.disabled) {
+      element.focus();
+      element.setSelectionRange(draft.text.length, draft.text.length);
+    }
+  }, [draft, onDraftApplied]);
 
   async function submit() {
     if (disabled || streaming || sending || submitting) return;

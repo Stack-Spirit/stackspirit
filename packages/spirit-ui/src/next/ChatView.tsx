@@ -22,6 +22,7 @@ import type {
 import { modelProviderLabel } from "../domain/engine";
 import { useFleet, useFleetStore } from "../state/fleetStore";
 import { ComposerBar } from "./ComposerBar";
+import { useShellUi } from "./shellUi";
 import {
   useConversations,
   type ChatMessageView,
@@ -643,6 +644,8 @@ export function ChatView({
   const loadingEarlier = useConversations((state) => state.loadingEarlier[session] ?? false);
   const truncated = useConversations((state) => state.truncated[session] ?? false);
   const endRef = useRef<HTMLDivElement>(null);
+  const composerDraft = useShellUi((state) => state.composerDraft);
+  const clearComposerDraft = useShellUi((state) => state.clearComposerDraft);
   const fleet = useFleet();
   const [newServerRequested, setNewServerRequested] = useState(false);
   const project = session.startsWith("project:") ? session.slice("project:".length) : null;
@@ -961,6 +964,12 @@ export function ChatView({
             allowModelSwitch={allowModelSwitch}
             openModelPickerRequest={modelPickerRequest}
             hero={hero}
+            draft={
+              composerDraft && composerDraft.session === session
+                ? composerDraft
+                : null
+            }
+            onDraftApplied={clearComposerDraft}
             usage={view?.usage}
             onSend={(text) => send(session, text)}
             onStop={() => void stop(session)}

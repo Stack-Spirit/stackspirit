@@ -128,6 +128,7 @@ export const MOCK_SCENARIOS = [
   "asif-strict-refusal",
   "asif-conflict",
   "job-detail-error",
+  "inbox-notice",
   "gate-d6-waiting",
   "gate-d6-incompatible",
   "gate-d6-ready",
@@ -853,6 +854,35 @@ export class MockBridge implements SpiritBridge {
           answered_at: null,
         })),
       );
+    },
+    dismissInbox: async (id: string): Promise<InboxItemView> => {
+      const item = this.inboxItems.find((candidate) => candidate.id === id);
+      if (!item) throw errorDto("not_found", `Inbox item ${id} was not found.`);
+      const dismissed: InboxItemView = {
+        ...item,
+        state: "dismissed",
+        answered_by: "stackspirit",
+        answered_at: this.now(),
+      };
+      this.inboxItems = this.inboxItems.map((candidate) =>
+        candidate.id === id ? dismissed : candidate,
+      );
+      if (this.fleetView) {
+        this.fleetView = {
+          ...this.fleetView,
+          inbox: this.fleetView.inbox.map((entry) =>
+            entry.id === id
+              ? {
+                  ...entry,
+                  state: "dismissed",
+                  answered_by: "stackspirit",
+                  answered_at: dismissed.answered_at,
+                }
+              : entry,
+          ),
+        };
+      }
+      return clone(dismissed);
     },
     answerInbox: async (id: string, answer: string): Promise<InboxItemView> => {
       if (!answer.trim()) {
@@ -3757,6 +3787,25 @@ export class MockBridge implements SpiritBridge {
         answered_at: null,
         age_secs: 600,
       },
+      ...(this.scenario === "inbox-notice"
+        ? [
+            {
+              id: "01MOCKINBOX000000000000000003",
+              project: "vowp",
+              job_id: null,
+              kind: "notice",
+              title: "Merge finished",
+              body: "ss-8 merged cleanly onto main.",
+              options: [],
+              state: "open",
+              answer: null,
+              answered_by: null,
+              created_at: iso(this.nowMs - 300_000),
+              answered_at: null,
+              age_secs: 300,
+            },
+          ]
+        : []),
       ...(this.scenario === "busy"
         ? [
             {

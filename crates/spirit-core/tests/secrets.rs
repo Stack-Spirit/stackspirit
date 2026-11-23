@@ -647,6 +647,13 @@ async fn a_client_without_a_server_vault_refuses_all_three_calls() {
         ) -> Result<spirit_core::wire::InboxItem, SpiritError> {
             Err(SpiritError::new(SpiritErrorCode::Gate, "no answer"))
         }
+        async fn dismiss_inbox(
+            &self,
+            _project: Option<&str>,
+            _id: &str,
+        ) -> Result<spirit_core::wire::InboxItem, SpiritError> {
+            Err(SpiritError::new(SpiritErrorCode::Gate, "no dismiss"))
+        }
         async fn set_target(
             &self,
             _target: u32,

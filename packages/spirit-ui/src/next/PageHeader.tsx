@@ -44,9 +44,10 @@ export function PageHeader({
         {sub ? <span className="nx-chat-head__sub">{sub}</span> : null}
       </div>
       {children}
-      <span className="nx-chat-head__spacer" />
-      {actions}
-      <PanelToggle />
+      <div className="nx-chat-head__actions">
+        {actions}
+        <PanelToggle />
+      </div>
     </header>
   );
 }

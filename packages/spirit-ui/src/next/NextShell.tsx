@@ -204,7 +204,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
         <PageHeader title="Inbox" sub="Everything waiting for you, across the server and its projects" />
         <div className="nx-page">
           <div className="nx-page__inner">
-            <InboxView scope="all" />
+            <InboxView scope="all" onOpenSession={openSession} />
           </div>
         </div>
       </section>

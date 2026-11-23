@@ -972,16 +972,31 @@ button.nx-node:focus-visible {
 .nx-chat-head {
   display: flex;
   flex: none;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  height: var(--nx-head-h);
-  padding: 0 12px 0 20px;
+  gap: 6px 8px;
+  min-height: var(--nx-head-h);
+  padding: 6px 12px 6px 20px;
   border-bottom: 1px solid var(--nx-line);
 }
 
 .nx-chat-head__titles {
   display: grid;
+  flex: 1 1 160px;
   min-width: 0;
+}
+
+/* Controls keep their natural size and wrap to a second sub-row when the pane is
+   narrow (the right details panel open), instead of clipping off the top. */
+.nx-chat-head__actions {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px 8px;
+  min-width: 0;
+  margin-left: auto;
 }
 
 .nx-chat-head__title {
@@ -3818,9 +3833,11 @@ button.nx-node:hover {
 
 .nx-row__text {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   flex: 1;
   gap: 2px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .nx-row__title {
@@ -3844,7 +3861,12 @@ button.nx-node:hover {
 }
 
 .nx-row__id {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--nx-faint);
   font-family: var(--font-mono);
   font-size: 11.5px;
@@ -4698,6 +4720,12 @@ button.nx-node:hover {
 
 .nx-inbox__answer {
   display: flex;
+  gap: 8px;
+}
+
+.nx-inbox__actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 

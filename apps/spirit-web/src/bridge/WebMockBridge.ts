@@ -97,6 +97,9 @@ export class WebMockBridge implements SpiritBridge {
     answerInbox: async (): Promise<never> => {
       throw webError("writes_disabled", WRITES_DISABLED);
     },
+    dismissInbox: async (): Promise<never> => {
+      throw webError("writes_disabled", WRITES_DISABLED);
+    },
     setTarget: async (): Promise<never> => {
       throw webError("no_route", "The Web preview has no capacity target route.");
     },

@@ -104,6 +104,14 @@ impl VowpClient for BlockingClient {
         self.inner.answer_inbox(project, id, answer).await
     }
 
+    async fn dismiss_inbox(
+        &self,
+        project: Option<&str>,
+        id: &str,
+    ) -> Result<spirit_core::wire::InboxItem, SpiritError> {
+        self.inner.dismiss_inbox(project, id).await
+    }
+
     async fn set_target(
         &self,
         target: u32,

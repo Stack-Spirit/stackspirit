@@ -83,6 +83,13 @@ pub trait VowpClient: Send + Sync {
         id: &str,
         answer: &str,
     ) -> Result<InboxItem, SpiritError>;
+    /// Runs `vowp [--project <p>] --json inbox dismiss <id>`; the only way to clear a
+    /// `notice`, which cannot be answered. `None` uses the reserved `_node` project.
+    async fn dismiss_inbox(
+        &self,
+        project: Option<&str>,
+        id: &str,
+    ) -> Result<InboxItem, SpiritError>;
     /// Runs `vowp --json capacity set ...`.
     async fn set_target(
         &self,
@@ -808,6 +815,24 @@ impl VowpClient for SshVowpClient {
         let output = self.check_output(output)?;
         serde_json::from_slice(&output.stdout)
             .map_err(|err| SpiritError::parse("inbox answer", err))
+    }
+
+    async fn dismiss_inbox(
+        &self,
+        project: Option<&str>,
+        id: &str,
+    ) -> Result<InboxItem, SpiritError> {
+        InboxId::parse(id)?;
+        let mut argv = self.base_argv();
+        let project = project.unwrap_or("_node");
+        ProjectName::parse(project)?;
+        argv.extend(["--project".to_owned(), project.to_owned()]);
+        push_json(&mut argv);
+        argv.extend(["inbox".to_owned(), "dismiss".to_owned(), id.to_owned()]);
+        let output = self.run(&argv, WRITE_TIMEOUT).await?;
+        let output = self.check_output(output)?;
+        serde_json::from_slice(&output.stdout)
+            .map_err(|err| SpiritError::parse("inbox dismiss", err))
     }
 
     async fn set_target(
@@ -1710,6 +1735,22 @@ impl VowpClient for MockVowpClient {
         Ok(state.inbox[index].clone())
     }
 
+    async fn dismiss_inbox(
+        &self,
+        _project: Option<&str>,
+        id: &str,
+    ) -> Result<InboxItem, SpiritError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(index) = state.inbox.iter().position(|item| item.id.as_str() == id) else {
+            return Err(SpiritError::not_found(&format!("inbox item {id}")));
+        };
+        state.inbox[index].state = crate::wire::enums::InboxState::Dismissed;
+        Ok(state.inbox[index].clone())
+    }
+
     async fn set_target(
         &self,
         target: u32,
@@ -2043,5 +2084,33 @@ mod tests {
             .unwrap();
         let command = fake.calls()[0].args.last().cloned().unwrap();
         assert!(command.contains("'--project' 'vowp' '--json'"), "{command}");
+    }
+
+    #[tokio::test]
+    async fn dismiss_inbox_without_project_passes_the_node_project() {
+        let (fake, client) = client(Some("/home/dev"));
+        client.dismiss_inbox(None, ITEM_ID).await.unwrap();
+        let command = fake.calls()[0].args.last().cloned().unwrap();
+        assert!(
+            command.contains("'--project' '_node' '--json' 'inbox' 'dismiss'"),
+            "{command}"
+        );
+        assert!(command.contains(ITEM_ID));
+        assert!(!command.contains("'answer'"));
+    }
+
+    #[tokio::test]
+    async fn dismiss_inbox_with_project_keeps_that_project() {
+        let (fake, client) = client(None);
+        client.dismiss_inbox(Some("vowp"), ITEM_ID).await.unwrap();
+        let command = fake.calls()[0].args.last().cloned().unwrap();
+        assert!(command.contains("'--project' 'vowp' '--json'"), "{command}");
+    }
+
+    #[tokio::test]
+    async fn dismiss_inbox_rejects_a_malformed_id() {
+        let (fake, client) = client(None);
+        assert!(client.dismiss_inbox(None, "nope").await.is_err());
+        assert!(fake.calls().is_empty());
     }
 }

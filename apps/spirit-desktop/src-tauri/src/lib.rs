@@ -106,6 +106,7 @@ pub fn run() {
             commands::fleet::fleet_raw_document,
             commands::fleet::fleet_inbox,
             commands::fleet::answer_inbox,
+            commands::fleet::dismiss_inbox,
             commands::fleet::job_action,
             commands::fleet::set_target,
             commands::cluster::cluster_form,

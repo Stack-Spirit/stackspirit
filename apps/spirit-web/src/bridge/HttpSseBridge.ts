@@ -977,6 +977,9 @@ export class HttpSseBridge {
     answerInbox: async (): Promise<never> => {
       throw webError("writes_disabled", WRITES_DISABLED);
     },
+    dismissInbox: async (): Promise<never> => {
+      throw webError("writes_disabled", WRITES_DISABLED);
+    },
     setTarget: async (): Promise<never> => {
       throw webError(
         "no_route",

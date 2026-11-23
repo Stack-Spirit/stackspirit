@@ -4,6 +4,7 @@ import { toSpiritError } from "../bridge/errors";
 import type { InboxItemView } from "../bridge/wire";
 import { formatAgeParts } from "../domain/format";
 import { useFleet, useFleetStore, useMutationsAllowed } from "../state/fleetStore";
+import { useShellUi } from "./shellUi";
 import { openInbox } from "./summary";
 
 export type InboxScope = "all" | { project: string };
@@ -37,7 +38,10 @@ interface Confirmation {
 export function InboxView({
   scope,
   heading = true,
+  onOpenSession,
 }: {
+  /** Opens the orchestrator chat for a project, or the global one for `null`. */
+  onOpenSession?: (project: string | null) => void;
   scope: InboxScope;
   /** Render the section heading. The project tab already has its own. */
   heading?: boolean;
@@ -108,6 +112,30 @@ export function InboxView({
     }
   }
 
+  async function dismiss(item: InboxItemView): Promise<void> {
+    if (!bridge) {
+      setError("The bridge is not initialized.");
+      return;
+    }
+    setBusyId(item.id);
+    setError(null);
+    try {
+      await bridge.fleet.dismissInbox(item.id);
+      await refresh();
+    } catch (caught) {
+      setError(toSpiritError(caught).message);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  function discuss(item: InboxItemView): void {
+    const summary = item.body ? item.body.replace(/\s+/g, " ").trim().slice(0, 240) : "";
+    const text = `Regarding inbox ${item.id} (${item.title})${summary ? `: ${summary}\n\n` : ": "}`;
+    useShellUi.getState().setComposerDraft(item.project ? `project:${item.project}` : "global", text);
+    onOpenSession?.(item.project);
+  }
+
   const chips: Array<{ key: string; label: string; count: number }> = [
     { key: "all", label: "All", count: scoped.length },
     { key: "global", label: "Global", count: globalCount },
@@ -176,6 +204,9 @@ export function InboxView({
                 busy={busyId === item.id}
                 disabled={!mutationsAllowed || busyId !== null}
                 onAnswer={(text) => void answer(item, text)}
+                onDismiss={() => void dismiss(item)}
+                onDiscuss={() => discuss(item)}
+                canDiscuss={onOpenSession !== undefined}
               />
             </li>
           ))}
@@ -190,17 +221,24 @@ function InboxCard({
   busy,
   disabled,
   onAnswer,
+  onDismiss,
+  onDiscuss,
+  canDiscuss,
 }: {
   item: InboxItemView;
   busy: boolean;
   disabled: boolean;
   onAnswer: (answer: string) => void;
+  onDismiss: () => void;
+  onDiscuss: () => void;
+  canDiscuss: boolean;
 }) {
   const [text, setText] = useState("");
   const trimmed = text.trim();
   const bytes = UTF8.encode(trimmed).length;
   const canSend = !disabled && trimmed.length > 0 && bytes <= MAX_ANSWER_BYTES;
   const kind = inboxKindLabel(item.kind);
+  const isNotice = kind === "Notice";
   const titleId = `inbox-title-${item.id}`;
 
   return (
@@ -218,6 +256,8 @@ function InboxCard({
         {item.title}
       </h3>
       {item.body ? <p className="nx-inbox__body">{item.body}</p> : null}
+      {isNotice ? null : (
+        <>
       {item.options.length > 0 ? (
         <div className="nx-inbox__options" role="group" aria-label={`Answers for ${item.title}`}>
           {item.options.map((option) => (
@@ -252,6 +292,20 @@ function InboxCard({
           {busy ? "Sending…" : "Send"}
         </button>
       </form>
+        </>
+      )}
+      <div className="nx-inbox__actions">
+        {isNotice ? (
+          <button type="button" className="nx-btn nx-btn--sm" disabled={disabled} onClick={onDismiss}>
+            {busy ? "Dismissing…" : "Dismiss"}
+          </button>
+        ) : null}
+        {canDiscuss ? (
+          <button type="button" className="nx-btn nx-btn--quiet nx-btn--sm" onClick={onDiscuss}>
+            Answer with orchestrator
+          </button>
+        ) : null}
+      </div>
     </article>
   );
 }

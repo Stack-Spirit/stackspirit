@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { MockBridge } from "../../bridge/MockBridge";
 import { InboxView, inboxKindLabel } from "../../next/InboxView";
+import { useShellUi, resetShellUi } from "../../next/shellUi";
 import { seedStore } from "../render";
 
 const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"];
@@ -18,7 +19,75 @@ async function seeded() {
   return bridge;
 }
 
+async function seededWithNotice() {
+  const bridge = await seeded();
+  const fleet = await bridge.fleet.refresh();
+  const notice = {
+    ...fleet.inbox[0]!,
+    id: "01MOCKINBOX000000000000000003",
+    project: "vowp",
+    kind: "notice",
+    title: "Merge finished",
+    body: "ss-8 merged cleanly.",
+    options: [],
+  };
+  const withNotice = { ...fleet, inbox: [...fleet.inbox, notice] };
+  seedStore(withNotice, { bridge });
+  vi.spyOn(bridge.fleet, "inbox").mockResolvedValue(withNotice.inbox);
+  return bridge;
+}
+
 describe("InboxView", () => {
+  it("a notice shows Dismiss and no answer box or Send", async () => {
+    const bridge = await seededWithNotice();
+    const dismiss = vi.spyOn(bridge.fleet, "dismissInbox");
+    render(
+      <InboxView scope={{ project: "vowp" }} onOpenSession={() => undefined} />,
+    );
+    const user = userEvent.setup();
+    const card = (await screen.findByText("Merge finished")).closest(
+      "article",
+    )!;
+    expect(within(card).queryByRole("textbox")).toBeNull();
+    expect(within(card).queryByRole("button", { name: "Send" })).toBeNull();
+    expect(
+      within(card).getByRole("button", { name: "Answer with orchestrator" }),
+    ).toBeInTheDocument();
+    await user.click(within(card).getByRole("button", { name: "Dismiss" }));
+    expect(dismiss).toHaveBeenCalledWith("01MOCKINBOX000000000000000003");
+  });
+
+  it.each([
+    [
+      "Choose a merge queue policy",
+      "project:vowp",
+      "01MOCKINBOX000000000000000001",
+    ],
+    ["Merge finished", "project:vowp", "01MOCKINBOX000000000000000003"],
+    [
+      "Raise the worker target to 6?",
+      "global",
+      "01MOCKINBOX000000000000000002",
+    ],
+  ])(
+    "Answer with orchestrator on %s opens %s and prefills the composer",
+    async (title, session, id) => {
+      resetShellUi();
+      await seededWithNotice();
+      const open = vi.fn();
+      render(<InboxView scope="all" onOpenSession={open} />);
+      const user = userEvent.setup();
+      const card = (await screen.findByText(title)).closest("article")!;
+      await user.click(
+        within(card).getByRole("button", { name: "Answer with orchestrator" }),
+      );
+      expect(open).toHaveBeenCalledWith(session === "global" ? null : "vowp");
+      const draft = useShellUi.getState().composerDraft;
+      expect(draft?.session).toBe(session);
+      expect(draft?.text).toContain(`Regarding inbox ${id} (${title})`);
+    },
+  );
+
   it("maps kinds to Decision, Question and Notice", () => {
     expect(inboxKindLabel("question")).toBe("Question");
     expect(inboxKindLabel("notice")).toBe("Notice");
