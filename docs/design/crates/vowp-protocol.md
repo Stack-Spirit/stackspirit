@@ -102,7 +102,7 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 3. **Timestamp** always serialises as exactly `YYYY-MM-DDTHH:MM:SS.mmmZ`. Parsing accepts RFC 3339 with any offset and 0–9 fractional
    digits; fractional digits beyond 3 are truncated (not rounded). `Timestamp` ordering equals string ordering of `as_rfc3339()`.
 4. **Ids.** ULID ids: 26 chars `[0-9A-HJKMNP-TV-Z]`, uppercase on output; parsing accepts lowercase and normalises to uppercase.
-   `CapsuleId` = `cap_` + ULID. Slugs (`JobId`, `NodeName`, `ProjectName`): `^[a-z0-9][a-z0-9-]{0,63}$`, no trailing `-`.
+   `CapsuleId` = `cap_` + ULID. Slugs: `JobId` = `^[a-z0-9][a-z0-9-]{0,119}$` (max 120 chars); `NodeName` and `ProjectName` = `^[a-z0-9][a-z0-9-]{0,63}$` (max 64 chars); none may end in `-`.
    `new()` is monotonic within one process (shared `Mutex<ulid::Generator>`; on overflow in the same ms, wait 1 ms and retry).
 5. **Executor grammar.** `harness ":" model [ "@" effort ] [ "#" variant ]`. `harness` ∈ {claude-code, opencode, cli, acp, vowp}.
    `model` non-empty, chars `[A-Za-z0-9._:/-]`. `effort`/`variant` `[a-z0-9_-]+`. `@effort` is only valid for `claude-code`, `#variant`
