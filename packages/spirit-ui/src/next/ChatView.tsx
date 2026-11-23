@@ -23,6 +23,7 @@ import { modelProviderLabel } from "../domain/engine";
 import { useFleet, useFleetStore } from "../state/fleetStore";
 import { ComposerBar } from "./ComposerBar";
 import { useShellUi } from "./shellUi";
+import { tokenTotal } from "./ContextMeter";
 import {
   useConversations,
   type ChatMessageView,
@@ -684,6 +685,14 @@ export function ChatView({
   const visibleMessages = showSecureServerForm
     ? messages
     : messages.filter((message) => message.card?.kind !== "secure-server");
+  // The usage object is session-cumulative, so only the latest reply carries it.
+  const lastAnswerIndex = visibleMessages.reduce(
+    (last, message, index) =>
+      message.role === "assistant" && (message.origin === "model" || message.origin === "preview")
+        ? index
+        : last,
+    -1,
+  );
   const hasConversation = visibleMessages.some(
     (message) =>
       message.role === "user" ||
@@ -693,20 +702,6 @@ export function ChatView({
   const hasReply = visibleMessages.some(
     (message) => message.origin === "model" || message.origin === "preview",
   );
-  let lastAssistantIndex = -1;
-  for (let i = visibleMessages.length - 1; i >= 0; i--) {
-    const m = visibleMessages[i]!;
-    if (m.role === "user") break;
-    if (m.origin === "model" || m.origin === "preview") {
-      lastAssistantIndex = i;
-      break;
-    }
-  }
-  const lastUserText =
-    [...visibleMessages]
-      .reverse()
-      .find((m) => m.role === "user")
-      ?.text.join("\n\n") ?? null;
   const pendingPermissions = view?.pending_permissions ?? [];
   const hero = !hasConversation && visibleMessages.length === 0 && pendingPermissions.length === 0;
   const secureCardOpen = visibleMessages.some(
@@ -890,10 +885,10 @@ export function ChatView({
                   session={session}
                   message={message}
                   model={view?.model ?? null}
-                  usage={index === lastAssistantIndex ? (view?.usage ?? null) : null}
+                  usage={index === lastAnswerIndex ? (view?.usage ?? null) : null}
                   onRetry={
-                    index === lastAssistantIndex && state === "ready" && lastUserText
-                      ? () => void send(session, lastUserText)
+                    state === "ready" && retryText(visibleMessages, index)
+                      ? () => void send(session, retryText(visibleMessages, index)!)
                       : null
                   }
                 />
@@ -1237,23 +1232,122 @@ function RetryNotice({
 }
 
 function compactTokens(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
-  return String(value);
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (value >= 1000) return `${(value / 1000).toFixed(1).replace(/\.0$/, "")}K`;
+  return String(Math.round(value));
 }
 
-function messageTime(createdAt: string | undefined): string | null {
+/** `MM/DD HH:MM` in local time, or null when the timestamp is absent or invalid. */
+export function messageStamp(createdAt: string | undefined): string | null {
   if (!createdAt) return null;
   const at = new Date(createdAt);
   if (Number.isNaN(at.getTime())) return null;
-  return at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${two(at.getMonth() + 1)}/${two(at.getDate())} ${two(at.getHours())}:${two(at.getMinutes())}`;
+}
+
+function CopyIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="5" y="5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M3 10.5V4A1.5 1.5 0 0 1 4.5 2.5H11" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function RetryIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.5v3h-3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function TokenIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+      <ellipse cx="8" cy="4" rx="5" ry="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
+/** Copy-to-clipboard with a short "copied" confirmation. */
+function useCopy(getText: () => string) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+  async function copy() {
+    try {
+      await navigator.clipboard?.writeText(getText());
+    } catch {
+      return;
+    }
+    setCopied(true);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1800);
+  }
+  return { copied, copy };
+}
+
+/** Subtle metadata row beneath a user bubble: `MM/DD HH:MM` and an icon Copy button. */
+function UserMeta({ message }: { message: ChatMessageView }) {
+  const { copied, copy } = useCopy(() => message.text.join("\n\n"));
+  const stamp = messageStamp(message.created_at);
+  return (
+    <div className="nx-user-meta" data-testid="user-meta">
+      {stamp ? (
+        <time className="nx-user-meta__time" dateTime={message.created_at} data-testid="user-time">
+          {stamp}
+        </time>
+      ) : null}
+      <button
+        type="button"
+        className="nx-icon-btn"
+        onClick={() => void copy()}
+        aria-label={copied ? "Copied" : "Copy message"}
+        title={copied ? "Copied" : "Copy"}
+        data-testid="user-copy"
+      >
+        {copied ? <CheckIcon /> : <CopyIcon />}
+      </button>
+    </div>
+  );
+}
+
+function durationLabel(ms: number): string {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
 /**
- * The quiet footer under a finished assistant reply: copy, model and provider, token or
- * context figures when the engine reported them, and the time. Retry appears only on the
- * newest reply of a settled session. Nothing here is invented: absent data is omitted.
+ * The quiet footer under a finished assistant reply: Copy, Retry, token usage, model and
+ * provider, and `MM/DD HH:MM`. Retry appears only on the newest reply of a settled
+ * session. Nothing here is invented: absent data is omitted.
  */
+/** The user text a reply answers: the nearest user message before it. */
+function retryText(messages: ChatMessageView[], index: number): string | null {
+  for (let i = index - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role === "user") return m.text.join("\n\n") || null;
+  }
+  return null;
+}
+
 function AnswerFooter({
   message,
   model,
@@ -1265,43 +1359,10 @@ function AnswerFooter({
   usage: ChatUsageView | null;
   onRetry: (() => void) | null;
 }) {
-  const [copied, setCopied] = useState(false);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-    },
-    [],
-  );
-
-  async function copy() {
-    const text = message.text.join("\n\n");
-    try {
-      await navigator.clipboard?.writeText(text);
-    } catch {
-      return;
-    }
-    setCopied(true);
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => setCopied(false), 1800);
-  }
-
-  const meta: string[] = [];
-  if (message.origin === "preview") {
-    meta.push("Preview");
-  } else if (model) {
-    meta.push(`${model.label} · ${modelProviderLabel(model.provider)}`);
-  }
-  if (usage) {
-    if (usage.output_tokens != null) meta.push(`${compactTokens(usage.output_tokens)} out`);
-    if (usage.context_tokens_used != null && usage.context_limit) {
-      meta.push(
-        `${compactTokens(usage.context_tokens_used)} / ${compactTokens(usage.context_limit)} context`,
-      );
-    }
-  }
-  const time = messageTime(message.created_at);
-  if (time) meta.push(time);
+  const { copied, copy } = useCopy(() => message.text.join("\n\n"));
+  const total = usage ? tokenTotal(usage) : null;
+  const preview = message.origin === "preview";
+  const stamp = messageStamp(message.created_at);
 
   return (
     <div className="nx-msg-footer" data-testid="answer-footer">
@@ -1310,9 +1371,10 @@ function AnswerFooter({
         className="nx-msg-footer__btn"
         onClick={() => void copy()}
         aria-label={copied ? "Copied" : "Copy answer"}
+        title={copied ? "Copied" : "Copy"}
         data-testid="answer-copy"
       >
-        <span aria-hidden="true">{copied ? "✓" : "⧉"}</span>
+        {copied ? <CheckIcon /> : <CopyIcon />}
         <span>{copied ? "Copied" : "Copy"}</span>
       </button>
       {onRetry ? (
@@ -1322,19 +1384,26 @@ function AnswerFooter({
           onClick={onRetry}
           data-testid="answer-retry"
         >
-          <span aria-hidden="true">↻</span>
+          <RetryIcon />
           <span>Retry</span>
         </button>
       ) : null}
-      {meta.length > 0 ? (
-        <span className="nx-msg-footer__meta" data-testid="answer-meta">
-          {meta.map((item) => (
-            <span key={item} data-testid={item === "Preview" ? "preview-tag" : undefined}>
-              {item}
-            </span>
-          ))}
-        </span>
-      ) : null}
+      <span className="nx-msg-footer__meta" data-testid="answer-meta">
+        {total !== null && total > 0 ? (
+          <span className="nx-msg-footer__usage" data-testid="answer-usage">
+            <TokenIcon />
+            Usage {compactTokens(total)} tok
+          </span>
+        ) : null}
+        {preview ? (
+          <span data-testid="preview-tag">Preview</span>
+        ) : model ? (
+          <span data-testid="answer-model">
+            {model.label} · {modelProviderLabel(model.provider)}
+          </span>
+        ) : null}
+        {stamp ? <time dateTime={message.created_at}>{stamp}</time> : null}
+      </span>
     </div>
   );
 }
@@ -1354,10 +1423,13 @@ function Message({
 }) {
   if (message.role === "user") {
     return (
-      <div className="nx-msg nx-msg--user">
-        {message.text.map((paragraph, index) => (
-          <p key={index}>{paragraph}</p>
-        ))}
+      <div className="nx-user">
+        <div className="nx-msg nx-msg--user">
+          {message.text.map((paragraph, index) => (
+            <p key={index}>{paragraph}</p>
+          ))}
+        </div>
+        <UserMeta message={message} />
       </div>
     );
   }
@@ -1367,11 +1439,24 @@ function Message({
     !message.streaming &&
     (message.origin === "model" || message.origin === "preview") &&
     message.text.some((paragraph) => paragraph.trim() !== "");
+  const steps = message.tools?.length ?? 0;
+  const header: string[] = [];
+  // Wall-clock turn duration, present only when the engine reported it.
+  const completedMs = message.completed_ms;
+  if (answered && completedMs != null && completedMs > 0) {
+    header.push(`Completed in ${durationLabel(completedMs)}`);
+    if (steps > 0) header.push(`${steps} ${steps === 1 ? "step" : "steps"}`);
+  }
   return (
     <div
       className={`nx-msg nx-msg--assistant${message.streaming ? " nx-msg--streaming" : ""}`}
       data-testid="assistant-message"
     >
+      {header.length > 0 ? (
+        <div className="nx-msg-header" data-testid="completion-header">
+          {header.join(" · ")}
+        </div>
+      ) : null}
       {received ? card : null}
       {message.tools && message.tools.length > 0 ? <ToolActivity tools={message.tools} /> : null}
       <div className="nx-msg__body">

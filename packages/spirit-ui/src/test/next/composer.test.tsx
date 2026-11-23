@@ -175,8 +175,7 @@ describe("Meadow composer", () => {
     expect(meter).toHaveTextContent("18%");
     expect(meter).toHaveAttribute("aria-label", "Context 18% used");
     expect(screen.getByTestId("usage-pill-turns")).toHaveTextContent("3 turns");
-    expect(screen.getByTestId("usage-pill-tokens")).toHaveTextContent("15.2k tokens");
-    expect(screen.getByTestId("usage-pill-cache")).toHaveTextContent("cache 8.4k");
+    expect(screen.getByTestId("usage-pill-tokens")).toHaveTextContent("23.6K tok · Cache hit 40%");
 
     await user.click(meter);
     const popover = screen.getByTestId("context-popover");

@@ -69,6 +69,11 @@ export interface ChatMessageView extends Omit<ChatMessage, "created_at" | "origi
    * event or log message has confirmed yet. Renderer-only: never sent over the bridge.
    */
   optimistic?: boolean;
+  /**
+   * Renderer-only wall-clock turn duration in ms, stamped when an assistant reply
+   * settles in a live session. Absent on replayed history. Never sent over the bridge.
+   */
+  completed_ms?: number;
 }
 
 /** The verified facts a successful onboarding may put in the conversation. */
@@ -203,6 +208,23 @@ function normalizeText(text: string[]): string[] {
     remaining -= clean.length;
   }
   return out.length > 0 ? out : [""];
+}
+
+/**
+ * Milliseconds from the latest user message before `index` to the reply's own timestamp
+ * (falling back to the wall clock when the reply has none), at least 1000.
+ */
+function turnElapsedMs(list: ChatMessageView[], index: number): number | undefined {
+  for (let i = index - 1; i >= 0; i--) {
+    const candidate = list[i];
+    if (candidate?.role !== "user") continue;
+    const started = candidate.created_at ? Date.parse(candidate.created_at) : NaN;
+    if (Number.isNaN(started)) return undefined;
+    const replyAt = list[index]?.created_at ? Date.parse(list[index]!.created_at!) : NaN;
+    const end = Number.isNaN(replyAt) ? Date.now() : replyAt;
+    return Math.max(1000, end - started);
+  }
+  return undefined;
 }
 
 function normalizeMessage(message: ChatMessage): ChatMessageView {
@@ -441,12 +463,16 @@ function applyChatEvent(bridge: SpiritBridge, event: ChatEvent): void {
         break;
       }
       const message = normalizeMessage(event.message);
-      useConversations.setState((current) => ({
-        messages: {
-          ...current.messages,
-          [session]: upsertMessage(current.messages[session] ?? [], message),
-        },
-      }));
+      useConversations.setState((current) => {
+        const merged = upsertMessage(current.messages[session] ?? [], message).slice();
+        const at = merged.findIndex((candidate) => candidate.id === message.id);
+        const settled = merged[at];
+        if (settled && settled.role === "assistant" && !settled.streaming && settled.completed_ms == null) {
+          const ms = turnElapsedMs(merged, at);
+          if (ms != null) merged[at] = { ...settled, completed_ms: ms };
+        }
+        return { messages: { ...current.messages, [session]: merged } };
+      });
       if (message.show) useShellUi.getState().openPanel(message.show);
       break;
     }
@@ -491,7 +517,12 @@ function applyChatEvent(bridge: SpiritBridge, event: ChatEvent): void {
           if (index >= 0) {
             const existing = list[index];
             if (!existing) return {};
-            const message = { ...existing, streaming: false };
+            const ms = existing.completed_ms ?? turnElapsedMs(list, index);
+            const message = {
+              ...existing,
+              streaming: false,
+              ...(ms != null ? { completed_ms: ms } : {}),
+            };
             const empty = message.text.every((paragraph) => paragraph.trim() === "");
             next =
               empty && !message.card && !message.tools?.length

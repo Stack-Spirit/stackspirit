@@ -44,10 +44,10 @@ export function formatExactTokens(value: number): string {
 /** Compact counts for the quiet stats pills. */
 export function formatCompactTokens(value: number): string {
   if (value >= 1_000_000) {
-    return `${trimZero(value / 1_000_000, 1)}m`;
+    return `${trimZero(value / 1_000_000, 1)}M`;
   }
   if (value >= 1_000) {
-    return `${trimZero(value / 1_000, 1)}k`;
+    return `${trimZero(value / 1_000, 1)}K`;
   }
   return String(Math.round(value));
 }
@@ -56,9 +56,10 @@ function trimZero(value: number, digits: number): string {
   return value.toFixed(digits).replace(/\.0$/, "");
 }
 
-function tokenTotal(usage: ChatUsageView): number | null {
-  if (usage.input_tokens === null || usage.output_tokens === null) return null;
-  return usage.input_tokens + usage.output_tokens;
+/** Uncached input + cache reads + output; `input_tokens` excludes cache reads. */
+export function tokenTotal(usage: ChatUsageView): number | null {
+  if (usage.input_tokens == null || usage.output_tokens == null) return null;
+  return usage.input_tokens + (usage.cache_read_tokens ?? 0) + usage.output_tokens;
 }
 
 /**
@@ -183,35 +184,71 @@ export function ContextMeter({ usage }: { usage?: ChatUsageView | null }) {
   );
 }
 
+/** Optional extras the engine may report; absent means "not available", never zero. */
+export type TelemetryUsage = ChatUsageView & {
+  steps?: number | null;
+  tokens_per_second?: number | null;
+};
+
+/** `cache_read / (input + cache_read)` as a rounded percentage, or null when unknowable. */
+export function cacheHitPercent(usage: ChatUsageView): number | null {
+  const cache = usage.cache_read_tokens;
+  if (cache === null || cache <= 0) return null;
+  const denominator = (usage.input_tokens ?? 0) + cache;
+  if (denominator <= 0) return null;
+  return Math.min(100, Math.round((cache / denominator) * 100));
+}
+
+function GaugeIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function DatabaseIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+      <ellipse cx="8" cy="4" rx="5" ry="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
 /**
- * Quiet secondary pills beside the ring. A counter renders only when the engine
- * reported it; a zero cache count is not shown as a "cache hit".
+ * The crisp telemetry strip under the composer: `N turns M steps · R tok/s`, then
+ * `T tok · Cache hit P%`. A part renders only when the engine reported it.
  */
-export function UsageStats({ usage }: { usage?: ChatUsageView | null }) {
+export function UsageStats({ usage }: { usage?: TelemetryUsage | null }) {
   if (!usage) return null;
   const total = tokenTotal(usage);
-  const cache = usage.cache_read_tokens;
   const turns = usage.turns;
-  const showTurns = turns > 0;
+  const steps = usage.steps ?? 0;
+  const rate = usage.tokens_per_second ?? 0;
+  const hit = cacheHitPercent(usage);
   const showTotal = total !== null && total > 0;
-  const showCache = cache !== null && cache > 0;
-  if (!showTurns && !showTotal && !showCache) return null;
+  if (!(turns > 0) && !showTotal) return null;
+
+  const turnParts: string[] = [];
+  if (turns > 0) turnParts.push(`${turns} ${turns === 1 ? "turn" : "turns"}`);
+  if (steps > 0) turnParts.push(`${steps} ${steps === 1 ? "step" : "steps"}`);
+  const turnText = turnParts.join(" ");
 
   return (
     <div className="nx-usage-pills" data-testid="usage-stats">
-      {showTurns ? (
+      {turns > 0 ? (
         <span className="nx-usage-pill" data-testid="usage-pill-turns">
-          {turns} {turns === 1 ? "turn" : "turns"}
+          <GaugeIcon />
+          {turnText}
+          {rate > 0 ? ` · ${rate >= 10 ? Math.round(rate) : rate.toFixed(1)} tok/s` : ""}
         </span>
       ) : null}
       {showTotal && total !== null ? (
         <span className="nx-usage-pill" data-testid="usage-pill-tokens">
-          {formatCompactTokens(total)} tokens
-        </span>
-      ) : null}
-      {showCache && cache !== null ? (
-        <span className="nx-usage-pill" data-testid="usage-pill-cache">
-          cache {formatCompactTokens(cache)}
+          <DatabaseIcon />
+          {formatCompactTokens(total)} tok{hit !== null ? ` · Cache hit ${hit}%` : ""}
         </span>
       ) : null}
     </div>

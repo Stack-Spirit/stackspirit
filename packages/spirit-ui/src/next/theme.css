@@ -1350,9 +1350,61 @@ button.nx-node:focus-visible {
   padding: 0 4px;
 }
 
-.nx-msg-footer__meta > span + span::before {
+.nx-msg-footer__meta > * + *::before {
   content: "·";
   margin-right: 8px;
+}
+
+.nx-msg-footer__usage {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.nx-msg-header {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--nx-line);
+  color: var(--nx-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.nx-user {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+}
+
+.nx-user-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--nx-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.nx-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--nx-radius-sm);
+  background: transparent;
+  color: var(--nx-muted);
+  cursor: pointer;
+}
+
+.nx-icon-btn:hover {
+  background: var(--nx-hover);
+  color: var(--nx-text);
+}
+
+.nx-icon-btn:focus-visible {
+  outline: 2px solid var(--nx-accent);
+  outline-offset: 1px;
 }
 
 /* ---- SpiritLoader: the pixel sprout, animated in CSS ---- */
@@ -1950,6 +2002,15 @@ button.nx-composer__start:hover {
   padding: 2px 8px 0;
 }
 
+/* Stats first, context ring last, whatever the DOM order. */
+.nx-composer-dock .nx-usage-pills {
+  order: 1;
+}
+
+.nx-composer-dock .nx-context {
+  order: 2;
+}
+
 .nx-context {
   position: relative;
   display: flex;
@@ -2047,10 +2108,10 @@ button.nx-composer__start:hover {
 .nx-usage-pill {
   display: inline-flex;
   align-items: center;
+  gap: 5px;
   height: 20px;
-  padding: 0 8px;
-  border-radius: 999px;
-  background: var(--nx-raised);
+  padding: 0 4px;
+  background: transparent;
   color: var(--nx-muted);
   font-size: 11px;
   font-weight: 500;
