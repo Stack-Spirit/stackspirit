@@ -520,6 +520,20 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
       `surface pair` path is separate and still pending, and the owner's Mac live D6
       readiness check has not been run; no live Mac verification is claimed here.
 
+### 5.2 Chat UX landed (ss-116..ss-118, verified by ss-119, 2026-11-23)
+
+Details and limits live in `docs/ORCHESTRATOR-CHAT.md` §10.
+
+- **Real orchestrator provisioning:** one-click Start creates, reuses, moves or resumes the real
+  VOWP universal project orchestrator on the connected VPS (`vowp orchestrator new ... --app
+  opencode`) and falls back to the bundled engine only on `chat_not_configured`. OpenCode 2.x
+  hosts are detected and addressed under the `/api/` prefix. `LocalOrchestratorGate` and
+  `AsifGate` stay until §5 wiring lands.
+- **DeepSeek-Harness message chrome:** user **Copy** plus date/time; assistant **Completed**
+  header and footer; bottom telemetry strip under the composer.
+- **Composer:** left-aligned `+` for image/file attachments (no Workspace Write dropdown) and an
+  OpenCode-backed reasoning effort selector that is hidden for non-reasoning models.
+
 ## 6. Known gaps and cautions
 
 - e2e status (updated 2026-11-21): the Meadow desktop suite passed **41/41** in the

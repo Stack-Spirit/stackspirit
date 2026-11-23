@@ -2686,3 +2686,54 @@ No ss-88 open defects remain. The three items the Xvfb run found are fixed on lo
    `4dc9b0a`): the picker stays below the header and the spec exercises the pointer path.
 3. **Settings notice read `Openrouter`** — fixed by `ss-103` (`24bb5cf`): Settings uses the
    shared `domain/engine` `providerLabel`, so it reads `OpenRouter`.
+
+## 10. Chat UX state after ss-116..ss-118 (2026-11-23)
+
+Verified by ss-119 against the merged ss-116..ss-118 state (results in the job report).
+
+### 10.1 Real VOWP universal project orchestrator and OpenCode 2.x `/api` prefix (ss-116, ss-116b)
+
+- **Project sessions are real orchestrators.** One-click Start provisions the real VOWP universal
+  orchestrator for a project on the connected VPS (`vowp orchestrator new --name <project>
+  --project <project> --app opencode --node <local>` plus local pairing) through a
+  desktop-injected provisioner (`commands/local_orchestrator.rs`). An existing orchestrator is
+  reused and never replaced; one on another node (or home-hosted) is moved; a stopped, failed or
+  degraded one is resumed; an offline node is reported, not hidden.
+- **Engine fallback is explicit.** Only an error starting with `chat_not_configured` (no VPS host
+  or enrolled local node connected) falls back to the bundled engine. Any other provisioning error
+  is shown to the owner.
+- **Bundled-engine project/global sessions** run in `workspaces/global` and
+  `workspaces/project/<name>` with the project-orchestrator instructions sent as the per-message
+  system prompt (the pinned engine ignores workspace `AGENTS.md`). Unlike the setup chat they keep
+  OpenCode's default tool access with every permission at `ask`, so the owner answers each prompt
+  in the permission card. The setup prompt never leaks into project sessions.
+- **OpenCode 2.x `/api` prefix.** `ChatEndpoint.api_prefix` is detected once per endpoint: an
+  HTML (2xx, non-JSON) answer on `/session` with real JSON under `/api/session` means a 2.x host,
+  and every request path then gets the `/api` prefix. Any doubt or error keeps the unprefixed 1.x
+  paths. The 2.x `{"data": [...]}` message-list envelope is unwrapped to a bare array.
+- OpenRouter provider verification retries transient failures (ss-116).
+- Gates stay: `LocalOrchestratorGate` and `AsifGate` are unchanged by this work.
+
+### 10.2 DeepSeek-Harness message chrome and telemetry strip (ss-117b)
+
+- **User message:** a **Copy** button and a local-time `MM/DD HH:MM` stamp under the bubble.
+- **Assistant message:** a **Completed** header (duration and step count when known) and a footer
+  with tokens (including cache), model, preview tag, retry state and timestamp. Model and retry
+  show on every reply; session usage only on the latest reply.
+- **Bottom telemetry strip** under the composer: turns, steps, tok/s, tok and cache hit ratio,
+  and the context ring (`ContextMeter`). Steps, tok/s and cache hit are omitted when unavailable.
+- Coverage: `chatMessages.test.tsx` and `e2e/meadow-chat-messages.spec.ts` (axe WCAG 2.2 AA,
+  light and dark).
+
+### 10.3 Attachments and reasoning effort (ss-118)
+
+- **Left-aligned `+`** in the composer attaches images and files (chips with remove). There is no
+  Workspace Write dropdown. Limits: at most 8 attachments per turn and 8 MiB per `data:` URI
+  (`MAX_ATTACHMENTS`, `MAX_ATTACHMENT_URL_BYTES`); oversized files show a clear error.
+  Attachments travel as `ChatAttachment { filename, mime, url }` and reach OpenCode as `file`
+  parts; chips clear after send.
+- **Reasoning effort selector** is driven by OpenCode: the model catalog carries
+  `variants` (for example `low`, `high`) and the selected value is sent as `variant`. The selector
+  is hidden for models with no declared variants.
+- Coverage: `composerAttachments.test.tsx` and `e2e/composer-attach-reasoning.spec.ts` (light
+  and dark).
