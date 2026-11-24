@@ -277,7 +277,7 @@ fn bootstrap_project(
         // Resolve it before the skip check: a subdirectory of an initialised checkout must
         // report `initialized: false` rather than let `init` conflict on the same file.
         root = git_checkout_root(&root)?;
-        if !root.join("vowp.toml").is_file() {
+        if !vowp_protocol::brand::has_project_config(&root) {
             crate::cmd::init::run_at(
                 registry.paths,
                 &root,
@@ -588,13 +588,13 @@ pub fn register_checkout(
     weight: Option<u8>,
 ) -> Result<(ProjectEntry, bool), CliError> {
     let root = validate_checkout(path)?;
-    let config = crate::ctx::load_project_config(&root.join("vowp.toml"), paths)?;
+    let config = crate::ctx::load_project_config(&vowp_protocol::brand::project_config_path(&root), paths)?;
     if let Some(name) = name
         && ProjectName::parse(name)? != config.project.name
     {
         return Err(CliError::Invalid(format!(
             "{} names project {}; --name {name} would make the supervisor reject it",
-            root.join("vowp.toml").display(),
+            vowp_protocol::brand::project_config_path(&root).display(),
             config.project.name
         )));
     }
@@ -856,7 +856,7 @@ fn git_checkout_root(path: &Path) -> Result<PathBuf, CliError> {
 /// Validates that `path` is a git checkout with a `vowp.toml` and returns its absolute root.
 fn validate_checkout(path: &Path) -> Result<PathBuf, CliError> {
     let root = git_checkout_root(path)?;
-    if !root.join("vowp.toml").is_file() {
+    if !vowp_protocol::brand::has_project_config(&root) {
         return Err(CliError::Invalid(format!(
             "no vowp.toml in {}; run `vowp init` there",
             root.display()

@@ -102,7 +102,7 @@ pub(crate) fn local_method(request: &jsonrpc::Request, tools: &Value) -> Option<
             Some(json!({
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": false}},
-                "serverInfo": {"name": "vowp", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "vowp", "title": vowp_protocol::brand::PRODUCT_NAME, "description": vowp_protocol::brand::PRODUCT_DESCRIPTION, "version": env!("CARGO_PKG_VERSION")},
             }))
         }
         // Claude Code sends this probe before initialize. A valid empty capability is
@@ -110,7 +110,7 @@ pub(crate) fn local_method(request: &jsonrpc::Request, tools: &Value) -> Option<
         "server/discover" => Some(json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "serverInfo": {"name": "vowp", "version": env!("CARGO_PKG_VERSION")},
+            "serverInfo": {"name": "vowp", "title": vowp_protocol::brand::PRODUCT_NAME, "description": vowp_protocol::brand::PRODUCT_DESCRIPTION, "version": env!("CARGO_PKG_VERSION")},
         })),
         "ping" => Some(json!({})),
         "tools/list" => Some(tools.clone()),

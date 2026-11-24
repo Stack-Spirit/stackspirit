@@ -22,7 +22,7 @@ enabled by VOWP_API_TOKEN (missing or empty disables them). The listener binds
 127.0.0.1 only.
 
 Options:
-  --home <dir>      VOWP home (default: $VOWP_HOME, else $HOME/.vowp)
+  --home <dir>      Node home (default: $STACKSPIRIT_HOME, then $VOWP_HOME, else $HOME/.vowp)
   --project <name>  registered project to serve (default: the only registered project)
   --port <n>        loopback port (default: 0, an ephemeral port)
   -h, --help        print this help
@@ -31,7 +31,7 @@ Options:
 /// Options parsed from `vowp-daemon` arguments.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Options {
-    /// Node home; `None` means `VOWP_HOME` or `$HOME/.vowp`.
+    /// Node home; `None` means `STACKSPIRIT_HOME`, `VOWP_HOME` or `$HOME/.vowp`.
     pub home: Option<PathBuf>,
     /// Registered project to serve; `None` means the only registered project.
     pub project: Option<String>,

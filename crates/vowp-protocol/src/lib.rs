@@ -13,6 +13,7 @@ pub mod adapter;
 pub mod agent;
 pub mod api;
 pub mod asif;
+pub mod brand;
 pub mod capacity;
 pub mod capsule;
 pub mod catalog;

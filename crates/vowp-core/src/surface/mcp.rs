@@ -288,7 +288,7 @@ impl Executor<'_, '_> {
             .project(project)?
             .ok_or_else(|| ToolFailure::not_found(format!("project {project}")))?;
         let root = Path::new(&entry.path);
-        let config = match std::fs::read_to_string(root.join("vowp.toml")) {
+        let config = match std::fs::read_to_string(vowp_protocol::brand::project_config_path(root)) {
             Ok(text) => VowpConfig::from_toml(&text)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 // A project-less session uses the node's own home config. A test fixture
@@ -301,7 +301,10 @@ impl Executor<'_, '_> {
             Err(source) => {
                 return Err(ToolFailure::new(
                     "io",
-                    format!("{}: {source}", root.join("vowp.toml").display()),
+                    format!(
+                        "{}: {source}",
+                        vowp_protocol::brand::project_config_path(root).display()
+                    ),
                 ));
             }
         };

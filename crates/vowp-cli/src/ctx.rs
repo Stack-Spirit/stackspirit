@@ -79,7 +79,7 @@ impl Ctx {
         let (config, project, project_root, project_selected) = match role {
             NodeRole::Home => match resolve_project_root(global, &paths) {
                 Ok(project_root) => {
-                    let config_path = project_root.join("vowp.toml");
+                    let config_path = vowp_protocol::brand::project_config_path(&project_root);
                     if !config_path.is_file() {
                         return Err(CliError::NotFound(format!(
                             "project config {}; run `vowp init`",
@@ -256,7 +256,7 @@ impl Ctx {
     }
 }
 
-/// Returns the node home from `--home`, `$VOWP_HOME`, or `~/.vowp`.
+/// Returns the node home from `--home`, `$STACKSPIRIT_HOME`, `$VOWP_HOME`, or `~/.vowp`.
 pub fn node_paths(global: &Global) -> Result<NodePaths, CliError> {
     match &global.home {
         Some(home) => Ok(NodePaths::new(home)),
@@ -299,7 +299,7 @@ pub fn selected_checkout_root(global: &Global, paths: &NodePaths) -> Result<Opti
     let candidate = if let Some(value) = &global.project {
         let candidate = PathBuf::from(value);
         if candidate.is_dir() {
-            if !candidate.join("vowp.toml").is_file() {
+            if !vowp_protocol::brand::has_project_config(&candidate) {
                 return Err(CliError::NotFound(format!(
                     "no vowp.toml in {}; run `vowp init`",
                     candidate.display()
@@ -313,7 +313,7 @@ pub fn selected_checkout_root(global: &Global, paths: &NodePaths) -> Result<Opti
                 .project(&name)?
                 .ok_or_else(|| CliError::NotFound(format!("project {name}; run `vowp init`")))?;
             let root = PathBuf::from(project.path);
-            if !root.join("vowp.toml").is_file() {
+            if !vowp_protocol::brand::has_project_config(&root) {
                 return Err(CliError::NotFound(format!(
                     "no vowp.toml in {}; run `vowp init`",
                     root.display()
@@ -329,7 +329,7 @@ pub fn selected_checkout_root(global: &Global, paths: &NodePaths) -> Result<Opti
     let Some(root) = candidate else {
         return Ok(None);
     };
-    let config = load_project_config(&root.join("vowp.toml"), paths)?;
+    let config = load_project_config(&vowp_protocol::brand::project_config_path(&root), paths)?;
     if config.project.name.as_str() == vowp_store::RESERVED_NODE_PROJECT {
         return Ok(None);
     }
@@ -341,7 +341,7 @@ fn resolve_project_root(global: &Global, paths: &NodePaths) -> Result<PathBuf, C
     if let Some(value) = &global.project {
         let candidate = PathBuf::from(value);
         if candidate.is_dir() {
-            if candidate.join("vowp.toml").is_file() {
+            if vowp_protocol::brand::has_project_config(&candidate) {
                 return Ok(candidate);
             }
             return Err(CliError::NotFound(format!(
@@ -355,7 +355,7 @@ fn resolve_project_root(global: &Global, paths: &NodePaths) -> Result<PathBuf, C
             .project(&name)?
             .ok_or_else(|| CliError::NotFound(format!("project {name}; run `vowp init`")))?;
         let root = PathBuf::from(project.path);
-        if !root.join("vowp.toml").is_file() {
+        if !vowp_protocol::brand::has_project_config(&root) {
             return Err(CliError::NotFound(format!(
                 "no vowp.toml in {}; run `vowp init`",
                 root.display()
@@ -374,7 +374,7 @@ fn resolve_project_root(global: &Global, paths: &NodePaths) -> Result<PathBuf, C
     match projects.as_slice() {
         [project] => {
             let root = PathBuf::from(&project.path);
-            if !root.join("vowp.toml").is_file() {
+            if !vowp_protocol::brand::has_project_config(&root) {
                 return Err(CliError::NotFound(format!(
                     "no vowp.toml in {}; run `vowp init`",
                     root.display()
@@ -400,7 +400,7 @@ fn cwd_project_root(start: &Path, paths: &NodePaths) -> Result<Option<PathBuf>, 
     let Some(root) = find_project_root(start) else {
         return Ok(None);
     };
-    let config = load_project_config(&root.join("vowp.toml"), paths)?;
+    let config = load_project_config(&vowp_protocol::brand::project_config_path(&root), paths)?;
     let store = Store::open(paths)?;
     let Some(project) = store.project(&config.project.name)? else {
         return Ok(None);
@@ -427,7 +427,7 @@ fn same_checkout(registered: &str, root: &Path) -> bool {
 /// Walks from `start` to the filesystem root looking for `vowp.toml`.
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     for directory in start.ancestors() {
-        if directory.join("vowp.toml").is_file() {
+        if vowp_protocol::brand::has_project_config(directory) {
             return Some(directory.to_path_buf());
         }
     }

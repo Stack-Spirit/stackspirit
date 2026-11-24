@@ -171,18 +171,19 @@ impl<'a> Backend<'a> {
             .project(project)?
             .ok_or_else(|| ToolError::new("not_found", format!("project {project}")))?;
         let root = std::path::Path::new(&entry.path);
-        let config = match crate::ctx::load_project_config(&root.join("vowp.toml"), self.ctx.paths()) {
-            Ok(config) => config,
-            Err(_) if project.as_str() == vowp_store::RESERVED_NODE_PROJECT => {
-                // A project-less session uses the node's own home config, which may have
-                // no `vowp.toml` yet on a freshly migrated home.
-                let mut config = (*self.ctx.config()).clone();
-                config.project.name = project.clone();
-                config.project.path = Some(entry.path.clone());
-                config
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let config =
+            match crate::ctx::load_project_config(&vowp_protocol::brand::project_config_path(root), self.ctx.paths()) {
+                Ok(config) => config,
+                Err(_) if project.as_str() == vowp_store::RESERVED_NODE_PROJECT => {
+                    // A project-less session uses the node's own home config, which may have
+                    // no `vowp.toml` yet on a freshly migrated home.
+                    let mut config = (*self.ctx.config()).clone();
+                    config.project.name = project.clone();
+                    config.project.path = Some(entry.path.clone());
+                    config
+                }
+                Err(error) => return Err(error.into()),
+            };
         let adapters = AdapterRegistry::from_config(&config)?;
         let mut deps = self.ctx.deps().clone();
         deps.config = Arc::new(config);

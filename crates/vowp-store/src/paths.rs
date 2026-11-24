@@ -25,11 +25,11 @@ impl NodePaths {
 
     /// Resolves the node root from the environment.
     ///
-    /// `VOWP_HOME` wins when set and non-empty; otherwise `$HOME/.vowp` is used. Returns
+    /// `STACKSPIRIT_HOME` wins when set and non-empty, then `VOWP_HOME`; otherwise `$HOME/.vowp` is used. Returns
     /// [`StoreError::NoHome`] when neither variable is usable.
     pub fn from_env() -> Result<Self, StoreError> {
-        if let Some(home) = std::env::var_os("VOWP_HOME").filter(|value| !value.is_empty()) {
-            return Ok(Self::new(PathBuf::from(home)));
+        if let Some(home) = vowp_protocol::brand::home_override_from_env() {
+            return Ok(Self::new(home));
         }
         match std::env::var_os("HOME").filter(|value| !value.is_empty()) {
             Some(home) => Ok(Self::new(PathBuf::from(home).join(".vowp"))),

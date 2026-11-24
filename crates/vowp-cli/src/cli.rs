@@ -71,7 +71,7 @@ pub struct Cli {
 #[command(
     name = "vowp",
     version,
-    about = "VOWP: local-first supervisor for AI coding agents",
+    about = "StackSpirit Engine (formerly VOWP): local-first supervisor for AI coding agents",
     disable_help_subcommand = true
 )]
 struct ParsedCli {
@@ -249,10 +249,10 @@ pub struct Global {
     /// Run the command on that node over ssh.
     #[arg(long, global = true, value_name = "NAME")]
     pub node: Option<String>,
-    /// Project name or path; defaults to the nearest ancestor with `vowp.toml`.
+    /// Project name or path; defaults to the nearest ancestor with `stackspirit.toml` or `vowp.toml`.
     #[arg(long, global = true, value_name = "NAME|PATH")]
     pub project: Option<String>,
-    /// Node home (default `$VOWP_HOME`, else `~/.vowp`).
+    /// Node home (default `$STACKSPIRIT_HOME`, then `$VOWP_HOME`, else `~/.vowp`).
     #[arg(long, global = true, value_name = "DIR")]
     pub home: Option<PathBuf>,
     /// Disable colour even when stdout is a terminal.

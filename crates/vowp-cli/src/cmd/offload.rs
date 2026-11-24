@@ -545,7 +545,7 @@ fn project_config(ctx: &Ctx, name: &ProjectName, path: &str) -> Result<VowpConfi
     if name == ctx.project() {
         return Ok(ctx.config().clone());
     }
-    let text = std::fs::read_to_string(Path::new(path).join("vowp.toml"))?;
+    let text = std::fs::read_to_string(vowp_protocol::brand::project_config_path(Path::new(path)))?;
     Ok(VowpConfig::from_toml(&text)?)
 }
 

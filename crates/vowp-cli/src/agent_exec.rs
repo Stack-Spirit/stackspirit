@@ -99,7 +99,10 @@ impl CoreRunHandler {
 
     /// Loads the checkout's `vowp.toml` without touching the real home configuration.
     fn project_config(&self, project_root: &Path) -> Result<VowpConfig, crate::CliError> {
-        crate::ctx::load_project_config(&project_root.join("vowp.toml"), &NodePaths::new(&self.config.state_dir))
+        crate::ctx::load_project_config(
+            &vowp_protocol::brand::project_config_path(project_root),
+            &NodePaths::new(&self.config.state_dir),
+        )
     }
 
     /// Returns the current saved map for one project.

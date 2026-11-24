@@ -415,7 +415,7 @@ fn check_config(project_root: Option<&Path>, paths: &vowp_store::NodePaths, chec
         checks.push("config", CheckStatus::Warn, "no vowp.toml found");
         return None;
     };
-    let config_path = root.join("vowp.toml");
+    let config_path = vowp_protocol::brand::project_config_path(root);
     match ctx::load_project_config(&config_path, paths) {
         Ok(config) => {
             checks.push(

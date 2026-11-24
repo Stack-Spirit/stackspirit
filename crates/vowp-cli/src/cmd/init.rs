@@ -88,7 +88,7 @@ pub(crate) fn run_at(
     force: bool,
     no_framework: bool,
 ) -> Result<InitOutcome, CliError> {
-    let config_path = root.join("vowp.toml");
+    let config_path = vowp_protocol::brand::project_config_path(root);
     if config_path.exists() && !force {
         return Err(CliError::Conflict(format!(
             "project already initialised at {}; use --force",
@@ -142,7 +142,11 @@ pub(crate) fn run_at(
 
     let mut written = Vec::new();
     let mut skipped = Vec::new();
-    write_relative(root, "vowp.toml", &config_text, force, &mut written, &mut skipped)?;
+    let config_name = config_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("vowp.toml");
+    write_relative(root, config_name, &config_text, force, &mut written, &mut skipped)?;
 
     std::fs::create_dir_all(root.join(".vowp/jobs"))?;
     std::fs::create_dir_all(root.join(".vowp/checkpoints"))?;

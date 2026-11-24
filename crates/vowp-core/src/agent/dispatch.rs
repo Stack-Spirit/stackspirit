@@ -1372,7 +1372,7 @@ pub(crate) fn project_config(live: &VowpConfig, project: &vowp_protocol::Project
     // The project's own `vowp.toml` is authoritative, exactly as `vowp offload status`
     // reads it. A missing or invalid file falls back to the registry copy and then to the
     // selected project's live document rather than failing the whole dispatch pass.
-    if let Ok(text) = std::fs::read_to_string(Path::new(&project.path).join("vowp.toml"))
+    if let Ok(text) = std::fs::read_to_string(vowp_protocol::brand::project_config_path(Path::new(&project.path)))
         && let Ok(config) = VowpConfig::from_toml(&text)
     {
         return config;

@@ -93,7 +93,7 @@ fn local_project(global: &Global) -> Result<LocalProject, CliError> {
     let root = match &global.project {
         Some(value) => {
             let candidate = PathBuf::from(value);
-            if candidate.is_dir() && candidate.join("vowp.toml").is_file() {
+            if candidate.is_dir() && vowp_protocol::brand::has_project_config(&candidate) {
                 candidate
             } else if candidate.is_dir() {
                 return Err(CliError::NotFound(format!(
@@ -116,7 +116,7 @@ fn local_project(global: &Global) -> Result<LocalProject, CliError> {
             })?
         }
     };
-    let config = crate::ctx::load_project_config(&root.join("vowp.toml"), &paths)?;
+    let config = crate::ctx::load_project_config(&vowp_protocol::brand::project_config_path(&root), &paths)?;
     Ok(LocalProject { root, config })
 }
 

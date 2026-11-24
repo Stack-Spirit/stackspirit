@@ -246,7 +246,7 @@ pub fn config_path(deps: &Deps, store: &Store) -> Result<Option<PathBuf>, CoreEr
     } else {
         return Ok(None);
     };
-    let path = root.join("vowp.toml");
+    let path = vowp_protocol::brand::project_config_path(&root);
     Ok(path.is_file().then_some(path))
 }
 
@@ -254,7 +254,7 @@ pub fn config_path(deps: &Deps, store: &Store) -> Result<Option<PathBuf>, CoreEr
 ///
 /// Returns `None` when the project file does not exist.
 pub fn fingerprint_at(project_root: &Path, node_home: &Path) -> Result<Option<ConfigFingerprint>, CoreError> {
-    let project = project_root.join("vowp.toml");
+    let project = vowp_protocol::brand::project_config_path(project_root);
     if !project.is_file() {
         return Ok(None);
     }

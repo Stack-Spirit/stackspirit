@@ -634,7 +634,7 @@ fn path_map_from_checkout(
 
 /// Reads `[project].name` from a checkout's `vowp.toml`, else uses the directory name.
 fn project_name_for(local_root: &Path) -> Result<ProjectName, CliError> {
-    let config_path = local_root.join("vowp.toml");
+    let config_path = vowp_protocol::brand::project_config_path(local_root);
     if config_path.is_file() {
         let text = std::fs::read_to_string(&config_path).map_err(CliError::Io)?;
         let value: toml::Value = toml::from_str(&text)

@@ -648,7 +648,7 @@ fn resolve_project(value: &str) -> Result<ProjectName, CliError> {
         return Ok(name);
     }
     let path = Path::new(value);
-    let config_path = path.join("vowp.toml");
+    let config_path = vowp_protocol::brand::project_config_path(path);
     if path.is_dir() && config_path.is_file() {
         let text = std::fs::read_to_string(&config_path)?;
         let config = VowpConfig::from_toml(&text)?;

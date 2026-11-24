@@ -1455,9 +1455,9 @@ fn list(ctx: &Ctx, io: &mut dyn IoStreams, args: &SessionLsArgs) -> Result<i32, 
             Ok(name) => Some(name),
             Err(error) => {
                 let path = std::path::Path::new(value);
-                if path.is_dir() && path.join("vowp.toml").is_file() {
+                if path.is_dir() && vowp_protocol::brand::has_project_config(path) {
                     Some(
-                        crate::ctx::load_project_config(&path.join("vowp.toml"), ctx.paths())?
+                        crate::ctx::load_project_config(&vowp_protocol::brand::project_config_path(path), ctx.paths())?
                             .project
                             .name,
                     )

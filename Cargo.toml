@@ -59,6 +59,10 @@ path = "crates/vowp-cli/src/lib.rs"
 name = "vowp"
 path = "crates/vowp-cli/src/main.rs"
 
+[[bin]]
+name = "stackspirit"
+path = "crates/vowp-cli/src/stackspirit.rs"
+
 [[test]]
 name = "agent"
 path = "crates/vowp-cli/tests/agent.rs"
@@ -154,6 +158,10 @@ path = "crates/vowp-cli/tests/setup_verify.rs"
 [[test]]
 name = "signals"
 path = "crates/vowp-cli/tests/signals.rs"
+
+[[test]]
+name = "stackspirit"
+path = "crates/vowp-cli/tests/stackspirit.rs"
 
 [[test]]
 name = "status"

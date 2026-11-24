@@ -3504,7 +3504,7 @@ fn project_supervisor(base: &Deps, entry: &ProjectEntry) -> Result<ProjectSuperv
 
 /// Resolves the project-scoped [`Deps`] described by the spec (§3.8).
 fn project_deps(base: &Deps, entry: &ProjectEntry) -> Result<Deps, CoreError> {
-    let config_path = Path::new(&entry.path).join("vowp.toml");
+    let config_path = vowp_protocol::brand::project_config_path(Path::new(&entry.path));
     let loaded_from_project = config_path.is_file();
     let mut config = if loaded_from_project {
         let text = std::fs::read_to_string(&config_path).map_err(|source| CoreError::Io {

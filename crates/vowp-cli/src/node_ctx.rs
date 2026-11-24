@@ -106,7 +106,7 @@ impl NodeCtx {
             });
         }
         let paths = crate::ctx::node_paths(global)?;
-        let vowp_home = std::env::var_os("VOWP_HOME").is_some_and(|value| !value.is_empty());
+        let vowp_home = vowp_protocol::brand::home_override_from_env().is_some();
         let role = if vowp_home || paths.db_path().is_file() {
             NodeRole::Home
         } else {
