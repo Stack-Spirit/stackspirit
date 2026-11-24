@@ -622,7 +622,7 @@ async fn ensure_on_client(
     }
     let session = card.session_id.to_string();
     let surface = ensure_paired_surface(client, local, state_dir, node, &session).await?;
-    bind_orchestrator_surface(state_dir, project, &session, &surface)?;
+    bind_orchestrator_surface(state_dir, &card.name, &session, &surface)?;
     if card.node.as_ref().map(ToString::to_string).as_deref() != Some(node) {
         card = client
             .orchestrator_move(
@@ -919,6 +919,30 @@ mod ensure_tests {
         let moves = client.orchestrator_move_calls();
         assert_eq!(moves.len(), 1);
         assert!(matches!(&moves[0].1, OrchestratorMoveTarget::Node { node } if node == "mac"));
+    }
+
+    #[tokio::test]
+    async fn resuming_a_non_canonical_card_binds_the_surface_by_its_own_name() {
+        let state = TempState::new();
+        mark_paired(state.path());
+        let mut stopped = card("stopped", Some("mac"));
+        stopped.name = "local-stackspirit".to_owned();
+        let client = mock(vec![stopped]).with_surfaces(vec![listed_surface()]);
+        ensure_on_client(&client, &agent(), state.path(), "mac", "stackspirit")
+            .await
+            .unwrap();
+        assert!(client.orchestrator_new_calls().is_empty());
+        assert_eq!(
+            client.orchestrator_resume_calls(),
+            vec!["local-stackspirit"]
+        );
+        assert!(
+            state
+                .path()
+                .join("orchestrators/local-stackspirit/config.json")
+                .exists()
+        );
+        assert!(!state.path().join("orchestrators/stackspirit").exists());
     }
 
     #[tokio::test]
