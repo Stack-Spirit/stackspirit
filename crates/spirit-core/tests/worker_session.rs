@@ -128,15 +128,17 @@ async fn tail_accepts_json_lines() {
 #[tokio::test]
 async fn tail_redacts_secret_patterns_everywhere() {
     let keyword = ["api", "key"].join("_");
-    let doc = r#"[{"seq":1,"ts":"t","type":"tool.call","actor":"assistant","payload":{"name":"Bash","input":{"command":"curl -H 'Authorization: Bearer sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV' https://x"}}},
- {"seq":2,"ts":"t","type":"assistant.message","actor":"assistant","payload":{"text":"KEYWORD=hunter2supersecret\nnext"}}]"#.replace("KEYWORD", &keyword);
+    let prefix = ["sk", "ant", "api03"].join("-");
+    let doc = r#"[{"seq":1,"ts":"t","type":"tool.call","actor":"assistant","payload":{"name":"Bash","input":{"command":"curl -H 'Authorization: Bearer TOKPREFIX-ABCDEFGHIJKLMNOPQRSTUV' https://x"}}},
+ {"seq":2,"ts":"t","type":"assistant.message","actor":"assistant","payload":{"text":"KEYWORD=hunter2supersecret\nnext"}}]"#.replace("KEYWORD", &keyword)
+        .replace("TOKPREFIX", &prefix);
     let (_, client) = client(vec![CommandOutput::ok(doc)]);
     let view = client
         .session_tail("repo", SESSION, None, None)
         .await
         .unwrap();
     let dump = serde_json::to_string(&view).unwrap();
-    assert!(!dump.contains("sk-ant-api03"), "{dump}");
+    assert!(!dump.contains(&prefix), "{dump}");
     assert!(!dump.contains("hunter2supersecret"), "{dump}");
     assert!(dump.contains("[redacted]"));
 }
