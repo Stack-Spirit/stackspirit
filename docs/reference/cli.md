@@ -42,6 +42,7 @@ python3 docs/reference/check-reference.py
 | [`vowp job replan`](#vowp-job-replan) | Replace a job through a planner turn |
 | [`vowp job fail`](#vowp-job-fail) | Give up on a stalled job |
 | [`vowp job cancel`](#vowp-job-cancel) | Cancel a non-terminal job |
+| [`vowp job set-executor`](#vowp-job-set-executor) | Pin a job to an executor, or switch a running job's session onto it |
 | [`vowp graph`](#vowp-graph) | Print, export or import the job graph |
 | [`vowp attach`](#vowp-attach) | Attach to a job's tmux window |
 | [`vowp session`](#vowp-session) | List and operate universal sessions |
@@ -392,17 +393,18 @@ Add, inspect or change jobs
 Usage: vowp job [OPTIONS] <COMMAND>
 
 Commands:
-  add      Add one job and its brief
-  update   Change a job's editable fields
-  ls       List jobs
-  show     Show one job
-  retry    Retry a failed, stalled or parked job
-  park     Park a non-terminal job
-  nudge    Ask a stalled job to continue
-  restart  Restart a stalled job with a fresh process
-  replan   Replace a job through a planner turn
-  fail     Give up on a stalled job
-  cancel   Cancel a non-terminal job
+  add           Add one job and its brief
+  update        Change a job's editable fields
+  ls            List jobs
+  show          Show one job
+  retry         Retry a failed, stalled or parked job
+  park          Park a non-terminal job
+  nudge         Ask a stalled job to continue
+  restart       Restart a stalled job with a fresh process
+  replan        Replace a job through a planner turn
+  fail          Give up on a stalled job
+  cancel        Cancel a non-terminal job
+  set-executor  Pin a job to an executor, or switch a running job's session onto it
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
@@ -661,6 +663,28 @@ Usage: vowp job cancel [OPTIONS] <ID>
 
 Arguments:
   <ID>  Job id
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `vowp.toml`
+      --home <DIR>           Node home (default `$VOWP_HOME`, else `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `vowp job set-executor`
+
+```text
+Pin a job to an executor, or switch a running job's session onto it
+
+Usage: vowp job set-executor [OPTIONS] <ID> <EXECUTOR>
+
+Arguments:
+  <ID>        Job id
+  <EXECUTOR>  Executor as `<harness>:<provider>/<model>[@effort|#variant]`
 
 Options:
       --json                 Print one machine-readable JSON document on stdout

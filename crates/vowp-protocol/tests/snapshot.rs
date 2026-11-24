@@ -61,3 +61,50 @@ fn session_card_round_trips_an_owner_without_a_token_field() {
     let card: SessionSurfaceCard = serde_json::from_value(value).expect("card with owner parses");
     assert_eq!(card.owner, Some(owner));
 }
+
+#[test]
+fn queue_and_running_cards_omit_new_fields_when_absent_and_round_trip_them() {
+    use vowp_protocol::snapshot::{QueueJobCard, RunningJobCard};
+    let queue = json!({
+        "job": "a-job", "title": "t", "kind": "build", "role": "worker", "priority": 1,
+        "state": "ready", "age_secs": 3, "waiting_reason": null
+    });
+    let card: QueueJobCard = serde_json::from_value(queue).expect("old queue card parses");
+    assert_eq!(card.planned_executor, None);
+    assert!(
+        !serde_json::to_value(&card)
+            .expect("json")
+            .as_object()
+            .expect("object")
+            .contains_key("planned_executor")
+    );
+    let mut card = card;
+    card.planned_executor = Some("opencode:deepseek/deepseek-flash".to_owned());
+    let back: QueueJobCard = serde_json::from_value(serde_json::to_value(&card).expect("json")).expect("parse");
+    assert_eq!(
+        back.planned_executor.as_deref(),
+        Some("opencode:deepseek/deepseek-flash")
+    );
+
+    let running = json!({
+        "job": "a-job", "kind": "build", "role": "worker", "executor": null, "node": "home",
+        "age_secs": 1, "last_event_age_secs": null, "session_id": null
+    });
+    let card: RunningJobCard = serde_json::from_value(running).expect("old running card parses");
+    assert_eq!(card.tokens_input, None);
+    assert_eq!(card.billing_mode, None);
+    let value = serde_json::to_value(&card).expect("json");
+    for key in [
+        "tokens_input",
+        "tokens_output",
+        "tokens_cache_read",
+        "context_window",
+        "cost_usd",
+        "billing_mode",
+    ] {
+        assert!(
+            !value.as_object().expect("object").contains_key(key),
+            "{key} must be omitted"
+        );
+    }
+}

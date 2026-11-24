@@ -2298,6 +2298,15 @@ impl Supervisor {
             .profiles
             .get(&job.profile)
             .ok_or_else(|| CoreError::NotFound(format!("profile {}", job.profile)))?;
+        if let Some(executor) = super::dispatch::job_executor_override(&self.store, &job.id)? {
+            return Ok(DispatchChoice {
+                job_id: job.id.clone(),
+                provider: executor.provider(),
+                executor,
+                rung: 0,
+                node: profile.node.clone(),
+            });
+        }
         let limited = super::limited_map(&self.store, self.deps.clock.now())?
             .into_iter()
             .collect::<HashMap<_, _>>();

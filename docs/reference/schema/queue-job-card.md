@@ -199,6 +199,13 @@ Exported by `vowp schema QueueJobCard` and generated from the protocol types in
       },
       "type": "array"
     },
+    "planned_executor": {
+      "description": "Executor the job will dispatch on: its explicit override, else the first\nnon-limited rung of its profile ladder.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "priority": {
       "description": "Dispatch priority.",
       "format": "int32",

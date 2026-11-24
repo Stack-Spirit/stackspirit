@@ -1721,3 +1721,155 @@ fn queue_card_needs_carries_real_upstream_dependencies() {
     let json = serde_json::to_value(card(&independent.id)).expect("json");
     assert!(json.get("needs").is_none(), "empty needs is not serialized");
 }
+
+#[test]
+fn queue_cards_plan_an_executor_and_running_cards_report_usage() {
+    let fixture = Fixture::new();
+    let now = fixture.clock.now();
+    let ready = fixture.job(&fixture.alpha, "q01-ready", 50);
+    fixture.set_state(
+        &fixture.alpha,
+        &ready,
+        JobState::Ready,
+        StateChange {
+            note: None,
+            parked_reason: None,
+        },
+    );
+    let pinned = fixture.job(&fixture.alpha, "q02-pinned", 40);
+    let store = fixture.store_for(&fixture.alpha);
+    store
+        .kv_set("job_executor:q02-pinned", "claude-code:claude-sonnet-5-5@high")
+        .expect("override");
+    let running = fixture.job(&fixture.alpha, "q03-run", 30);
+    fixture.set_state(
+        &fixture.alpha,
+        &running,
+        JobState::Running,
+        StateChange {
+            note: None,
+            parked_reason: None,
+        },
+    );
+    let _ = pinned;
+    let make_run = |job: &Job, executor: &str, cost: Cost| Run {
+        id: RunId::new(),
+        job_id: Some(job.id.clone()),
+        session_id: None,
+        role: RunRole::Worker,
+        purpose: RunPurpose::Start,
+        profile: None,
+        rung: 0,
+        executor: Some(Executor::parse(executor).expect("executor")),
+        provider: None,
+        node: NodeName::parse("local").expect("node"),
+        native_session_id: None,
+        pid: None,
+        window: None,
+        cwd: None,
+        started_at: now.minus(Duration::from_secs(10)),
+        ended_at: None,
+        exit_code: None,
+        outcome: None,
+        limit_kind: None,
+        cost,
+        detail: String::new(),
+    };
+    store
+        .insert_run(&make_run(
+            &running,
+            "opencode:deepseek/deepseek-flash",
+            Cost::receipt(0.25, tokens(1000, 200)),
+        ))
+        .expect("run");
+    store
+        .kv_set("model_context_window:deepseek/deepseek-flash", "128000")
+        .expect("window");
+
+    let snapshot = fixture.snapshot();
+    let alpha = snapshot
+        .projects
+        .iter()
+        .find(|p| p.name == fixture.alpha)
+        .expect("alpha");
+    let queue = |id: &str| {
+        alpha
+            .queue
+            .iter()
+            .find(|card| card.job.as_str() == id)
+            .expect("queue card")
+    };
+    assert_eq!(
+        queue("q01-ready").planned_executor.as_deref(),
+        Some("opencode:deepseek/deepseek-flash"),
+        "first ladder rung"
+    );
+    assert_eq!(
+        queue("q02-pinned").planned_executor.as_deref(),
+        Some("claude-code:claude-sonnet-5-5@high"),
+        "explicit override wins"
+    );
+    let card = alpha
+        .running
+        .iter()
+        .find(|card| card.job.as_str() == "q03-run")
+        .expect("running");
+    assert_eq!(card.tokens_input, Some(1000));
+    assert_eq!(card.tokens_output, Some(200));
+    assert_eq!(card.billing_mode.as_deref(), Some("api"));
+    assert_eq!(card.cost_usd, Some(0.25));
+    assert_eq!(card.context_window, Some(128_000));
+}
+
+#[test]
+fn running_card_never_invents_usage_or_cost_for_subscriptions() {
+    let fixture = Fixture::new();
+    let now = fixture.clock.now();
+    let job = fixture.job(&fixture.alpha, "s01-sub", 50);
+    fixture.set_state(
+        &fixture.alpha,
+        &job,
+        JobState::Running,
+        StateChange {
+            note: None,
+            parked_reason: None,
+        },
+    );
+    let store = fixture.store_for(&fixture.alpha);
+    store
+        .insert_run(&Run {
+            id: RunId::new(),
+            job_id: Some(job.id.clone()),
+            session_id: None,
+            role: RunRole::Worker,
+            purpose: RunPurpose::Start,
+            profile: None,
+            rung: 0,
+            executor: Some(Executor::parse("claude-code:claude-sonnet-5-5").expect("executor")),
+            provider: None,
+            node: NodeName::parse("local").expect("node"),
+            native_session_id: None,
+            pid: None,
+            window: None,
+            cwd: None,
+            started_at: now.minus(Duration::from_secs(5)),
+            ended_at: None,
+            exit_code: None,
+            outcome: None,
+            limit_kind: None,
+            cost: Cost::unknown(),
+            detail: String::new(),
+        })
+        .expect("run");
+    let snapshot = fixture.snapshot();
+    let alpha = snapshot
+        .projects
+        .iter()
+        .find(|p| p.name == fixture.alpha)
+        .expect("alpha");
+    let card = &alpha.running[0];
+    assert_eq!(card.billing_mode.as_deref(), Some("subscription"));
+    assert_eq!(card.tokens_input, None);
+    assert_eq!(card.cost_usd, None);
+    assert_eq!(card.context_window, None);
+}

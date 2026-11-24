@@ -116,6 +116,24 @@ pub struct RunningJobCard {
     pub last_event_age_secs: Option<u64>,
     /// Session the job runs in, when any.
     pub session_id: Option<SessionId>,
+    /// Non-cached input tokens of the active run, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_input: Option<u64>,
+    /// Output tokens of the active run, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_output: Option<u64>,
+    /// Prompt-cache read tokens of the active run, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_cache_read: Option<u64>,
+    /// Known context window of the model in tokens, when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Cost so far in USD; only for API-priced providers, absent for subscriptions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// `subscription`, `api` or `free`, when the executor is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_mode: Option<String>,
 }
 
 /// One blocked job card.
@@ -155,6 +173,10 @@ pub struct QueueJobCard {
     /// Upstream jobs this job needs, from the job graph.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<JobId>,
+    /// Executor the job will dispatch on: its explicit override, else the first
+    /// non-limited rung of its profile ladder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_executor: Option<String>,
 }
 
 /// The newest merge recorded for a project.

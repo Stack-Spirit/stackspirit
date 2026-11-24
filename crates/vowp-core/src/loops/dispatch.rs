@@ -11,6 +11,20 @@ use vowp_store::Store;
 use crate::CoreError;
 use crate::deps::Deps;
 
+/// Returns the kv key holding a job's explicit executor override.
+pub fn job_executor_key(job: &JobId) -> String {
+    format!("job_executor:{job}")
+}
+
+/// Reads a job's explicit executor override (`vowp job set-executor`), when one is set.
+///
+/// An unparsable stored value is ignored so a hand-edited row cannot block dispatch.
+pub fn job_executor_override(store: &Store, job: &JobId) -> Result<Option<vowp_protocol::Executor>, CoreError> {
+    Ok(store
+        .kv_get(&job_executor_key(job))?
+        .and_then(|value| vowp_protocol::Executor::parse(&value).ok()))
+}
+
 /// Returns false when the job must wait; writes the waiting reason to `jobs.note`.
 ///
 /// The body builds the node-wide admission request, asks the capacity manager, records

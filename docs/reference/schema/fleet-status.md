@@ -1173,6 +1173,13 @@ Exported by `vowp schema FleetStatus` and generated from the protocol types in
           },
           "type": "array"
         },
+        "planned_executor": {
+          "description": "Executor the job will dispatch on: its explicit override, else the first\nnon-limited rung of its profile ladder.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "priority": {
           "description": "Dispatch priority.",
           "format": "int32",
@@ -1271,6 +1278,30 @@ Exported by `vowp schema FleetStatus` and generated from the protocol types in
           "minimum": 0,
           "type": "integer"
         },
+        "billing_mode": {
+          "description": "`subscription`, `api` or `free`, when the executor is known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "context_window": {
+          "description": "Known context window of the model in tokens, when configured.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cost_usd": {
+          "description": "Cost so far in USD; only for API-priced providers, absent for subscriptions.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "executor": {
           "description": "Executor string, when known.",
           "type": [
@@ -1313,6 +1344,33 @@ Exported by `vowp schema FleetStatus` and generated from the protocol types in
             }
           ],
           "description": "Session the job runs in, when any."
+        },
+        "tokens_cache_read": {
+          "description": "Prompt-cache read tokens of the active run, when recorded.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tokens_input": {
+          "description": "Non-cached input tokens of the active run, when recorded.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tokens_output": {
+          "description": "Output tokens of the active run, when recorded.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [

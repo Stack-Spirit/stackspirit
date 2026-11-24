@@ -496,6 +496,17 @@ pub enum JobCommand {
     Fail(JobFailArgs),
     /// Cancel a non-terminal job.
     Cancel(JobIdArgs),
+    /// Pin a job to an executor, or switch a running job's session onto it.
+    SetExecutor(JobSetExecutorArgs),
+}
+
+/// Arguments for `vowp job set-executor`.
+#[derive(Debug, Clone, Args)]
+pub struct JobSetExecutorArgs {
+    /// Job id.
+    pub id: String,
+    /// Executor as `<harness>:<provider>/<model>[@effort|#variant]`.
+    pub executor: String,
 }
 
 /// Arguments for `vowp job add`.
