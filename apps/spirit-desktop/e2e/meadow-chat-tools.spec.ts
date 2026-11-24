@@ -33,10 +33,16 @@ for (const theme of ["light", "dark"] as const) {
   test(`tool activity rows are calm and pass WCAG 2.2 AA (${theme})`, async ({ page }) => {
     await startTurn(page, "chat-tools", theme);
     const rows = page.getByTestId("tool-row");
+    await expect(page.getByTestId("session-state")).toContainText("Ready");
+    // Completed steps collapse behind the completion header until the owner opens them.
+    const toggle = page.getByTestId("completion-header").last();
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(rows).toHaveCount(0);
+    await expectNoWcagViolations(page);
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
     await expect(rows.first()).toBeVisible();
     await expect(rows.first()).toHaveAttribute("data-status", "completed");
-    await expectNoWcagViolations(page);
-    await expect(page.getByTestId("session-state")).toContainText("Ready");
     await expect(rows).toHaveCount(3);
     await expect(rows.nth(2)).toContainText("failed");
     await expectNoWcagViolations(page);
@@ -61,6 +67,14 @@ for (const theme of ["light", "dark"] as const) {
     await expect(page.getByTestId("session-state")).toContainText("Replying…");
     await expectNoWcagViolations(page);
 
+    // Docked directly above the composer, Reject on the left, Meadow primary on the right.
+    const cardBox = (await card.boundingBox())!;
+    const composerBox = (await page.getByRole("textbox", { name: "Message" }).boundingBox())!;
+    expect(cardBox.y + cardBox.height).toBeLessThanOrEqual(composerBox.y);
+    await expect(card.getByRole("button")).toHaveText(["Reject", "Always allow", "Allow once"]);
+    const patterns = await card.locator(".nx-perm__patterns").evaluate((el) => getComputedStyle(el).overflowY);
+    expect(patterns).toBe("auto");
+
     // Keyboard reachable, with a visible ring.
     const allow = card.getByRole("button", { name: "Allow once" });
     await allow.focus();
@@ -73,6 +87,21 @@ for (const theme of ["light", "dark"] as const) {
     await expectNoWcagViolations(page);
   });
 }
+
+test("Enter allows once and Escape rejects from the docked card", async ({ page }) => {
+  await startTurn(page, "chat-permission", "light");
+  const card = page.getByTestId("permission-card");
+  await expect(card).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(card).toHaveCount(0);
+  await expect(page.getByText(/You allowed the request/)).toBeVisible();
+
+  await startTurn(page, "chat-permission", "light");
+  await expect(page.getByTestId("permission-card")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("permission-card")).toHaveCount(0);
+  await expect(page.getByText(/You rejected the request/)).toBeVisible();
+});
 
 test("Reject also resolves the turn", async ({ page }) => {
   await startTurn(page, "chat-permission", "light");

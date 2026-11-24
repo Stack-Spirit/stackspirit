@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
 import { errorTitle, toSpiritError, type SpiritError } from "../bridge/errors";
 import type {
@@ -703,6 +703,14 @@ export function ChatView({
     (message) => message.origin === "model" || message.origin === "preview",
   );
   const pendingPermissions = view?.pending_permissions ?? [];
+  const lastVisible = visibleMessages[visibleMessages.length - 1];
+  // The completed answer footer owns the tail slot once it renders; no second indicator.
+  const lastAnswered =
+    lastVisible !== undefined &&
+    lastVisible.role !== "user" &&
+    !lastVisible.streaming &&
+    (lastVisible.origin === "model" || lastVisible.origin === "preview") &&
+    lastVisible.text.some((paragraph) => paragraph.trim() !== "");
   const hero = !hasConversation && visibleMessages.length === 0 && pendingPermissions.length === 0;
   const secureCardOpen = visibleMessages.some(
     (message) => message.card?.kind === "secure-server",
@@ -877,7 +885,7 @@ export function ChatView({
               ) : null}
             </div>
           ) : null}
-          {visibleMessages.length > 0 || pendingPermissions.length > 0 ? (
+          {visibleMessages.length > 0 ? (
             <div className="nx-chat__inner">
               {visibleMessages.map((message, index) => (
                 <Message
@@ -885,6 +893,7 @@ export function ChatView({
                   session={session}
                   message={message}
                   model={view?.model ?? null}
+                  live={state === "streaming" && index === visibleMessages.length - 1}
                   usage={index === lastAnswerIndex ? (view?.usage ?? null) : null}
                   onRetry={
                     state === "ready" && retryText(visibleMessages, index)
@@ -893,21 +902,11 @@ export function ChatView({
                   }
                 />
               ))}
-              {state === "streaming" && !retry ? (
+              {state === "streaming" && !retry && !lastAnswered ? (
                 <div className="nx-msg__thinking">
                   <TurnLoader />
                 </div>
               ) : null}
-              {pendingPermissions.map((prompt) => (
-                <PermissionCard
-                  key={prompt.id}
-                  prompt={prompt}
-                  busy={permissionBusy === prompt.id}
-                  locked={permissionBusy !== null}
-                  error={permissionError?.message ?? null}
-                  onReply={(decision) => void replyPermission(session, prompt.id, decision)}
-                />
-              ))}
               <div ref={endRef} />
             </div>
           ) : (
@@ -946,6 +945,20 @@ export function ChatView({
             ) : null
           }
         >
+          {pendingPermissions.length > 0 ? (
+            <div className="nx-perm-dock" data-testid="permission-dock">
+              {pendingPermissions.map((prompt) => (
+                <PermissionCard
+                  key={prompt.id}
+                  prompt={prompt}
+                  busy={permissionBusy === prompt.id}
+                  locked={permissionBusy !== null}
+                  error={permissionError?.message ?? null}
+                  onReply={(decision) => void replyPermission(session, prompt.id, decision)}
+                />
+              ))}
+            </div>
+          ) : null}
           <ComposerBar
             session={session}
             placeholder={composerPlaceholder(session, state, missingModel, Boolean(retry))}
@@ -1408,19 +1421,29 @@ function AnswerFooter({
   );
 }
 
+/** The completion header (and so the toggle) only exists when the engine reported a duration. */
+function completedMs0(message: ChatMessageView): boolean {
+  return message.completed_ms != null && message.completed_ms > 0;
+}
+
 function Message({
   session,
   message,
   model,
   usage,
+  live,
   onRetry,
 }: {
   session: SessionId;
   message: ChatMessageView;
+  /** True for the reply the running turn is still producing: its tool rows stay visible. */
+  live: boolean;
   model: ChatModelView | null;
   usage: ChatUsageView | null;
   onRetry: (() => void) | null;
 }) {
+  const [stepsOpen, setStepsOpen] = useState(false);
+  const toolsId = useId();
   if (message.role === "user") {
     return (
       <div className="nx-user">
@@ -1441,6 +1464,9 @@ function Message({
     message.text.some((paragraph) => paragraph.trim() !== "");
   const steps = message.tools?.length ?? 0;
   const header: string[] = [];
+  // Completed tool steps collapse behind the completion header once the reply is done;
+  // while the turn streams, live tool rows stay visible.
+  const collapsible = answered && !live && steps > 0 && completedMs0(message);
   // Wall-clock turn duration, present only when the engine reported it.
   const completedMs = message.completed_ms;
   if (answered && completedMs != null && completedMs > 0) {
@@ -1453,12 +1479,30 @@ function Message({
       data-testid="assistant-message"
     >
       {header.length > 0 ? (
-        <div className="nx-msg-header" data-testid="completion-header">
-          {header.join(" · ")}
-        </div>
+        steps > 0 ? (
+          <button
+            type="button"
+            className="nx-msg-header nx-msg-header--toggle"
+            data-testid="completion-header"
+            aria-expanded={stepsOpen}
+            aria-controls={toolsId}
+            onClick={() => setStepsOpen((open) => !open)}
+          >
+            <span>{header.join(" · ")}</span>
+            <span className="nx-msg-header__chevron" aria-hidden="true">
+              {stepsOpen ? "▾" : "▸"}
+            </span>
+          </button>
+        ) : (
+          <div className="nx-msg-header" data-testid="completion-header">
+            {header.join(" · ")}
+          </div>
+        )
       ) : null}
       {received ? card : null}
-      {message.tools && message.tools.length > 0 ? <ToolActivity tools={message.tools} /> : null}
+      {message.tools && message.tools.length > 0 && (!collapsible || stepsOpen) ? (
+        <ToolActivity tools={message.tools} id={toolsId} />
+      ) : null}
       <div className="nx-msg__body">
         {message.text
           .filter((paragraph) => paragraph.trim() !== "" || !message.tools?.length)
@@ -1484,9 +1528,9 @@ const TOOL_STATUS_LABEL: Record<ChatToolStatus, string> = {
 };
 
 /** Compact, calm tool-call rows. The text states the status; the dot only reinforces it. */
-function ToolActivity({ tools }: { tools: ChatToolActivity[] }) {
+function ToolActivity({ tools, id }: { tools: ChatToolActivity[]; id?: string }) {
   return (
-    <ul className="nx-tools" aria-label="Tool activity" data-testid="tool-activity">
+    <ul id={id} className="nx-tools" aria-label="Tool activity" data-testid="tool-activity">
       {tools.map((tool) => (
         <li
           key={tool.id}
@@ -1540,8 +1584,33 @@ function PermissionCard({
   onReply: (decision: ChatPermissionDecision) => void;
 }) {
   const titleId = useId();
+  const cardRef = useRef<HTMLElement>(null);
+  // Focus the card when it appears so Enter / Escape work without a click. Only steal
+  // focus from the page body or the composer, never from another control the owner chose.
+  useEffect(() => {
+    const active = document.activeElement;
+    if (!active || active === document.body || active.tagName === "TEXTAREA") {
+      cardRef.current?.focus({ preventScroll: true });
+    }
+  }, []);
+  const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (locked || event.repeat || event.nativeEvent.isComposing) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onReply("reject");
+    } else if (event.key === "Enter") {
+      if ((event.target as HTMLElement).closest("button, a[href], input, textarea, select")) {
+        return;
+      }
+      event.preventDefault();
+      onReply("once");
+    }
+  };
   return (
     <section
+      ref={cardRef}
+      tabIndex={-1}
+      onKeyDown={onKeyDown}
       className="nx-perm nx-permission-card"
       aria-labelledby={titleId}
       data-testid="permission-card"

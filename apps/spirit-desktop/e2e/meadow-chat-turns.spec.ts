@@ -54,6 +54,46 @@ for (const theme of ["light", "dark"] as const) {
     await expect(loader.getByTestId("turn-loader-text")).toContainText(/Thinking/);
     await expect(loader.locator("svg circle")).toHaveCount(3);
     await expect(loader.locator("svg .nx-turn-loader__orbit")).toHaveCount(1);
+    // The shimmer is motion; read its gradient with motion allowed.
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    // Meadow shimmer: muted -> accent -> muted, in the same 28px tail slot as the footer.
+    const look = await loader.evaluate((el) => {
+      const text = el.querySelector(".nx-turn-loader__text")!;
+      const probe = document.createElement("span");
+      probe.style.color = "var(--nx-accent)";
+      document.body.appendChild(probe);
+      const accent = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        accent,
+        gradient: getComputedStyle(text).backgroundImage,
+        minHeight: getComputedStyle(el).minHeight,
+      };
+    });
+    expect(look.gradient).toContain(look.accent);
+    expect(look.minHeight).toBe("28px");
     await expectNoWcagViolations(page);
   });
 }
+
+test("loader and answer footer share one tail slot (no layout jump)", async ({ page }) => {
+  await startTurn(page, "chat-permission", "light");
+  const loader = page.getByTestId("turn-loader");
+  await expect(loader).toBeVisible();
+  // Distance from the end of the transcript content above to the loader slot.
+  const before = await page.locator(".nx-msg__thinking").evaluate((el) => {
+    const prev = el.previousElementSibling!.getBoundingClientRect();
+    const box = el.getBoundingClientRect();
+    return { gap: box.top - prev.bottom, height: box.height };
+  });
+  await page.getByTestId("permission-card").getByRole("button", { name: "Allow once" }).click();
+  const footer = page.getByTestId("answer-footer").last();
+  await expect(footer).toBeVisible();
+  const after = await footer.evaluate((el) => {
+    const body = el.parentElement!.querySelector(".nx-msg__body")!.getBoundingClientRect();
+    const box = el.getBoundingClientRect();
+    return { gap: box.top - body.bottom, height: box.height };
+  });
+  expect(Math.abs(before.gap - after.gap)).toBeLessThanOrEqual(1);
+  expect(Math.abs(before.height - after.height)).toBeLessThanOrEqual(1);
+});

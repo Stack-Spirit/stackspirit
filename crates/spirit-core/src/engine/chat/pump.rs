@@ -401,9 +401,18 @@ pub struct SseEventMapper {
     last_text: HashMap<(String, Option<String>), String>,
     truncated: BTreeSet<String>,
     active_assistant: Option<String>,
+    /// Native ids of user messages. OpenCode echoes their parts, and those must never
+    /// be mapped to assistant (left-aligned) messages.
+    user_messages: BTreeSet<String>,
 }
 
 impl SseEventMapper {
+    /// Registers a user message id (for example a just-sent `msg_...`) so echoed parts
+    /// for it are ignored.
+    pub fn register_user_message(&mut self, id: impl Into<String>) {
+        self.user_messages.insert(id.into());
+    }
+
     /// Creates an empty mapper.
     #[must_use]
     pub fn new() -> Self {
@@ -419,6 +428,9 @@ impl SseEventMapper {
         self.truncated.clear();
         self.active_assistant = None;
         for message in messages {
+            if message.role == ChatRole::User {
+                self.user_messages.insert(message.id.clone());
+            }
             if message.role == ChatRole::Assistant {
                 let text = message.joined_text();
                 self.last_text.insert((message.id.clone(), None), text);
@@ -436,6 +448,9 @@ impl SseEventMapper {
                     return Mapped::Error {
                         status: message.error_status,
                     };
+                }
+                if message.role == "user" {
+                    self.user_messages.insert(message.id.clone());
                 }
                 if message.role != "assistant" {
                     return Mapped::None;
@@ -471,6 +486,9 @@ impl SseEventMapper {
                 message_id,
                 session_id: _,
             } => {
+                if self.user_messages.contains(message_id) {
+                    return Mapped::None;
+                }
                 self.last_text.retain(|(id, _), _| id != message_id);
                 if self.active_assistant.as_deref() == Some(message_id) {
                     self.active_assistant = None;
@@ -488,7 +506,13 @@ impl SseEventMapper {
             EngineEvent::SessionError { error_status, .. } => Mapped::Error {
                 status: *error_status,
             },
-            EngineEvent::ToolPartUpdated { .. } => Mapped::ToolActivity,
+            EngineEvent::ToolPartUpdated { message_id, .. } => {
+                if self.user_messages.contains(message_id) {
+                    Mapped::None
+                } else {
+                    Mapped::ToolActivity
+                }
+            }
             EngineEvent::PermissionAsked {
                 id,
                 permission,
@@ -528,6 +552,9 @@ impl SseEventMapper {
     }
 
     fn map_part(&mut self, part: &EnginePartUpdate, now: Timestamp) -> Mapped {
+        if self.user_messages.contains(&part.message_id) {
+            return Mapped::None;
+        }
         self.active_assistant = Some(part.message_id.clone());
         let key = (part.message_id.clone(), Some(part.id.clone()));
         let base = self
@@ -843,5 +870,57 @@ mod tests {
             mapper.map(&event, Timestamp::epoch()),
             Mapped::Error { status: Some(429) }
         );
+    }
+
+    fn user_echo_part(id: &str) -> EngineEvent {
+        EngineEvent::MessagePartUpdated {
+            part: EnginePartUpdate {
+                id: "prt_1".to_owned(),
+                message_id: id.to_owned(),
+                session_id: Some("s1".to_owned()),
+                text: Some("hello".to_owned()),
+                delta: None,
+            },
+        }
+    }
+
+    #[test]
+    fn echoed_user_message_parts_never_become_assistant_messages() {
+        let mut mapper = SseEventMapper::new();
+        let updated = EngineEvent::MessageUpdated {
+            message: EngineMessageUpdate {
+                id: "msg_u".to_owned(),
+                role: "user".to_owned(),
+                session_id: Some("s1".to_owned()),
+                has_error: false,
+                error_status: None,
+            },
+        };
+        assert_eq!(mapper.map(&updated, Timestamp::epoch()), Mapped::None);
+        assert_eq!(
+            mapper.map(&user_echo_part("msg_u"), Timestamp::epoch()),
+            Mapped::None
+        );
+        let tool = EngineEvent::ToolPartUpdated {
+            session_id: None,
+            message_id: "msg_u".to_owned(),
+        };
+        assert_eq!(mapper.map(&tool, Timestamp::epoch()), Mapped::None);
+        assert!(mapper.active_assistant.is_none());
+    }
+
+    #[test]
+    fn pre_registered_sent_user_id_suppresses_part_before_message_updated() {
+        let mut mapper = SseEventMapper::new();
+        mapper.register_user_message("msg_sent");
+        assert_eq!(
+            mapper.map(&user_echo_part("msg_sent"), Timestamp::epoch()),
+            Mapped::None
+        );
+        // A different (assistant) message still maps.
+        assert!(matches!(
+            mapper.map(&user_echo_part("msg_a"), Timestamp::epoch()),
+            Mapped::Message(_)
+        ));
     }
 }

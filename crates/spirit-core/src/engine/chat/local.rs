@@ -1112,6 +1112,7 @@ impl LocalChatProvider {
             record.error = None;
             record.retry = None;
             record.active_turn = Some(user.id.clone());
+            record.mapper.register_user_message(user.id.clone());
             record.turn_completed = false;
             record.turn_cancelled = false;
             record.turn_seq = record.turn_seq.saturating_add(1);

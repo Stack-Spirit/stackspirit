@@ -47,8 +47,15 @@ for (const theme of ["light", "dark"] as const) {
     await expect(footer).toBeVisible();
     await expect(footer.getByTestId("answer-meta")).toContainText(/\d{2}\/\d{2} \d{2}:\d{2}/);
     await expect(page.getByTestId("completion-header").last()).toHaveText(
-      /^Completed in \d+s · 3 steps$/,
+      /^Completed in \d+s · 3 steps\s*[▸▾]$/,
     );
+    // The user meta is calm at rest and fully revealed on hover.
+    const copy = page.getByTestId("user-meta").last().getByRole("button");
+    await copy.evaluate((el) => (el as HTMLElement).blur());
+    await page.mouse.move(0, 0);
+    await expect(copy).toHaveCSS("opacity", /^0\.6/);
+    await page.locator(".nx-user").last().hover();
+    await expect(copy).toHaveCSS("opacity", "1");
     await expectNoWcagViolations(page);
   });
 

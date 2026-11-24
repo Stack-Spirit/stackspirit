@@ -108,7 +108,13 @@ describe("assistant footer", () => {
     const { user, box } = await openChat("chat-tools");
     await user.type(box, "go{Enter}");
     const header = await screen.findByTestId("completion-header");
-    expect(header.textContent).toMatch(/^Completed in (\d+s|1m \d+s) · 3 steps$/);
+    expect(header.textContent).toMatch(/^Completed in (\d+s|1m \d+s) · 3 steps[▸▾]$/);
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryAllByTestId("tool-row")).toHaveLength(0);
+    await user.click(header);
+    expect(header).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getAllByTestId("tool-row")).toHaveLength(3);
+    expect(screen.queryByTestId("turn-loader")).toBeNull();
     expect(header.textContent).not.toMatch(/\d{3,}m/);
   });
 
