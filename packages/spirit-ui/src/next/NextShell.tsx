@@ -14,6 +14,7 @@ import { ChatView } from "./ChatView";
 import { useCluster, useClusterStore } from "./clusterStore";
 import { initializeConversations } from "./conversations";
 import { ContextPanel } from "./ContextPanel";
+import { WorkerSessionView } from "./WorkerSessionView";
 import { FormClusterDialog } from "./FormClusterDialog";
 import { PromoteBackupDialog } from "./PromoteBackupDialog";
 import { ServerPage } from "./ServerPage";
@@ -123,7 +124,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
     if (connected && view.kind === "session" && view.session === "setup") {
       setView({ kind: "session", session: "global" });
     }
-    if (!connected && (view.kind === "server" || view.kind === "workers" || view.kind === "inbox")) {
+    if (!connected && (view.kind === "server" || view.kind === "workers" || view.kind === "workerSession" || view.kind === "inbox")) {
       setView({ kind: "session", session: "global" });
     }
   }
@@ -171,7 +172,9 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const scopeProject =
     view.kind === "workers"
       ? view.project
-      : view.kind === "session" && view.session.startsWith("project:")
+      : view.kind === "workerSession"
+        ? view.project
+        : view.kind === "session" && view.session.startsWith("project:")
         ? view.session.slice("project:".length)
         : null;
 
@@ -208,6 +211,16 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
           </div>
         </div>
       </section>
+    );
+  } else if (view.kind === "workerSession" && serverLabel) {
+    main = (
+      <WorkerSessionView
+        key={`ws:${view.sessionId}`}
+        project={view.project}
+        jobId={view.jobId}
+        sessionId={view.sessionId}
+        onBack={() => openWorkers(view.project)}
+      />
     );
   } else if (view.kind === "workers" && serverLabel) {
     main = <WorkersPage key={`workers:${view.project}`} project={view.project} onOpenSession={() => openSession(view.project)} />;
@@ -281,6 +294,9 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
             onOpenServer={openServer}
             onOpenWorkers={openWorkers}
             onOpenSession={(project) => openSession(project)}
+            onOpenWorkerSession={(project, jobId, sessionId) =>
+              setView({ kind: "workerSession", project, jobId, sessionId })
+            }
             onOpenInbox={() => setInboxOpen(true)}
             resizeHandle={drawer.handleProps}
           />

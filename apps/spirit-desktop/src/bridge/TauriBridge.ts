@@ -63,6 +63,7 @@ import type {
   SecretSetInput,
   SecretSetOutcome,
   SessionCardView,
+  SessionTailView,
   SessionTakeoverResult,
   SessionId,
   SetTargetInput,
@@ -222,6 +223,12 @@ export class TauriBridge implements SpiritBridge {
     dismissInbox: (id: string): Promise<InboxItemView> => call("dismiss_inbox", { id }),
     setTarget: (input: SetTargetInput): Promise<CapacityTargetView> =>
       call("set_target", { input }),
+    sessionTail: (
+      project: string,
+      sessionId: string,
+      afterSeq?: number | null,
+    ): Promise<SessionTailView> =>
+      call("session_tail", { project, sessionId, afterSeq: afterSeq ?? null }),
     rawDocument: (): Promise<RawDocument | null> => call("fleet_raw_document"),
   };
 

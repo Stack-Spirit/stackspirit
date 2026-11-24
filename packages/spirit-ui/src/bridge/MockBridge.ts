@@ -84,6 +84,8 @@ import type {
   SecretSetOutcome,
   SessionCardView,
   SessionOwnerView,
+  SessionTailView,
+  SessionEventView,
   SessionTakeoverResult,
   SessionId,
   SetTargetInput,
@@ -348,6 +350,9 @@ export class MockBridge implements SpiritBridge {
   private connectionState: ConnectionSnapshot;
   private fleetView: FleetView | null = null;
   private ownerOverride: SessionOwnerView | null = null;
+  /** Session tail polls, for tests. */
+  readonly tailPolls: { project: string; sessionId: string; afterSeq: number | null }[] = [];
+  private readonly tailTicks = new Map<string, number>();
   /** Session ids passed to `takeoverSession`, for tests. */
   readonly takeovers: string[] = [];
   /** Every `orchestratorMove` call, with the requested target. */
@@ -734,6 +739,19 @@ export class MockBridge implements SpiritBridge {
   };
 
   fleetApi = {
+    sessionTail: async (
+      project: string,
+      sessionId: string,
+      afterSeq?: number | null,
+    ): Promise<SessionTailView> => {
+      if (typeof sessionId !== "string" || sessionId.length === 0 || !project) {
+        throw errorDto("invalid_input", "session tail needs a project and a session id");
+      }
+      this.tailPolls.push({ project, sessionId, afterSeq: afterSeq ?? null });
+      const tick = this.tailTicks.get(sessionId) ?? 0;
+      this.tailTicks.set(sessionId, tick + 1);
+      return clone(mockSessionTail(sessionId, afterSeq ?? null, tick, this.nowMs));
+    },
     get: async (): Promise<FleetView | null> => (this.fleetView ? clone(this.fleetView) : null),
     refresh: async (): Promise<FleetView> => {
       if (!this.fleetView || !this.connectionState.host_id) {
@@ -1087,6 +1105,18 @@ export class MockBridge implements SpiritBridge {
     list: async (): Promise<SessionCardView[]> =>
       clone(this.fleetView?.sessions ?? []),
     takeoverSession: async (sessionId: string): Promise<SessionTakeoverResult> => {
+      // Worker sessions (running cards or job-bound sessions) have no surface owner; the
+      // mock's seeded worker ids are not strict ULIDs, so they are matched before validation.
+      const owned = this.fleetView?.session_owners?.some((owner) => owner.session_id === sessionId);
+      const isWorkerSession =
+        !owned &&
+        !!this.fleetView &&
+        (this.fleetView.running.some((card) => card.session_id === sessionId) ||
+          this.fleetView.sessions.some((card) => card.id === sessionId && card.role !== null));
+      if (isWorkerSession) {
+        this.takeovers.push(sessionId);
+        return { session_id: sessionId, previous: "worker" };
+      }
       this.requireSessionId(sessionId);
       if (this.scenario === "owner-unsupported") {
         throw errorDto(
@@ -4233,3 +4263,44 @@ export class MockBridge implements SpiritBridge {
   }
 }
 
+
+/** Deterministic worker-session events; later ticks append new events for live polling. */
+function mockSessionTail(
+  sessionId: string,
+  afterSeq: number | null,
+  tick: number,
+  nowMs: number,
+): SessionTailView {
+  const claude = sessionId.endsWith("1") || sessionId.endsWith("AC");
+  const script: [string, string, string, string | null][] = claude
+    ? [
+        ["turn.started", "system", "Turn 1 started", null],
+        ["assistant.message", "assistant", "Assistant: Reading the brief and AGENTS.md.", null],
+        ["tool.call", "assistant", "Read: AGENTS.md", '{"file_path":"AGENTS.md"}'],
+        ["tool.result", "tool", "Tool result: ok", "# StackSpirit Worker Instructions"],
+        ["tool.call", "assistant", "Bash: cargo test -p spirit-core", '{"command":"cargo test -p spirit-core"}'],
+        ["tool.result", "tool", "Tool result: ok (exit 0)", "test result: ok. 142 passed"],
+        ["assistant.message", "assistant", "Assistant: Gates are green, writing the report.", null],
+        ["turn.ended", "system", "Turn 1 ended (end_turn)", null],
+      ]
+    : [
+        ["turn.started", "system", "Turn 1 started", null],
+        ["assistant.message", "assistant", "Assistant: Planning the change set.", null],
+        ["tool.call", "assistant", "bash: npm run typecheck", '{"command":"npm run typecheck"}'],
+        ["tool.result", "tool", "Tool result: ok (exit 0)", "tsc --noEmit: no errors"],
+        ["file.change", "tool", "File modified: packages/spirit-ui/src/next/ContextPanel.tsx", null],
+        ["assistant.message", "assistant", "Assistant: Running vitest.", null],
+      ];
+  const visible = Math.min(script.length, 4 + tick * 2);
+  const events: SessionEventView[] = script.slice(0, visible).map(([kind, actor, summary, detail], index) => ({
+    seq: index + 1,
+    at: new Date(nowMs - (script.length - index) * 4000).toISOString(),
+    kind,
+    actor,
+    summary,
+    detail,
+  }));
+  const fresh = afterSeq === null ? events : events.filter((event) => event.seq > afterSeq);
+  const last = events.at(-1)?.seq ?? 0;
+  return { session_id: sessionId, events: fresh, next_seq: Math.max(last, afterSeq ?? 0) };
+}

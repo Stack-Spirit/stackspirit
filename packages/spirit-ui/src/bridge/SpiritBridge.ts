@@ -61,6 +61,7 @@ import type {
   SecretSetInput,
   SecretSetOutcome,
   SessionCardView,
+  SessionTailView,
   SessionTakeoverResult,
   SessionId,
   SetTargetInput,
@@ -252,6 +253,15 @@ export interface SpiritBridge {
      * A 404 is a typed `not_found`, not a missing route.
      */
     job?(id: string): Promise<JobDetailView>;
+    /**
+     * Optional read-only tail of one worker session's event log. Incremental through
+     * `afterSeq`; never writes to the session. Absent on bridges that cannot reach VOWP.
+     */
+    sessionTail?(
+      project: string,
+      sessionId: string,
+      afterSeq?: number | null,
+    ): Promise<SessionTailView>;
     /** Parsed VOWP documents plus every `WireWarning` from the last parse. */
     rawDocument(): Promise<RawDocument | null>;
     /**

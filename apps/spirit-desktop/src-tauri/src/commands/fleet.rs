@@ -194,6 +194,20 @@ fn project_for_job(view: &FleetView, job_id: &str) -> Option<String> {
     None
 }
 
+/// Reads a page of one session's event log, read-only (`vowp session tail --from`).
+#[tauri::command]
+pub async fn session_tail(
+    state: State<'_, AppState>,
+    project: String,
+    session_id: String,
+    after_seq: Option<u64>,
+) -> CommandResult<spirit_core::vowp::client::session_tail::SessionTailView> {
+    let client = state.client()?;
+    client
+        .session_tail(&project, &session_id, after_seq, None)
+        .await
+}
+
 /// Takes a session over for StackSpirit.
 ///
 /// The renderer supplies only the session id. The local node and surface label come

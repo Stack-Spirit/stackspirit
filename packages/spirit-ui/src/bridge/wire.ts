@@ -707,6 +707,25 @@ export interface SessionTakeoverResult {
   previous: string | null;
 }
 
+/** One redacted event of a worker session's log (`vowp session tail`). */
+export interface SessionEventView {
+  seq: number;
+  at: string;
+  /** Event type such as `assistant.message`, `tool.call`, `turn.started`. */
+  kind: string;
+  actor: string;
+  summary: string;
+  detail: string | null;
+}
+
+/** A page of a session's event log, oldest first. */
+export interface SessionTailView {
+  session_id: string;
+  events: SessionEventView[];
+  /** Pass as `afterSeq` on the next poll. */
+  next_seq: number;
+}
+
 export interface SessionCardView {
   id: string;
   project: string | null;

@@ -10,6 +10,8 @@ export type NextView =
   | { kind: "server" }
   /** Full page: one project's workers and jobs as a node map and rows. */
   | { kind: "workers"; project: string }
+  /** Full page: read-only live session of one worker, with explicit take over. */
+  | { kind: "workerSession"; project: string; jobId: string; sessionId: string }
   /** Full page: every open inbox item, Global and per project. */
   | { kind: "inbox" };
 

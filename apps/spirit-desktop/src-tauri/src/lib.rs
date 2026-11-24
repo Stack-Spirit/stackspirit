@@ -138,6 +138,7 @@ pub fn run() {
             commands::asif::asif_export,
             commands::asif::asif_import,
             commands::fleet::session_takeover,
+            commands::fleet::session_tail,
             commands::local_orchestrator::local_orchestrator_overview,
             commands::local_orchestrator::local_agent_status,
             commands::local_orchestrator::local_agent_pair,

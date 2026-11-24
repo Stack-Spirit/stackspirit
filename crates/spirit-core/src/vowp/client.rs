@@ -190,6 +190,21 @@ pub trait VowpClient: Send + Sync {
         ))
     }
 
+    /// Reads `vowp --project <p> --json session tail <id> [--from N]` as a redacted,
+    /// read-only view. `limit` is applied client-side (VOWP has no `--limit`).
+    async fn session_tail(
+        &self,
+        _project: &str,
+        _session_id: &str,
+        _after_seq: Option<u64>,
+        _limit: Option<u32>,
+    ) -> Result<crate::vowp::client::session_tail::SessionTailView, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "session tail is unavailable for this client",
+        ))
+    }
+
     /// Reads `vowp orchestrator ls --json`.
     async fn orchestrator_list(&self) -> Result<Vec<OrchestratorCard>, SpiritError> {
         Err(SpiritError::new(
@@ -998,6 +1013,27 @@ impl VowpClient for SshVowpClient {
                     None => previous.to_string(),
                 }),
         })
+    }
+
+    async fn session_tail(
+        &self,
+        project: &str,
+        session_id: &str,
+        after_seq: Option<u64>,
+        limit: Option<u32>,
+    ) -> Result<crate::vowp::client::session_tail::SessionTailView, SpiritError> {
+        let rest =
+            crate::vowp::client::session_tail::session_tail_args(project, session_id, after_seq)?;
+        let mut argv = self.base_argv();
+        argv.extend(rest);
+        let output = self.run(&argv, READ_TIMEOUT).await?;
+        let output = self.check_output(output)?;
+        crate::vowp::client::session_tail::parse_session_tail(
+            session_id,
+            &output.stdout,
+            after_seq,
+            limit,
+        )
     }
 
     async fn orchestrator_list(&self) -> Result<Vec<OrchestratorCard>, SpiritError> {
@@ -2067,6 +2103,295 @@ impl VowpClient for MockVowpClient {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .warnings,
         )
+    }
+}
+
+/// Read-only live view of one universal session's event log (`vowp session tail`).
+pub mod session_tail {
+    use crate::error::{SpiritError, SpiritErrorCode, redact};
+    use crate::wire::ids::{ProjectName, SessionId};
+
+    /// Largest page of events a caller may request.
+    pub const SESSION_TAIL_MAX_LIMIT: u32 = 500;
+    /// Default page size.
+    pub const SESSION_TAIL_DEFAULT_LIMIT: u32 = 200;
+    const SUMMARY_CHARS: usize = 200;
+    const DETAIL_CHARS: usize = 1200;
+
+    /// One session event, reduced to what the Meadow timeline shows.
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionEventView {
+        /// Sequence number within the session.
+        pub seq: u64,
+        /// Event timestamp as VOWP wrote it.
+        pub at: String,
+        /// Event type such as `assistant.message` or `tool.call`.
+        pub kind: String,
+        /// `user`, `assistant`, `system`, `tool` or the raw value.
+        pub actor: String,
+        /// One redacted line.
+        pub summary: String,
+        /// Longer redacted text, when the event has any.
+        pub detail: Option<String>,
+    }
+
+    /// A page of the session's event log.
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionTailView {
+        /// The session that was read.
+        pub session_id: String,
+        /// Events oldest first.
+        pub events: Vec<SessionEventView>,
+        /// Pass this as `after_seq` on the next poll.
+        pub next_seq: u64,
+    }
+
+    /// Validates the inputs and builds the argv after the common `vowp [--home H]` prefix.
+    ///
+    /// VOWP's `session tail` has `--from <N>` (start after this sequence number) and no
+    /// `--limit`; the limit is applied client-side by [`parse_session_tail`].
+    pub fn session_tail_args(
+        project: &str,
+        session_id: &str,
+        after_seq: Option<u64>,
+    ) -> Result<Vec<String>, SpiritError> {
+        ProjectName::parse(project)?;
+        SessionId::parse(session_id)?;
+        let mut argv = vec![
+            "--project".to_owned(),
+            project.to_owned(),
+            "--json".to_owned(),
+            "session".to_owned(),
+            "tail".to_owned(),
+        ];
+        if let Some(seq) = after_seq {
+            argv.extend(["--from".to_owned(), seq.to_string()]);
+        }
+        argv.push(session_id.to_owned());
+        Ok(argv)
+    }
+
+    /// Parses `vowp --json session tail` output into a redacted view.
+    pub fn parse_session_tail(
+        session_id: &str,
+        stdout: &[u8],
+        after_seq: Option<u64>,
+        limit: Option<u32>,
+    ) -> Result<SessionTailView, SpiritError> {
+        let text = String::from_utf8_lossy(stdout);
+        let rows = collect_rows(&text)?;
+        let floor = after_seq.unwrap_or(0);
+        let mut events: Vec<SessionEventView> = rows
+            .iter()
+            .filter_map(event_view)
+            .filter(|event| after_seq.is_none() || event.seq > floor)
+            .collect();
+        events.sort_by_key(|event| event.seq);
+        let limit = limit
+            .unwrap_or(SESSION_TAIL_DEFAULT_LIMIT)
+            .clamp(1, SESSION_TAIL_MAX_LIMIT) as usize;
+        if events.len() > limit {
+            // Keep the newest page when polling from scratch, the oldest when resuming.
+            if after_seq.is_some() {
+                events.truncate(limit);
+            } else {
+                events.drain(..events.len() - limit);
+            }
+        }
+        let next_seq = events.last().map_or(floor, |event| event.seq.max(floor));
+        Ok(SessionTailView {
+            session_id: session_id.to_owned(),
+            events,
+            next_seq,
+        })
+    }
+
+    fn collect_rows(text: &str) -> Result<Vec<serde_json::Value>, SpiritError> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            return match value {
+                serde_json::Value::Array(rows) => Ok(rows),
+                serde_json::Value::Object(map) => match map.get("events") {
+                    Some(serde_json::Value::Array(rows)) => Ok(rows.clone()),
+                    _ if map.contains_key("seq") => Ok(vec![serde_json::Value::Object(map)]),
+                    _ => Ok(Vec::new()),
+                },
+                _ => Err(SpiritError::new(
+                    SpiritErrorCode::Parse,
+                    "session tail: unexpected JSON shape",
+                )),
+            };
+        }
+        let mut rows = Vec::new();
+        for line in trimmed.lines().filter(|line| !line.trim().is_empty()) {
+            let value = serde_json::from_str(line)
+                .map_err(|err| SpiritError::parse("session tail", err))?;
+            rows.push(value);
+        }
+        Ok(rows)
+    }
+
+    fn event_view(row: &serde_json::Value) -> Option<SessionEventView> {
+        let seq = row.get("seq")?.as_u64()?;
+        let kind = row
+            .get("type")
+            .or_else(|| row.get("kind"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        let at = row
+            .get("ts")
+            .or_else(|| row.get("at"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        let actor = row
+            .get("actor")
+            .and_then(|value| value.as_str())
+            .unwrap_or("system")
+            .to_owned();
+        let payload = row.get("payload").unwrap_or(&serde_json::Value::Null);
+        let (summary, detail) = describe(&kind, payload);
+        Some(SessionEventView {
+            seq,
+            at,
+            kind,
+            actor,
+            summary: clip(&redact(&summary), SUMMARY_CHARS),
+            detail: detail
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| clip(&redact(&text), DETAIL_CHARS)),
+        })
+    }
+
+    fn text_of(payload: &serde_json::Value, key: &str) -> String {
+        payload
+            .get(key)
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn first_line(text: &str) -> String {
+        text.lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_owned()
+    }
+
+    fn describe(kind: &str, payload: &serde_json::Value) -> (String, Option<String>) {
+        match kind {
+            "assistant.message" | "user.message" | "assistant.reasoning" | "note" => {
+                let text = text_of(payload, "text");
+                let label = match kind {
+                    "user.message" => "You",
+                    "assistant.reasoning" => "Thinking",
+                    "note" => "Note",
+                    _ => "Assistant",
+                };
+                let line = first_line(&text);
+                (
+                    if line.is_empty() {
+                        label.to_owned()
+                    } else {
+                        format!("{label}: {line}")
+                    },
+                    Some(text),
+                )
+            }
+            "tool.call" => {
+                let name = text_of(payload, "name");
+                let input = payload.get("input").cloned().unwrap_or_default();
+                let command = input
+                    .get("command")
+                    .or_else(|| input.get("cmd"))
+                    .or_else(|| input.get("file_path"))
+                    .or_else(|| input.get("path"))
+                    .and_then(|value| value.as_str())
+                    .map(first_line);
+                let summary = match command {
+                    Some(command) if !command.is_empty() => format!("{name}: {command}"),
+                    _ => format!("Tool call: {name}"),
+                };
+                (summary, Some(input.to_string()))
+            }
+            "tool.result" => {
+                let ok = payload
+                    .get("ok")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(true);
+                let exit = payload
+                    .get("exit_code")
+                    .and_then(|value| value.as_i64())
+                    .map(|code| format!(" (exit {code})"))
+                    .unwrap_or_default();
+                let output = text_of(payload, "output");
+                (
+                    format!(
+                        "{}{exit}",
+                        if ok {
+                            "Tool result: ok"
+                        } else {
+                            "Tool result: failed"
+                        }
+                    ),
+                    Some(output),
+                )
+            }
+            "turn.started" => (
+                format!(
+                    "Turn {} started",
+                    payload.get("turn").and_then(|v| v.as_u64()).unwrap_or(0)
+                ),
+                None,
+            ),
+            "turn.ended" => (
+                format!(
+                    "Turn {} ended ({})",
+                    payload.get("turn").and_then(|v| v.as_u64()).unwrap_or(0),
+                    text_of(payload, "stop_reason")
+                ),
+                None,
+            ),
+            "file.change" => (
+                format!(
+                    "File {}: {}",
+                    text_of(payload, "op"),
+                    text_of(payload, "path")
+                ),
+                None,
+            ),
+            "error" => {
+                let message = text_of(payload, "message");
+                (format!("Error: {}", first_line(&message)), Some(message))
+            }
+            other => {
+                let message = payload
+                    .get("summary")
+                    .or_else(|| payload.get("message"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned)
+                    .unwrap_or_default();
+                if message.is_empty() {
+                    (other.to_owned(), None)
+                } else {
+                    (format!("{other}: {}", first_line(&message)), Some(message))
+                }
+            }
+        }
+    }
+
+    fn clip(text: &str, max: usize) -> String {
+        if text.chars().count() <= max {
+            return text.to_owned();
+        }
+        let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
     }
 }
 

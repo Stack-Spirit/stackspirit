@@ -13,6 +13,8 @@ export interface ContextPanelProps {
   onOpenServer: () => void;
   onOpenWorkers: (project: string) => void;
   onOpenSession: (project: string) => void;
+  /** Opens the live read-only view of a worker's session. */
+  onOpenWorkerSession?: (project: string, jobId: string, sessionId: string) => void;
   /** Opens the full inbox, where questions can be answered. */
   onOpenInbox?: () => void;
   /** Drag handle on the panel's left edge. */
@@ -208,6 +210,7 @@ function JobDetail({
   content,
   onOpenWorkers,
   onOpenSession,
+  onOpenWorkerSession,
 }: { content: Extract<PanelContent, { kind: "job" }> } & ContextPanelProps) {
   const fleet = useFleet();
   const item = findJob(fleet, content.project, content.jobId);
@@ -224,6 +227,7 @@ function JobDetail({
   const { job } = item;
   const lane = LANE_INFO.find((entry) => entry.key === item.lane);
   const tone = jobTone(item);
+  const sessionId = job.session_id ?? worker?.session_id ?? null;
   return (
     <section className="nx-panel__section" aria-label={`Job ${job.job_id}`}>
       <div className="nx-job-head">
@@ -281,6 +285,15 @@ function JobDetail({
         <button type="button" className="nx-btn nx-btn--sm" onClick={() => onOpenSession(job.project)}>
           Ask the orchestrator
         </button>
+        {sessionId && onOpenWorkerSession ? (
+          <button
+            type="button"
+            className="nx-btn nx-btn--sm"
+            onClick={() => onOpenWorkerSession(job.project, job.job_id, sessionId)}
+          >
+            Open session
+          </button>
+        ) : null}
         <button type="button" className="nx-btn nx-btn--quiet nx-btn--sm" onClick={() => onOpenWorkers(job.project)}>
           {job.project} workers
         </button>
