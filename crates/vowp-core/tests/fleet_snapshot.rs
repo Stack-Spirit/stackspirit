@@ -17,8 +17,10 @@ use vowp_protocol::{
     RunPurpose, RunRole, SNAPSHOT_FORMAT, SNAPSHOT_VERSION, SecretName, Session, SessionId, SessionRole, SessionState,
     Snapshot, TargetMode, Timestamp, Tokens,
 };
+use vowp_protocol::{Actor, CostEvent, EventBody, EventIndexRow, EventSource, EventType};
 use vowp_protocol::{HostSample, SampleSource};
 use vowp_protocol::{Lease, OwnershipMode, OwnershipState, SurfaceActivity, SurfaceId, SurfaceKind};
+use vowp_store::session_log::{NewEvent, SessionLog};
 use vowp_store::{NodePaths, StateChange, Store};
 use vowp_tmux::fake::FakeWindows;
 
@@ -1775,13 +1777,64 @@ fn queue_cards_plan_an_executor_and_running_cards_report_usage() {
         cost,
         detail: String::new(),
     };
+    // Production inserts the run with an unknown cost; usage arrives as `cost` events in the
+    // run's session log.
+    let session_id = SessionId::new();
+    let log = SessionLog::create(&fixture.paths, &session_id, Arc::new(fixture.clock.clone())).expect("log");
+    let appended = log
+        .append(NewEvent {
+            actor: Actor::System,
+            source: EventSource {
+                harness: HarnessKind::Opencode,
+                model: Some("deepseek/deepseek-flash".to_owned()),
+                node: None,
+                native_session_id: None,
+            },
+            body: EventBody::Cost(CostEvent {
+                cost: Cost::receipt(0.25, tokens(1000, 200)),
+                run_id: None,
+            }),
+            raw: None,
+            ts: None,
+        })
+        .expect("append cost");
     store
-        .insert_run(&make_run(
-            &running,
-            "opencode:deepseek/deepseek-flash",
-            Cost::receipt(0.25, tokens(1000, 200)),
-        ))
-        .expect("run");
+        .upsert_session(&Session {
+            id: session_id.clone(),
+            project: Some(fixture.alpha.clone()),
+            job_id: Some(running.id.clone()),
+            role: Some(SessionRole::Worker),
+            title: "usage".to_owned(),
+            parent_session_id: None,
+            node: NodeName::parse("local").expect("node"),
+            cwd: String::new(),
+            state: SessionState::Running,
+            executor: None,
+            last_seq: 0,
+            last_capsule_id: None,
+            log_bytes: 0,
+            created_at: now,
+            updated_at: now,
+        })
+        .expect("session");
+    store
+        .index_event(&EventIndexRow {
+            session_id: session_id.clone(),
+            seq: appended.envelope.seq,
+            id: appended.envelope.id.clone(),
+            ts: appended.envelope.ts,
+            event_type: EventType::Cost,
+            actor: Actor::System,
+            harness: HarnessKind::Opencode,
+            model: None,
+            byte_offset: appended.byte_offset,
+            byte_len: appended.byte_len,
+            summary: String::new(),
+        })
+        .expect("index");
+    let mut run = make_run(&running, "opencode:deepseek/deepseek-flash", Cost::unknown());
+    run.session_id = Some(session_id);
+    store.insert_run(&run).expect("run");
     store
         .kv_set("model_context_window:deepseek/deepseek-flash", "128000")
         .expect("window");

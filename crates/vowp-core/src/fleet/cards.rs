@@ -69,7 +69,7 @@ pub(crate) fn project_read(
             }
             None => (None, deps.node.clone(), job.state_changed_at, None, None),
         };
-        let usage = run.map(|run| run_usage_fields(store, run)).transpose()?;
+        let usage = run.map(|run| run_usage_fields(deps, store, run)).transpose()?;
         let usage = usage.unwrap_or_default();
         running.push(RunningJobCard {
             job: job.id.clone(),
@@ -215,29 +215,59 @@ struct UsageFields {
 
 /// Derives token, context, cost and billing fields from the active run.
 ///
-/// Nothing is invented: tokens stay `None` while the run has recorded none, cost only shows
-/// for `api` billing, and the context window comes from the `model_context_window:<model>`
-/// kv entry when an operator set one.
-fn run_usage_fields(store: &Store, run: &vowp_protocol::Run) -> Result<UsageFields, CoreError> {
+/// Nothing is invented: tokens and cost are summed from the `cost` events of the run's
+/// session (the run row only carries a cost once it finishes) and stay `None` while none
+/// were recorded; cost only shows for `api` billing, and the context window comes from the
+/// `model_context_window:<model>` kv entry when an operator set one.
+fn run_usage_fields(deps: &Deps, store: &Store, run: &vowp_protocol::Run) -> Result<UsageFields, CoreError> {
     let mut fields = UsageFields::default();
     let Some(executor) = &run.executor else {
         return Ok(fields);
     };
     let mode = billing_mode(executor);
-    let tokens = &run.cost.tokens;
+    let cost = live_cost(deps, store, run)?;
+    let tokens = &cost.tokens;
     if tokens.input + tokens.output + tokens.cache_read > 0 {
         fields.tokens_input = Some(tokens.input);
         fields.tokens_output = Some(tokens.output);
         fields.tokens_cache_read = Some(tokens.cache_read);
     }
     if mode == Some("api") {
-        fields.cost_usd = run.cost.usd;
+        fields.cost_usd = cost.usd;
     }
     fields.billing_mode = mode.map(str::to_owned);
     fields.context_window = store
         .kv_get(&format!("model_context_window:{}", executor.model))?
         .and_then(|value| value.trim().parse().ok());
     Ok(fields)
+}
+
+/// Sums the run's cost: the recorded run cost plus every `cost` event its session logged
+/// for this run (or for no run) since it started.
+fn live_cost(deps: &Deps, store: &Store, run: &vowp_protocol::Run) -> Result<vowp_protocol::Cost, CoreError> {
+    let mut total = run.cost.clone();
+    let Some(session_id) = &run.session_id else {
+        return Ok(total);
+    };
+    let has_cost = store
+        .event_rows(session_id, 0, u32::MAX)?
+        .iter()
+        .any(|row| row.event_type == vowp_protocol::EventType::Cost);
+    if !has_cost {
+        return Ok(total);
+    }
+    let reader = vowp_store::session_log::SessionLog::open_read(&deps.paths, session_id)?;
+    for envelope in reader.read_all()? {
+        if envelope.event_type != vowp_protocol::EventType::Cost || envelope.ts < run.started_at {
+            continue;
+        }
+        if let Ok(vowp_protocol::EventBody::Cost(event)) = envelope.body()
+            && event.run_id.as_ref().is_none_or(|id| *id == run.id)
+        {
+            total.add(&event.cost);
+        }
+    }
+    Ok(total)
 }
 
 /// Classifies how an executor is billed: `subscription`, `api` or `free`.

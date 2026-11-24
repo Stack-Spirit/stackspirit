@@ -1373,6 +1373,15 @@ impl Supervisor {
                 .into_iter()
                 .collect::<BTreeMap<String, Profile>>(),
             now,
+            overrides: {
+                let mut pins = HashMap::new();
+                for job in jobs.iter().filter(|job| job.state == JobState::Ready) {
+                    if let Some(executor) = super::dispatch::job_executor_override(&self.store, &job.id)? {
+                        pins.insert(job.id.clone(), executor);
+                    }
+                }
+                pins
+            },
         };
         let choices = plan_dispatch(&graph, &jobs, &caps);
         let mut dispatched = 0;

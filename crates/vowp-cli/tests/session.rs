@@ -4177,3 +4177,69 @@ fn session_show_and_ls_report_the_owner() {
     assert!(!free_row.contains("[active"), "{free_row}");
     assert!(!listing.contains(&token));
 }
+
+#[test]
+fn job_set_executor_switches_a_running_jobs_session() {
+    let env = common::TestEnv::new();
+    configure(&env);
+    let id = create(&env);
+    let session_id = vowp_protocol::SessionId::parse(&id).expect("id");
+    let job = env.insert_job("run-switch", "Run", vowp_protocol::JobKind::Build, &[]);
+    let store = env.store();
+    store
+        .set_job_state(
+            &job.id,
+            vowp_protocol::JobState::Running,
+            &vowp_store::StateChange {
+                note: None,
+                parked_reason: None,
+            },
+        )
+        .expect("running");
+    store
+        .insert_run(&vowp_protocol::Run {
+            id: vowp_protocol::RunId::new(),
+            job_id: Some(job.id.clone()),
+            session_id: Some(session_id.clone()),
+            role: vowp_protocol::RunRole::Worker,
+            purpose: vowp_protocol::RunPurpose::Start,
+            profile: None,
+            rung: 0,
+            executor: Some(vowp_protocol::Executor::parse("opencode:deepseek/deepseek-flash#max").expect("executor")),
+            provider: None,
+            node: NodeName::parse("local").expect("node"),
+            native_session_id: None,
+            pid: None,
+            window: None,
+            cwd: None,
+            started_at: Timestamp::now(),
+            ended_at: None,
+            exit_code: None,
+            outcome: None,
+            limit_kind: None,
+            cost: Cost::unknown(),
+            detail: String::new(),
+        })
+        .expect("run");
+
+    let (code, value, stderr) = env.run_json(&["job", "set-executor", "run-switch", "opencode:deepseek/deepseek-chat"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(value["switched"], true);
+    assert_eq!(value["session_id"], id.as_str());
+    assert_eq!(
+        store.kv_get("job_executor:run-switch").expect("kv").as_deref(),
+        Some("opencode:deepseek/deepseek-chat")
+    );
+    let session = store.require_session(&session_id).expect("session");
+    assert_eq!(
+        session.executor.as_ref().map(ToString::to_string).as_deref(),
+        Some("opencode:deepseek/deepseek-chat")
+    );
+    let switches = store.list_switches(&session_id).expect("switches");
+    assert_eq!(switches.len(), 1);
+    assert_eq!(switches[0].state, vowp_protocol::SwitchState::Completed);
+    assert!(
+        van_capsule_exists(env.home_path(), &id),
+        "no handoff capsule was written"
+    );
+}

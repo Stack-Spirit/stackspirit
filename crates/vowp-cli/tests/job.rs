@@ -492,3 +492,22 @@ fn job_set_executor_refuses_running_job_without_session_and_terminal_jobs() {
     assert_ne!(code, 0, "running job without a session cannot switch");
     assert_eq!(env.store().kv_get("job_executor:run-me").expect("kv"), None);
 }
+
+#[test]
+fn job_set_executor_refuses_terminal_jobs() {
+    let env = common::TestEnv::new();
+    let job = env.insert_job("done-job", "Done", vowp_protocol::JobKind::Build, &[]);
+    env.store()
+        .set_job_state(
+            &job.id,
+            JobState::Cancelled,
+            &StateChange {
+                note: None,
+                parked_reason: None,
+            },
+        )
+        .expect("cancelled");
+    let (code, _, _) = env.run_json(&["job", "set-executor", "done-job", "opencode:deepseek/deepseek-pro"]);
+    assert_ne!(code, 0, "terminal job cannot change executor");
+    assert_eq!(env.store().kv_get("job_executor:done-job").expect("kv"), None);
+}
