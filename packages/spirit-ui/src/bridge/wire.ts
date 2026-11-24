@@ -199,6 +199,85 @@ export interface SecretRemoveOutcome {
   removed: boolean;
 }
 
+/** What kind of node a remote directory entry is. */
+export type RemoteEntryKind = "file" | "dir" | "symlink";
+
+/** One row of a server directory listing (`spirit_core::vowp::files::RemoteEntry`). */
+export interface RemoteEntry {
+  name: string;
+  /** Absolute path of the entry. */
+  path: string;
+  kind: RemoteEntryKind;
+  size_bytes: number;
+  /** Four octal digits, for example `0600`. */
+  mode: string;
+  modified_at: Timestamp | null;
+  /** `.env*`, `id_*`, `*.pem`, `*.key`, `auth.json`, `credentials*`: preview is masked. */
+  is_secret_like: boolean;
+  /** `vowp.db*`, `vowp.toml`, `.ssh` or a worktree: changing it shows the seatbelt. */
+  is_protected_hint: boolean;
+}
+
+/** A listed directory with the paths the breadcrumb needs. */
+export interface RemoteDirListing {
+  /** Resolved absolute path. */
+  path: string;
+  parent: string | null;
+  /** The server user's home (what `~` means). */
+  home: string;
+  /** Directories first, then files. */
+  entries: RemoteEntry[];
+  truncated: boolean;
+}
+
+export type RemotePreviewKind = "text" | "markdown" | "image" | "binary";
+
+/** A bounded preview of one remote file. Secret-like files are masked unless revealed. */
+export interface RemotePreview {
+  path: string;
+  name: string;
+  kind: RemotePreviewKind;
+  size_bytes: number;
+  /** True when the file is secret-like and was not revealed; no content was read. */
+  masked: boolean;
+  truncated: boolean;
+  text: string | null;
+  image_mime: string | null;
+  image_base64: string | null;
+  note: string | null;
+}
+
+export interface RemoteFileOutcome {
+  path: string;
+}
+
+export interface RemoteUploadOutcome {
+  path: string;
+  size_bytes: number;
+}
+
+export interface RemoteDownloadOutcome {
+  local_path: string;
+  size_bytes: number;
+}
+
+/** Input for moving or renaming a remote path. */
+export interface RemoteMoveInput {
+  from: string;
+  /** The exact destination path (a folder drop passes `folder/name`). */
+  to: string;
+  /** The user accepted the live-VOWP-path seatbelt. The host re-checks it. */
+  confirm_protected?: boolean;
+}
+
+/** Input for deleting a remote path. */
+export interface RemoteDeleteInput {
+  path: string;
+  /** Allow deleting a non-empty folder. */
+  recursive?: boolean;
+  confirm_protected?: boolean;
+}
+
 export interface ConnectionSnapshot {
   state:
     | "disconnected"

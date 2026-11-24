@@ -228,6 +228,7 @@ function ServerCard({
   const clusterAvailable = useFleetStore((state) => Boolean(state.bridge?.cluster));
   const openSessions = useFleetStore((state) => state.openSessions);
   const sessionsAvailable = useFleetStore((state) => Boolean(state.bridge?.sessions));
+  const filesAvailable = useFleetStore((state) => Boolean(state.bridge?.files));
   const connection = useConnection();
   const selectedHostId = useFleetStore((state) => state.selectedHostId);
   const connect = useFleetStore((state) => state.connect);
@@ -312,6 +313,16 @@ function ServerCard({
               >
                 Open server page
               </MenuItem>
+              {filesAvailable ? (
+                <MenuItem
+                  onSelect={() => {
+                    close();
+                    onNavigate({ kind: "files" });
+                  }}
+                >
+                  Browse files
+                </MenuItem>
+              ) : null}
               {sessionsAvailable ? (
                 <MenuItem
                   onSelect={() => {

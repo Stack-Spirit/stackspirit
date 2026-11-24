@@ -10,6 +10,7 @@ import { AddProjectDialog } from "./AddProjectDialog";
 import { ErrorNotice } from "./ErrorNotice";
 import { InboxView } from "./InboxView";
 import { PageHeader } from "./PageHeader";
+import { RemoteFilesView } from "./RemoteFilesView";
 import { ChatView } from "./ChatView";
 import { useCluster, useClusterStore } from "./clusterStore";
 import { initializeConversations } from "./conversations";
@@ -124,7 +125,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
     if (connected && view.kind === "session" && view.session === "setup") {
       setView({ kind: "session", session: "global" });
     }
-    if (!connected && (view.kind === "server" || view.kind === "workers" || view.kind === "workerSession" || view.kind === "inbox")) {
+    if (!connected && (view.kind === "server" || view.kind === "workers" || view.kind === "workerSession" || view.kind === "inbox" || view.kind === "files")) {
       setView({ kind: "session", session: "global" });
     }
   }
@@ -195,12 +196,15 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
         onOpenProject={openWorkers}
         onFormCluster={() => setClusterFormOpen(true)}
         onOpenInbox={() => setView({ kind: "inbox" })}
+        onOpenFiles={bridge.files ? () => setView({ kind: "files" }) : undefined}
         onPromote={(target) => {
           setPromoteTarget(target);
           setPromoteOpen(true);
         }}
       />
     );
+  } else if (view.kind === "files" && serverLabel && bridge.files) {
+    main = <RemoteFilesView key={`files:${view.path ?? "~"}`} initialPath={view.path ?? "~"} onBack={openServer} />;
   } else if (view.kind === "inbox" && serverLabel) {
     main = (
       <section className="nx-main" aria-label="Inbox">

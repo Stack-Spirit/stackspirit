@@ -764,6 +764,17 @@ impl SpiritCore {
         }
     }
 
+    /// Builds the Finder-style file service for one host over verified SSH.
+    #[must_use]
+    pub fn remote_files(
+        &self,
+        runner: Arc<dyn crate::ssh::CommandRunner>,
+        target: crate::ssh::SshTarget,
+        options: crate::ssh::SshOptions,
+    ) -> crate::vowp::RemoteFiles {
+        crate::vowp::RemoteFiles::new(crate::ssh::SshRemote::new(runner, target, options))
+    }
+
     /// Scans host keys with the injected runner.
     pub async fn scan_host_keys(
         &self,

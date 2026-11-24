@@ -155,6 +155,13 @@ pub fn run() {
             commands::local_orchestrator::local_orchestrator_resume,
             commands::local_orchestrator::local_orchestrator_move,
             commands::projects::project_add,
+            commands::files::files_list,
+            commands::files::files_preview,
+            commands::files::files_mkdir,
+            commands::files::files_move,
+            commands::files::files_delete,
+            commands::files::files_upload,
+            commands::files::files_download,
         ])
         .build(tauri::generate_context!())
         .expect("error while building StackSpirit")

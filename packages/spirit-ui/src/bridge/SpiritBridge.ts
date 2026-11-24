@@ -56,6 +56,13 @@ import type {
   ProjectAddInput,
   ProjectAddOutcome,
   RawDocument,
+  RemoteDeleteInput,
+  RemoteDirListing,
+  RemoteDownloadOutcome,
+  RemoteFileOutcome,
+  RemoteMoveInput,
+  RemotePreview,
+  RemoteUploadOutcome,
   SecretListView,
   SecretRemoveOutcome,
   SecretSetInput,
@@ -217,6 +224,28 @@ export interface SpiritBridge {
     set(input: SecretSetInput): Promise<SecretSetOutcome>;
     /** Removes one secret through `vowp secret rm NAME --yes`. */
     remove(name: string): Promise<SecretRemoveOutcome>;
+  };
+
+  /**
+   * Optional Finder-style file manager for the connected server. Present on the desktop
+   * host and the preview bridge (a virtual filesystem); the read-only Web bridge omits it.
+   *
+   * Paths are absolute or start with `~/`; `~` is expanded on the server. Every change is
+   * an explicit user action. Secret-like files preview as `masked: true` without being
+   * read unless `reveal` is passed by the local user, and contents are never logged or
+   * sent to the AI. A protected live VOWP path (`vowp.db*`, `vowp.toml`, `.ssh`, a
+   * worktree) rejects with `conflict` / `protected_path` until `confirm_protected` is set.
+   * `upload` and `download` open the native picker on the host (`null` = cancelled); the
+   * renderer never supplies a local path.
+   */
+  files?: {
+    list(path: string): Promise<RemoteDirListing>;
+    preview(path: string, reveal?: boolean): Promise<RemotePreview>;
+    mkdir(path: string): Promise<RemoteFileOutcome>;
+    move(input: RemoteMoveInput): Promise<RemoteFileOutcome>;
+    delete(input: RemoteDeleteInput): Promise<RemoteFileOutcome>;
+    upload(remoteDir: string): Promise<RemoteUploadOutcome | null>;
+    download(remotePath: string): Promise<RemoteDownloadOutcome | null>;
   };
 
   /**

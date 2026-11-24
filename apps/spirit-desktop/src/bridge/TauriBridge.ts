@@ -58,6 +58,13 @@ import type {
   ProjectAddInput,
   ProjectAddOutcome,
   RawDocument,
+  RemoteDeleteInput,
+  RemoteDirListing,
+  RemoteDownloadOutcome,
+  RemoteFileOutcome,
+  RemoteMoveInput,
+  RemotePreview,
+  RemoteUploadOutcome,
   SecretListView,
   SecretRemoveOutcome,
   SecretSetInput,
@@ -163,6 +170,29 @@ export class TauriBridge implements SpiritBridge {
       }
       return call("secrets_remove", { name });
     },
+  };
+
+  files = {
+    list: (path: string): Promise<RemoteDirListing> => call("files_list", { path }),
+    preview: (path: string, reveal = false): Promise<RemotePreview> =>
+      call("files_preview", { input: { path, reveal } }),
+    mkdir: (path: string): Promise<RemoteFileOutcome> => call("files_mkdir", { path }),
+    move: (input: RemoteMoveInput): Promise<RemoteFileOutcome> =>
+      call("files_move", {
+        input: { from: input.from, to: input.to, confirm_protected: input.confirm_protected ?? false },
+      }),
+    delete: (input: RemoteDeleteInput): Promise<RemoteFileOutcome> =>
+      call("files_delete", {
+        input: {
+          path: input.path,
+          recursive: input.recursive ?? false,
+          confirm_protected: input.confirm_protected ?? false,
+        },
+      }),
+    upload: (remoteDir: string): Promise<RemoteUploadOutcome | null> =>
+      call("files_upload", { remoteDir }),
+    download: (remotePath: string): Promise<RemoteDownloadOutcome | null> =>
+      call("files_download", { remotePath }),
   };
 
   projects = {

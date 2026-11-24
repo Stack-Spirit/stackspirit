@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod asif;
 pub mod client;
+pub mod files;
 pub mod local;
 pub mod project;
 pub mod secret;
@@ -13,6 +14,10 @@ pub use asif::{
     ensure_package_size,
 };
 pub use client::{MockVowpClient, OrchestratorMoveTarget, SshVowpClient, VowpClient, VowpProbe};
+pub use files::{
+    RemoteDirListing, RemoteDownloadOutcome, RemoteEntry, RemoteEntryKind, RemoteFileOutcome,
+    RemoteFiles, RemotePreview, RemotePreviewKind, RemoteUploadOutcome,
+};
 pub use local::{AgentPairRequest, AgentPairing, SurfacePairing, SurfacePairingView};
 pub use project::{ProjectAddOutcome, ProjectAddRequest, ProjectSource, parse_project_bootstrap};
 pub use secret::{

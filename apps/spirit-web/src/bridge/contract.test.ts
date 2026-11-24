@@ -94,6 +94,19 @@ describe("SpiritBridge coverage", () => {
     bridge.dispose();
   });
 
+  it("keeps the Web bridge read-only: no desktop file manager surface", () => {
+    const http = new HttpSseBridge({
+      baseUrl: "http://web.test",
+      pageOrigin: "http://web.test",
+      fetchImpl: async () => new Response("{}"),
+    });
+    const preview = new WebMockBridge("fresh");
+    expect((http as SpiritBridge).files).toBeUndefined();
+    expect((preview as SpiritBridge).files).toBeUndefined();
+    http.dispose();
+    preview.dispose();
+  });
+
   it("keeps every route constant explicit", () => {
     expect(Object.values(READ_ROUTES).every((route) => route.startsWith("/api/v1/"))).toBe(
       true,

@@ -78,6 +78,14 @@ import type {
   ProjectAddOutcome,
   ProjectView,
   RawDocument,
+  RemoteDeleteInput,
+  RemoteDirListing,
+  RemoteDownloadOutcome,
+  RemoteEntry,
+  RemoteFileOutcome,
+  RemoteMoveInput,
+  RemotePreview,
+  RemoteUploadOutcome,
   SecretListView,
   SecretRemoveOutcome,
   SecretSetInput,
@@ -182,6 +190,214 @@ function errorDto(
   retryable = false,
 ): SpiritErrorDto {
   return { code, message, hint, retryable };
+}
+
+const MOCK_HOME = "/home/owner";
+/** A 1x1 transparent PNG, so the preview pane has a real image to show. */
+const MOCK_PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+interface MockNode {
+  kind: "file" | "dir" | "symlink";
+  mode: string;
+  modified: string;
+  text?: string;
+  image?: string;
+}
+
+/** Same classification as `spirit_core::vowp::files`; the mock enforces the real rules. */
+function mockSecretLike(name: string): boolean {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".pub")) return false;
+  return (
+    lower.startsWith(".env") ||
+    lower.startsWith("id_") ||
+    lower.endsWith(".pem") ||
+    lower.endsWith(".key") ||
+    lower === "auth.json" ||
+    lower.startsWith("credentials")
+  );
+}
+
+function mockProtectedName(name: string): boolean {
+  return name.startsWith("vowp.db") || name === "vowp.toml" || name === ".ssh";
+}
+
+function mockProtectedPath(path: string): boolean {
+  const parts = path.split("/").filter((part) => part && part !== "~");
+  return parts.some((part, index) => mockProtectedName(part) || (part === "worktrees" && index + 1 < parts.length));
+}
+
+/**
+ * Preview-only virtual server filesystem behind `MockBridge.files`: `~`, `~/stackspirit`,
+ * `~/vowp`, `~/.vowp/{vowp.db, vowp.toml, logs, backups, worktrees}`, one folder per fleet
+ * project and `/`. Nothing here touches a host; the rules mirror `spirit-core`.
+ */
+class MockRemoteFs {
+  private nodes = new Map<string, MockNode>();
+
+  constructor(private readonly now: string) {
+    const dir = (path: string, mode = "0755") => this.nodes.set(path, { kind: "dir", mode, modified: now });
+    const file = (path: string, text: string, mode = "0644") =>
+      this.nodes.set(path, { kind: "file", mode, modified: now, text });
+    for (const path of ["/", "/home", "/etc", "/var", "/var/log", "/tmp", "/usr", MOCK_HOME]) dir(path);
+    file("/etc/hostname", "staging-vps\n");
+    file("/var/log/syslog", "Nov 24 09:00:01 staging-vps systemd[1]: Started Daily apt download activities.\n");
+    const home = (rest: string) => `${MOCK_HOME}/${rest}`;
+    for (const path of ["stackspirit", "stackspirit/src", "vowp", ".vowp", ".vowp/logs", ".vowp/backups", ".vowp/worktrees", ".vowp/worktrees/ss-101-example", ".ssh"]) {
+      dir(home(path), path === ".ssh" ? "0700" : "0755");
+    }
+    file(home("notes.md"), "# Server notes\n\n- Backups run nightly.\n- `vowp.db` is the **live database**; do not move it.\n");
+    this.nodes.set(home("logo.png"), { kind: "file", mode: "0644", modified: now, image: MOCK_PNG });
+    file(home("stackspirit/README.md"), "# StackSpirit\n\nDesktop control room for VOWP.\n");
+    file(home("stackspirit/src/main.rs"), "fn main() {\n    println!(\"hello\");\n}\n");
+    file(home("stackspirit/.env"), "EXAMPLE_VALUE=preview-only-not-a-real-secret\n", "0600");
+    file(home("vowp/README.md"), "# VOWP\n\nThe agent-work framework.\n");
+    file(home("vowp/Cargo.toml"), "[workspace]\nmembers = []\n");
+    file(home(".vowp/vowp.toml"), "[supervisor]\ntarget_workers = 2\n", "0600");
+    this.nodes.set(home(".vowp/vowp.db"), { kind: "file", mode: "0600", modified: now, text: "\u0000" });
+    file(home(".vowp/logs/supervisor.log"), "2026-11-24T09:00:00Z supervisor started\n2026-11-24T09:00:05Z 2 workers running\n");
+    file(home(".vowp/backups/vowp-2026-11-23.db.zst"), "\u0000");
+    file(home(".vowp/worktrees/ss-101-example/README.md"), "# Worker checkout\n");
+    file(home(".ssh/authorized_keys"), "ssh-ed25519 AAAA-preview-key owner@laptop\n", "0600");
+    file(home(".ssh/id_ed25519"), "preview-private-key-placeholder\n", "0600");
+    file(home(".ssh/id_ed25519.pub"), "ssh-ed25519 AAAA-preview-key owner@staging-vps\n");
+  }
+
+  /** Makes sure a folder exists for every fleet project. */
+  ensureProjects(names: string[]): void {
+    for (const name of names) {
+      const base = `${MOCK_HOME}/${name}`;
+      if (this.nodes.has(base)) continue;
+      this.nodes.set(base, { kind: "dir", mode: "0755", modified: this.now });
+      this.nodes.set(`${base}/README.md`, { kind: "file", mode: "0644", modified: this.now, text: `# ${name}\n` });
+    }
+  }
+
+  private resolve(path: string): string {
+    let abs = path === "~" ? MOCK_HOME : path.startsWith("~/") ? `${MOCK_HOME}/${path.slice(2)}` : path;
+    if (path.includes("\0") || path.includes("\n") || !abs.startsWith("/")) {
+      throw errorDto("invalid_input", "path: must be absolute or start with ~/");
+    }
+    abs = abs.replace(/\/+$/, "") || "/";
+    return abs;
+  }
+
+  private fail(code: string, message: string, hint: string | null = null): never {
+    throw errorDto(code, message, hint);
+  }
+
+  private childrenOf(dir: string): string[] {
+    const prefix = dir === "/" ? "/" : `${dir}/`;
+    return [...this.nodes.keys()].filter((key) => key !== dir && key.startsWith(prefix) && !key.slice(prefix.length).includes("/"));
+  }
+
+  private entry(path: string, node: MockNode, parent: string): RemoteEntry {
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    return {
+      name,
+      path,
+      kind: node.kind,
+      size_bytes: node.kind === "dir" ? 4096 : (node.text ?? node.image ?? "").length,
+      mode: node.mode,
+      modified_at: node.modified,
+      is_secret_like: mockSecretLike(name),
+      is_protected_hint: mockProtectedName(name) || parent.endsWith("/worktrees") || mockProtectedPath(parent),
+    };
+  }
+
+  list(path: string): RemoteDirListing {
+    const abs = this.resolve(path);
+    const node = this.nodes.get(abs);
+    if (!node || node.kind !== "dir") this.fail("not_found", "that path was not found");
+    const entries = this.childrenOf(abs).map((child) => this.entry(child, this.nodes.get(child) as MockNode, abs));
+    entries.sort(
+      (a, b) =>
+        Number(b.kind === "dir") - Number(a.kind === "dir") || a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+    );
+    const parent = abs === "/" ? null : abs.slice(0, abs.lastIndexOf("/")) || "/";
+    return { path: abs, parent, home: MOCK_HOME, entries, truncated: false };
+  }
+
+  preview(path: string, reveal: boolean): RemotePreview {
+    const abs = this.resolve(path);
+    const node = this.nodes.get(abs);
+    if (!node || node.kind === "dir") this.fail("not_found", "that path was not found");
+    const name = abs.slice(abs.lastIndexOf("/") + 1);
+    const size = (node.text ?? node.image ?? "").length;
+    const base = { path: abs, name, size_bytes: size, truncated: false, text: null, image_mime: null, image_base64: null, note: null };
+    if (mockSecretLike(name) && !reveal) return { ...base, kind: "text", masked: true };
+    if (node.image) return { ...base, kind: "image", masked: false, image_mime: "image/png", image_base64: node.image };
+    if ((node.text ?? "").includes("\u0000")) {
+      return { ...base, kind: "binary", masked: false, note: "Binary file. Download it to open it." };
+    }
+    return { ...base, kind: /\.(md|markdown)$/i.test(name) ? "markdown" : "text", masked: false, text: node.text ?? "" };
+  }
+
+  mkdir(path: string): RemoteFileOutcome {
+    const abs = this.resolve(path);
+    if (this.nodes.has(abs)) this.fail("conflict", "something with that name already exists", "Choose a different name.");
+    const parent = abs.slice(0, abs.lastIndexOf("/")) || "/";
+    if (this.nodes.get(parent)?.kind !== "dir") this.fail("not_found", "that path was not found");
+    this.nodes.set(abs, { kind: "dir", mode: "0755", modified: this.now });
+    return { path };
+  }
+
+  private confirm(path: string, confirmed: boolean | undefined): void {
+    if (mockProtectedPath(path) && !confirmed) {
+      this.fail(
+        "conflict",
+        "protected_path: this is a live VOWP system path",
+        "Moving or deleting it may interrupt running work. Confirm to continue anyway.",
+      );
+    }
+  }
+
+  move(input: RemoteMoveInput): RemoteFileOutcome {
+    const from = this.resolve(input.from);
+    const to = this.resolve(input.to);
+    this.confirm(from, input.confirm_protected);
+    if (!this.nodes.has(from)) this.fail("not_found", "that path was not found");
+    if (this.nodes.has(to)) this.fail("conflict", "something with that name already exists", "Choose a different name.");
+    if (to.startsWith(`${from}/`)) this.fail("remote", "could not move the file (exit 1)");
+    const moved = [...this.nodes.keys()].filter((key) => key === from || key.startsWith(`${from}/`));
+    for (const key of moved) {
+      const node = this.nodes.get(key) as MockNode;
+      this.nodes.delete(key);
+      this.nodes.set(to + key.slice(from.length), node);
+    }
+    return { path: input.to };
+  }
+
+  delete(input: RemoteDeleteInput): RemoteFileOutcome {
+    const abs = this.resolve(input.path);
+    if (abs === "/" || abs === MOCK_HOME) {
+      this.fail("refused", "the server root and the home folder cannot be deleted from here");
+    }
+    this.confirm(abs, input.confirm_protected);
+    const node = this.nodes.get(abs);
+    if (!node) this.fail("not_found", "that path was not found");
+    const children = node.kind === "dir" ? this.childrenOf(abs) : [];
+    if (children.length && !input.recursive) this.fail("remote", "could not delete the file (exit 1)");
+    for (const key of [...this.nodes.keys()]) if (key === abs || key.startsWith(`${abs}/`)) this.nodes.delete(key);
+    return { path: input.path };
+  }
+
+  upload(remoteDir: string): RemoteUploadOutcome {
+    const dir = this.resolve(remoteDir);
+    let name = "uploaded-notes.txt";
+    for (let i = 1; this.nodes.has(`${dir}/${name}`); i += 1) name = `uploaded-notes (${i}).txt`;
+    const text = "Uploaded from this Mac (preview).\n";
+    this.nodes.set(`${dir}/${name}`, { kind: "file", mode: "0644", modified: this.now, text });
+    return { path: `${dir}/${name}`, size_bytes: text.length };
+  }
+
+  download(remotePath: string): RemoteDownloadOutcome {
+    const abs = this.resolve(remotePath);
+    const node = this.nodes.get(abs);
+    if (!node || node.kind === "dir") this.fail("not_found", "that path was not found");
+    return { local_path: `/Users/owner/Downloads/${abs.slice(abs.lastIndexOf("/") + 1)}`, size_bytes: (node.text ?? node.image ?? "").length };
+  }
 }
 
 /**
@@ -644,6 +860,26 @@ export class MockBridge implements SpiritBridge {
       void name;
       throw previewSecretsUnavailable();
     },
+  };
+
+  private remoteFs: MockRemoteFs | null = null;
+  private fs(): MockRemoteFs {
+    if (this.connectionState.state !== "connected" && this.connectionState.state !== "stale") {
+      throw errorDto("conflict", "Connect to a host before browsing its files.");
+    }
+    this.remoteFs ??= new MockRemoteFs(iso(this.nowMs));
+    this.remoteFs.ensureProjects((this.fleetView?.projects ?? []).map((project) => project.name));
+    return this.remoteFs;
+  }
+
+  filesApi = {
+    list: async (path: string): Promise<RemoteDirListing> => this.fs().list(path),
+    preview: async (path: string, reveal = false): Promise<RemotePreview> => this.fs().preview(path, reveal),
+    mkdir: async (path: string): Promise<RemoteFileOutcome> => this.fs().mkdir(path),
+    move: async (input: RemoteMoveInput): Promise<RemoteFileOutcome> => this.fs().move(input),
+    delete: async (input: RemoteDeleteInput): Promise<RemoteFileOutcome> => this.fs().delete(input),
+    upload: async (remoteDir: string): Promise<RemoteUploadOutcome | null> => this.fs().upload(remoteDir),
+    download: async (remotePath: string): Promise<RemoteDownloadOutcome | null> => this.fs().download(remotePath),
   };
 
   clusterApi = {
@@ -1822,6 +2058,7 @@ export class MockBridge implements SpiritBridge {
   hosts = this.hostsApi;
   onboarding = this.onboardingApi;
   secrets = this.secretsApi;
+  files = this.filesApi;
   projects = {
     add: async (input: ProjectAddInput): Promise<ProjectAddOutcome> => {
       if (this.connectionState.state !== "connected") {

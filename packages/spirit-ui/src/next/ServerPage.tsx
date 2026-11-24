@@ -14,7 +14,7 @@ const LEAVES_PER_PROJECT = 4;
  * Full-page server view: health in detail, then a node map of every project and
  * what its workers are doing, then the projects as rows.
  */
-export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromote, onOpenInbox }: { serverLabel: string; onOpenProject: (project: string) => void; onFormCluster: () => void; onPromote: (target: string | null) => void; onOpenInbox?: () => void }) {
+export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromote, onOpenInbox, onOpenFiles }: { serverLabel: string; onOpenProject: (project: string) => void; onFormCluster: () => void; onPromote: (target: string | null) => void; onOpenInbox?: () => void; onOpenFiles?: () => void }) {
   const fleet = useFleet();
   const connection = useConnection();
   const refresh = useFleetStore((state) => state.refresh);
@@ -79,9 +79,16 @@ export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromot
         title={serverLabel}
         sub={status}
         actions={
-          <button type="button" className="nx-btn nx-btn--quiet nx-btn--sm" onClick={() => void refresh()}>
-            Refresh
-          </button>
+          <>
+            {onOpenFiles ? (
+              <button type="button" className="nx-btn nx-btn--quiet nx-btn--sm" onClick={onOpenFiles} data-testid="server-browse-files">
+                Browse files
+              </button>
+            ) : null}
+            <button type="button" className="nx-btn nx-btn--quiet nx-btn--sm" onClick={() => void refresh()}>
+              Refresh
+            </button>
+          </>
         }
       />
       <div className="nx-page">

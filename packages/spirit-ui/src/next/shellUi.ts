@@ -13,7 +13,9 @@ export type NextView =
   /** Full page: read-only live session of one worker, with explicit take over. */
   | { kind: "workerSession"; project: string; jobId: string; sessionId: string }
   /** Full page: every open inbox item, Global and per project. */
-  | { kind: "inbox" };
+  | { kind: "inbox" }
+  /** Full page: Finder-style file manager for the connected server. */
+  | { kind: "files"; path?: string };
 
 /** What the slide-in details panel shows. The bridge owns the target type. */
 export type PanelContent = ChatPanelTarget;

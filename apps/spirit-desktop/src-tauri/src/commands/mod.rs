@@ -5,6 +5,7 @@ pub mod chat;
 pub mod cluster;
 pub mod connection;
 pub mod engine;
+pub mod files;
 pub mod fleet;
 pub mod gates;
 pub mod hosts;
