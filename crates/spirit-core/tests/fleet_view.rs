@@ -336,3 +336,68 @@ fn verify_and_fix_children_chain_behind_their_parents() {
     );
     assert_eq!(ready_card(&fleet, "ss-9-verify-0").needs, ["explicit"]);
 }
+
+#[test]
+fn planned_executor_reaches_queued_cards() {
+    let fleet = view_of(|project| {
+        project["queue"].as_array_mut().unwrap().push(queue_row(
+            "ss-200",
+            "build",
+            "pending",
+            json!({"planned_executor": "opencode:deepseek/deepseek-v4-pro"}),
+        ));
+    });
+    let planned = ready_card(&fleet, "ss-200")
+        .planned_executor
+        .as_ref()
+        .expect("planned executor");
+    assert_eq!(planned.harness, "opencode");
+    assert_eq!(planned.provider, "deepseek");
+}
+
+#[test]
+fn queue_rows_without_planned_executor_stay_compatible() {
+    let fleet = view_of(|_| {});
+    assert!(!fleet.lanes.ready.is_empty());
+    assert!(
+        fleet
+            .lanes
+            .ready
+            .iter()
+            .all(|card| card.planned_executor.is_none())
+    );
+}
+
+#[test]
+fn running_usage_and_billing_fields_deserialize_and_default_to_none() {
+    let old = view_of(|_| {});
+    assert!(!old.lanes.running.is_empty());
+    assert!(old.lanes.running.iter().all(|card| {
+        card.tokens_input.is_none()
+            && card.context_window.is_none()
+            && card.cost_usd.is_none()
+            && card.billing_mode.is_none()
+    }));
+
+    let fleet = view_of(|project| {
+        let running = project["running"][0].as_object_mut().unwrap();
+        running.insert("tokens_input".into(), json!(100_000));
+        running.insert("tokens_output".into(), json!(42_000));
+        running.insert("tokens_cache_read".into(), json!(9_000));
+        running.insert("context_window".into(), json!(200_000));
+        running.insert("cost_usd".into(), json!(0.14));
+        running.insert("billing_mode".into(), json!("api"));
+    });
+    let card = fleet
+        .lanes
+        .running
+        .iter()
+        .chain(&fleet.lanes.review_fix)
+        .find(|card| card.tokens_input.is_some())
+        .expect("usage card");
+    assert_eq!(card.tokens_output, Some(42_000));
+    assert_eq!(card.tokens_cache_read, Some(9_000));
+    assert_eq!(card.context_window, Some(200_000));
+    assert_eq!(card.cost_usd, Some(0.14));
+    assert_eq!(card.billing_mode.as_deref(), Some("api"));
+}

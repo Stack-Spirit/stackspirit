@@ -1256,7 +1256,20 @@ export interface JobCardView {
   session_id: string | null;
   /** Upstream job ids; explicit `needs`, else derived for verify/fix child jobs. */
   needs?: string[];
+  /** Executor a queued job will run on once dispatched; absent on older VOWP snapshots. */
+  planned_executor?: ExecutorView | null;
+  /** Usage of a running job; each field is absent or null when VOWP does not report it. */
+  tokens_input?: number | null;
+  tokens_output?: number | null;
+  tokens_cache_read?: number | null;
+  context_window?: number | null;
+  /** API cost in USD; null is unknown, never zero. */
+  cost_usd?: number | null;
+  billing_mode?: BillingMode | null;
 }
+
+/** How a run is billed. Unknown values from newer VOWP builds are shown as unknown usage. */
+export type BillingMode = "subscription" | "api" | "free";
 
 export interface JobLanes {
   running: JobCardView[];

@@ -58,6 +58,24 @@ pub struct RunningJobCard {
     pub last_event_age_secs: Option<u64>,
     /// Session the job runs in, when any.
     pub session_id: Option<SessionId>,
+    /// Input tokens spent so far. Absent in older VOWP builds.
+    #[serde(default)]
+    pub tokens_input: Option<u64>,
+    /// Output tokens spent so far. Absent in older VOWP builds.
+    #[serde(default)]
+    pub tokens_output: Option<u64>,
+    /// Cache-read tokens served so far. Absent in older VOWP builds.
+    #[serde(default)]
+    pub tokens_cache_read: Option<u64>,
+    /// Context window size of the model in tokens, when known.
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    /// API cost in USD; `None` means unknown, never zero.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// How the run is billed: `subscription`, `api`, or `free`. Unknown values pass through.
+    #[serde(default)]
+    pub billing_mode: Option<String>,
 }
 
 /// One blocked job card.
@@ -97,6 +115,9 @@ pub struct QueueJobCard {
     /// Upstream jobs this job waits on. Absent in older VOWP builds.
     #[serde(default)]
     pub needs: Vec<JobId>,
+    /// Executor string the job will run on once dispatched. Absent in older VOWP builds.
+    #[serde(default)]
+    pub planned_executor: Option<String>,
 }
 
 /// The newest merge recorded for a project.

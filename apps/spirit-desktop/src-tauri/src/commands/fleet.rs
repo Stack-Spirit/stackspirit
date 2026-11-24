@@ -149,6 +149,22 @@ pub async fn job_action(
 }
 
 #[tauri::command]
+pub async fn set_job_executor(
+    state: State<'_, AppState>,
+    project: String,
+    job_id: String,
+    executor: String,
+) -> CommandResult<()> {
+    let client = state.client()?;
+    let manager = state.connection_manager().await;
+    client
+        .set_job_executor(&project, &job_id, &executor)
+        .await?;
+    let _ = manager.poll_once(client.as_ref()).await;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn set_target(
     state: State<'_, AppState>,
     input: SetTargetInput,

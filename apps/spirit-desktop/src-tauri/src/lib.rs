@@ -109,6 +109,7 @@ pub fn run() {
             commands::fleet::dismiss_inbox,
             commands::fleet::job_action,
             commands::fleet::set_target,
+            commands::fleet::set_job_executor,
             commands::cluster::cluster_form,
             commands::cluster::cluster_health,
             commands::cluster::cluster_promote,

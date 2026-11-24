@@ -76,6 +76,21 @@ pub trait VowpClient: Send + Sync {
         action: JobAction,
         reason: Option<&str>,
     ) -> Result<(), SpiritError>;
+    /// Runs `vowp --project <p> --json job set-executor <job> <executor>`.
+    ///
+    /// The default refuses so clients that cannot write to VOWP never pretend to.
+    async fn set_job_executor(
+        &self,
+        _project: &str,
+        _job: &str,
+        _executor: &str,
+    ) -> Result<(), SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "Changing a job's model is unavailable for this client",
+        )
+        .with_hint("Connect with a VOWP client that supports `job set-executor`."))
+    }
     /// Runs `vowp [--project <p>] --json inbox answer <id> <answer>`.
     async fn answer_inbox(
         &self,
@@ -678,6 +693,23 @@ fn orchestrator_app_arg(app: &OrchestratorApp) -> Result<&'static str, SpiritErr
 }
 
 /// Validates the user-visible park reason before it reaches `vowp job park --reason`.
+/// Validates an executor string destined for argv: one non-empty token, no option-like
+/// prefix, no whitespace or control characters.
+pub fn validated_executor(executor: &str) -> Result<&str, SpiritError> {
+    let trimmed = executor.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 200
+        || trimmed.starts_with('-')
+        || trimmed.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(SpiritError::invalid_input(
+            "executor",
+            "must be one token of 1-200 characters without whitespace, controls or a leading dash",
+        ));
+    }
+    Ok(trimmed)
+}
+
 fn validated_park_reason(reason: Option<&str>) -> Result<&str, SpiritError> {
     let trimmed = reason
         .map(str::trim)
@@ -792,6 +824,29 @@ impl VowpClient for SshVowpClient {
         if let Some(reason) = park_reason {
             argv.extend(["--reason".to_owned(), reason.to_owned()]);
         }
+        let output = self.run(&argv, WRITE_TIMEOUT).await?;
+        self.check_output(output)?;
+        Ok(())
+    }
+
+    async fn set_job_executor(
+        &self,
+        project: &str,
+        job: &str,
+        executor: &str,
+    ) -> Result<(), SpiritError> {
+        ProjectName::parse(project)?;
+        JobId::parse(job)?;
+        let executor = validated_executor(executor)?;
+        let mut argv = self.base_argv();
+        argv.extend(["--project".to_owned(), project.to_owned()]);
+        push_json(&mut argv);
+        argv.extend([
+            "job".to_owned(),
+            "set-executor".to_owned(),
+            job.to_owned(),
+            executor.to_owned(),
+        ]);
         let output = self.run(&argv, WRITE_TIMEOUT).await?;
         self.check_output(output)?;
         Ok(())
@@ -1296,6 +1351,7 @@ struct MockState {
     capacity_calls: u32,
     actions: Vec<(String, String, JobAction, Option<String>)>,
     targets: Vec<SetTargetInput>,
+    executor_changes: Vec<(String, String, String)>,
     asif_export: Option<(AsifExportSummary, Vec<u8>)>,
     asif_import: Option<AsifImportResponse>,
     asif_exports: Vec<(String, String, AsifExportOptions)>,
@@ -1347,6 +1403,7 @@ impl MockVowpClient {
                 capacity_calls: 0,
                 actions: Vec::new(),
                 targets: Vec::new(),
+                executor_changes: Vec::new(),
                 asif_export: None,
                 asif_import: None,
                 asif_exports: Vec::new(),
@@ -1684,6 +1741,16 @@ impl MockVowpClient {
             .clone()
     }
 
+    /// Returns recorded `(project, job, executor)` changes.
+    #[must_use]
+    pub fn executor_changes(&self) -> Vec<(String, String, String)> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .executor_changes
+            .clone()
+    }
+
     /// Returns recorded target writes.
     #[must_use]
     pub fn targets(&self) -> Vec<SetTargetInput> {
@@ -1764,6 +1831,21 @@ impl VowpClient for MockVowpClient {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .actions
             .push((project.to_owned(), job.to_owned(), action, park_reason));
+        Ok(())
+    }
+
+    async fn set_job_executor(
+        &self,
+        project: &str,
+        job: &str,
+        executor: &str,
+    ) -> Result<(), SpiritError> {
+        let executor = validated_executor(executor)?.to_owned();
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .executor_changes
+            .push((project.to_owned(), job.to_owned(), executor));
         Ok(())
     }
 

@@ -270,6 +270,11 @@ export interface SpiritBridge {
     refresh(): Promise<FleetView>;
     capacity(): Promise<CapacityView | null>;
     jobAction(jobId: string, action: JobAction, reason?: string | null): Promise<ActionResult>;
+    /**
+     * Changes the executor of a queued job, or hands a running one to another executor
+     * (`vowp job set-executor`). `executor` is the canonical `harness:model[@effort][#variant]`.
+     */
+    setJobExecutor(project: string, jobId: string, executor: string): Promise<void>;
     inbox(all: boolean): Promise<InboxItemView[]>;
     answerInbox(id: string, answer: string): Promise<InboxItemView>;
     /** Dismisses an item without an answer (`vowp inbox dismiss`); the only way to clear a notice. */

@@ -5780,3 +5780,68 @@ button.nx-composer__attach:disabled {
     max-height: 40vh;
   }
 }
+
+/* Worker executor picker and usage */
+.nx-ring__track {
+  stroke: var(--nx-line-strong);
+}
+
+.nx-ring__fill {
+  stroke: var(--nx-accent);
+}
+
+.nx-usage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--nx-muted);
+  font-size: 12px;
+}
+
+.nx-usage__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.nx-change {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.nx-change__form {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius);
+  background: var(--nx-raised);
+}
+
+.nx-change__form label {
+  display: grid;
+  gap: 3px;
+  color: var(--nx-muted);
+  font-size: 12px;
+}
+
+.nx-change__form select {
+  padding: 6px 8px;
+  border: 1px solid var(--nx-line-strong);
+  border-radius: var(--nx-radius-sm);
+  background: var(--nx-panel);
+  color: var(--nx-text);
+  font: inherit;
+}
+
+.nx-change__confirm p,
+.nx-change__msg {
+  margin: 0 0 6px;
+  color: var(--nx-text);
+  font-size: 12.5px;
+}
+
+.nx-change__msg--error {
+  color: var(--nx-danger);
+}

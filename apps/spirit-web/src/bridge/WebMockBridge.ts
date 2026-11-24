@@ -93,6 +93,9 @@ export class WebMockBridge implements SpiritBridge {
     jobAction: async (): Promise<never> => {
       throw webError("writes_disabled", WRITES_DISABLED);
     },
+    setJobExecutor: async (): Promise<never> => {
+      throw webError("writes_disabled", WRITES_DISABLED);
+    },
     inbox: async (all: boolean): Promise<InboxItemView[]> => this.inner.fleet.inbox(all),
     answerInbox: async (): Promise<never> => {
       throw webError("writes_disabled", WRITES_DISABLED);

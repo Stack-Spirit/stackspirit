@@ -973,6 +973,9 @@ export class HttpSseBridge {
     jobAction: async (): Promise<never> => {
       throw webError("writes_disabled", WRITES_DISABLED);
     },
+    setJobExecutor: async (): Promise<never> => {
+      throw webError("writes_disabled", WRITES_DISABLED);
+    },
     inbox: async (all: boolean): Promise<InboxItemView[]> => this.readInbox(all),
     answerInbox: async (): Promise<never> => {
       throw webError("writes_disabled", WRITES_DISABLED);

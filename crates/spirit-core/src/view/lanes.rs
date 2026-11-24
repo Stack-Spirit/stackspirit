@@ -54,6 +54,27 @@ pub struct JobCardView {
     /// `-verify-N` / `-fix-N` child jobs). Empty when unknown.
     #[serde(default)]
     pub needs: Vec<String>,
+    /// Executor a queued job is planned to run on. `None` for older VOWP snapshots.
+    #[serde(default)]
+    pub planned_executor: Option<ExecutorView>,
+    /// Input tokens spent, when a running card reports them.
+    #[serde(default)]
+    pub tokens_input: Option<u64>,
+    /// Output tokens spent, when a running card reports them.
+    #[serde(default)]
+    pub tokens_output: Option<u64>,
+    /// Cache-read tokens, when a running card reports them.
+    #[serde(default)]
+    pub tokens_cache_read: Option<u64>,
+    /// Model context window in tokens, when known.
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    /// API cost in USD; `None` is unknown, never zero.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// `subscription`, `api`, or `free`; unknown values pass through.
+    #[serde(default)]
+    pub billing_mode: Option<String>,
 }
 
 impl JobCardView {
@@ -355,6 +376,13 @@ fn running_card(project: &str, card: &RunningJobCard, stalled: bool) -> JobCardV
         executor: card.executor.as_deref().map(ExecutorView::parse),
         session_id: card.session_id.as_ref().map(ToString::to_string),
         needs: Vec::new(),
+        planned_executor: None,
+        tokens_input: card.tokens_input,
+        tokens_output: card.tokens_output,
+        tokens_cache_read: card.tokens_cache_read,
+        context_window: card.context_window,
+        cost_usd: card.cost_usd,
+        billing_mode: card.billing_mode.clone(),
     }
 }
 
@@ -376,6 +404,13 @@ fn blocked_card(project: &str, card: &BlockedJobCard) -> JobCardView {
         executor: None,
         session_id: None,
         needs: Vec::new(),
+        planned_executor: None,
+        tokens_input: None,
+        tokens_output: None,
+        tokens_cache_read: None,
+        context_window: None,
+        cost_usd: None,
+        billing_mode: None,
     }
 }
 
@@ -397,6 +432,13 @@ fn queue_card(project: &str, row: &QueueJobCard) -> JobCardView {
         executor: None,
         session_id: None,
         needs: row.needs.iter().map(|id| id.as_str().to_owned()).collect(),
+        planned_executor: row.planned_executor.as_deref().map(ExecutorView::parse),
+        tokens_input: None,
+        tokens_output: None,
+        tokens_cache_read: None,
+        context_window: None,
+        cost_usd: None,
+        billing_mode: None,
     }
 }
 
@@ -424,5 +466,14 @@ fn gate_card(
         needs: queue_row.map_or_else(Vec::new, |row| {
             row.needs.iter().map(|id| id.as_str().to_owned()).collect()
         }),
+        planned_executor: queue_row
+            .and_then(|row| row.planned_executor.as_deref())
+            .map(ExecutorView::parse),
+        tokens_input: None,
+        tokens_output: None,
+        tokens_cache_read: None,
+        context_window: None,
+        cost_usd: None,
+        billing_mode: None,
     }
 }

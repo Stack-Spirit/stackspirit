@@ -242,6 +242,8 @@ export class TauriBridge implements SpiritBridge {
       const fleet = await call<FleetView | null>("fleet_get");
       return fleet?.capacity ?? null;
     },
+    setJobExecutor: (project: string, jobId: string, executor: string): Promise<void> =>
+      call("set_job_executor", { project, jobId, executor }),
     jobAction: (
       jobId: string,
       action: JobAction,

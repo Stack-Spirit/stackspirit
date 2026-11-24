@@ -555,6 +555,24 @@ const PREVIEW_PROVIDER_MODELS: Record<string, Array<{ id: string; label: string 
   ],
 };
 
+/** Deterministic usage for the n-th running mock card: API, free, subscription, then free. */
+function mockUsage(index: number): Partial<JobCardView> {
+  if (index === 0) {
+    return {
+      tokens_input: 128_000,
+      tokens_output: 14_000,
+      tokens_cache_read: 96_000,
+      context_window: 200_000,
+      cost_usd: 0.14,
+      billing_mode: "api",
+    };
+  }
+  if (index === 2) {
+    return { tokens_input: 61_000, tokens_output: 9_000, context_window: 200_000, billing_mode: "subscription" };
+  }
+  return { tokens_input: 12_000, tokens_output: 2_000, context_window: 128_000, billing_mode: "free" };
+}
+
 export class MockBridge implements SpiritBridge {
   readonly kind = "mock" as const;
   readonly preview = true;
@@ -565,6 +583,8 @@ export class MockBridge implements SpiritBridge {
   private hostList: HostProfile[];
   private connectionState: ConnectionSnapshot;
   private fleetView: FleetView | null = null;
+  /** Recorded `setJobExecutor` calls, for tests. */
+  readonly executorChanges: { project: string; jobId: string; executor: string }[] = [];
   private ownerOverride: SessionOwnerView | null = null;
   /** Session tail polls, for tests. */
   readonly tailPolls: { project: string; sessionId: string; afterSeq: number | null }[] = [];
@@ -1066,6 +1086,33 @@ export class MockBridge implements SpiritBridge {
         );
       }
       return clone(detail);
+    },
+    setJobExecutor: async (project: string, jobId: string, executor: string): Promise<void> => {
+      if (!this.fleetView) throw errorDto("not_found", "The fleet has not loaded yet.");
+      if (!/^[^\s-]\S{0,199}$/.test(executor)) {
+        throw errorDto("invalid_input", "executor: must be one token without whitespace");
+      }
+      const parsed = parseExecutor(executor);
+      let found = false;
+      const patch = (card: JobCardView, running: boolean): JobCardView => {
+        if (card.project !== project || card.job_id !== jobId) return card;
+        found = true;
+        return running ? { ...card, executor: parsed } : { ...card, planned_executor: parsed };
+      };
+      const lanes = this.fleetView.lanes;
+      this.fleetView = {
+        ...this.fleetView,
+        lanes: {
+          ...lanes,
+          running: lanes.running.map((card) => patch(card, true)),
+          ready: lanes.ready.map((card) => patch(card, false)),
+          review_fix: lanes.review_fix.map((card) => patch(card, true)),
+          parked_blocked: lanes.parked_blocked.map((card) => patch(card, false)),
+        },
+      };
+      if (!found) throw errorDto("not_found", `Job ${jobId} was not found.`);
+      this.executorChanges.push({ project, jobId, executor });
+      this.emit({ kind: "fleet", revision: this.fleetView.revision, fleet: clone(this.fleetView) });
     },
     jobAction: async (
       jobId: string,
@@ -3846,7 +3893,8 @@ export class MockBridge implements SpiritBridge {
         counts[lane] = (counts[lane] ?? 0) + count;
       }
     }
-    const runningCards = running.map((card) => ({
+    const runningCards = running.map((card, index) => ({
+      ...mockUsage(index),
       job_id: card.job_id,
       project: card.project,
       title: null,
@@ -3863,7 +3911,12 @@ export class MockBridge implements SpiritBridge {
       executor: card.executor,
       session_id: card.session_id,
     }));
-    const readyCards = Array.from({ length: this.scenario === "queue-cap" ? 200 : 3 }, (_, index) => ({
+    const readyCards: JobCardView[] = Array.from({ length: this.scenario === "queue-cap" ? 200 : 3 }, (_, index) => ({
+      planned_executor: parseExecutor(
+        ["claude-code:claude-sonnet-5-5@medium", "opencode:deepseek/deepseek-flash#max", "opencode:openrouter/openai/gpt-5"][
+          index % 3
+        ] ?? "claude-code:claude-sonnet-5-5",
+      ),
       job_id: `ss-${5 + index}-mock`,
       project: "vowp",
       title: ["Build the visual fleet canvas", "Capacity and storage rail", "Engine model catalog"][

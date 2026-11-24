@@ -39,6 +39,7 @@ export const WEB_METHOD_CLASSES: Record<string, MethodClass> = {
   "fleet.capacity": "unavailable",
   "fleet.job": "available",
   "fleet.jobAction": "write-gated",
+  "fleet.setJobExecutor": "write-gated",
   "fleet.inbox": "available",
   "fleet.answerInbox": "write-gated",
   "fleet.dismissInbox": "write-gated",

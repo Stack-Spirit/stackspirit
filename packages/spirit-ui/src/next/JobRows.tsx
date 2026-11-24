@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 
 import { formatAge } from "../domain/format";
+import { UsageInline } from "./ContextPanel";
 import { jobName, jobPhase, jobTone, LANE_INFO, providerModel, type LaneKey, type ProjectJob, waitReason } from "./summary";
 
 export interface JobRowsProps {
@@ -76,6 +77,10 @@ export function JobRows({ jobs, selectedId, onSelect, showProject }: JobRowsProp
               .filter(Boolean)
               .join(" · ");
             const model = providerModel(job);
+            const planned =
+              item.lane === "ready" && !job.executor && job.planned_executor
+                ? providerModel({ ...job, executor: job.planned_executor })
+                : null;
             const phase = jobPhase(item);
             return (
               <li key={`${job.project}:${job.job_id}`}>
@@ -89,7 +94,7 @@ export function JobRows({ jobs, selectedId, onSelect, showProject }: JobRowsProp
                   <span className="nx-row__text">
                     <span className="nx-row__title">{jobName(job)}</span>
                     <span className="nx-row__sub">{summary}</span>
-                    {phase || model ? (
+                    {phase || model || planned ? (
                       <span className="nx-row__badges" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                         {phase ? (
                           <span className="nx-chip nx-chip--muted" data-testid="job-phase">
@@ -101,8 +106,14 @@ export function JobRows({ jobs, selectedId, onSelect, showProject }: JobRowsProp
                             {model}
                           </span>
                         ) : null}
+                        {planned ? (
+                          <span className="nx-chip nx-chip--muted" data-testid="job-planned">
+                            Planned: {planned}
+                          </span>
+                        ) : null}
                       </span>
                     ) : null}
+                    {item.lane === "running" ? <UsageInline job={job} /> : null}
                     {item.lane === "ready" ? (
                       <span className="nx-row__reason" data-testid="job-wait-reason">
                         Waiting: {waitReason(job)}
