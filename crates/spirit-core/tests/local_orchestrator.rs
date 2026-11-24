@@ -1187,3 +1187,84 @@ async fn orchestrator_move_missing_command_is_not_supported_and_never_fakes_a_ca
         assert!(error.message.starts_with("not_supported:"), "{error}");
     }
 }
+
+// --- Project orchestrator discovery, create and resume (ss-128) ---------------------------
+
+fn project_card(name: &str, project: Option<&str>, state: &str) -> OrchestratorCard {
+    let mut card = orchestrator_card(name);
+    card.project = project.map(|p| ProjectName::parse(p).unwrap());
+    card.state = state.to_owned();
+    card
+}
+
+#[test]
+fn project_discovery_prefers_running_then_canonical_name_then_stopped_bound() {
+    use spirit_core::service::select_project_orchestrator as select;
+
+    // (a) a running orchestrator wins over the canonical name.
+    let cards = vec![
+        project_card("stackspirit", Some("stackspirit"), "stopped"),
+        project_card("local-stackspirit", Some("stackspirit"), "running"),
+    ];
+    assert_eq!(
+        select(&cards, "stackspirit").unwrap().name,
+        "local-stackspirit"
+    );
+
+    // (b) with nothing running, the canonical name wins over another stopped card.
+    let cards = vec![
+        project_card("local-stackspirit", Some("stackspirit"), "stopped"),
+        project_card("stackspirit", Some("stackspirit"), "stopped"),
+    ];
+    assert_eq!(select(&cards, "stackspirit").unwrap().name, "stackspirit");
+
+    // (c) a stopped project-bound `local-<project>` is found rather than "none".
+    let cards = vec![
+        project_card("other", Some("other"), "running"),
+        project_card("local-stackspirit", Some("stackspirit"), "stopped"),
+    ];
+    assert_eq!(
+        select(&cards, "stackspirit").unwrap().name,
+        "local-stackspirit"
+    );
+
+    // (d) nothing bound to the project: none.
+    let cards = vec![project_card("other", Some("other"), "running")];
+    assert!(select(&cards, "stackspirit").is_none());
+    assert!(select(&[], "stackspirit").is_none());
+}
+
+#[tokio::test]
+async fn project_create_is_canonically_named_and_bound() {
+    let client = fresh_mock().with_orchestrator_new_result(orchestrator_card("stackspirit"));
+    let request = OrchestratorNewRequest {
+        node: "vowp-local".to_owned(),
+        app: spirit_core::wire::OrchestratorApp::Opencode,
+        project: Some("stackspirit".to_owned()),
+        name: Some("stackspirit".to_owned()),
+        force: false,
+    };
+    client.orchestrator_new(request.clone()).await.unwrap();
+    let calls = client.orchestrator_new_calls();
+    assert_eq!(calls, vec![request]);
+    assert_eq!(calls[0].name.as_deref(), Some("stackspirit"));
+    assert_eq!(calls[0].project.as_deref(), Some("stackspirit"));
+    assert!(!calls[0].force, "create never replaces an existing record");
+}
+
+#[tokio::test]
+async fn project_resume_targets_the_existing_stopped_card_without_creating() {
+    let stopped = project_card("local-stackspirit", Some("stackspirit"), "stopped");
+    let client = fresh_mock().with_orchestrators(vec![stopped]);
+    let cards = client.orchestrator_list().await.unwrap();
+    let picked = spirit_core::service::select_project_orchestrator(&cards, "stackspirit")
+        .unwrap()
+        .clone();
+    assert_eq!(picked.state, "stopped");
+    client.orchestrator_resume(&picked.name).await.unwrap();
+    assert_eq!(
+        client.orchestrator_resume_calls(),
+        vec!["local-stackspirit"]
+    );
+    assert!(client.orchestrator_new_calls().is_empty());
+}

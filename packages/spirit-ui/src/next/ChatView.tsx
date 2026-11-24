@@ -99,8 +99,14 @@ function StartOrchestratorCard({
   onOpenEngineSettings?: () => void;
 }) {
   const bridge = useFleetStore((state) => state.bridge);
-  const agentStatus = bridge?.localOrchestrators?.agentStatus;
+  const local = bridge?.localOrchestrators;
+  const agentStatus = local?.agentStatus;
+  const orchestratorList = local?.orchestratorList;
+  const orchestratorResume = local?.orchestratorResume;
   const [agentEnrolled, setEnrolled] = useState<boolean | null>(null);
+  const [existing, setExisting] = useState<OrchestratorView | null>(null);
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   const enrolled = agentStatus ? agentEnrolled : false;
 
   useEffect(() => {
@@ -118,6 +124,52 @@ function StartOrchestratorCard({
     };
   }, [agentStatus]);
 
+  useEffect(() => {
+    if (!orchestratorList) return;
+    let cancelled = false;
+    void orchestratorList()
+      .then((rows) => {
+        if (!cancelled) setExisting(resolveProjectOrchestrator(rows, project));
+      })
+      .catch(() => {
+        if (!cancelled) setExisting(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [orchestratorList, project]);
+
+  const state =
+    existing === null
+      ? "not created"
+      : existing.state === "running" || existing.state === "starting"
+        ? "running"
+        : "stopped";
+  // A saved orchestrator is resumed, never duplicated; only a missing one is created.
+  const canResume = existing !== null && state !== "running" && Boolean(orchestratorResume);
+  const busy = starting || resuming;
+
+  async function resume() {
+    if (!existing || !orchestratorResume || busy) return;
+    setResuming(true);
+    setResumeError(null);
+    try {
+      const card = await orchestratorResume(existing.name, existing.project, existing.node);
+      setExisting(card);
+      onStart();
+    } catch (caught) {
+      setResumeError(toSpiritError(caught).message);
+    } finally {
+      setResuming(false);
+    }
+  }
+
+  const label = canResume
+    ? `Resume ${project} orchestrator`
+    : existing === null
+      ? `Create & Start ${project} orchestrator`
+      : `Start ${project} orchestrator`;
+
   return (
     <div
       className="nx-chat__error nx-chat__start"
@@ -127,19 +179,30 @@ function StartOrchestratorCard({
     >
       <strong>{project} isn’t running on this Mac yet</strong>
       <span>
-        {project} doesn’t have a local orchestrator running on this Mac yet. Start one and
-        you can chat right away with the models you already connected.
+        {project} doesn’t have a local orchestrator running on this Mac yet.{" "}
+        {canResume
+          ? "Its saved orchestrator is stopped; resume it to chat right away."
+          : "Start one and you can chat right away with the models you already connected."}
       </span>
+      <span className="nx-chat__start-state" data-testid="project-orchestrator-state" data-state={state}>
+        Orchestrator: {state}
+        {existing ? ` (${existing.name})` : ""}
+      </span>
+      {resumeError ? (
+        <span role="alert" data-testid="project-orchestrator-resume-error">
+          {resumeError}
+        </span>
+      ) : null}
       <div className="nx-chat__error-actions">
         <button
           type="button"
           className="nx-btn nx-btn--sm"
-          onClick={onStart}
-          disabled={starting}
-          aria-busy={starting}
+          onClick={canResume ? () => void resume() : onStart}
+          disabled={busy}
+          aria-busy={busy}
           data-testid="start-orchestrator-button"
         >
-          {starting ? "Starting…" : `Start ${project} orchestrator`}
+          {busy ? (canResume ? "Resuming…" : "Starting…") : label}
         </button>
         {enrolled === false && onOpenEngineSettings ? (
           <button
@@ -236,6 +299,22 @@ export function selectProjectOrchestrator(
   const matches = orchestrators.filter((row) => (row.project ?? null) === project);
   if (project === null) return matches[0] ?? null;
   return matches.find((row) => row.app === "chat") ?? matches[0] ?? null;
+}
+
+/**
+ * Discovery for the project view's Start/Resume card, matching the core's
+ * `select_project_orchestrator`: a running orchestrator for the project, then the one named
+ * for the project, then any stopped project-bound card (e.g. `local-<project>`).
+ */
+export function resolveProjectOrchestrator(
+  orchestrators: readonly OrchestratorView[],
+  project: string,
+): OrchestratorView | null {
+  const matches = orchestrators.filter(
+    (row) => row.name === project || row.project === project,
+  );
+  const live = matches.find((row) => row.state === "running" || row.state === "starting");
+  return live ?? matches.find((row) => row.name === project) ?? matches[0] ?? null;
 }
 
 /**

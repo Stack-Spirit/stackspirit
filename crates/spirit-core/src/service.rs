@@ -26,7 +26,7 @@ use crate::vowp::{
     VowpClient,
 };
 use crate::wire::{
-    AgentPathAddRequest, AgentPathMap, AsifImportResponse, NodeCard, NodeName,
+    AgentPathAddRequest, AgentPathMap, AsifImportResponse, NodeCard, NodeName, OrchestratorCard,
     OrchestratorNewRequest, ProjectName, SurfaceEntry, SurfacePairRequest, SurfaceRevokeResult,
     SurfaceRotateRequest, SurfaceRotateResult, ensure_surface_id,
 };
@@ -792,6 +792,29 @@ impl SpiritCore {
     ) -> crate::host::HostProbe {
         crate::host::probe_host(runner, input).await
     }
+}
+
+/// Picks the orchestrator that serves `project` from the registered cards.
+///
+/// Any card whose `project == <project>` (or that is named `<project>`) matches. Preference:
+/// (a) a running orchestrator for the project, (b) the canonical card named `<project>`,
+/// (c) any other stopped or failed project-bound card, such as an older `local-<project>`.
+/// `None` means no orchestrator exists, so the caller creates the canonical one.
+#[must_use]
+pub fn select_project_orchestrator<'a>(
+    cards: &'a [OrchestratorCard],
+    project: &str,
+) -> Option<&'a OrchestratorCard> {
+    let matches = |card: &&OrchestratorCard| {
+        card.name == project || card.project.as_ref().is_some_and(|p| p.as_str() == project)
+    };
+    let live = |card: &&OrchestratorCard| matches!(card.state.as_str(), "running" | "starting");
+    cards
+        .iter()
+        .filter(matches)
+        .find(live)
+        .or_else(|| cards.iter().find(|card| card.name == project))
+        .or_else(|| cards.iter().find(matches))
 }
 
 pub(crate) fn validate_orchestrator_name(name: &str) -> Result<(), SpiritError> {

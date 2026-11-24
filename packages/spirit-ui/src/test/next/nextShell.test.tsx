@@ -349,7 +349,7 @@ describe("NextShell", () => {
     expect(screen.queryByText("A capability gate is not ready")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Connect a provider" })).not.toBeInTheDocument();
 
-    await user.click(within(card).getByRole("button", { name: "Start vowp orchestrator" }));
+    await user.click(within(card).getByRole("button", { name: "Create & Start vowp orchestrator" }));
     await waitFor(() => expect(screen.queryByTestId("start-orchestrator")).not.toBeInTheDocument());
     await waitFor(() =>
       expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled(),

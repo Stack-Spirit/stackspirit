@@ -1871,6 +1871,7 @@ export class MockBridge implements SpiritBridge {
       this.validateChatStart({ session, location: "local", project, resume: true });
       const existing = this.chatSessions.get(session);
       if (existing) return clone(existing);
+      this.ensureProjectOrchestrator(project);
       this.chatLogs.set(session, []);
       const view = this.makeChatView(session, "local");
       this.chatSessions.set(session, view);
@@ -2663,6 +2664,43 @@ export class MockBridge implements SpiritBridge {
     }
   }
 
+  /**
+   * Like the real provisioner: a project with no orchestrator gets the canonical one (named
+   * for the project, bound to it); an existing stopped one is resumed, never duplicated.
+   */
+  private ensureProjectOrchestrator(project: string): void {
+    const rows = this.localState.orchestrators;
+    const found = rows.find((row) => row.name === project || row.project === project);
+    if (found) {
+      if (found.state !== "running") {
+        this.localState = {
+          ...this.localState,
+          orchestrators: rows.map((row) =>
+            row === found
+              ? { ...row, state: "running", session_state: "running" }
+              : row,
+          ),
+        };
+      }
+      return;
+    }
+    const sessionId = "01JCF5WQ8ZK3M2V7N4P6R8T0AG";
+    const view: LocalOrchestratorView = {
+      name: project,
+      session_id: sessionId,
+      project,
+      app: "opencode",
+      state: "running",
+      node: this.localState.node?.name ?? null,
+      protocol: "vowp-agent/1",
+      agent_status: this.localState.agent.state,
+      lease_holder: "StackSpirit Desktop",
+      session_state: "running",
+      join: this.localJoin(sessionId),
+    };
+    this.localState = { ...this.localState, orchestrators: [...rows, view] };
+  }
+
   private requireChatScenario(session: SessionId): void {
     if (
       this.scenario === "chat-project-not-configured" &&
@@ -2996,6 +3034,7 @@ export class MockBridge implements SpiritBridge {
       case "gate-d6-revoked":
         return "revoked";
       case "gates-ready":
+      case "chat-project-not-configured":
       case "gate-asif-ready":
       case "gate-asif-ready-export-only":
       case "asif-export-losses":
@@ -3237,7 +3276,11 @@ export class MockBridge implements SpiritBridge {
       agent,
       node,
       surfaces,
-      orchestrators,
+      // This scenario starts with no orchestrator saved for the project.
+      orchestrators:
+        this.scenario === "chat-project-not-configured"
+          ? orchestrators.filter((row) => row.project !== "vowp")
+          : orchestrators,
       paths: [
         {
           project: "vowp",
@@ -4346,6 +4389,7 @@ export class MockBridge implements SpiritBridge {
         return "ready-export-only";
       case "gate-asif-ready":
       case "gates-ready":
+      case "chat-project-not-configured":
       case "owner-project":
       case "asif-export-losses":
       case "asif-import-warnings":

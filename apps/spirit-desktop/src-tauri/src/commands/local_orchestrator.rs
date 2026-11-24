@@ -579,9 +579,8 @@ async fn find_card(
     client: &dyn VowpClient,
     project: &str,
 ) -> Result<Option<OrchestratorCard>, SpiritError> {
-    Ok(client.orchestrator_list().await?.into_iter().find(|card| {
-        card.name == project || card.project.as_ref().is_some_and(|p| p.as_str() == project)
-    }))
+    let cards = client.orchestrator_list().await?;
+    Ok(spirit_core::service::select_project_orchestrator(&cards, project).cloned())
 }
 
 /// Makes sure the project's orchestrator exists, owns a paired and bound surface, runs on
