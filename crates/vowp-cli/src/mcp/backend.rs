@@ -1207,7 +1207,7 @@ impl<'a> Backend<'a> {
             "params": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "vowp-control", "version": env!("CARGO_PKG_VERSION")},
+                "clientInfo": {"name": "stackspirit-control", "version": env!("CARGO_PKG_VERSION")},
             }
         });
         let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});

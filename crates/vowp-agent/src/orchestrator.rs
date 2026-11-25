@@ -1043,9 +1043,10 @@ impl OrchestratorHost {
         if config.app == OrchestratorApp::Opencode {
             let socket = self.state_dir.join(AGENT_SOCKET_FILE).display().to_string();
             let instructions = dir.join(ORCHESTRATOR_AGENTS_FILE).display().to_string();
+            let key = existing_mcp_key(&dir.join(ORCHESTRATOR_OPENCODE_FILE));
             let value = serde_json::json!({
                 "mcp": {
-                    "vowp": {
+                    key: {
                         "type": "local",
                         "command": [
                             "vowp",
@@ -2044,6 +2045,16 @@ fn own_process_group_from_ps() -> Option<u32> {
         return None;
     }
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// Picks the MCP server key for the local opencode config: an existing legacy `vowp` entry is
+/// kept (a resume never re-keys a working config); a new file uses `stackspirit`.
+fn existing_mcp_key(path: &Path) -> &'static str {
+    let legacy = fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|value| value.get("mcp").and_then(|s| s.get("vowp")).is_some());
+    if legacy { "vowp" } else { "stackspirit" }
 }
 
 #[cfg(test)]

@@ -317,7 +317,7 @@ fn conversation(
         "protocolVersion": options.protocol_version,
         "clientCapabilities": {},
         "clientInfo": {
-            "name": "vowp",
+            "name": "stackspirit",
             "version": env!("CARGO_PKG_VERSION"),
         },
     });

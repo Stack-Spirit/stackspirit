@@ -754,7 +754,7 @@ fn orchestrator_registers_mcp_in_opencode_and_claude_configs() {
         .create(&request("oc", OrchestratorApp::Opencode))
         .expect("create opencode orchestrator");
     let config = read_json(&opencode.dir.join("opencode.json"));
-    let server = &config["mcp"]["vowp"];
+    let server = &config["mcp"]["stackspirit"];
     assert_eq!(server["type"], "local");
     assert_eq!(server["enabled"], true);
     let command: Vec<String> = server["command"]
@@ -787,7 +787,7 @@ fn orchestrator_registers_mcp_in_opencode_and_claude_configs() {
         .create(&request("cc", OrchestratorApp::ClaudeCode))
         .expect("create Claude orchestrator");
     let config = read_json(&claude.dir.join(".mcp.json"));
-    let server = &config["mcpServers"]["vowp"];
+    let server = &config["mcpServers"]["stackspirit"];
     assert_eq!(server["command"], "vowp");
     let args: Vec<String> = server["args"]
         .as_array()
@@ -971,7 +971,7 @@ fn orchestrator_state_survives_supervisor_restart() {
     assert_eq!(starts.load(Ordering::SeqCst), 1);
 
     let config = read_json(&info.dir.join("opencode.json"));
-    let config_args: Vec<String> = config["mcp"]["vowp"]["command"]
+    let config_args: Vec<String> = config["mcp"]["stackspirit"]["command"]
         .as_array()
         .expect("opencode command")
         .iter()
@@ -990,7 +990,7 @@ fn orchestrator_state_survives_supervisor_restart() {
     assert_eq!(state["state"], "running");
     assert!(info.dir.join("host.json").is_file());
     let config = read_json(&info.dir.join("opencode.json"));
-    let config_args: Vec<String> = config["mcp"]["vowp"]["command"]
+    let config_args: Vec<String> = config["mcp"]["stackspirit"]["command"]
         .as_array()
         .expect("opencode command")
         .iter()
@@ -2614,5 +2614,42 @@ fn attach_holds_the_lease_until_stdin_closes_and_then_releases_it() {
     assert!(
         lease_row(&env, &session).is_none(),
         "closing stdin released the lease row"
+    );
+}
+
+#[test]
+fn new_orchestrator_uses_stackspirit_key_and_resume_keeps_legacy_vowp_key() {
+    let env = TestEnv::new();
+    let (orchestrator, _, _, _, _) = manager(deps(&env));
+    let oc = orchestrator
+        .create(&request("keys-oc", OrchestratorApp::Opencode))
+        .expect("create opencode orchestrator");
+    let config = read_json(&oc.dir.join("opencode.json"));
+    assert!(config["mcp"].get("stackspirit").is_some());
+    assert!(config["mcp"].get("vowp").is_none(), "keys must not be dual-registered");
+    assert_eq!(config["mcp"]["stackspirit"]["command"][0], "vowp");
+
+    // Simulate an orchestrator created before the rename: rewrite its config under `vowp`.
+    let path = oc.dir.join("opencode.json");
+    let text = std::fs::read_to_string(&path).expect("read config");
+    let legacy = text.replacen("\"stackspirit\"", "\"vowp\"", 1);
+    assert_ne!(text, legacy);
+    std::fs::write(&path, legacy).expect("write legacy config");
+    orchestrator.resume("keys-oc").expect("resume orchestrator");
+    let config = read_json(&path);
+    assert!(config["mcp"].get("vowp").is_some(), "resume re-keyed a legacy config");
+    assert!(config["mcp"].get("stackspirit").is_none());
+
+    let cc = orchestrator
+        .create(&request("keys-cc", OrchestratorApp::ClaudeCode))
+        .expect("create Claude orchestrator");
+    let config = read_json(&cc.dir.join(".mcp.json"));
+    assert!(config["mcpServers"].get("stackspirit").is_some());
+    assert!(config["mcpServers"].get("vowp").is_none());
+    let text = std::fs::read_to_string(cc.dir.join(".mcp.json")).expect("read mcp.json");
+    let token = std::fs::read_to_string(cc.dir.join("lease.token")).expect("token");
+    assert!(
+        !token.trim().is_empty() && !text.contains(token.trim()),
+        "token leaked into .mcp.json"
     );
 }

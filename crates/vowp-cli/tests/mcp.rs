@@ -122,8 +122,20 @@ impl TestEnv {
 
 /// Runs the MCP server in-process with scripted stdin and returns `(code, stdout, stderr)`.
 fn run_mcp(env: &TestEnv, session: &str, surface: &str, token_file: &Path, input: &str) -> (i32, String, String) {
+    run_mcp_as("vowp", env, session, surface, token_file, input)
+}
+
+/// Like [`run_mcp`], invoked under the given binary name (`vowp` or `stackspirit`).
+fn run_mcp_as(
+    program: &str,
+    env: &TestEnv,
+    session: &str,
+    surface: &str,
+    token_file: &Path,
+    input: &str,
+) -> (i32, String, String) {
     let args = vec![
-        "vowp".to_owned(),
+        program.to_owned(),
         "--home".to_owned(),
         env.home_path().display().to_string(),
         "--project".to_owned(),
@@ -643,7 +655,7 @@ fn mcp_initialize_and_tools_list() {
     assert_eq!(code, 0, "{stderr}");
     let values = responses(&stdout);
     let init = response(&values, 1);
-    assert_eq!(init["result"]["serverInfo"]["name"], "vowp");
+    assert_eq!(init["result"]["serverInfo"]["name"], "stackspirit-engine");
     assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
     let tools = response(&values, 2)["result"]["tools"]
         .as_array()
@@ -670,6 +682,81 @@ fn mcp_initialize_and_tools_list() {
     ] {
         assert!(tools.contains(&name), "missing tool {name}: {tools:?}");
     }
+    assert_eq!(tools.len(), 15, "the frozen tool list changed: {tools:?}");
+}
+
+#[test]
+fn stackspirit_mcp_serves_the_same_identity_tools_and_backend_as_vowp_mcp() {
+    let env = TestEnv::new();
+    let session = create_session(&env);
+    let token = token_file(&env, "unused");
+    let input = format!(
+        "{}\n{}\n{}\n{}\n",
+        request(
+            1,
+            "initialize",
+            json!({"protocolVersion": "2024-11-05", "capabilities": {}})
+        ),
+        request(2, "tools/list", json!({})),
+        request(3, "server/discover", json!({})),
+        tool_call(4, "fleet_status", json!({})),
+    );
+    let mut outputs = Vec::new();
+    for program in ["vowp", "stackspirit"] {
+        let (code, stdout, stderr) = run_mcp_as(program, &env, &session, "surf-test", &token, &input);
+        assert_eq!(code, 0, "{program}: {stderr}");
+        outputs.push(responses(&stdout));
+    }
+    // Identity, tool list and discover are byte-identical; the tool call reaches the same
+    // backend (its snapshot carries live timestamps, so compare only success and shape).
+    for id in 1..=3 {
+        assert_eq!(response(&outputs[0], id), response(&outputs[1], id), "id {id} differs");
+    }
+    for values in &outputs {
+        let call = response(values, 4);
+        assert!(call.get("error").is_none(), "{call}");
+        assert_eq!(call["result"]["isError"], json!(false), "{call}");
+    }
+    let values = &outputs[1];
+    assert_eq!(
+        response(values, 1)["result"]["serverInfo"]["name"],
+        "stackspirit-engine"
+    );
+    assert_eq!(
+        response(values, 3)["result"]["serverInfo"]["name"],
+        "stackspirit-engine"
+    );
+    assert_eq!(
+        response(values, 1)["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    let tools: Vec<&str> = response(values, 2)["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    let mut expected = vec![
+        "fleet_status",
+        "fleet_queue",
+        "inbox_list",
+        "capacity_report",
+        "session_tail",
+        "inbox_answer",
+        "job_add",
+        "job_pause",
+        "job_retry",
+        "capacity_set",
+        "tunnel_open",
+        "tunnel_close",
+        "secret_request",
+        "session_handoff",
+        "session_resume",
+    ];
+    let mut actual = tools.clone();
+    expected.sort_unstable();
+    actual.sort_unstable();
+    assert_eq!(actual, expected, "the frozen tool names changed");
 }
 
 #[test]
@@ -683,7 +770,7 @@ fn mcp_server_discover_answered() {
     let values = responses(&stdout);
     let discover = response(&values, 1);
     assert!(discover.get("error").is_none(), "{discover}");
-    assert_eq!(discover["result"]["serverInfo"]["name"], "vowp");
+    assert_eq!(discover["result"]["serverInfo"]["name"], "stackspirit-engine");
 }
 
 #[test]
@@ -1233,7 +1320,7 @@ fn mcp_proxy_serves_initialize_list_and_ping_without_a_home() {
     assert!(stderr.is_empty(), "the proxy writes errors to stdout: {stderr}");
     let values = responses(&stdout);
     let init = response(&values, 1);
-    assert_eq!(init["result"]["serverInfo"]["name"], "vowp");
+    assert_eq!(init["result"]["serverInfo"]["name"], "stackspirit-engine");
     assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(response(&values, 2)["result"], json!({}));
     let tools = response(&values, 3)["result"]["tools"]

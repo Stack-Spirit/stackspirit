@@ -1943,9 +1943,10 @@ impl Orchestrator {
         let surface = surface.to_string();
         match app {
             OrchestratorApp::Opencode => {
+                let key = existing_mcp_key(&dir.join("opencode.json"), "mcp");
                 let config = serde_json::json!({
                     "mcp": {
-                        "vowp": {
+                        key: {
                             "type": "local",
                             "command": [
                                 "vowp",
@@ -1964,9 +1965,10 @@ impl Orchestrator {
                 write_private_json_atomic(&dir.join("opencode.json"), &config)?;
             }
             OrchestratorApp::ClaudeCode => {
+                let key = existing_mcp_key(&dir.join(".mcp.json"), "mcpServers");
                 let config = serde_json::json!({
                     "mcpServers": {
-                        "vowp": {
+                        key: {
                             "command": "vowp",
                             "args": [
                                 "mcp",
@@ -2501,6 +2503,21 @@ fn write_private_text(path: &Path, text: &str) -> Result<(), CoreError> {
 }
 
 /// Writes one private JSON document (mode 0600) atomically, creating its parent.
+/// New orchestrators register their MCP server under this key.
+const MCP_KEY_NEW: &str = "stackspirit";
+/// Key used by orchestrators created before the StackSpirit rename; preserved on resume.
+const MCP_KEY_LEGACY: &str = "vowp";
+
+/// Picks the MCP server key for an app config file: an existing legacy `vowp` entry under
+/// `section` is kept (a resume never re-keys a working config), anything else gets the new key.
+fn existing_mcp_key(path: &Path, section: &str) -> &'static str {
+    let legacy = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|value| value.get(section).and_then(|s| s.get(MCP_KEY_LEGACY)).is_some());
+    if legacy { MCP_KEY_LEGACY } else { MCP_KEY_NEW }
+}
+
 fn write_private_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), CoreError> {
     let bytes = serde_json::to_vec(value).map_err(|error| CoreError::Invalid(error.to_string()))?;
     write_private_bytes(path, &bytes)

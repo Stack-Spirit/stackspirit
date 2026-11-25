@@ -263,7 +263,7 @@ fn acp_clean_turn_emits_events_in_order() {
     assert_eq!(requests.len(), 3, "one handshake, one session, one prompt");
     assert_eq!(requests[0]["method"], "initialize");
     assert_eq!(requests[0]["params"]["protocolVersion"], ACP_PROTOCOL_VERSION);
-    assert_eq!(requests[0]["params"]["clientInfo"]["name"], "vowp");
+    assert_eq!(requests[0]["params"]["clientInfo"]["name"], "stackspirit");
     assert_eq!(requests[1]["method"], "session/new");
     assert_eq!(
         requests[1]["params"]["cwd"].as_str(),

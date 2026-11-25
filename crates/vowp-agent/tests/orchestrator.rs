@@ -1083,7 +1083,7 @@ fn orchestrator_opencode_json_names_the_socket_and_surface_without_a_token() {
     let dir = OrchestratorHost::dir(&state, "opencode-config").expect("dir");
     let text = fs::read_to_string(dir.join("opencode.json")).expect("opencode config");
     let value: serde_json::Value = serde_json::from_str(&text).expect("opencode json");
-    let server = &value["mcp"]["vowp"];
+    let server = &value["mcp"]["stackspirit"];
     assert_eq!(server["type"], "local");
     assert_eq!(server["enabled"], true);
     let command: Vec<String> = server["command"]
@@ -1207,7 +1207,7 @@ fn orchestrator_resume_refreshes_the_app_files_atomically() {
     }
     let opencode: serde_json::Value =
         serde_json::from_slice(&fs::read(dir.join("opencode.json")).expect("opencode config")).expect("opencode json");
-    let command: Vec<String> = opencode["mcp"]["vowp"]["command"]
+    let command: Vec<String> = opencode["mcp"]["stackspirit"]["command"]
         .as_array()
         .expect("mcp command")
         .iter()
@@ -1270,7 +1270,7 @@ fn orchestrator_app_files_never_contain_a_secret_or_pair_link() {
     // path: both live below the agent state directory.
     let value: serde_json::Value =
         serde_json::from_slice(&fs::read(dir.join("opencode.json")).expect("opencode config")).expect("opencode json");
-    let command = value["mcp"]["vowp"]["command"].as_array().expect("mcp command");
+    let command = value["mcp"]["stackspirit"]["command"].as_array().expect("mcp command");
     for arg in command.iter().filter_map(|value| value.as_str()) {
         if arg.starts_with('/') {
             assert!(Path::new(arg).starts_with(&state), "external path {arg}");
