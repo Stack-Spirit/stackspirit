@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Hermetic proof of the stackspirit PyPI wheels (design §4.6): fake binaries, temp venv, no network.
-# Runs under a temporary HOME. Needs python3 with `build` and pip importable. `uv` is optional locally; set REQUIRE_UV=1 (CI) to fail without it.
+# Runs under a temporary HOME. Needs only python3 (stdlib); pip (or uv) is needed for step 4/5. `uv` is optional locally; set REQUIRE_UV=1 (CI) to fail without it.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -8,29 +8,11 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 export PYTHONDONTWRITEBYTECODE=1
 
-# Locate the python tooling (`build`, `pip` and their dependencies) while the caller's environment is
-# still intact, then run everything under a temporary HOME. Only the importable code directories are
-# added to PYTHONPATH (read-only use); caches, config and tool state all go under the temp home.
-tool_path="$(python3 -P - <<'PYX' || true
-import importlib.util, os
-dirs = []
-for mod in ("build", "pip", "pyproject_hooks", "packaging"):
-    spec = importlib.util.find_spec(mod)
-    if spec and spec.origin:
-        d = os.path.dirname(os.path.dirname(spec.origin))
-        if d not in dirs:
-            dirs.append(d)
-print(os.pathsep.join(dirs))
-PYX
-)"
+# Everything runs under a temporary HOME: nothing reads or writes the caller's home.
 export HOME="$work/home"
 mkdir -p "$HOME/.cache" "$HOME/.config" "$HOME/.local/share"
 export XDG_CACHE_HOME="$HOME/.cache" XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share"
-export PIP_CACHE_DIR="$HOME/.cache/pip" UV_CACHE_DIR="$HOME/.cache/uv"
-export PYTHONUSERBASE="$HOME/.local"
-[ -z "$tool_path" ] || export PYTHONPATH="$tool_path"
-python3 -c 'import build, pip' 2>/dev/null \
-  || { echo "FAIL: python3 needs the 'build' and 'pip' modules importable from the caller's environment" >&2; exit 1; }
+export PIP_CACHE_DIR="$HOME/.cache/pip" UV_CACHE_DIR="$HOME/.cache/uv" PYTHONUSERBASE="$HOME/.local"
 unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL UV_INDEX_URL VIRTUAL_ENV
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -118,15 +100,29 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) host_tag=macosx_11_0_arm64; host_triple=aarch64-apple-darwin ;;
   *) echo "skip: no wheel for this host"; exit 0 ;;
 esac
-python3 -m venv --without-pip "$work/venv"
 wheels="$work/out1"
-python3 -m pip --python "$work/venv/bin/python" install --no-index --find-links "$wheels" \
-  --disable-pip-version-check --quiet "stackspirit==$version" || fail "offline pip install failed"
-for n in "${names[@]}"; do
-  got="$("$work/venv/bin/$n" --version x)"
-  [ "$got" = "fake:$n:--version x:$host_triple" ] || fail "$n printed '$got'"
-done
-ok "pip install --no-index runs all four console scripts (argv[0] and args preserved)"
+python3 -m venv --without-pip "$work/venv"
+if python3 -c 'import pip' 2>/dev/null; then
+  python3 -m pip --python "$work/venv/bin/python" install --no-index --find-links "$wheels" \
+    --disable-pip-version-check --quiet "stackspirit==$version" || fail "offline pip install failed"
+  installer=pip
+elif command -v uv >/dev/null 2>&1; then
+  UV_NO_CONFIG=1 uv pip install --offline --no-index --find-links "$wheels" --python "$work/venv/bin/python" \
+    --quiet "stackspirit==$version" || fail "offline uv pip install failed"
+  installer="uv pip"
+elif [ "${REQUIRE_PIP:-0}" = 1 ]; then
+  fail "pip or uv is required (REQUIRE_PIP=1) but neither works under a temporary HOME"
+else
+  installer=""
+  echo "SKIP: no pip or uv usable under a temporary HOME; the install test did not run (CI sets REQUIRE_PIP=1)"
+fi
+if [ -n "$installer" ]; then
+  for n in "${names[@]}"; do
+    got="$("$work/venv/bin/$n" --version x)"
+    [ "$got" = "fake:$n:--version x:$host_triple" ] || fail "$n printed '$got'"
+  done
+  ok "$installer install --no-index runs all four console scripts (argv[0] and args preserved)"
+fi
 
 # 5. uvx-style run.
 if command -v uv >/dev/null 2>&1; then

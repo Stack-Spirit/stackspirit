@@ -49,11 +49,13 @@ mkdir -p "$out"
 for entry in "${targets[@]}"; do
   triple="${entry% *}"
   tag="${entry#* }"
-  python3 -m build --wheel --no-isolation --outdir "$out" \
-    --config-setting "bin-dir=$target_dir/$triple/release" \
-    --config-setting "platform-tag=$tag" \
-    --config-setting "target=$triple" \
-    --config-setting "version=$version" \
-    "$root/packaging/pypi/stackspirit" >&2
+  # Drive the in-tree PEP 517 backend directly (stdlib only, no `build` front end needed).
+  python3 -I -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import backend
+out, bin_dir, tag, target, version = sys.argv[2:]
+print(backend.build_wheel(out, {"bin-dir": bin_dir, "platform-tag": tag, "target": target, "version": version}))
+' "$root/packaging/pypi/stackspirit" "$out" "$target_dir/$triple/release" "$tag" "$triple" "$version" >&2
 done
 ls "$out"/stackspirit-*.whl
