@@ -267,14 +267,61 @@ impl SshRemote {
         self.run_with_timeout(argv, READ_TIMEOUT).await
     }
 
+    /// Rewrites an engine program in `argv[0]` (`vowp` or `stackspirit`) to the binary
+    /// recorded for this destination. Returns `None` when `argv[0]` is not the engine.
+    fn engine_argv(&self, argv: &[String]) -> Option<Vec<String>> {
+        let first = argv.first()?;
+        if first != command::ENGINE_BINARY && first != command::LEGACY_ENGINE_BINARY {
+            return None;
+        }
+        let mut resolved = argv.to_vec();
+        resolved[0] = command::engine_binary_for(&self.target.destination()).to_owned();
+        Some(resolved)
+    }
+
+    /// Runs `argv` once; when the preferred `stackspirit` binary is missing (exit 127)
+    /// retries with the legacy `vowp` and remembers it for this destination.
+    async fn run_engine_aware<F, Fut>(
+        &self,
+        argv: &[String],
+        mut run: F,
+    ) -> Result<CommandOutput, SpiritError>
+    where
+        F: FnMut(Vec<String>) -> Fut,
+        Fut: std::future::Future<Output = Result<CommandOutput, SpiritError>>,
+    {
+        let Some(resolved) = self.engine_argv(argv) else {
+            return run(argv.to_vec()).await;
+        };
+        let used_preferred = resolved[0] == command::ENGINE_BINARY;
+        let first = run(resolved.clone()).await;
+        if used_preferred && matches!(&first, Ok(output) if output.status == 127) {
+            let mut legacy = resolved;
+            legacy[0] = command::LEGACY_ENGINE_BINARY.to_owned();
+            if let Ok(output) = run(legacy).await {
+                if output.status != 127 {
+                    command::set_engine_binary_for(
+                        &self.target.destination(),
+                        command::LEGACY_ENGINE_BINARY,
+                    );
+                    return Ok(output);
+                }
+            }
+        }
+        first
+    }
+
     /// Runs a fixed remote argv array with an explicit timeout.
     pub async fn run_with_timeout(
         &self,
         argv: &[String],
         timeout: Duration,
     ) -> Result<CommandOutput, SpiritError> {
-        let spec = ssh_command(&self.target, &self.options, argv, timeout)?;
-        self.runner.run(&spec).await
+        self.run_engine_aware(argv, |argv| async move {
+            let spec = ssh_command(&self.target, &self.options, &argv, timeout)?;
+            self.runner.run(&spec).await
+        })
+        .await
     }
 
     /// Runs a fixed remote argv array with an explicit timeout and stdout cap.
@@ -284,9 +331,17 @@ impl SshRemote {
         timeout: Duration,
         output_cap: usize,
     ) -> Result<CommandOutput, SpiritError> {
-        let spec =
-            ssh_command_with_output_cap(&self.target, &self.options, argv, timeout, output_cap)?;
-        self.runner.run(&spec).await
+        self.run_engine_aware(argv, |argv| async move {
+            let spec = ssh_command_with_output_cap(
+                &self.target,
+                &self.options,
+                &argv,
+                timeout,
+                output_cap,
+            )?;
+            self.runner.run(&spec).await
+        })
+        .await
     }
 
     /// Runs a fixed remote argv array while streaming `stdin` bytes to it.
@@ -300,10 +355,21 @@ impl SshRemote {
         timeout: Duration,
         output_cap: usize,
     ) -> Result<CommandOutput, SpiritError> {
-        let spec =
-            ssh_command_with_output_cap(&self.target, &self.options, argv, timeout, output_cap)?
+        self.run_engine_aware(argv, |argv| {
+            let stdin = stdin.clone();
+            async move {
+                let spec = ssh_command_with_output_cap(
+                    &self.target,
+                    &self.options,
+                    &argv,
+                    timeout,
+                    output_cap,
+                )?
                 .with_stdin(stdin);
-        self.runner.run(&spec).await
+                self.runner.run(&spec).await
+            }
+        })
+        .await
     }
 
     /// Runs a remote argv array that opens a hidden prompt, then writes `input`.
@@ -318,7 +384,8 @@ impl SshRemote {
         input: &[u8],
         timeout: Duration,
     ) -> Result<CommandOutput, SpiritError> {
-        let spec = ssh_command_with_pty(&self.target, &self.options, argv, timeout)?;
+        let argv = self.engine_argv(argv).unwrap_or_else(|| argv.to_vec());
+        let spec = ssh_command_with_pty(&self.target, &self.options, &argv, timeout)?;
         self.runner.run_with_prompt(&spec, prompt, input).await
     }
 

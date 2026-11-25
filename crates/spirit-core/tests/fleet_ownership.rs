@@ -190,7 +190,7 @@ async fn takeover_runs_the_documented_command_without_force() {
     assert_eq!(calls.len(), 1);
     let command = calls[0].args.last().cloned().unwrap();
     assert!(command.contains(
-        "'vowp' '--project' 'repo' '--json' 'session' 'takeover' '--kind' 'chat' '--holder' 'stackspirit' '--node' 'macbook' '--label'"
+        "'stackspirit' '--project' 'repo' '--json' 'session' 'takeover' '--kind' 'chat' '--holder' 'stackspirit' '--node' 'macbook' '--label'"
     ));
     assert!(command.contains(SESSION));
     assert!(!command.contains("--force"));
@@ -213,7 +213,7 @@ async fn takeover_sends_the_node_project_for_the_global_orchestrator() {
     let calls = fake.calls();
     assert_eq!(calls.len(), 1);
     let command = calls[0].args.last().cloned().unwrap();
-    assert!(command.contains("'vowp' '--project' '_node' '--json' 'session' 'takeover'"));
+    assert!(command.contains("'stackspirit' '--project' '_node' '--json' 'session' 'takeover'"));
     assert!(command.contains(SESSION));
 }
 

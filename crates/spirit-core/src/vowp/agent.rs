@@ -96,7 +96,8 @@ impl CommandLocalAgent {
         stdin: Option<Vec<u8>>,
         timeout: Duration,
     ) -> Result<CommandOutput, SpiritError> {
-        let mut spec = CommandSpec::new("vowp", argv).with_timeout(timeout);
+        let mut spec = CommandSpec::new(crate::ssh::command::local_engine_binary(), argv)
+            .with_timeout(timeout);
         if let Some(stdin) = stdin {
             spec = spec.with_stdin(stdin);
         }

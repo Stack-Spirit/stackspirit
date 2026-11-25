@@ -444,7 +444,7 @@ export function FormClusterDialog({ hosts, initial, onClose }: FormClusterDialog
           <span className="nx-form__error">{errors.backupTarget}</span>
         ) : (
           <p className="nx-cluster__note">
-            A path or rsync target for <code>vowp backup --to</code>. Use the server&apos;s SSH key;
+            A path or rsync target for <code>stackspirit backup --to</code>. Use the server&apos;s SSH key;
             never put a password or token here.
           </p>
         )}
@@ -457,7 +457,7 @@ export function FormClusterDialog({ hosts, initial, onClose }: FormClusterDialog
             onChange={(event) => setConfirmed(event.target.checked)}
           />
           <span>
-            I understand StackSpirit will enroll each worker, edit Home&apos;s <code>vowp.toml</code>{" "}
+            I understand StackSpirit will enroll each worker, edit Home&apos;s <code>stackspirit.toml</code>{" "}
             and register a backup schedule over SSH. This cannot be undone by cancelling.
           </span>
         </label>

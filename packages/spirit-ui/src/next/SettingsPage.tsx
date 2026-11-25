@@ -536,7 +536,7 @@ export function SettingsPage() {
         </label>
         {!catalogReady ? (
           <p className="nx-provider__empty">
-            The StackSpirit Engine is stopped. Start it to load the live
+            StackSpirit is not running. Start it to load the live
             provider catalog.
           </p>
         ) : availableRows.length > 0 ? (

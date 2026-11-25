@@ -242,7 +242,7 @@ async fn form_with_two_servers_writes_the_expected_commands_and_config() {
     for expected in [
         "'schedule' 'add' 'every 1d' 'command'",
         "'--name' 'cluster-backup'",
-        "'--' 'vowp' 'backup' '--to' 'backup@192.0.2.20:/srv/vowp-backups'",
+        "'--' 'stackspirit' 'backup' '--to' 'backup@192.0.2.20:/srv/vowp-backups'",
     ] {
         assert!(schedule.contains(expected), "{expected}: {schedule}");
     }
@@ -343,7 +343,7 @@ async fn form_prefers_and_writes_back_stackspirit_toml_when_present() {
     for expected in [
         "'schedule' 'add' 'every 1d' 'command'",
         "'--name' 'cluster-backup'",
-        "'--' 'vowp' 'backup' '--to' 'backup@192.0.2.20:/srv/vowp-backups'",
+        "'--' 'stackspirit' 'backup' '--to' 'backup@192.0.2.20:/srv/vowp-backups'",
     ] {
         assert!(schedule.contains(expected), "{expected}: {schedule}");
     }

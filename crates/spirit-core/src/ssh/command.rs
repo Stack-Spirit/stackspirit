@@ -204,7 +204,7 @@ pub fn resolve_local_engine_binary(path_env: Option<&str>) -> &'static str {
     let found = path_env.is_some_and(|path| {
         std::env::split_paths(path).any(|dir| {
             let candidate = dir.join(ENGINE_BINARY);
-            std::fs::metadata(&candidate).is_ok_and(|meta| meta.is_file())
+            std::fs::metadata(&candidate).is_ok_and(|meta| meta.is_file() && is_executable(&meta))
         })
     });
     if found {
@@ -214,15 +214,40 @@ pub fn resolve_local_engine_binary(path_env: Option<&str>) -> &'static str {
     }
 }
 
+#[cfg(unix)]
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_meta: &std::fs::Metadata) -> bool {
+    true
+}
+
+/// Resolves the local engine program from the process `PATH`.
+#[must_use]
+pub fn local_engine_binary() -> &'static str {
+    let path = std::env::var_os("PATH").map(|path| path.to_string_lossy().into_owned());
+    resolve_local_engine_binary(path.as_deref())
+}
+
+/// Resolves the engine home directory from the process environment
+/// (`STACKSPIRIT_HOME`, then `VOWP_HOME`).
+#[must_use]
+pub fn engine_home_from_process_env() -> Option<String> {
+    engine_home_from_env(|key| std::env::var(key).ok())
+}
+
 /// Process-wide record of which engine binary each SSH destination answered to.
 ///
 /// The remote command stays a plain single-quoted argv (no shell operators), so the
-/// binary is chosen up front: `vowp` until a probe saw that only `stackspirit` exists.
+/// binary is chosen up front: `stackspirit` until a command saw that only `vowp` exists.
 static REMOTE_ENGINE_BINARIES: std::sync::Mutex<Vec<(String, &'static str)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Returns the engine program to run on `destination`: `stackspirit` once a probe found
-/// it there, otherwise the legacy `vowp` so existing homes keep working.
+/// Returns the engine program to run on `destination`: `stackspirit` unless a command
+/// found that only the legacy `vowp` exists there.
 #[must_use]
 pub fn engine_binary_for(destination: &str) -> &'static str {
     REMOTE_ENGINE_BINARIES
@@ -230,7 +255,7 @@ pub fn engine_binary_for(destination: &str) -> &'static str {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .find(|(host, _)| host == destination)
-        .map_or(LEGACY_ENGINE_BINARY, |(_, binary)| *binary)
+        .map_or(ENGINE_BINARY, |(_, binary)| *binary)
 }
 
 /// Records the engine program that works on `destination`.
@@ -275,13 +300,13 @@ mod tests {
     }
 
     #[test]
-    fn remote_binary_defaults_to_vowp_until_stackspirit_is_recorded() {
-        assert_eq!(engine_binary_for("ss129-host"), "vowp");
-        set_engine_binary_for("ss129-host", ENGINE_BINARY);
+    fn remote_binary_defaults_to_stackspirit_until_vowp_is_recorded() {
         assert_eq!(engine_binary_for("ss129-host"), "stackspirit");
         set_engine_binary_for("ss129-host", LEGACY_ENGINE_BINARY);
         assert_eq!(engine_binary_for("ss129-host"), "vowp");
-        assert_eq!(engine_binary_for("ss129-other"), "vowp");
+        set_engine_binary_for("ss129-host", ENGINE_BINARY);
+        assert_eq!(engine_binary_for("ss129-host"), "stackspirit");
+        assert_eq!(engine_binary_for("ss129-other"), "stackspirit");
     }
 
     #[test]
@@ -291,6 +316,14 @@ mod tests {
         let path = dir.display().to_string();
         assert_eq!(resolve_local_engine_binary(Some(&path)), "vowp");
         std::fs::write(dir.join("stackspirit"), b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file = dir.join("stackspirit");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(resolve_local_engine_binary(Some(&path)), "vowp");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         assert_eq!(resolve_local_engine_binary(Some(&path)), "stackspirit");
         assert_eq!(resolve_local_engine_binary(None), "vowp");
         std::fs::remove_dir_all(&dir).unwrap();

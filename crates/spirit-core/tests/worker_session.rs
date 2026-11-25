@@ -41,7 +41,7 @@ async fn tail_runs_the_documented_command_with_from() {
     let command = calls[0].args.last().cloned().unwrap();
     assert!(
         command.contains(&format!(
-            "'vowp' '--home' '/srv/vowp' '--project' 'repo' '--json' 'session' 'tail' '--from' '2' '{SESSION}'"
+            "'stackspirit' '--home' '/srv/vowp' '--project' 'repo' '--json' 'session' 'tail' '--from' '2' '{SESSION}'"
         )),
         "{command}"
     );

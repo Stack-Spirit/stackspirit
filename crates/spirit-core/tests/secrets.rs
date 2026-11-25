@@ -116,7 +116,10 @@ async fn secret_list_parses_metadata_without_a_value_and_keeps_vowp_order() {
     );
 
     let call = fake.last_call().expect("one list call");
-    assert_eq!(remote_command(&call), "'vowp' '--json' 'secret' 'ls'");
+    assert_eq!(
+        remote_command(&call),
+        "'stackspirit' '--json' 'secret' 'ls'"
+    );
     assert!(
         !call.args.iter().any(|arg| arg == "-tt"),
         "a plain read must not allocate a pty"
@@ -224,7 +227,7 @@ async fn secret_remove_sends_yes_and_returns_the_vowp_outcome() {
     let call = fake.last_call().expect("one remove call");
     assert_eq!(
         remote_command(&call),
-        "'vowp' '--json' 'secret' 'rm' 'TEST_KEY' '--yes'"
+        "'stackspirit' '--json' 'secret' 'rm' 'TEST_KEY' '--yes'"
     );
     assert!(
         !call.args.iter().any(|arg| arg == "-tt"),
@@ -399,7 +402,7 @@ async fn secret_set_writes_only_after_the_exact_prompt() {
     // The SSH argv carries the name, `-tt` and the normal options, never the value.
     let command = remote_command(&call.spec);
     assert_eq!(
-        command, "'vowp' '--json' 'secret' 'set' 'TEST_KEY'",
+        command, "'stackspirit' '--json' 'secret' 'set' 'TEST_KEY'",
         "the value must never be an argv element"
     );
     assert!(call.spec.args.iter().any(|arg| arg == "-tt"));

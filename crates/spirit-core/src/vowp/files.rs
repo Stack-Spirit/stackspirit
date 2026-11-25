@@ -215,7 +215,10 @@ pub fn is_secret_like(name: &str) -> bool {
 /// A live VOWP path hint from the file name alone: `vowp.db*`, `vowp.toml`, `.ssh`.
 #[must_use]
 pub fn is_protected_name(name: &str) -> bool {
-    name.starts_with("vowp.db") || name == "vowp.toml" || name == ".ssh"
+    name.starts_with("vowp.db")
+        || name == "vowp.toml"
+        || name == "stackspirit.toml"
+        || name == ".ssh"
 }
 
 /// True when `path` is, or lies inside, a live VOWP path: a `vowp.db*` / `vowp.toml` /

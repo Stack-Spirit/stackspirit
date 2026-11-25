@@ -1060,11 +1060,11 @@ async fn orchestrator_move_uses_the_exact_node_and_home_argv() {
     let calls = runner.calls();
     assert_eq!(
         remote_argv(&calls[0]),
-        "'vowp' '--json' 'orchestrator' 'move' 'vowp-local' '--node' 'mac-studio'"
+        "'stackspirit' '--json' 'orchestrator' 'move' 'vowp-local' '--node' 'mac-studio'"
     );
     assert_eq!(
         remote_argv(&calls[1]),
-        "'vowp' '--json' 'orchestrator' 'move' 'vowp-local' '--home'"
+        "'stackspirit' '--json' 'orchestrator' 'move' 'vowp-local' '--home'"
     );
     assert!(!remote_argv(&calls[0]).contains("--project"));
 }

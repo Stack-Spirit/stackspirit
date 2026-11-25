@@ -18,7 +18,7 @@ export const HOSTS_DESKTOP_ONLY =
   "Host profiles and SSH keys live in the desktop app. This Web build talks to one daemon and cannot add, connect, or switch hosts.";
 
 export const ENGINE_DESKTOP_ONLY =
-  "The StackSpirit Engine runs beside the desktop app. This Web build cannot start the engine, manage provider keys, or switch models.";
+  "StackSpirit runs beside the desktop app. This Web build cannot start the engine, manage provider keys, or switch models.";
 
 export const GATES_DESKTOP_ONLY =
   "Capability gates are probed over SSH from the desktop app. This Web build cannot probe them.";

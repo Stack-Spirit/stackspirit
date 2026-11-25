@@ -264,7 +264,7 @@ function closedError(reason: ChatCloseReason): SpiritErrorDto {
     case "engine_stopped":
       return {
         code: "engine",
-        message: "engine_not_ready: The StackSpirit Engine stopped.",
+        message: "engine_not_ready: StackSpirit stopped.",
         hint: "Restart it in Settings → Engine, then reconnect.",
         retryable: true,
       };

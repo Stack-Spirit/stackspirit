@@ -33,6 +33,7 @@ type Dialog =
 const VOWP_HINTS: Record<string, string> = {
   "vowp.db": "live database",
   "vowp.toml": "config",
+  "stackspirit.toml": "config",
   logs: "supervisor logs",
   backups: "backups",
   worktrees: "worker checkouts",
@@ -60,7 +61,7 @@ function looksProtected(path: string): boolean {
   const parts = path.split("/").filter((part) => part && part !== "~");
   return parts.some(
     (part, index) =>
-      part.startsWith("vowp.db") || part === "vowp.toml" || part === ".ssh" || (part === "worktrees" && index + 1 < parts.length),
+      part.startsWith("vowp.db") || part === "vowp.toml" || part === "stackspirit.toml" || part === ".ssh" || (part === "worktrees" && index + 1 < parts.length),
   );
 }
 

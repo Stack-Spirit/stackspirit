@@ -223,6 +223,18 @@ impl VowpEndpointResolver {
         if let Some(agent_home) = std::env::var_os("VOWP_AGENT_HOME") {
             tokio::process::Command::env(&mut command, "VOWP_AGENT_HOME", agent_home);
         }
+        if let Some(engine_home) = crate::ssh::command::engine_home_from_process_env() {
+            tokio::process::Command::env(
+                &mut command,
+                crate::ssh::command::ENGINE_HOME_ENV,
+                &engine_home,
+            );
+            tokio::process::Command::env(
+                &mut command,
+                crate::ssh::command::LEGACY_ENGINE_HOME_ENV,
+                &engine_home,
+            );
+        }
         let child = command
             .spawn()
             .map_err(|_| not_configured(name, "the installed VOWP agent command is unavailable"))?;

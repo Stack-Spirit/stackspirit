@@ -143,7 +143,7 @@ export function PromoteBackupDialog({
           ) : null}
           <p className="nx-cluster__note">
             StackSpirit never backs up secrets. Re-enter server secret values with{" "}
-            <code>vowp secret set</code> on the restored Home.
+            <code>stackspirit secret set</code> on the restored Home.
           </p>
         </div>
       </Modal>

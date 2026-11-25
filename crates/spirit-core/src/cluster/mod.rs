@@ -880,7 +880,7 @@ impl ClusterService {
         .await?;
 
         let restore_argv = vec![
-            "vowp".to_owned(),
+            crate::ssh::command::ENGINE_BINARY.to_owned(),
             "backup".to_owned(),
             "--restore".to_owned(),
             request.backup_dir.clone(),
@@ -934,7 +934,10 @@ impl ClusterService {
     }
 
     async fn preflight(&self, remote: &SshRemote, label: &str) -> Result<(), SpiritError> {
-        let argv = vec!["vowp".to_owned(), "--version".to_owned()];
+        let argv = vec![
+            crate::ssh::command::ENGINE_BINARY.to_owned(),
+            "--version".to_owned(),
+        ];
         let output = remote.run_with_timeout(&argv, PREFLIGHT_TIMEOUT).await?;
         check_cluster_output(output, &format!("{label} VOWP preflight"))?;
         Ok(())
@@ -1025,13 +1028,13 @@ struct OffloadNodeRow {
 }
 
 fn plain_vowp_argv(rest: &[&str]) -> Vec<String> {
-    let mut argv = vec!["vowp".to_owned()];
+    let mut argv = vec![crate::ssh::command::ENGINE_BINARY.to_owned()];
     argv.extend(rest.iter().map(|value| (*value).to_owned()));
     argv
 }
 
 fn vowp_argv(home: &HostProfile, rest: &[&str]) -> Vec<String> {
-    let mut argv = vec!["vowp".to_owned()];
+    let mut argv = vec![crate::ssh::command::ENGINE_BINARY.to_owned()];
     if let Some(path) = &home.vowp_home {
         argv.push("--home".to_owned());
         argv.push(path.clone());
@@ -1041,7 +1044,11 @@ fn vowp_argv(home: &HostProfile, rest: &[&str]) -> Vec<String> {
 }
 
 fn vowp_home_argv(home_dir: &str, rest: &[&str]) -> Vec<String> {
-    let mut argv = vec!["vowp".to_owned(), "--home".to_owned(), home_dir.to_owned()];
+    let mut argv = vec![
+        crate::ssh::command::ENGINE_BINARY.to_owned(),
+        "--home".to_owned(),
+        home_dir.to_owned(),
+    ];
     argv.extend(rest.iter().map(|value| (*value).to_owned()));
     argv
 }
@@ -1052,7 +1059,7 @@ fn node_enroll_argv(home: &HostProfile, node_name: &str) -> Vec<String> {
 
 fn agent_enroll_argv(home: &HostProfile) -> Vec<String> {
     vec![
-        "vowp".to_owned(),
+        crate::ssh::command::ENGINE_BINARY.to_owned(),
         "--json".to_owned(),
         "agent".to_owned(),
         "enroll".to_owned(),
@@ -1065,7 +1072,7 @@ fn agent_enroll_argv(home: &HostProfile) -> Vec<String> {
 
 fn agent_paths_add_argv(mapping: &ClusterWorkerProject) -> Vec<String> {
     let mut argv = vec![
-        "vowp".to_owned(),
+        crate::ssh::command::ENGINE_BINARY.to_owned(),
         "--json".to_owned(),
         "agent".to_owned(),
         "paths".to_owned(),
@@ -1093,7 +1100,7 @@ fn schedule_backup_argv(
     backup_target: &str,
 ) -> Result<Vec<String>, SpiritError> {
     let spec = policy.schedule_spec()?;
-    let mut argv = vec!["vowp".to_owned()];
+    let mut argv = vec![crate::ssh::command::ENGINE_BINARY.to_owned()];
     if let Some(path) = &home.vowp_home {
         argv.push("--home".to_owned());
         argv.push(path.clone());
@@ -1109,7 +1116,7 @@ fn schedule_backup_argv(
         "--name".to_owned(),
         CLUSTER_BACKUP_SCHEDULE.to_owned(),
         "--".to_owned(),
-        "vowp".to_owned(),
+        crate::ssh::command::engine_binary_for(&home.ssh.destination()).to_owned(),
     ]);
     if let Some(path) = &home.vowp_home {
         argv.push("--home".to_owned());

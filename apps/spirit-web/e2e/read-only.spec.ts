@@ -84,7 +84,7 @@ test("desktop-only routes show the exact copy without a bridge read", async ({ p
   expect(apiRequests).toEqual([]);
   await page.goto("/engine");
   await expect(page.getByTestId("desktop-only-engine")).toContainText(
-    "The StackSpirit Engine runs beside the desktop app.",
+    "StackSpirit runs beside the desktop app.",
   );
   await page.goto("/gates");
   await expect(page.getByTestId("desktop-only-gates")).toContainText(

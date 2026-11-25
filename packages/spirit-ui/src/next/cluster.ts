@@ -185,7 +185,7 @@ export function validateClusterDraft(
       "Enter the project's absolute checkout path on Home, for example /srv/code/project.";
   }
   if (draft.backupTarget.trim().length === 0) {
-    errors.backupTarget = "Enter the destination for `vowp backup --to`.";
+    errors.backupTarget = "Enter the destination for `stackspirit backup --to`.";
   } else if (draft.backupTarget.trim().length > 4096) {
     errors.backupTarget = "The backup destination is too long.";
   } else if (draft.backupTarget.trim().startsWith("-")) {

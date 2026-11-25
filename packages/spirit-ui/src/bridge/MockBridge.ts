@@ -220,7 +220,7 @@ function mockSecretLike(name: string): boolean {
 }
 
 function mockProtectedName(name: string): boolean {
-  return name.startsWith("vowp.db") || name === "vowp.toml" || name === ".ssh";
+  return name.startsWith("vowp.db") || name === "vowp.toml" || name === "stackspirit.toml" || name === ".ssh";
 }
 
 function mockProtectedPath(path: string): boolean {

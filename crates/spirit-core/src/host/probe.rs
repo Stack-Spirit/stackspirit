@@ -101,22 +101,8 @@ pub async fn probe_host(
     let version_argv = version_argv(input.vowp_home.as_deref());
     let started = std::time::Instant::now();
     let destination = input.target.destination();
-    let mut first = remote.run(&version_argv).await;
-    // A host that has only the renamed `stackspirit` binary answers 127 to `vowp`. Retry
-    // once with `stackspirit` and remember it for later commands to that host.
-    if matches!(&first, Ok(output) if output.status == 127) {
-        let mut alt = version_argv.clone();
-        alt[0] = crate::ssh::command::ENGINE_BINARY.to_owned();
-        if let Ok(output) = remote.run(&alt).await {
-            if output.success() {
-                crate::ssh::command::set_engine_binary_for(
-                    &destination,
-                    crate::ssh::command::ENGINE_BINARY,
-                );
-                first = Ok(output);
-            }
-        }
-    }
+    // `run` prefers `stackspirit` and falls back to `vowp` on a missing binary (exit 127).
+    let first = remote.run(&version_argv).await;
     match first {
         Ok(output) => {
             latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -227,7 +213,7 @@ fn pin_error(algorithm: &str) -> String {
 }
 
 fn version_argv(home: Option<&str>) -> Vec<String> {
-    let mut argv = vec!["vowp".to_owned()];
+    let mut argv = vec![crate::ssh::command::ENGINE_BINARY.to_owned()];
     if let Some(home) = home {
         argv.push("--home".to_owned());
         argv.push(home.to_owned());

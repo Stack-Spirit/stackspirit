@@ -492,7 +492,7 @@ describe("Composer → Engine & Models", () => {
   it("says the engine is stopped instead of inventing providers", async () => {
     const { dialog } = await openProviderPanel("stopped");
     const card = within(dialog).getByTestId("engine-models-settings");
-    expect(within(card).getByText(/engine is stopped/i)).toBeInTheDocument();
+    expect(within(card).getByText(/StackSpirit is not running/i)).toBeInTheDocument();
     expect(
       within(card).getByRole("searchbox", { name: "Search providers" }),
     ).toBeDisabled();

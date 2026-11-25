@@ -122,11 +122,13 @@ async fn folder_and_git_add_use_the_exact_argv() {
     let calls = runner.calls();
     assert_eq!(
         remote_argv(&calls[0]),
-        format!("'vowp' '--json' 'project' 'add' '{HOME_PATH}' '--name' 'demo-app' '--init'")
+        format!(
+            "'stackspirit' '--json' 'project' 'add' '{HOME_PATH}' '--name' 'demo-app' '--init'"
+        )
     );
     assert_eq!(
         remote_argv(&calls[1]),
-        "'vowp' '--json' 'project' 'add' '--git' 'https://example.com/org/demo-app.git' '--name' 'demo-app' '--init' '--orchestrator' 'chat'"
+        "'stackspirit' '--json' 'project' 'add' '--git' 'https://example.com/org/demo-app.git' '--name' 'demo-app' '--init' '--orchestrator' 'chat'"
     );
 }
 

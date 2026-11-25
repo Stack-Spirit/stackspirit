@@ -426,7 +426,7 @@ pub struct GateProbeOptions {
 }
 
 fn base_argv(options: &GateProbeOptions, json: bool) -> Vec<String> {
-    let mut argv = vec!["vowp".to_owned()];
+    let mut argv = vec![crate::ssh::command::ENGINE_BINARY.to_owned()];
     if let Some(home) = &options.home {
         argv.extend(["--home".to_owned(), home.clone()]);
     }
@@ -598,8 +598,11 @@ async fn probe_local_agent_commands(
         ),
     ];
     for (label, args, required, missing_label) in checks {
-        let spec = CommandSpec::new("vowp", args.iter().map(|arg| (*arg).to_owned()).collect())
-            .with_timeout(Duration::from_secs(10));
+        let spec = CommandSpec::new(
+            crate::ssh::command::local_engine_binary(),
+            args.iter().map(|arg| (*arg).to_owned()).collect(),
+        )
+        .with_timeout(Duration::from_secs(10));
         match runner.run(&spec).await {
             Ok(output) if output.success() => {
                 let text = output.stdout_text();
@@ -643,8 +646,11 @@ async fn probe_local_agent_commands(
         ),
     ];
     for (label, args, required) in optional_checks {
-        let spec = CommandSpec::new("vowp", args.iter().map(|arg| (*arg).to_owned()).collect())
-            .with_timeout(Duration::from_secs(10));
+        let spec = CommandSpec::new(
+            crate::ssh::command::local_engine_binary(),
+            args.iter().map(|arg| (*arg).to_owned()).collect(),
+        )
+        .with_timeout(Duration::from_secs(10));
         match runner.run(&spec).await {
             Ok(output) if output.success() => {
                 if required
@@ -1323,7 +1329,8 @@ async fn probe_local_agent(local_runner: Option<&dyn CommandRunner>) -> (LocalAg
     };
     let argv = vec!["--json".to_owned(), "agent".to_owned(), "status".to_owned()];
     let spec =
-        crate::ssh::command::CommandSpec::new("vowp", argv).with_timeout(Duration::from_secs(10));
+        crate::ssh::command::CommandSpec::new(crate::ssh::command::local_engine_binary(), argv)
+            .with_timeout(Duration::from_secs(10));
     match runner.run(&spec).await {
         Ok(output) if output.status == 3 => (
             LocalAgentStatus {

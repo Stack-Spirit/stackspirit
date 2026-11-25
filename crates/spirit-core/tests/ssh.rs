@@ -171,7 +171,11 @@ async fn ssh_read_command_uses_the_expected_vowp_json_forms() {
     assert!(commands[1].contains("'--json' 'capacity' 'report'"));
     assert!(commands[2].contains("'--json' 'fleet' 'queue'"));
     assert!(commands[3].contains("'--json' 'fleet' 'inbox' '--all'"));
-    assert!(commands.iter().all(|command| command.starts_with("'vowp'")));
+    assert!(
+        commands
+            .iter()
+            .all(|command| command.starts_with("'stackspirit'"))
+    );
 }
 
 #[tokio::test]
