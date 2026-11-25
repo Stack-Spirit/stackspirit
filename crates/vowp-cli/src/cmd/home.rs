@@ -163,6 +163,17 @@ fn link_state(
                     other => CliError::NotFound(other.to_string()),
                 }
             })?;
+        // An explicit path is authoritative: a missing `STACKSPIRIT_*`/`VOWP_*` path or `--home` is an
+        // error, never a silent "nothing to link".
+        resolved
+            .require_existing()
+            .map_err(|error| CliError::NotFound(error.to_string()))?;
+        if matches!(resolved.source, vowp_store::StateSource::Flag) && !resolved.path.exists() {
+            return Err(CliError::NotFound(format!(
+                "--home {} does not exist",
+                resolved.path.display()
+            )));
+        }
         let base = match &resolved.source {
             vowp_store::StateSource::Flag | vowp_store::StateSource::Env(_) => {
                 let path = &resolved.path;

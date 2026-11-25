@@ -743,3 +743,37 @@ fn daemon_reports_a_home_conflict_with_both_paths_and_the_hint() {
         "{err}"
     );
 }
+
+#[test]
+fn link_with_a_missing_explicit_home_is_an_error_and_writes_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".vowp"));
+    let before = snapshot(dir.path());
+    let missing = dir.path().join("gone/.stackspirit");
+    for env in [
+        ("STACKSPIRIT_HOME", missing.to_str().expect("utf8")),
+        ("VOWP_HOME", missing.to_str().expect("utf8")),
+    ] {
+        let output = run(dir.path(), &[env], &["home", "migrate", "--link", "--dry-run"]);
+        assert!(!output.status.success(), "{env:?} must fail");
+        assert!(
+            text(&output.stderr).contains("does not exist"),
+            "{}",
+            text(&output.stderr)
+        );
+    }
+    let flagged = run(
+        dir.path(),
+        &[],
+        &[
+            "--home",
+            missing.to_str().expect("utf8"),
+            "home",
+            "migrate",
+            "--link",
+            "--yes",
+        ],
+    );
+    assert!(!flagged.status.success());
+    assert_eq!(snapshot(dir.path()), before);
+}
