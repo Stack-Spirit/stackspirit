@@ -454,8 +454,42 @@ async fn run_remote(
     options: &GateProbeOptions,
     argv: &[String],
 ) -> Result<CommandOutput, SpiritError> {
-    let spec = ssh_command(&options.target, &options.ssh, argv, Duration::from_secs(20))?;
-    runner.run(&spec).await
+    use crate::ssh::command::{
+        ENGINE_BINARY, LEGACY_ENGINE_BINARY, engine_binary_for, set_engine_binary_for,
+    };
+    let destination = options.target.destination();
+    let mut resolved = argv.to_vec();
+    let is_engine = matches!(
+        resolved.first().map(String::as_str),
+        Some(ENGINE_BINARY | LEGACY_ENGINE_BINARY)
+    );
+    if is_engine {
+        resolved[0] = engine_binary_for(&destination).to_owned();
+    }
+    let spec = ssh_command(
+        &options.target,
+        &options.ssh,
+        &resolved,
+        Duration::from_secs(20),
+    )?;
+    let first = runner.run(&spec).await;
+    if is_engine && resolved[0] == ENGINE_BINARY && matches!(&first, Ok(o) if o.status == 127) {
+        let mut legacy = resolved;
+        legacy[0] = LEGACY_ENGINE_BINARY.to_owned();
+        let spec = ssh_command(
+            &options.target,
+            &options.ssh,
+            &legacy,
+            Duration::from_secs(20),
+        )?;
+        if let Ok(output) = runner.run(&spec).await {
+            if output.status != 127 {
+                set_engine_binary_for(&destination, LEGACY_ENGINE_BINARY);
+                return Ok(output);
+            }
+        }
+    }
+    first
 }
 
 fn version_from_output(output: &CommandOutput) -> Option<String> {
