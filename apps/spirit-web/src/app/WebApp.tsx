@@ -376,6 +376,57 @@ export function WebApp({ bridge }: { bridge: SpiritBridge }) {
         status={fleet.status}
       />
 
+
+      <nav className="web-tabbar" aria-label="Mobile tabs" data-testid="web-tabbar">
+        <button
+          type="button"
+          className="web-tabbar__item"
+          data-testid="tab-fleet"
+          aria-current={path === "fleet" ? "page" : undefined}
+          onClick={() => {
+            if (path !== "fleet") navigate("fleet");
+            document.getElementById("main-canvas")?.scrollTo?.({ top: 0 });
+            document.querySelector(".canvas__scroll")?.scrollTo?.({ top: 0 });
+          }}
+        >
+          <span aria-hidden="true">◈</span>
+          Fleet
+        </button>
+        <button
+          type="button"
+          className="web-tabbar__item"
+          data-testid="tab-workers"
+          onClick={() => {
+            if (path !== "fleet") navigate("fleet");
+            window.setTimeout(
+              () => document.querySelector('[data-testid="running-workers"]')?.scrollIntoView?.({ block: "start" }),
+              0,
+            );
+          }}
+        >
+          <span aria-hidden="true">⚙</span>
+          Workers
+        </button>
+        <button
+          type="button"
+          className="web-tabbar__item"
+          data-testid="tab-inbox"
+          onClick={() => setInboxOpen(true)}
+        >
+          <span aria-hidden="true">◔</span>
+          Inbox{inboxCount > 0 ? ` (${inboxCount})` : ""}
+        </button>
+        <button
+          type="button"
+          className="web-tabbar__item"
+          data-testid="tab-capacity"
+          onClick={() => setCapacityOpen(true)}
+        >
+          <span aria-hidden="true">▥</span>
+          Capacity
+        </button>
+      </nav>
+
       <WebInboxDrawer
         open={inboxOpen}
         onClose={() => setInboxOpen(false)}

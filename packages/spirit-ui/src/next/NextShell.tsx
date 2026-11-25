@@ -22,6 +22,7 @@ import { ServerPage } from "./ServerPage";
 import { SettingsView } from "./SettingsView";
 import { useShellUi, type NextView } from "./shellUi";
 import { Sidebar } from "./Sidebar";
+import { SpiritMark } from "./SpiritMark";
 import { useNextTheme } from "./themePreference";
 import { useResizable } from "./useResizable";
 import { ConnectPrompt, Welcome } from "./Welcome";
@@ -66,6 +67,9 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const side = useResizable({ storageKey: "stackspirit.sidebarWidth", initial: 272, min: 220, max: 420, grows: "right" });
   const drawer = useResizable({ storageKey: "stackspirit.panelWidth", initial: 400, min: 320, max: 640, grows: "left" });
   const [addingProject, setAddingProject] = useState(false);
+  // Phones: the sidebar is an off-canvas drawer opened from the mobile bar (CSS hides the
+  // bar and keeps the sidebar docked on wider viewports).
+  const [navOpen, setNavOpen] = useState(false);
   // The connected local node, resolved when the dialog opens; null without a connected agent.
   const [localNode, setLocalNode] = useState<string | null>(null);
   const [projectNotice, setProjectNotice] = useState<string | null>(null);
@@ -98,6 +102,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const navigate = (next: NextView) => {
     if (next.kind === "settings") setSettingsEngine(false);
     setView(next);
+    setNavOpen(false);
   };
 
   useEffect(() => {
@@ -160,10 +165,18 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
     );
   }
 
-  const openSession = (project: string | null) =>
+  const openSession = (project: string | null) => {
     setView({ kind: "session", session: project ? `project:${project}` : "global" });
-  const openWorkers = (project: string) => setView({ kind: "workers", project });
-  const openServer = () => setView({ kind: "server" });
+    setNavOpen(false);
+  };
+  const openWorkers = (project: string) => {
+    setView({ kind: "workers", project });
+    setNavOpen(false);
+  };
+  const openServer = () => {
+    setView({ kind: "server" });
+    setNavOpen(false);
+  };
 
   const serverLabel = connected && activeHost ? activeHost.label : null;
   // The setup chat can show a saved server without connecting. It is read-only and
@@ -259,10 +272,42 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
 
   return (
     <div
-      className={`nx${side.dragging || drawer.dragging ? " nx--resizing" : ""}`}
+      className={`nx${side.dragging || drawer.dragging ? " nx--resizing" : ""}${navOpen ? " nx--nav-open" : ""}`}
       data-testid="next-shell"
       style={{ "--nx-side-w": `${side.width}px`, "--nx-panel-w": `${drawer.width}px` } as CSSProperties}
     >
+      <div className="nx-mobilebar" data-testid="mobile-bar">
+        <button
+          type="button"
+          className="nx-mobilebar__menu"
+          aria-label={navOpen ? "Close navigation" : "Open navigation"}
+          aria-expanded={navOpen}
+          data-testid="mobile-nav-toggle"
+          onClick={() => setNavOpen((open) => !open)}
+        >
+          <span aria-hidden="true">☰</span>
+        </button>
+        <SpiritMark size={22} />
+        <span className="nx-mobilebar__name">StackSpirit</span>
+        {connected ? (
+          <button
+            type="button"
+            className="nx-mobilebar__inbox"
+            data-testid="mobile-inbox"
+            onClick={() => navigate({ kind: "inbox" })}
+          >
+            Inbox
+          </button>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        className="nx-scrim"
+        aria-label="Close navigation"
+        tabIndex={navOpen ? 0 : -1}
+        data-testid="mobile-nav-scrim"
+        onClick={() => setNavOpen(false)}
+      />
       <Sidebar
         view={view}
         onNavigate={navigate}

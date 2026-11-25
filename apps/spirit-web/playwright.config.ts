@@ -19,7 +19,7 @@ export default defineConfig({
     {
       name: "web-read-only",
       use: { ...devices["Desktop Chrome"], baseURL: "http://127.0.0.1:4173" },
-      testMatch: ["read-only.spec.ts", "accessibility.spec.ts"],
+      testMatch: ["read-only.spec.ts", "accessibility.spec.ts", "mobile-pwa.spec.ts"],
     },
     {
       name: "web-stale",

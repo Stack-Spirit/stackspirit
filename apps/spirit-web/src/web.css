@@ -927,3 +927,88 @@
     animation: none;
   }
 }
+
+/* ======================================================================
+   Mobile-first PWA layer: bottom tab bar, safe areas, 44px touch targets
+   ====================================================================== */
+
+.web-tabbar {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  html,
+  body {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  .web-shell.app-shell {
+    height: 100dvh;
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .web-tabbar {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    flex: none;
+    border-top: 1px solid var(--nx-line);
+    background: var(--nx-panel);
+    padding-bottom: env(safe-area-inset-bottom);
+    z-index: 20;
+  }
+
+  .web-tabbar__item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    min-height: 56px;
+    min-width: 44px;
+    padding: 6px 4px;
+    border: 0;
+    background: transparent;
+    color: var(--nx-muted);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .web-tabbar__item[aria-current="page"] {
+    color: var(--nx-accent);
+    font-weight: 600;
+  }
+
+  /* The topbar actions that the tab bar replaces stay reachable but compact. */
+  .web-topbar [data-testid="web-inbox-button"],
+  .web-topbar [data-testid="web-capacity-button"] {
+    display: none;
+  }
+
+  .web-topbar .btn,
+  .web-shell .btn {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .web-shell .view-nav__item,
+  .web-shell .drawer__close {
+    min-height: 44px;
+  }
+
+  .web-shell pre,
+  .web-shell .mono {
+    overflow-wrap: anywhere;
+  }
+
+  .web-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .canvas__inner,
+  .view-stack {
+    min-width: 0;
+    max-width: 100%;
+  }
+}

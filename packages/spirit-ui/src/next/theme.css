@@ -4291,13 +4291,136 @@ button.nx-node:hover {
   }
 }
 
+/* Desktop: the mobile bar and scrim do not exist. */
+.nx-mobilebar,
+.nx-scrim {
+  display: none;
+}
+
 @media (max-width: 720px) {
   .nx {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100dvh;
+    max-width: 100vw;
+    overflow-x: hidden;
   }
 
+  .nx-mobilebar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 52px;
+    padding: env(safe-area-inset-top) 8px 0 4px;
+    border-bottom: 1px solid var(--nx-line);
+    background: var(--nx-sidebar);
+  }
+
+  .nx-mobilebar__menu,
+  .nx-mobilebar__inbox {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+    border: 0;
+    border-radius: var(--nx-radius);
+    background: transparent;
+    color: var(--nx-text);
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .nx-mobilebar__menu {
+    font-size: 20px;
+  }
+
+  .nx-mobilebar__name {
+    flex: 1;
+    min-width: 0;
+    font-weight: 600;
+  }
+
+  .nx-mobilebar__inbox {
+    padding: 0 12px;
+    color: var(--nx-accent);
+    font-weight: 600;
+  }
+
+  /* The sidebar becomes an off-canvas drawer. */
   .nx-side {
-    display: none;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 40;
+    width: min(86vw, 320px);
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    transform: translateX(-102%);
+    visibility: hidden;
+    transition: transform 160ms ease, visibility 160ms;
+    box-shadow: var(--nx-shadow);
+  }
+
+  .nx--nav-open .nx-side {
+    transform: none;
+    visibility: visible;
+  }
+
+  .nx-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    border: 0;
+    background: rgb(0 0 0 / 40%);
+  }
+
+  .nx--nav-open .nx-scrim {
+    display: block;
+  }
+
+  .nx-stage {
+    min-width: 0;
+    max-width: 100vw;
+  }
+
+  .nx-chat-head {
+    padding-left: 12px;
+  }
+
+  /* Touch targets and the sticky composer. */
+  .nx-btn,
+  .nx-side button,
+  .nx-chat-head button,
+  .nx-composer__controls button,
+  .nx-page button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .nx-composer textarea {
+    font-size: 16px; /* stops iOS zooming on focus */
+  }
+
+  .nx-composer-shell {
+    position: sticky;
+    bottom: 0;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--nx-page);
+  }
+
+  .nx-page,
+  .nx-page__inner,
+  .nx-column {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .nx-page pre,
+  .nx-chat pre {
+    overflow-x: auto;
   }
 
   .nx-drawer--open,

@@ -16,10 +16,12 @@ import { SetupPanel } from "./app/SetupPanel";
 import { pathFor, WebApp } from "./app/WebApp";
 import { SpiritMark } from "./shared/next";
 import "./web.css";
+import { registerServiceWorker } from "./registerServiceWorker";
 
 const container = document.getElementById("root");
 if (!container) throw new Error("missing #root");
 
+registerServiceWorker();
 const root = createRoot(container);
 
 function BootError({ error }: { error: SpiritErrorDto }) {
