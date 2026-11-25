@@ -1321,6 +1321,84 @@ fn setup_home_registers_a_path_with_spaces_and_shell_metacharacters() {
 }
 
 #[test]
+fn setup_home_registers_a_repository_with_only_stackspirit_toml() {
+    let machine = Machine::new();
+    machine.write_ssh();
+    machine.write_tools("password");
+    machine.write_remote_vowp();
+    let repo = machine.remote.path().join("projects/newname");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .arg(&repo)
+            .status()
+            .expect("git init")
+            .success()
+    );
+    let mut config = vowp_protocol::VowpConfig::with_defaults_for_tests();
+    config.project.name = vowp_protocol::ProjectName::parse("newname").expect("project name");
+    config.project.path = Some(repo.display().to_string());
+    config.project.push = false;
+    std::fs::write(
+        repo.join("stackspirit.toml"),
+        toml::to_string_pretty(&config).expect("config toml"),
+    )
+    .expect("stackspirit.toml");
+    let repo_arg = repo.to_str().expect("repo path");
+
+    let plan = machine.run_with_sudo(
+        "password",
+        &[
+            "--json",
+            "setup",
+            "plan",
+            "--target",
+            "fake.example",
+            "--repository",
+            repo_arg,
+        ],
+    );
+    assert!(plan.status.success(), "{}", String::from_utf8_lossy(&plan.stderr));
+    assert!(
+        serde_json::to_string(&json(&plan))
+            .expect("plan json")
+            .contains(&format!("{repo_arg}/stackspirit.toml")),
+        "the plan must look for stackspirit.toml"
+    );
+
+    let output = machine.run_with_sudo(
+        "password",
+        &[
+            "--json",
+            "setup",
+            "home",
+            "--target",
+            "fake.example",
+            "--repository",
+            repo_arg,
+            "--apply",
+            "--yes",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(json(&output)["status"], "ok");
+    assert!(
+        machine
+            .remote
+            .path()
+            .join(".vowp/projects/newname/project.db")
+            .is_file(),
+        "the stackspirit.toml repository must be registered"
+    );
+}
+
+#[test]
 fn setup_home_stops_when_a_repository_has_no_vowp_toml() {
     let machine = Machine::new();
     machine.write_ssh();
