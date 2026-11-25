@@ -100,6 +100,10 @@ name = "graph"
 path = "crates/vowp-cli/tests/graph.rs"
 
 [[test]]
+name = "home"
+path = "crates/vowp-cli/tests/home.rs"
+
+[[test]]
 name = "inbox"
 path = "crates/vowp-cli/tests/inbox.rs"
 

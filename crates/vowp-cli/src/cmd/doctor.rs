@@ -79,10 +79,23 @@ impl Checks {
 
 /// Runs `vowp doctor`.
 pub fn run(global: &Global, io: &mut dyn IoStreams, _args: &DoctorArgs) -> Result<i32, CliError> {
-    let paths = ctx::node_paths(global)?;
+    let mut checks = Checks::default();
+    let resolved = match ctx::resolve_state(vowp_store::StateKind::Home, global.home.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(CliError::Conflict(detail)) => {
+            // A conflict is reported, not raised: doctor is the tool the owner runs to see it.
+            checks.push("home", CheckStatus::Fail, detail);
+            check_state_dirs(&mut checks);
+            return print_report(global, io, checks);
+        }
+        Err(error) => return Err(error),
+    };
+    let paths = vowp_store::NodePaths::new(&resolved.path);
     let root = paths.root();
     let runner: Arc<dyn CommandRunner> = Arc::new(SystemRunner);
-    let mut checks = Checks::default();
+
+    check_home_selection(&resolved, &mut checks);
+    check_state_dirs(&mut checks);
 
     check_home(root, &mut checks);
     check_db(&paths, &mut checks);
@@ -133,6 +146,11 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, _args: &DoctorArgs) -> Resul
     check_supervisor(&paths, &mut checks);
     check_disk(runner.as_ref(), root, &mut checks);
 
+    print_report(global, io, checks)
+}
+
+/// Prints the checks and returns the exit code (1 when any check failed).
+fn print_report(global: &Global, io: &mut dyn IoStreams, checks: Checks) -> Result<i32, CliError> {
     let ok = checks.healthy();
     if global.json {
         let report = DoctorReport {
@@ -153,6 +171,85 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, _args: &DoctorArgs) -> Resul
         writeln!(io.out(), "{}", if ok { "doctor: ok" } else { "doctor: failures found" })?;
     }
     Ok(if ok { 0 } else { 1 })
+}
+
+/// Opens a node home read-only and runs the integrity and schema checks.
+///
+/// Used by `home migrate --move` to verify a copy; never writes.
+pub(crate) fn verify_home_read_only(paths: &vowp_store::NodePaths) -> Result<(), String> {
+    let store = Store::open_read_only(paths, None).map_err(|error| error.to_string())?;
+    store.integrity_check().map_err(|error| error.to_string())?;
+    store.global_schema_version().map_err(|error| error.to_string())?;
+    let mut checks = Checks::default();
+    check_schema(paths, &mut checks);
+    match checks.items.iter().find(|check| check.status == CheckStatus::Fail) {
+        Some(check) => Err(check.detail.clone()),
+        None => Ok(()),
+    }
+}
+
+/// Reports which home was selected, why, and the node config file.
+///
+/// A legacy name is a warning with the migration hint, never a failure.
+fn check_home_selection(resolved: &vowp_store::ResolvedState, checks: &mut Checks) {
+    use vowp_store::StateSource;
+    let source = match &resolved.source {
+        StateSource::Flag => "--home".to_owned(),
+        StateSource::Env(name) => format!("${name}"),
+        StateSource::Existing => "~/.stackspirit".to_owned(),
+        StateSource::ExistingLegacy => "~/.vowp".to_owned(),
+        StateSource::Fresh => "default for a fresh machine".to_owned(),
+    };
+    let config = resolved.path.join("config.toml");
+    let config_text = if config.is_file() {
+        format!("config {}", config.display())
+    } else {
+        "no config.toml".to_owned()
+    };
+    let detail = format!("selected {} ({source}); {config_text}", resolved.path.display());
+    if resolved.legacy {
+        checks.push(
+            "home-path",
+            CheckStatus::Warn,
+            format!("{detail}; legacy name in use, see `stackspirit home migrate --link --dry-run`"),
+        );
+    } else {
+        checks.push("home-path", CheckStatus::Ok, detail);
+    }
+    if let Some(warning) = &resolved.warning {
+        checks.push("home-env", CheckStatus::Warn, warning.clone());
+    }
+}
+
+/// Reports the agent and control state directories when this machine has them.
+fn check_state_dirs(checks: &mut Checks) {
+    for (kind, name, file) in [
+        (vowp_store::StateKind::Agent, "agent-state", "agent.json"),
+        (vowp_store::StateKind::Control, "control-state", "control.json"),
+    ] {
+        match vowp_store::resolve_state_from_env(kind, None) {
+            Ok(resolved) => {
+                if !resolved.path.join(file).is_file() {
+                    continue;
+                }
+                let detail = format!(
+                    "selected {}; config {}",
+                    resolved.path.display(),
+                    resolved.path.join(file).display()
+                );
+                if resolved.legacy {
+                    checks.push(
+                        name,
+                        CheckStatus::Warn,
+                        format!("{detail}; legacy name in use, see `stackspirit home migrate --link --dry-run`"),
+                    );
+                } else {
+                    checks.push(name, CheckStatus::Ok, detail);
+                }
+            }
+            Err(error) => checks.push(name, CheckStatus::Warn, error.to_string()),
+        }
+    }
 }
 
 /// Checks that the node home exists and accepts a write.

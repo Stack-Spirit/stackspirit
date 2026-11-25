@@ -377,6 +377,7 @@ fn start_wss_gateway(
 ) -> Option<WssGateway> {
     let binary = gateway_binary();
     let mut command = Command::new(&binary);
+    crate::ctx::export_home_env(&mut command, paths.root());
     command
         .arg("--home")
         .arg(paths.root())
@@ -435,6 +436,7 @@ fn start_web_window(paths: &NodePaths, project: &ProjectName, io: &mut dyn IoStr
     let _ = std::fs::remove_file(&address_file);
 
     let mut command = Command::new(&binary);
+    crate::ctx::export_home_env(&mut command, paths.root());
     command
         .arg("--home")
         .arg(paths.root())
@@ -1269,6 +1271,7 @@ fn run_detached(
     let mut detached = Command::new("setsid");
     detached.arg(&exe);
     configure(&mut detached);
+    crate::ctx::export_home_env(&mut detached, paths.root());
     detached
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
@@ -1278,6 +1281,7 @@ fn run_detached(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut direct = Command::new(&exe);
             configure(&mut direct);
+            crate::ctx::export_home_env(&mut direct, paths.root());
             direct
                 .stdin(Stdio::null())
                 .stdout(log.try_clone()?)

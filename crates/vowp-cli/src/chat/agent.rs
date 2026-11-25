@@ -133,7 +133,7 @@ fn run_bridge(io: &mut dyn IoStreams, opts: &ChatOptions, local: &LocalProject) 
         ));
     }
     let session = opts.session.clone();
-    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let state_dir = crate::ctx::agent_state_dir()?;
     let config = AgentConfig::load(&state_dir).map_err(map_agent_error)?;
     if let Some(node) = opts.node.as_ref()
         && node != &config.node

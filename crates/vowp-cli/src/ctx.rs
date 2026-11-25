@@ -52,7 +52,7 @@ impl Ctx {
     /// Builds the context from the global flags without creating the node home.
     ///
     /// A home keeps the v0.1 behaviour. A control machine gets a context bound to its
-    /// `~/.vowp-control` directory so local commands (`control`, `tunnel`, `node`) work
+    /// control directory (`~/.stackspirit-control` or `~/.vowp-control`) so local commands (`control`, `tunnel`, `node`) work
     /// without a database; every other command is routed to the home by
     /// [`crate::remote::maybe_run`] before this function runs. An uninitialised machine
     /// gets an empty context so `vowp control init` can create the control role.
@@ -216,9 +216,7 @@ impl Ctx {
             NodeRole::Control => Err(CliError::NotFound(
                 "this is a control machine; the home holds the database".to_owned(),
             )),
-            NodeRole::Uninitialised => Err(CliError::NotFound(
-                "vowp home is not initialised; run `vowp setup` or `vowp init`".to_owned(),
-            )),
+            NodeRole::Uninitialised => Err(CliError::NotFound(uninitialised_message())),
         }
     }
 
@@ -234,9 +232,7 @@ impl Ctx {
             NodeRole::Control => Err(CliError::NotFound(
                 "this is a control machine; the home holds the database".to_owned(),
             )),
-            NodeRole::Uninitialised => Err(CliError::NotFound(
-                "vowp home is not initialised; run `vowp setup` or `vowp init`".to_owned(),
-            )),
+            NodeRole::Uninitialised => Err(CliError::NotFound(uninitialised_message())),
         }
     }
 
@@ -256,12 +252,56 @@ impl Ctx {
     }
 }
 
-/// Returns the node home from `--home`, `$STACKSPIRIT_HOME`, `$VOWP_HOME`, or `~/.vowp`.
-pub fn node_paths(global: &Global) -> Result<NodePaths, CliError> {
-    match &global.home {
-        Some(home) => Ok(NodePaths::new(home)),
-        None => Ok(NodePaths::from_env()?),
+/// Resolves one state directory with the shared store resolver, mapping its errors onto
+/// [`CliError`]. Pure: nothing is created, moved or deleted.
+pub fn resolve_state(kind: vowp_store::StateKind, flag: Option<&Path>) -> Result<vowp_store::ResolvedState, CliError> {
+    vowp_store::resolve_state_from_env(kind, flag).map_err(|error| match error {
+        vowp_store::ResolveError::Conflict { .. } => CliError::Conflict(error.to_string()),
+        vowp_store::ResolveError::NoHome(_) => CliError::Invalid(error.to_string()),
+        other => CliError::NotFound(other.to_string()),
+    })
+}
+
+/// Returns the "home is not initialised" message.
+///
+/// An explicit `STACKSPIRIT_HOME` / `VOWP_HOME` is authoritative: when it names a path that does
+/// not exist, the message reports that variable and path instead of suggesting a fallback.
+pub(crate) fn uninitialised_message() -> String {
+    if let Ok(resolved) = vowp_store::resolve_state_from_env(vowp_store::StateKind::Home, None)
+        && let Err(error) = resolved.require_existing()
+    {
+        return error.to_string();
     }
+    "vowp home is not initialised; run `vowp setup` or `vowp init`".to_owned()
+}
+
+/// Returns the node home from `--home`, `$STACKSPIRIT_HOME`, `$VOWP_HOME`, or the real one of
+/// `~/.stackspirit` and `~/.vowp` (fresh machines get `~/.stackspirit`).
+pub fn node_paths(global: &Global) -> Result<NodePaths, CliError> {
+    let resolved = resolve_state(vowp_store::StateKind::Home, global.home.as_deref())?;
+    Ok(NodePaths::new(resolved.path))
+}
+
+/// Returns the agent state directory (`~/.stackspirit-agent` or `~/.vowp-agent`).
+pub fn agent_state_dir() -> Result<PathBuf, CliError> {
+    Ok(resolve_state(vowp_store::StateKind::Agent, None)?.path)
+}
+
+/// Sets both home variable spellings on a child, with the same value.
+pub fn export_home_env(command: &mut std::process::Command, home: &Path) {
+    command.env("STACKSPIRIT_HOME", home).env("VOWP_HOME", home);
+}
+
+/// Sets both control-home variable spellings on a child, with the same value.
+pub fn export_control_env(command: &mut std::process::Command, dir: &Path) {
+    command
+        .env("STACKSPIRIT_CONTROL_HOME", dir)
+        .env("VOWP_CONTROL_HOME", dir);
+}
+
+/// Sets both agent-home variable spellings on a child, with the same value.
+pub fn export_agent_env(command: &mut std::process::Command, dir: &Path) {
+    command.env("STACKSPIRIT_AGENT_HOME", dir).env("VOWP_AGENT_HOME", dir);
 }
 
 /// Returns whether human output may use ANSI colour.
@@ -469,6 +509,11 @@ fn valid_pid(pid: u32) -> bool {
 /// `kill -0` sends no signal: exit 0 means the process exists, and `EPERM` means it exists
 /// but belongs to another user. Invalid ids always count as not alive.
 fn process_alive(pid: u32) -> bool {
+    pid_alive(pid)
+}
+
+/// Returns whether a process with `pid` exists (see [`process_alive`]).
+pub(crate) fn pid_alive(pid: u32) -> bool {
     if !valid_pid(pid) {
         return false;
     }

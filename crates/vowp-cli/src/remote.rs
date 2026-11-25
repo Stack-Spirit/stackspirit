@@ -115,6 +115,7 @@ fn control_action(command: &CliCommand) -> ControlAction {
         | CliCommand::Tunnel(_)
         | CliCommand::Node { .. }
         | CliCommand::Setup(_)
+        | CliCommand::Home(_)
         | CliCommand::Doctor(_)
         | CliCommand::Version
         | CliCommand::Schema(_)
@@ -1014,17 +1015,10 @@ pub(crate) fn cached_snapshot(root: &Path) -> Result<Option<CachedSnapshot>, Cli
     }))
 }
 
-/// Returns the control directory: `$VOWP_CONTROL_HOME`, else `$HOME/.vowp-control`.
+/// Returns the control directory: `STACKSPIRIT_CONTROL_HOME`, `VOWP_CONTROL_HOME`, else the real one
+/// of `~/.stackspirit-control` and `~/.vowp-control` (a fresh machine gets the StackSpirit name).
 pub(crate) fn control_root() -> Result<PathBuf, CliError> {
-    if let Some(root) = std::env::var_os("VOWP_CONTROL_HOME").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(root));
-    }
-    let home = std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            CliError::NotFound("HOME is not set; set VOWP_CONTROL_HOME to a control directory".to_owned())
-        })?;
-    Ok(PathBuf::from(home).join(".vowp-control"))
+    Ok(crate::ctx::resolve_state(vowp_store::StateKind::Control, None)?.path)
 }
 
 /// Reads `control.json` from `root`, when it exists.

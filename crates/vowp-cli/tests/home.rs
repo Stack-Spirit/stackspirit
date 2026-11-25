@@ -1,0 +1,482 @@
+//! Home, agent and control directory compatibility: resolution, `home migrate`, `doctor` and the
+//! dual environment export. Hermetic: every test uses a temporary `$HOME` and a private tmux
+//! directory; nothing reads the real home, starts tmux or touches the network.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+
+use vowp_store::{NodePaths, Store};
+
+const BIN: &str = env!("CARGO_BIN_EXE_stackspirit");
+
+/// Runs `stackspirit` with `HOME=home`, no home variables and a private tmux directory.
+fn run(home: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
+    let tmux = home.join(".tmux-private");
+    std::fs::create_dir_all(&tmux).expect("private tmux dir");
+    let mut command = Command::new(BIN);
+    command
+        .args(args)
+        .current_dir(home)
+        .env_remove("VOWP_HOME")
+        .env_remove("STACKSPIRIT_HOME")
+        .env_remove("VOWP_AGENT_HOME")
+        .env_remove("STACKSPIRIT_AGENT_HOME")
+        .env_remove("VOWP_CONTROL_HOME")
+        .env_remove("STACKSPIRIT_CONTROL_HOME")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env("HOME", home)
+        .env("TMUX_TMPDIR", &tmux);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("run stackspirit")
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Creates a real home (a database) at `path`.
+fn make_home(path: &Path) {
+    std::fs::create_dir_all(path).expect("home dir");
+    Store::open(&NodePaths::new(path)).expect("store opens");
+    assert!(path.join("vowp.db").is_file());
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// Returns the `doctor --json` check named `name`.
+fn doctor_check(home: &Path, env: &[(&str, &str)], name: &str) -> Option<serde_json::Value> {
+    let output = run(home, env, &["--json", "doctor"]);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "doctor json: {error}\n{}\n{}",
+            text(&output.stdout),
+            text(&output.stderr)
+        )
+    });
+    report["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|check| check["name"] == name)
+        .cloned()
+}
+
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read dir")
+        .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+        .filter(|name| name != ".tmux-private")
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn legacy_only_home_is_selected_and_only_warns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".vowp"));
+    let check = doctor_check(dir.path(), &[], "home-path").expect("home-path check");
+    assert_eq!(check["status"], "warn", "{check}");
+    let detail = check["detail"].as_str().expect("detail");
+    assert!(
+        detail.contains(&dir.path().join(".vowp").display().to_string()),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("home migrate --link --dry-run"),
+        "migration hint: {detail}"
+    );
+    assert!(
+        !dir.path().join(".stackspirit").exists(),
+        "doctor must not create anything"
+    );
+    // The legacy name alone must not make doctor fail.
+    let home_check = doctor_check(dir.path(), &[], "home").expect("home check");
+    assert_eq!(home_check["status"], "ok");
+}
+
+#[test]
+fn two_distinct_homes_conflict_and_name_both_paths_and_the_hint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".vowp"));
+    make_home(&dir.path().join(".stackspirit"));
+    let output = run(dir.path(), &[], &["status"]);
+    assert!(!output.status.success());
+    let err = text(&output.stderr);
+    assert!(
+        err.contains(".vowp") && err.contains(".stackspirit") && err.contains("--home"),
+        "{err}"
+    );
+
+    let check = doctor_check(dir.path(), &[], "home").expect("doctor reports the conflict");
+    assert_eq!(check["status"], "fail");
+    assert!(check["detail"].as_str().expect("detail").contains("--home"));
+
+    // --home resolves the ambiguity.
+    let chosen = dir.path().join(".stackspirit");
+    let output = run(
+        dir.path(),
+        &[],
+        &["--home", chosen.to_str().expect("utf8"), "--json", "doctor"],
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert!(
+        report["checks"]
+            .as_array()
+            .expect("checks")
+            .iter()
+            .any(|c| c["name"] == "db" && c["status"] == "ok")
+    );
+}
+
+#[test]
+fn new_name_symlink_to_old_home_is_one_home() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let old = dir.path().join(".vowp");
+    make_home(&old);
+    std::os::unix::fs::symlink(&old, dir.path().join(".stackspirit")).expect("link");
+    let check = doctor_check(dir.path(), &[], "home-path").expect("home-path check");
+    assert_eq!(check["status"], "ok", "no conflict, no legacy warning: {check}");
+    assert!(
+        check["detail"]
+            .as_str()
+            .expect("detail")
+            .contains(&dir.path().join(".stackspirit").display().to_string())
+    );
+}
+
+#[test]
+fn explicit_environment_precedence_is_probed_in_child_processes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    make_home(&a);
+    make_home(&b);
+    let (a_text, b_text) = (a.to_str().expect("utf8"), b.to_str().expect("utf8"));
+    let both = doctor_check(
+        dir.path(),
+        &[("STACKSPIRIT_HOME", a_text), ("VOWP_HOME", b_text)],
+        "home-path",
+    )
+    .expect("home-path");
+    assert!(
+        both["detail"].as_str().expect("detail").contains(a_text),
+        "new name wins: {both}"
+    );
+    let warning = doctor_check(
+        dir.path(),
+        &[("STACKSPIRIT_HOME", a_text), ("VOWP_HOME", b_text)],
+        "home-env",
+    )
+    .expect("one warning for differing variables");
+    assert_eq!(warning["status"], "warn");
+    let legacy = doctor_check(dir.path(), &[("VOWP_HOME", b_text)], "home-path").expect("home-path");
+    assert!(legacy["detail"].as_str().expect("detail").contains(b_text));
+}
+
+#[test]
+fn missing_explicit_home_is_an_error_and_never_falls_back() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".vowp"));
+    let missing = dir.path().join("does-not-exist");
+    let output = run(
+        dir.path(),
+        &[("STACKSPIRIT_HOME", missing.to_str().expect("utf8"))],
+        &["status"],
+    );
+    assert!(!output.status.success());
+    let err = text(&output.stderr);
+    assert!(
+        err.contains("STACKSPIRIT_HOME") && err.contains("does-not-exist"),
+        "{err}"
+    );
+    assert!(!missing.exists(), "reading must not create the path");
+}
+
+#[test]
+fn link_dry_run_writes_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".vowp"));
+    std::fs::create_dir_all(dir.path().join(".vowp-agent")).expect("agent");
+    std::fs::write(dir.path().join(".vowp-agent/agent.json"), "{}").expect("agent.json");
+    let before = entries(dir.path());
+    let output = run(dir.path(), &[], &["home", "migrate", "--link", "--dry-run"]);
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let out = text(&output.stdout);
+    assert!(
+        out.contains(".stackspirit") && out.contains(".stackspirit-agent"),
+        "{out}"
+    );
+    assert!(out.contains("nothing was written"), "{out}");
+    assert_eq!(entries(dir.path()), before, "dry run must not write");
+}
+
+#[test]
+fn link_without_yes_or_dry_run_refuses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".vowp"));
+    let output = run(dir.path(), &[], &["home", "migrate", "--link"]);
+    assert!(!output.status.success());
+    assert!(!dir.path().join(".stackspirit").exists());
+}
+
+#[test]
+fn link_yes_creates_symlinks_without_moving_data_and_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let old = dir.path().join(".vowp");
+    make_home(&old);
+    std::fs::create_dir_all(dir.path().join(".vowp-control")).expect("control");
+    // The control machine is also reported by role, so it needs a parseable control.json.
+    let control = vowp_cli::node_ctx::ControlConfig {
+        role: "control".to_owned(),
+        home: "main".to_owned(),
+        ssh_target: "user@example.invalid".to_owned(),
+        remote_home: "/home/user/.vowp".to_owned(),
+        created_at: vowp_protocol::Timestamp::now(),
+    };
+    std::fs::write(
+        dir.path().join(".vowp-control/control.json"),
+        serde_json::to_string(&control).expect("control json"),
+    )
+    .expect("control.json");
+    let db_before = std::fs::metadata(old.join("vowp.db")).expect("db").len();
+    let output = run(dir.path(), &[], &["home", "migrate", "--link", "--yes"]);
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let new = dir.path().join(".stackspirit");
+    assert!(is_symlink(&new));
+    assert_eq!(
+        std::fs::canonicalize(&new).expect("canonical"),
+        std::fs::canonicalize(&old).expect("canonical")
+    );
+    assert!(is_symlink(&dir.path().join(".stackspirit-control")));
+    assert!(
+        !dir.path().join(".stackspirit-agent").exists(),
+        "no agent on this machine"
+    );
+    assert!(!is_symlink(&old), "the legacy directory is still the real one");
+    assert_eq!(std::fs::metadata(old.join("vowp.db")).expect("db").len(), db_before);
+
+    let again = run(dir.path(), &[], &["home", "migrate", "--link", "--yes"]);
+    assert!(again.status.success(), "{}", text(&again.stderr));
+    assert!(text(&again.stdout).contains("already linked"));
+}
+
+#[test]
+fn link_refuses_when_the_new_path_is_a_distinct_real_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".vowp"));
+    make_home(&dir.path().join(".stackspirit"));
+    let output = run(dir.path(), &[], &["home", "migrate", "--link", "--yes"]);
+    assert!(!output.status.success());
+    assert!(!is_symlink(&dir.path().join(".stackspirit")));
+}
+
+#[test]
+fn link_on_a_fresh_new_home_links_the_old_name_to_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".stackspirit"));
+    let output = run(dir.path(), &[], &["home", "migrate", "--link", "--yes"]);
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(is_symlink(&dir.path().join(".vowp")));
+}
+
+/// Starts a long-lived child and returns it so its pid is a live process.
+fn live_process() -> std::process::Child {
+    Command::new("sleep")
+        .arg("60")
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn sleep")
+}
+
+#[test]
+fn move_refuses_while_the_supervisor_lock_is_live() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let old = dir.path().join(".vowp");
+    make_home(&old);
+    let mut sleeper = live_process();
+    std::fs::write(old.join("supervisor.lock"), format!("{}\n", sleeper.id())).expect("lock");
+    let target = dir.path().join(".stackspirit");
+    let output = run(
+        dir.path(),
+        &[],
+        &[
+            "home",
+            "migrate",
+            "--move",
+            "--to",
+            target.to_str().expect("utf8"),
+            "--yes",
+        ],
+    );
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+    assert!(!output.status.success());
+    let err = text(&output.stderr);
+    assert!(err.contains("supervisor.lock"), "{err}");
+    assert!(!target.exists(), "a refused move leaves no destination");
+    assert!(old.join("vowp.db").is_file());
+    assert!(!is_symlink(&old));
+}
+
+#[test]
+fn move_refuses_while_an_orchestrator_host_is_running() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let old = dir.path().join(".vowp");
+    make_home(&old);
+    let mut sleeper = live_process();
+    let host = old.join("orchestrators").join("main");
+    std::fs::create_dir_all(&host).expect("host dir");
+    std::fs::write(
+        host.join(vowp_core::surface::orchestrator::KEEPER_PID_FILE),
+        format!("{}\n", sleeper.id()),
+    )
+    .expect("pid");
+    let target = dir.path().join(".stackspirit");
+    let output = run(
+        dir.path(),
+        &[],
+        &[
+            "home",
+            "migrate",
+            "--move",
+            "--to",
+            target.to_str().expect("utf8"),
+            "--yes",
+        ],
+    );
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+    assert!(!output.status.success());
+    assert!(text(&output.stderr).contains("orchestrator host"));
+    assert!(!target.exists());
+}
+
+#[test]
+fn move_dry_run_writes_nothing_and_prints_socket_names() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".vowp"));
+    let before = entries(dir.path());
+    let target = dir.path().join(".stackspirit");
+    let output = run(
+        dir.path(),
+        &[],
+        &[
+            "home",
+            "migrate",
+            "--move",
+            "--to",
+            target.to_str().expect("utf8"),
+            "--dry-run",
+        ],
+    );
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let out = text(&output.stdout);
+    assert!(
+        out.contains("VOWP_TMUX_SOCKET=vowp-") && out.contains("STACKSPIRIT_TMUX_SOCKET=vowp-"),
+        "{out}"
+    );
+    assert_eq!(entries(dir.path()), before);
+}
+
+#[test]
+fn move_copies_verifies_and_leaves_the_legacy_path_as_a_symlink() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let old = dir.path().join(".vowp");
+    make_home(&old);
+    std::fs::create_dir_all(old.join("sessions/s1")).expect("session dir");
+    std::fs::write(old.join("sessions/s1/log.jsonl"), "{}\n").expect("log");
+    let db_bytes = std::fs::read(old.join("vowp.db")).expect("db");
+    let new = dir.path().join(".stackspirit");
+    let output = run(
+        dir.path(),
+        &[],
+        &[
+            "home",
+            "migrate",
+            "--move",
+            "--to",
+            new.to_str().expect("utf8"),
+            "--yes",
+        ],
+    );
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let out = text(&output.stdout);
+    assert!(out.contains("VOWP_TMUX_SOCKET=vowp-"), "{out}");
+    assert!(!is_symlink(&new) && new.join("vowp.db").is_file());
+    assert_eq!(
+        std::fs::read(new.join("vowp.db")).expect("db"),
+        db_bytes,
+        "database is byte-identical"
+    );
+    assert_eq!(
+        std::fs::read_to_string(new.join("sessions/s1/log.jsonl")).expect("log"),
+        "{}\n"
+    );
+    assert!(is_symlink(&old), "legacy path is a symlink to the new home");
+    assert_eq!(
+        std::fs::canonicalize(&old).expect("canonical"),
+        std::fs::canonicalize(&new).expect("canonical")
+    );
+    let backup = PathBuf::from(format!("{}.premove", old.display()));
+    assert!(
+        backup.join("vowp.db").is_file(),
+        "original kept for the owner to delete"
+    );
+    // Both names still resolve to one home.
+    let check = doctor_check(dir.path(), &[], "home-path").expect("home-path");
+    assert_eq!(check["status"], "ok", "{check}");
+}
+
+#[test]
+fn doctor_reports_agent_and_control_state_with_legacy_warning() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".vowp"));
+    std::fs::create_dir_all(dir.path().join(".vowp-agent")).expect("agent");
+    std::fs::write(dir.path().join(".vowp-agent/agent.json"), "{}").expect("agent.json");
+    let check = doctor_check(dir.path(), &[], "agent-state").expect("agent-state");
+    assert_eq!(check["status"], "warn");
+    assert!(check["detail"].as_str().expect("detail").contains("agent.json"));
+    assert!(
+        doctor_check(dir.path(), &[], "control-state").is_none(),
+        "no control state here"
+    );
+}
+
+#[test]
+fn exported_child_environments_carry_both_names_with_one_value() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("state");
+    for (export, new_name, old_name) in [
+        (
+            vowp_cli::ctx::export_home_env as fn(&mut Command, &Path),
+            "STACKSPIRIT_HOME",
+            "VOWP_HOME",
+        ),
+        (
+            vowp_cli::ctx::export_agent_env,
+            "STACKSPIRIT_AGENT_HOME",
+            "VOWP_AGENT_HOME",
+        ),
+        (
+            vowp_cli::ctx::export_control_env,
+            "STACKSPIRIT_CONTROL_HOME",
+            "VOWP_CONTROL_HOME",
+        ),
+    ] {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!("printf '%s|%s' \"${new_name}\" \"${old_name}\""))
+            .env_remove(new_name)
+            .env_remove(old_name);
+        export(&mut command, &target);
+        let output = command.output().expect("probe child");
+        let expected = format!("{0}|{0}", target.display());
+        assert_eq!(text(&output.stdout), expected, "{new_name}/{old_name}");
+    }
+}

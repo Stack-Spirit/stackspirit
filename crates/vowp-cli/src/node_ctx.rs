@@ -44,7 +44,7 @@ pub struct ControlConfig {
 /// The control-machine directory and its config.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ControlHome {
-    /// `~/.vowp-control` (or `$VOWP_CONTROL_HOME`).
+    /// `~/.stackspirit-control`, `~/.vowp-control` or an explicit `*_CONTROL_HOME`.
     pub root: PathBuf,
     /// Parsed `control.json`.
     pub config: ControlConfig,
@@ -105,9 +105,23 @@ impl NodeCtx {
                 target: Some(target),
             });
         }
-        let paths = crate::ctx::node_paths(global)?;
-        let vowp_home = vowp_protocol::brand::home_override_from_env().is_some();
-        let role = if vowp_home || paths.db_path().is_file() {
+        let resolved = match crate::ctx::resolve_state(vowp_store::StateKind::Home, None) {
+            Ok(resolved) => resolved,
+            // Two real homes: discovery must not pick one. `doctor` reports the conflict and every
+            // command that needs a home fails in `ctx::node_paths` with both paths and the hint.
+            Err(CliError::Conflict(_)) => {
+                return Ok(Self {
+                    role: NodeRole::Uninitialised,
+                    paths: NodePaths::new(PathBuf::new()),
+                    control: None,
+                    target: None,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let paths = NodePaths::new(&resolved.path);
+        let explicit_home = vowp_protocol::brand::home_override_from_env().is_some();
+        let role = if explicit_home || paths.db_path().is_file() {
             NodeRole::Home
         } else {
             NodeRole::Uninitialised
@@ -132,9 +146,7 @@ impl NodeCtx {
             NodeRole::Control => Err(CliError::Guard(
                 "this command needs the home; run it on the machine that holds the node".to_owned(),
             )),
-            NodeRole::Uninitialised => Err(CliError::NotFound(
-                "vowp home is not initialised; run `vowp setup` or `vowp init`".to_owned(),
-            )),
+            NodeRole::Uninitialised => Err(CliError::NotFound(crate::ctx::uninitialised_message())),
         }
     }
 
@@ -329,15 +341,10 @@ fn build_home_deps(paths: &NodePaths, config: VowpConfig, adapters: Arc<AdapterR
 
 /// Returns the control home, when one is configured.
 fn read_control_home() -> Result<Option<ControlHome>, CliError> {
-    let root = match std::env::var_os("VOWP_CONTROL_HOME").filter(|value| !value.is_empty()) {
-        Some(root) => PathBuf::from(root),
-        None => {
-            let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) else {
-                return Ok(None);
-            };
-            PathBuf::from(home).join(".vowp-control")
-        }
+    let Ok(resolved) = vowp_store::resolve_state_from_env(vowp_store::StateKind::Control, None) else {
+        return Ok(None);
     };
+    let root = resolved.path;
     let config_path = root.join("control.json");
     if !config_path.is_file() {
         return Ok(None);

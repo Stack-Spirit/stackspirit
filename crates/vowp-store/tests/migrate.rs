@@ -290,7 +290,7 @@ fn paths_layout() {
             }
             "home" => {
                 let paths = NodePaths::from_env().expect("HOME resolves");
-                assert_eq!(paths.root(), Path::new("/h/.vowp"));
+                assert_eq!(paths.root(), Path::new("/h/.stackspirit"));
             }
             "none" => {
                 let error = NodePaths::from_env().expect_err("neither variable is set");
@@ -762,4 +762,173 @@ fn v8_migration_is_idempotent_and_writes_a_backup_first() {
         })
         .count();
     assert_eq!(count, 1, "no second backup");
+}
+
+mod resolver {
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    use vowp_store::{ResolveError, StateKind, StateSource, resolve_state};
+
+    fn no_env(_: &str) -> Option<OsString> {
+        None
+    }
+
+    fn real_home(dir: &Path, name: &str, marker: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::create_dir_all(&path).expect("state dir");
+        std::fs::write(path.join(marker), b"x").expect("marker");
+        path
+    }
+
+    #[test]
+    fn only_legacy_home_is_selected() {
+        let home = tempfile::tempdir().expect("home");
+        let old = real_home(home.path(), ".vowp", "vowp.db");
+        let got = resolve_state(StateKind::Home, None, no_env, Some(home.path())).expect("resolves");
+        assert_eq!(got.path, old);
+        assert!(got.legacy);
+        assert_eq!(got.source, StateSource::ExistingLegacy);
+    }
+
+    #[test]
+    fn only_new_home_is_selected() {
+        let home = tempfile::tempdir().expect("home");
+        let new = real_home(home.path(), ".stackspirit", "vowp.db");
+        let got = resolve_state(StateKind::Home, None, no_env, Some(home.path())).expect("resolves");
+        assert_eq!(got.path, new);
+        assert!(!got.legacy);
+    }
+
+    #[test]
+    fn two_distinct_homes_conflict_with_both_paths_and_hint() {
+        let home = tempfile::tempdir().expect("home");
+        real_home(home.path(), ".vowp", "vowp.db");
+        real_home(home.path(), ".stackspirit", "vowp.db");
+        let error = resolve_state(StateKind::Home, None, no_env, Some(home.path())).expect_err("conflict");
+        assert!(matches!(error, ResolveError::Conflict { .. }));
+        let text = error.to_string();
+        assert!(
+            text.contains(".stackspirit") && text.contains(".vowp") && text.contains("--home"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn new_name_symlink_to_old_home_is_one_home() {
+        let home = tempfile::tempdir().expect("home");
+        let old = real_home(home.path(), ".vowp", "vowp.db");
+        std::os::unix::fs::symlink(&old, home.path().join(".stackspirit")).expect("link");
+        let got = resolve_state(StateKind::Home, None, no_env, Some(home.path())).expect("one home");
+        assert_eq!(got.path, home.path().join(".stackspirit"), "new spelling preferred");
+        assert!(!got.legacy);
+    }
+
+    #[test]
+    fn neither_home_selects_the_new_default_without_creating_it() {
+        let home = tempfile::tempdir().expect("home");
+        let got = resolve_state(StateKind::Home, None, no_env, Some(home.path())).expect("fresh");
+        assert_eq!(got.path, home.path().join(".stackspirit"));
+        assert_eq!(got.source, StateSource::Fresh);
+        assert!(!home.path().join(".stackspirit").exists(), "discovery must not create");
+        assert!(std::fs::read_dir(home.path()).expect("read").next().is_none());
+    }
+
+    #[test]
+    fn flag_beats_new_env_beats_legacy_env() {
+        let home = tempfile::tempdir().expect("home");
+        let env = |name: &str| match name {
+            "STACKSPIRIT_HOME" => Some(OsString::from("/new")),
+            "VOWP_HOME" => Some(OsString::from("/old")),
+            _ => None,
+        };
+        let flagged = resolve_state(StateKind::Home, Some(Path::new("/flag")), env, Some(home.path())).expect("flag");
+        assert_eq!(flagged.path, Path::new("/flag"));
+        let new = resolve_state(StateKind::Home, None, env, Some(home.path())).expect("env");
+        assert_eq!(new.path, Path::new("/new"));
+        assert!(
+            new.warning
+                .as_deref()
+                .is_some_and(|w| w.contains("STACKSPIRIT_HOME") && w.contains("VOWP_HOME"))
+        );
+        let legacy_only = |name: &str| (name == "VOWP_HOME").then(|| OsString::from("/old"));
+        let old = resolve_state(StateKind::Home, None, legacy_only, Some(home.path())).expect("legacy env");
+        assert_eq!(old.path, Path::new("/old"));
+        assert_eq!(old.source, StateSource::Env("VOWP_HOME"));
+    }
+
+    #[test]
+    fn same_path_in_both_variables_does_not_warn() {
+        let env = |name: &str| match name {
+            "STACKSPIRIT_HOME" | "VOWP_HOME" => Some(OsString::from("/same")),
+            _ => None,
+        };
+        let got = resolve_state(StateKind::Home, None, env, None).expect("env");
+        assert!(got.warning.is_none());
+    }
+
+    #[test]
+    fn missing_explicit_home_is_an_error_not_a_fallback() {
+        let home = tempfile::tempdir().expect("home");
+        real_home(home.path(), ".vowp", "vowp.db");
+        let missing = home.path().join("nope");
+        let value = missing.clone().into_os_string();
+        let env = move |name: &str| (name == "STACKSPIRIT_HOME").then(|| value.clone());
+        let got = resolve_state(StateKind::Home, None, env, Some(home.path())).expect("explicit is used as given");
+        assert_eq!(got.path, missing, "must not fall back to ~/.vowp");
+        let error = got.require_existing().expect_err("missing explicit path");
+        assert!(error.to_string().contains("STACKSPIRIT_HOME") && error.to_string().contains("nope"));
+    }
+
+    #[test]
+    fn no_home_and_no_explicit_path_is_an_error() {
+        let error = resolve_state(StateKind::Home, None, no_env, None).expect_err("no HOME");
+        assert!(matches!(error, ResolveError::NoHome(_)));
+    }
+
+    #[test]
+    fn partial_legacy_agent_dir_without_marker_is_still_selected_but_a_home_is_not() {
+        let home = tempfile::tempdir().expect("home");
+        std::fs::create_dir_all(home.path().join(".vowp-agent")).expect("agent dir");
+        std::fs::create_dir_all(home.path().join(".vowp")).expect("home dir without database");
+        let agent = resolve_state(StateKind::Agent, None, no_env, Some(home.path())).expect("agent");
+        assert_eq!(agent.path, home.path().join(".vowp-agent"));
+        let node = resolve_state(StateKind::Home, None, no_env, Some(home.path())).expect("home");
+        assert_eq!(node.path, home.path().join(".stackspirit"), "no vowp.db, no home");
+    }
+
+    #[test]
+    fn agent_and_control_use_their_own_names_markers_and_variables() {
+        let home = tempfile::tempdir().expect("home");
+        let agent = real_home(home.path(), ".vowp-agent", "agent.json");
+        let control = real_home(home.path(), ".vowp-control", "control.json");
+        let a = resolve_state(StateKind::Agent, None, no_env, Some(home.path())).expect("agent");
+        assert_eq!(a.path, agent);
+        let c = resolve_state(StateKind::Control, None, no_env, Some(home.path())).expect("control");
+        assert_eq!(c.path, control);
+        // A home marker does not make an agent directory real.
+        let other = tempfile::tempdir().expect("other");
+        real_home(other.path(), ".stackspirit-agent", "vowp.db");
+        let fresh = resolve_state(StateKind::Agent, None, no_env, Some(other.path())).expect("fresh");
+        assert_eq!(fresh.source, StateSource::Fresh);
+        let env = |name: &str| (name == "STACKSPIRIT_AGENT_HOME").then(|| OsString::from("/a"));
+        assert_eq!(
+            resolve_state(StateKind::Agent, None, env, Some(home.path()))
+                .expect("env")
+                .path,
+            Path::new("/a")
+        );
+        let env = |name: &str| (name == "VOWP_CONTROL_HOME").then(|| OsString::from("/c"));
+        assert_eq!(
+            resolve_state(StateKind::Control, None, env, Some(home.path()))
+                .expect("env")
+                .path,
+            Path::new("/c")
+        );
+        real_home(home.path(), ".stackspirit-agent", "agent.json");
+        assert!(matches!(
+            resolve_state(StateKind::Agent, None, no_env, Some(home.path())),
+            Err(ResolveError::Conflict { .. })
+        ));
+    }
 }
