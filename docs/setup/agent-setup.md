@@ -24,10 +24,10 @@ as an **agent node**:
 | **agent node** | An optional Mac or Linux machine that dials the home to run a local surface or offloaded jobs. It holds no truth. |
 | **project** | One git repository registered on the home. |
 | **session** | One conversation with one id and an append-only log on the home. |
-| **surface** | Where the owner is talking to a session now: an app, `vowp chat`, or the MCP server an app calls. |
+| **surface** | Where the owner is talking to a session now: an app, `stackspirit chat`, or the MCP server an app calls. |
 | **orchestrator** | The long-lived session that reads the fleet snapshot and asks the owner before changing anything. |
 
-The owner normally talks through the opencode desktop app or a Claude app. `vowp chat` is the
+The owner normally talks through the opencode desktop app or a Claude app. `stackspirit chat` is the
 fallback surface. The setup agent does not replace either app; it installs the home, joins the
 control machine and proves both sides can reach each other.
 
@@ -96,7 +96,7 @@ I can set up VOWP 0.4.0 for you. Before I show you the plan, I need five answers
    use — `opencode`, `claude-code`, or both — and which provider name does each use? Names only;
    never send me a key.
 3. Repositories. Which existing checkouts on the home should I register? Give the path on the
-   home, not a URL or a path on this computer. Say if a checkout still needs `vowp init`.
+   home, not a URL or a path on this computer. Say if a checkout still needs `stackspirit init`.
 4. GitHub remote. Should merged work be pushed to a GitHub remote so it is safe off the VPS?
    Recommended, never required. Setup does not push or create a remote.
 5. Control machine. Should this computer be a control machine (snapshot cache, tunnels and the
@@ -137,7 +137,7 @@ if ! command -v vowp >/dev/null 2>&1; then
     | sh -s -- --download --version 0.4.0 --no-service --no-cron --no-watchdog
 fi
 command -v vowp >/dev/null 2>&1 || export PATH="$HOME/.local/bin:$PATH"
-vowp --version
+stackspirit --version
 ```
 
 The last command must print `vowp 0.4.0` for the version in the prompt. If it prints a different
@@ -153,7 +153,7 @@ Pass the answers as flags. `--target` is the home's SSH destination; it is **not
 `--home` directory flag. Repository paths are paths **on the home**; setup does not clone a URL.
 
 ```sh
-vowp setup plan --target <ssh-target> \
+stackspirit setup plan --target <ssh-target> \
   --version 0.4.0 \
   --name <home-name> \
   --repository <path-on-the-home> \
@@ -179,8 +179,8 @@ Every answer flag is optional except `--target`:
 Run both forms; the command is read-only and safe to repeat:
 
 ```sh
-vowp setup plan --target <ssh-target> ...      # text for the owner
-vowp setup plan --target <ssh-target> ... --json
+stackspirit setup plan --target <ssh-target> ...      # text for the owner
+stackspirit setup plan --target <ssh-target> ... --json
 ```
 
 `plan` opens read-only SSH probes on the home. The probes check the OS and architecture, the login
@@ -257,7 +257,7 @@ Do not prefix it with `sudo`; setup creates the non-root user only when password
 available, and otherwise deliberately runs in no-sudo mode.
 
 ```sh
-vowp setup home --target <ssh-target> --apply --yes \
+stackspirit setup home --target <ssh-target> --apply --yes \
   --version 0.4.0 \
   --name <home-name> \
   --repository <path-on-the-home> \
@@ -272,7 +272,7 @@ of the text output. `--yes` is the single approval from §5; never pass it befor
 yes.
 
 `setup home` is idempotent. Re-running it after a hand-off continues from the phase that stopped and
-does not redo finished work. Do not run `vowp up` or `vowp down` yourself; setup starts the service
+does not redo finished work. Do not run `stackspirit up` or `stackspirit down` yourself; setup starts the service
 when systemd is available.
 
 The phases are:
@@ -289,7 +289,7 @@ The phases are:
 | **tunnels** | None by default. Tunnels are opened from the control machine when needed. | Nothing by default. |
 
 The result is a `SetupOutcome` with `status`, `phase`, `changed`, `handoff` and `checks`. Treat any
-`handoff` as a stop; go to §7. `vowp doctor` is reported as a check: a warning or failure does not
+`handoff` as a stop; go to §7. `stackspirit doctor` is reported as a check: a warning or failure does not
 stop the phase, but you must report it and not call it a success.
 
 `setup home` writes `~/.vowp-control/setup.json` on the control machine so the next step knows the
@@ -301,8 +301,8 @@ Run this only after the home phase exits 0 and only if the owner answered yes to
 plan once; `--apply` is the approval.
 
 ```sh
-vowp setup control --apply
-vowp setup control --apply --json
+stackspirit setup control --apply
+stackspirit setup control --apply --json
 ```
 
 It reuses the target from the home run or an existing `~/.vowp-control/control.json`; pass
@@ -342,7 +342,7 @@ command. Never start a new plan unless the hand-off changed one of the five answ
 | **approval** | Reads the whole plan and says yes. | Show the plan; run `setup home --apply --yes` only after the yes. | Pass `--yes` before approval; run a subset. |
 | **sudo command** | Runs the exact command setup printed in their own terminal on the home. | Give the command; wait for "done"; re-run setup. | Ask for the password in chat; store it; echo it; put it in a file. |
 | **harness login** | Opens the harness's device-code URL or signs in on the home with the harness's own flow. | Relay the URL or code if the plan asks you to; wait; re-run setup. | Ask for the account password or token; copy `~/.claude` or opencode credential files. |
-| **secret value** | Enters it with `vowp secret set NAME` (hidden prompt) or `vowp secret request NAME` (one-time link). | Tell them the name and the safe method; wait for "saved"; check the name and last-4 only. | Ask them to paste it in chat; put it in argv, an environment variable or a file; read `~/.vowp/secrets`. |
+| **secret value** | Enters it with `stackspirit secret set NAME` (hidden prompt) or `stackspirit secret request NAME` (one-time link). | Tell them the name and the safe method; wait for "saved"; check the name and last-4 only. | Ask them to paste it in chat; put it in argv, an environment variable or a file; read `~/.vowp/secrets`. |
 | **owner answer** | Answers the `owner-answer:<question>` from the plan, for example a repository without `vowp.toml`. | Use the answer; re-run the plan if it changes the plan. | Guess; pick a default the plan did not state; edit the repository yourself. |
 | **GitHub remote** | Adds the remote and pushes `main` after setup. | Report the recommendation. | Push, create a repository or change visibility. |
 
@@ -360,8 +360,8 @@ them to rotate it and use the safe path.
 Run this on the control machine after the home and control phases succeed:
 
 ```sh
-vowp setup verify
-vowp setup verify --json
+stackspirit setup verify
+stackspirit setup verify --json
 ```
 
 `verify` runs the checks on the home over SSH when it is run on a control machine, and directly when
@@ -380,7 +380,7 @@ The checks:
   fresh snapshot and reports a `warn` that readability from a control machine was not verified,
   because the home cannot prove that side.
 - **`orchestrator.chat`** — create a project-bound orchestrator with the chat app, send it a turn
-  through `vowp chat`, and check the assistant event in the session log. The orchestrator directory
+  through `stackspirit chat`, and check the assistant event in the session log. The orchestrator directory
   is removed afterwards.
 
 If a check fails, stop and report it. Do not edit the result, re-run until it passes without
@@ -484,10 +484,10 @@ and do not send the private key anywhere.
 ## 12. Command reference
 
 ```sh
-vowp setup plan --target <ssh-target> [answer flags] [--json]
-vowp setup home --target <ssh-target> --apply --yes [answer flags] [--json]
-vowp setup control --apply [--target <ssh-target>] [--name <name>] [--force] [--json]
-vowp setup verify [--json]
+stackspirit setup plan --target <ssh-target> [answer flags] [--json]
+stackspirit setup home --target <ssh-target> --apply --yes [answer flags] [--json]
+stackspirit setup control --apply [--target <ssh-target>] [--name <name>] [--force] [--json]
+stackspirit setup verify [--json]
 ```
 
 The answer flags are `--version`, `--name`, `--repository` (`--repo`), `--harness`, `--provider`,
@@ -526,12 +526,12 @@ amendment will align the two.
 ## 13. What setup does not do
 
 - It does not clone a repository, run `vowp init` for you, or change a project's `vowp.toml`. It
-  registers an existing checkout; `vowp init` is offered as a hand-off, never forced.
+  registers an existing checkout; `stackspirit init` is offered as a hand-off, never forced.
 - It does not push, create a GitHub repository or change visibility. `--github-remote` only adds
   the recommendation.
 - It does not install a harness or a provider account, and it never reads a harness login.
 - It does not open a public port, change a firewall or DNS record, or install a system package.
-- It does not run `vowp up` or `vowp down` for you; the service phase starts the user unit where
+- It does not run `stackspirit up` or `stackspirit down` for you; the service phase starts the user unit where
   systemd is available.
 - It does not edit the owner's databases, session logs or repositories. It never reads or prints a
   secret value; secret files move only through the documented secret store and upgrade path.

@@ -1,6 +1,6 @@
 # StackSpirit Engine — rebrand and zero-downtime migration plan
 
-Status: **design; not implemented.** This is the v6-1 deliverable. It changes no code. It names
+Status: **design; v6-2 through v6-7 implemented in the tree.** This is the v6-1 deliverable; the operator-facing result is the [migration guide](../guides/stackspirit-migration.md) and the [deprecation policy](../deprecation-policy.md). It names
 the target identity, fixes the compatibility contract, gives the exact deployment order for a live
 home, a Mac agent node and StackSpirit Desktop, and breaks the work into six independently
 mergeable jobs (`v6-2` through `v6-7`).

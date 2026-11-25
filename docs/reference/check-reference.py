@@ -60,7 +60,7 @@ def slugify_type(name: str) -> str:
 def cli_sections(text: str) -> list[tuple[list[str], int]]:
     sections = []
     for number, line in enumerate(text.splitlines(), 1):
-        match = re.match(r"^#{2,6}\s+`vowp(?: ([^`]+))?`\s*$", line)
+        match = re.match(r"^#{2,6}\s+`(?:stackspirit|vowp)(?: ([^`]+))?`\s*$", line)
         if match:
             path = match.group(1).split() if match.group(1) else []
             sections.append((path, number))
@@ -77,7 +77,7 @@ def check_cli() -> list[str]:
         failures.append("cli.md is missing the generated-page marker")
     sections = cli_sections(text)
     if not sections or sections[0][0]:
-        failures.append("cli.md does not start with the `vowp` root help section")
+        failures.append("cli.md does not start with the `stackspirit` root help section")
     documented = [path[0] for path, _ in sections if len(path) == 1]
     duplicates = sorted({name for name in documented if documented.count(name) > 1})
     if duplicates:
@@ -90,7 +90,7 @@ def check_cli() -> list[str]:
         failures.append("commands in cli.md but not in V0_1_COMMANDS/V0_2_COMMANDS: " + ", ".join(extra))
     for path, number in sections:
         if path and path[0] not in expected:
-            failures.append(f"cli.md:{number}: `vowp {' '.join(path)}` is not in V0_1_COMMANDS/V0_2_COMMANDS")
+            failures.append(f"cli.md:{number}: `stackspirit {' '.join(path)}` is not in V0_1_COMMANDS/V0_2_COMMANDS")
     if "__window" in expected and "__window" not in documented:
         failures.append("the hidden __window command is missing from cli.md")
     return failures

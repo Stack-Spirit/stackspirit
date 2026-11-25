@@ -18,10 +18,22 @@ been cut and the latest public release remains 0.4.0 (2026-11-18).
 
 ### Changed
 
+- Documentation, framework skills and templates now use the `stackspirit` command name in every
+  instruction; `vowp` remains a supported alias with the same command tree. `.vowp/` paths and
+  brief/report paths are unchanged. The CLI and schema reference pages are generated from the
+  `stackspirit` binary.
+- `docs/reference/generate.py` and `docs/tests/check-commands.sh` accept `stackspirit` and
+  `vowp` command examples.
+
 - The workspace, crate, packaging and version-test strings now report `0.5.1-dev`, so
   `vowp --version` prints `vowp 0.5.1-dev` instead of `vowp 0.4.0`.
 
 ### Added
+
+- [`docs/guides/stackspirit-migration.md`](docs/guides/stackspirit-migration.md): the live-home,
+  agent and desktop migration sequence with rollback and the optional directory move.
+- [`docs/deprecation-policy.md`](docs/deprecation-policy.md): legacy names are supported for all of
+  v6; removal is a v7 decision.
 
 - **v0.5 Slice 1 — live snapshot streams.** `GET /api/v1/jobs/stream`,
   `GET /api/v1/jobs/{id}/stream`, `GET /api/v1/cost/stream`, `GET /api/v1/inbox/stream` and

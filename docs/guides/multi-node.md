@@ -6,7 +6,7 @@ a database; no second machine is authoritative. The v0.4 [agent node](agent-node
 supported Mac or Linux executor: it dials the home, keeps its own node key and path map, and can
 run as a launchd or systemd-user service.
 
-> **Status: current.** `vowp control`, `vowp tunnel`, `vowp fleet`, `vowp node`, the `--node` redirect
+> **Status: current.** `stackspirit control`, `stackspirit tunnel`, `stackspirit fleet`, `stackspirit node`, the `--node` redirect
 > and cross-machine session export/import/switch are implemented. Remote execution uses the home's
 > session service; the same session is never written by two machines. The v0.4 agent node is in
 > [The agent node](agent-node.md).
@@ -16,11 +16,11 @@ run as a launchd or systemd-user service.
 | Machine | Role | Holds |
 |---|---|---|
 | **home** | The VPS. Runs the one supervisor, owns the global and project databases, session logs, leases and snapshot. | All truth. |
-| **control machine** | A laptop or desktop. Reads the snapshot, opens tunnels, runs the app or `vowp chat`, sends writes to the home. | `~/.vowp-control/`: config, snapshot cache, spool, surface state and tunnel records. |
+| **control machine** | A laptop or desktop. Reads the snapshot, opens tunnels, runs the app or `stackspirit chat`, sends writes to the home. | `~/.vowp-control/`: config, snapshot cache, spool, surface state and tunnel records. |
 | **executor machine** | A registered machine that can run a turn. It can also be surface-only (`node add <name> -`) because it dials the home; the home never dials it. | Its own working copy and harness login. |
 
 The phone is a control surface with no installation: an SSH app plus the owner's key, running
-`vowp chat` on the home. See [Using your phone](phone.md).
+`stackspirit chat` on the home. See [Using your phone](phone.md).
 
 ## Prepare SSH
 
@@ -28,7 +28,7 @@ Every route is plain SSH with key authentication and no password prompt:
 
 ```sh
 ssh -o BatchMode=yes -o ConnectTimeout=10 <home-ssh-target> true
-ssh -o BatchMode=yes -o ConnectTimeout=10 <executor-ssh-target> vowp --version
+ssh -o BatchMode=yes -o ConnectTimeout=10 <executor-ssh-target> stackspirit --version
 ```
 
 Keep the host keys in `known_hosts`. If a key is missing, fix the key; do not disable batch mode or
@@ -40,9 +40,9 @@ provider; a control machine only needs SSH to the home.
 On the laptop or desktop:
 
 ```sh
-vowp control init --name home <home-ssh-target>
-vowp control status
-vowp fleet status
+stackspirit control init --name home <home-ssh-target>
+stackspirit control status
+stackspirit fleet status
 ```
 
 `control init` probes the home, writes `~/.vowp-control/control.json` (0600), creates the spool, the
@@ -51,10 +51,10 @@ refuses to overwrite an existing configuration without `--force`; a failed probe
 `--strict` is passed. The setup path does the same thing:
 
 ```sh
-vowp setup control --apply
+stackspirit setup control --apply
 ```
 
-`setup control` reuses the target from `vowp setup home` (or takes `--target`) and installs no
+`setup control` reuses the target from `stackspirit setup home` (or takes `--target`) and installs no
 supervisor. It is the recommended path because it also records the setup state and fetches the first
 snapshot.
 
@@ -62,15 +62,15 @@ On a control machine:
 
 - project, fleet, capacity, job, inbox, secret and session commands default to the home; the CLI
   sends them over SSH and returns the home's exit code;
-- `vowp status` and `vowp fleet status` try the home over SSH first; only when SSH fails do they print
+- `stackspirit status` and `stackspirit fleet status` try the home over SSH first; only when SSH fails do they print
   the cached snapshot with an `as of` time. A successful `fleet status` refreshes that cache;
 - `fleet status --refresh` requires SSH; `fleet status --cached` never opens SSH;
 - writes (`project add/pause`, `inbox answer`, `job add/pause/retry`, `capacity set`, ...) always go
   to the home; they never succeed against the cache;
-- `vowp up`, `vowp down` and `vowp board` refuse with exit 5 because they need local truth;
+- `stackspirit up`, `stackspirit down` and `stackspirit board` refuse with exit 5 because they need local truth;
 - a path given to `project add` is a path **on the home**, not on the laptop.
 
-`vowp control status` prints the config and the cache metadata without SSH. The cache is disposable;
+`stackspirit control status` prints the config and the cache metadata without SSH. The cache is disposable;
 the home remains the only source.
 
 ## Open a tunnel
@@ -80,10 +80,10 @@ reaches them through a managed SSH forward. Claude Remote Control does not use a
 outbound to claude.ai from the home and opens no local port.
 
 ```sh
-vowp tunnel open opencode --remote-port <port>
-vowp tunnel open web --remote-port <port> --local-port <port>
-vowp tunnel ls
-vowp tunnel close opencode
+stackspirit tunnel open opencode --remote-port <port>
+stackspirit tunnel open web --remote-port <port> --local-port <port>
+stackspirit tunnel ls
+stackspirit tunnel close opencode
 ```
 
 `tunnel open` starts `ssh -N ... -L 127.0.0.1:<local>:<host>:<remote>` in its own process group,
@@ -91,7 +91,7 @@ records the pid in `~/.vowp-control/tunnels.json` (0600) and prints the local po
 Ports below 1024 need `--allow-privileged`. A duplicate name is a conflict (exit 4). `tunnel ls`
 removes records whose process died. There is no `close --all`: close what you opened.
 
-A tunnel is opened from the machine that will use it. On the home, `vowp tunnel` exits 5. Ports and
+A tunnel is opened from the machine that will use it. On the home, `stackspirit tunnel` exits 5. Ports and
 pids are local to the control machine and never written to the snapshot or the session log.
 
 ## Register executor machines
@@ -99,13 +99,13 @@ pids are local to the control machine and never written to the snapshot or the s
 The machine registry is the `nodes` table. On the home:
 
 ```sh
-vowp node add <node-name> <executor-ssh-target>
-vowp node add laptop -            # surface-only: the laptop dials the home
-vowp node ls
-vowp node rm <node-name>
+stackspirit node add <node-name> <executor-ssh-target>
+stackspirit node add laptop -            # surface-only: the laptop dials the home
+stackspirit node ls
+stackspirit node rm <node-name>
 ```
 
-`node add` probes `ssh -o BatchMode=yes <target> vowp --version` and stores the result in the machine's
+`node add` probes `ssh -o BatchMode=yes <target> stackspirit --version` and stores the result in the machine's
 capabilities. A failed probe is a warning unless `--strict` is passed; a surface-only machine is
 registered without a probe because the home will never dial it. `node rm` refuses the local machine.
 
@@ -121,11 +121,11 @@ installed as a launchd or systemd-user service. The home keeps the database, the
 the merge queue.
 
 ```sh
-vowp node enroll mac-studio --label mac
-vowp node show mac-studio
+stackspirit node enroll mac-studio --label mac
+stackspirit node show mac-studio
 ```
 
-Run the printed `vowp agent enroll` command on the node, then check it with `vowp agent status`.
+Run the printed `stackspirit agent enroll` command on the node, then check it with `stackspirit agent status`.
 The full operator path — service install, separate user, surface rotation, WSS, bundle result and
 capacity history — is in [The agent node](agent-node.md). It is not a second home and does not
 change the rule that the home is the only writer.
@@ -158,9 +158,9 @@ The same session normally stays on the home while you change the surface. If you
 different machine, the v0.1 bundle path still works:
 
 ```sh
-vowp session export <id> --out planner.vowp-bundle.json
-vowp session import planner.vowp-bundle.json --node <node-name>
-vowp session switch <id> --to <executor> --node <node-name>
+stackspirit session export <id> --out planner.vowp-bundle.json
+stackspirit session import planner.vowp-bundle.json --node <node-name>
+stackspirit session switch <id> --to <executor> --node <node-name>
 ```
 
 `export` writes a `vowp-bundle-v1` file with a capsule, the last events and a checksum. `import`
@@ -181,7 +181,7 @@ The practical rules:
 - The home stays up; do not run a second supervisor to "keep the session alive".
 - On reconnect, the surface replays its spool into the home log and continues from the last
   acknowledged sequence. The chat view prints only events after the current turn's `grant.tail_seq`;
-  use `vowp session show` or `vowp session tail` to read the replayed events from the home log.
+  use `stackspirit session show` or `stackspirit session tail` to read the replayed events from the home log.
 - Do not hand-edit `log.jsonl`, a capsule or a spool file to repair a gap; report the session id and
   the first missing sequence instead.
 - A surface that does not hold the lease can read in follow mode but every write is refused with the
@@ -191,19 +191,19 @@ The practical rules:
 
 ```sh
 # once, on the laptop
-vowp control init --name home <home-ssh-target>
-vowp setup control --apply
+stackspirit control init --name home <home-ssh-target>
+stackspirit setup control --apply
 
 # every day
-vowp fleet status
-vowp fleet queue
-vowp chat <session-id>          # routed to the home over SSH
+stackspirit fleet status
+stackspirit fleet queue
+stackspirit chat <session-id>          # routed to the home over SSH
 ```
 
 ```sh
 # once, on the home
-vowp project add /srv/projects/alpha
-vowp up
+stackspirit project add /srv/projects/alpha
+stackspirit up
 ```
 
 The laptop has no supervisor, no project database and no worktrees. If it is lost, the home is
@@ -213,10 +213,10 @@ unchanged.
 
 | Symptom | Check |
 |---|---|
-| Exit 7, `remote` | `ssh -o BatchMode=yes <target> vowp --version` from the same user and shell. |
+| Exit 7, `remote` | `ssh -o BatchMode=yes <target> stackspirit --version` from the same user and shell. |
 | `vowp: command not found` remotely | The remote non-interactive `PATH`; install to `~/.local/bin` or use the absolute path. |
 | `this is a control machine` | The command needs local truth (`up`, `down`, `board`) or an app host. Run it on the home. |
-| `no control configuration` | Run `vowp control init --name home <home-ssh-target>` on this machine. |
+| `no control configuration` | Run `stackspirit control init --name home <home-ssh-target>` on this machine. |
 | `fleet status` says `stale` | The home is unreachable. Check SSH; the cached answer is still labelled `as of`. |
 | A write says it went to the cache | It did not. Writes always route to the home; fix SSH or the control config. |
 | Host key prompt | Add the host key to `known_hosts`; batch mode must not prompt. |

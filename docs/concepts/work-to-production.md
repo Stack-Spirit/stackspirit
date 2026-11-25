@@ -40,7 +40,7 @@ rollback = "./scripts/rollback.sh"                    # optional explicit comman
 
 ## The promotion pipeline
 
-`vowp promote <change> --to <env>` accepts a commit, ref or job id and runs:
+`stackspirit promote <change> --to <env>` accepts a commit, ref or job id and runs:
 
 1. **Guards.** Built-in checks and custom scripts run in the target checkout. A failure refuses the
    release; nothing is deployed and nothing is retried with a workaround.
@@ -99,10 +99,10 @@ automatically with a weakened check.
 
 ## Rollback
 
-`vowp rollback <release> [--yes]` redeploys the banked serving copy that was captured before the original
+`stackspirit rollback <release> [--yes]` redeploys the banked serving copy that was captured before the original
 deploy. This requires a rollback command: configure `serving_bank` (the banked snapshot is restored with
 `tar` when `rollback` is omitted), or configure `rollback` directly. If neither is set, the release has
-no rollback command and `vowp rollback` fails with `has no rollback command`. Rollback creates a new
+no rollback command and `stackspirit rollback` fails with `has no rollback command`. Rollback creates a new
 release row and sets the original release's `rolled_back_by` field to the new release id, runs the
 rollback command, and appends the same release-log line format. Rollback does not re-run the promotion
 gates: the artifact being restored is the one that was live before.
@@ -122,13 +122,13 @@ The design is stricter for three reasons:
 ## Commands
 
 ```sh
-vowp promote <change> --to prod --dry-run
-vowp promote <change> --to prod
-vowp releases --env prod
-vowp rollback <release> --yes
+stackspirit promote <change> --to prod --dry-run
+stackspirit promote <change> --to prod
+stackspirit releases --env prod
+stackspirit rollback <release> --yes
 ```
 
-`vowp releases` lists `ID ENV CHANGE STATE FROM→TO CREATED`. With `--json` the release objects are the
+`stackspirit releases` lists `ID ENV CHANGE STATE FROM→TO CREATED`. With `--json` the release objects are the
 protocol types. A deployment is a public action: nothing in VOWP deploys, publishes or flips visibility
 without an approval item answered by a human, unless the environment is explicitly configured with
 `approval = "policy"` and the operator passes `--yes`.

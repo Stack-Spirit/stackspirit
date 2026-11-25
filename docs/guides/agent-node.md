@@ -1,5 +1,7 @@
 # The agent node
 
+> **VOWP compatibility.** Commands are shown as `stackspirit`; `vowp` works identically. An existing `vowp-agent` unit and `~/.vowp-agent` state are updated in place; renaming the unit is the explicit `--rename-unit` step. See the [StackSpirit migration guide](stackspirit-migration.md) and the [deprecation policy](../deprecation-policy.md).
+
 An **agent node** is a Mac or Linux machine that dials the home and runs local surfaces or
 offloaded jobs. It is not a second home: the home still owns the database, the session log and
 every merge. The node owns its own node key, path map, harness login, worktrees and surface
@@ -31,14 +33,14 @@ the supported shape and its limits.
 Create the node and a one-time code on the home:
 
 ```sh
-vowp node enroll mac-studio --label mac
+stackspirit node enroll mac-studio --label mac
 ```
 
-The command prints the 52-character code once and the matching `vowp agent enroll` line. The code
+The command prints the 52-character code once and the matching `stackspirit agent enroll` line. The code
 expires after ten minutes and is stored only as a hash. Then, on the node:
 
 ```sh
-vowp agent enroll --target <home-ssh-target> --code-file - --project ~/src/vowp
+stackspirit agent enroll --target <home-ssh-target> --code-file - --project ~/src/vowp
 ```
 
 `--project` is repeatable and maps one local checkout; the project name comes from its
@@ -48,21 +50,21 @@ code from stdin; the code is never in argv, `ps` or a log line.
 
 Enrollment writes `~/.vowp-agent/agent.json` (0600) and the node key pair. It then connects and
 performs the `AgentHello` → `HomeChallenge` → `AgentAuth` → `HomeWelcome` handshake. The node is
-ready when `vowp agent status` shows a connection and a key fingerprint:
+ready when `stackspirit agent status` shows a connection and a key fingerprint:
 
 ```sh
-vowp agent status
+stackspirit agent status
 ```
 
 Later project changes do not need a re-enrollment:
 
 ```sh
-vowp agent paths add --project ~/src/another-project
-vowp agent paths ls
-vowp agent paths rm another-project
+stackspirit agent paths add --project ~/src/another-project
+stackspirit agent paths ls
+stackspirit agent paths rm another-project
 ```
 
-A running `vowp agent run` reloads the path map on its next heartbeat and sends
+A running `stackspirit agent run` reloads the path map on its next heartbeat and sends
 `PathMapUpdate`. Absolute roots stay in `agent.json` and in the owner-only home row; they are
 never put in a status snapshot or a frame that carries a job.
 
@@ -71,13 +73,13 @@ never put in a status snapshot or a frame that carries a job.
 SSH stdio is the default and needs no home listener:
 
 ```sh
-vowp agent enroll --target <home-ssh-target> --code-file - --project ~/src/vowp
+stackspirit agent enroll --target <home-ssh-target> --code-file - --project ~/src/vowp
 ```
 
 The agent runs this forced command on the home:
 
 ```text
-ssh -T -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 <target> vowp agent gateway --stdio
+ssh -T -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 <target> stackspirit agent gateway --stdio
 ```
 
 WSS is the optional alternative for a network that blocks outbound SSH. It carries the same
@@ -85,7 +87,7 @@ frames over a TLS reverse proxy that you operate; VOWP itself opens only a loopb
 Enroll with the proxy URL instead of an SSH target:
 
 ```sh
-vowp agent enroll --wss wss://home.example.com/agent/v1 --code-file - --project ~/src/vowp
+stackspirit agent enroll --wss wss://home.example.com/agent/v1 --code-file - --project ~/src/vowp
 ```
 
 The URL must be exactly `wss://host[:port]/agent/v1`: no `ws://`, query, fragment, user-info or
@@ -93,7 +95,7 @@ other path is accepted. TLS uses the system trust store and hostname verificatio
 self-signed deployment can hard-pin the leaf certificate:
 
 ```sh
-vowp agent enroll --wss wss://home.example.com/agent/v1 \
+stackspirit agent enroll --wss wss://home.example.com/agent/v1 \
   --tls-fingerprint sha256:<64-lowercase-hex> --code-file -
 ```
 
@@ -114,7 +116,7 @@ deployment is in [WSS deployment](#wss-deployment).
 In a terminal:
 
 ```sh
-vowp agent run --foreground
+stackspirit agent run --foreground
 ```
 
 `--role` is `surface`, `executor` or `both` (the default, shown in the help as `ROLE`). The
@@ -126,9 +128,9 @@ For a node that must survive a reboot, logout and crash, install the service man
 agent never runs as root and VOWP never installs a system-wide unit.
 
 ```sh
-vowp agent service install --print
-vowp agent service install --now
-vowp agent service status
+stackspirit agent service install --print
+stackspirit agent service install --now
+stackspirit agent service status
 ```
 
 `--print` writes nothing and invokes no manager; it prints the unit text, the unit path and the
@@ -153,7 +155,7 @@ restarts it. The systemd unit uses `RestartPreventExitStatus=4 5` instead.
 Stop and remove the unit without deleting the node key or any token:
 
 ```sh
-vowp agent service uninstall --yes
+stackspirit agent service uninstall --yes
 ```
 
 `uninstall` stops the unit first and removes only a file carrying the VOWP marker. A missing or
@@ -174,8 +176,8 @@ stopped. A home restart only drops the connection; the agent reconnects and send
 ## Check the node
 
 ```sh
-vowp agent status
-vowp agent doctor
+stackspirit agent status
+stackspirit agent doctor
 ```
 
 `agent status` prints the connection, node, home, protocol, last heartbeat, pending spool bytes,
@@ -233,13 +235,13 @@ home and the node; the home prints the code once and the exact Mac command.
 On the home:
 
 ```sh
-vowp surface pair --session <session-id> --node mac-studio --kind opencode
+stackspirit surface pair --session <session-id> --node mac-studio --kind opencode
 ```
 
 The command prints a ten-minute one-time code, the expiry and a line like:
 
 ```sh
-vowp agent pair --code-file - --surface <surface-id> --session <session-id> --app opencode
+stackspirit agent pair --code-file - --surface <surface-id> --session <session-id> --app opencode
 ```
 
 Run that line on the node and paste the code on stdin. `agent pair` stores the token at
@@ -247,8 +249,8 @@ Run that line on the node and paste the code on stdin. `agent pair` stores the t
 id, token path and expiry; it never prints the token.
 
 ```sh
-vowp surface ls
-vowp surface ls --node mac-studio
+stackspirit surface ls
+stackspirit surface ls --node mac-studio
 ```
 
 `surface ls` shows `ID NODE KIND STATE SCOPES PREFIX EXPIRES OVERLAP`. `PREFIX` is the newest
@@ -261,7 +263,7 @@ state are separate facts.
 ### Rotate a token
 
 ```sh
-vowp surface rotate <surface-id>
+stackspirit surface rotate <surface-id>
 ```
 
 A rotation mints a fresh 30-day token with the surface's existing scopes and shortens every other
@@ -275,8 +277,8 @@ it never prints the token.
 The default works for an online node. Two flags cover an offline or planned window:
 
 ```sh
-vowp surface rotate <surface-id> --wait 30s
-vowp surface rotate <surface-id> --grace 1h
+stackspirit surface rotate <surface-id> --wait 30s
+stackspirit surface rotate <surface-id> --grace 1h
 ```
 
 `--wait` polls the outbox for the given duration. It exits 0 when the frame was drained and exits
@@ -297,16 +299,16 @@ When a surface is lost, or a token died offline past its replacement expiry, use
 to revoke the old surface and create the replacement:
 
 ```sh
-vowp surface pair --session <session-id> --node mac-studio --kind opencode --replace <old-surface-id>
+stackspirit surface pair --session <session-id> --node mac-studio --kind opencode --replace <old-surface-id>
 ```
 
 The old surface must belong to the same node and session and must not already be revoked. Its
 queued rotation frame is removed and every active token is revoked, so it cannot receive a stale
-token. Then run the new `vowp agent pair` line on the node. The longer manual form still works:
+token. Then run the new `stackspirit agent pair` line on the node. The longer manual form still works:
 
 ```sh
-vowp surface revoke <old-surface-id> --yes
-vowp surface pair --session <session-id> --node mac-studio --kind opencode
+stackspirit surface revoke <old-surface-id> --yes
+stackspirit surface pair --session <session-id> --node mac-studio --kind opencode
 ```
 
 `surface revoke` revokes every active token, marks the surface `revoked`, removes any queued
@@ -326,9 +328,9 @@ never calls `sudo`, changes uid or writes another user's home; the `sudo -iu` be
 owner's action:
 
 ```sh
-sudo -iu vowp-agent -- vowp agent enroll --target <home-ssh-target> --code-file -
-sudo -iu vowp-agent -- vowp agent service install --now
-sudo -iu vowp-agent -- vowp agent status
+sudo -iu vowp-agent -- stackspirit agent enroll --target <home-ssh-target> --code-file -
+sudo -iu vowp-agent -- stackspirit agent service install --now
+sudo -iu vowp-agent -- stackspirit agent status
 loginctl enable-linger vowp-agent
 ```
 
@@ -374,10 +376,10 @@ missing table means WSS is off.
 ### 2. Start the loopback listener
 
 ```sh
-vowp up
+stackspirit up
 ```
 
-When `[ingress.wss].enabled = true`, `vowp up` starts the hidden `vowp agent gateway --listen`
+When `[ingress.wss].enabled = true`, `stackspirit up` starts the hidden `stackspirit agent gateway --listen`
 child on the configured address and stops it with the supervisor. A missing or unstartable
 gateway warns and leaves the supervisor running, exactly like the optional web window. The
 listener binds loopback only and serves one route; it never terminates TLS and never opens a
@@ -421,8 +423,8 @@ writes proxy configuration.
 ### 4. Enroll and verify
 
 ```sh
-vowp agent enroll --wss wss://home.example.com/agent/v1 --code-file -
-vowp agent status
+stackspirit agent enroll --wss wss://home.example.com/agent/v1 --code-file -
+stackspirit agent status
 ```
 
 The agent offers the `vowp-agent/1` subprotocol on every connection. A missing or different
@@ -444,7 +446,7 @@ In system mode, a proxy certificate whose fingerprint differs from the value rec
 value through a trusted channel first — out of band, not from the same connection and not from a
 page served by that host. Then record it as your normal user:
 
-    vowp agent trust --fingerprint sha256:<64-lowercase-hex>
+    stackspirit agent trust --fingerprint sha256:<64-lowercase-hex>
 
 The command is local-only: it reads and rewrites only the private `agent.json` (0600), never
 connects to the home, never runs the agent, and never reads or prints `node.key`, a surface token
@@ -473,8 +475,8 @@ placement = "any"
 Then check the effective policy and dispatch:
 
 ```sh
-vowp offload policy
-vowp offload status
+stackspirit offload policy
+stackspirit offload status
 ```
 
 The assignment carries `result_transport`, so the value wins for the whole run and neither side
@@ -514,9 +516,9 @@ bounded history in the global database. Raw `host_samples` stay for 48 hours; th
 for 30 days. A gap is a gap, not a zero.
 
 ```sh
-vowp capacity history
-vowp capacity history --since 7d --bucket 1h
-vowp capacity history --json
+stackspirit capacity history
+stackspirit capacity history --since 7d --bucket 1h
+stackspirit capacity history --json
 ```
 
 `--since` accepts a duration or date and defaults to 24 hours. `--bucket` is `5m` (the stored
@@ -549,19 +551,19 @@ The zeroes stand for byte counts; the real document never invents a measurement.
 home-only and opens the store read-only, so it writes no target, advice, ledger or rollup row and
 is safe while the supervisor runs. A `--since` before the retained window is clamped to the
 oldest retained bucket and the command says so. Cost is not duplicated here: use
-`vowp cost --by day`.
+`stackspirit cost --by day`.
 
 ## Routine checks
 
 | Check | Command |
 |---|---|
-| Enrollment and connection | `vowp agent status` |
-| State-directory mode and copied logins | `vowp agent doctor` |
-| Service unit and manager state | `vowp agent service status` |
-| Surface prefix, expiry and pending rotation | `vowp surface ls` |
-| Node reachability and mapped projects | `vowp node show <name>` |
-| Effective offload and bundle policy | `vowp offload policy` |
-| Capacity history and gaps | `vowp capacity history --since 7d --bucket 1h` |
+| Enrollment and connection | `stackspirit agent status` |
+| State-directory mode and copied logins | `stackspirit agent doctor` |
+| Service unit and manager state | `stackspirit agent service status` |
+| Surface prefix, expiry and pending rotation | `stackspirit surface ls` |
+| Node reachability and mapped projects | `stackspirit node show <name>` |
+| Effective offload and bundle policy | `stackspirit offload policy` |
+| Capacity history and gaps | `stackspirit capacity history --since 7d --bucket 1h` |
 
 Next: [Control machines and extra machines](multi-node.md) for `--node` and tunnels, or the
 [security model](../security.md) for the trust boundaries and the hardening checklist.

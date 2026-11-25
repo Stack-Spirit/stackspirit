@@ -4,9 +4,9 @@ This walkthrough starts with a home that is already installed (see [Install](ins
 with one project running and an orchestrator session you can reach from the control machine or the
 phone. It uses one home for every project; there is no separate "laptop-only" mode.
 
-> **Status: current.** `vowp init`, `vowp doctor`, `vowp project`, `vowp job`, `vowp graph`,
-> `vowp plan`, `vowp up`, `vowp down`, `vowp status`, `vowp fleet`, `vowp board`, `vowp attach`,
-> `vowp orchestrator` commands and `vowp chat` are implemented. The examples below use placeholders:
+> **Status: current.** `stackspirit init`, `stackspirit doctor`, `stackspirit project`, `stackspirit job`, `stackspirit graph`,
+> `stackspirit plan`, `stackspirit up`, `stackspirit down`, `stackspirit status`, `stackspirit fleet`, `stackspirit board`, `stackspirit attach`,
+> `stackspirit orchestrator` commands and `stackspirit chat` are implemented. The examples below use placeholders:
 > replace them with names from your own home.
 
 | Placeholder | Replace with |
@@ -24,12 +24,12 @@ phone. It uses one home for every project; there is no separate "laptop-only" mo
 On the home:
 
 ```sh
-vowp doctor
-vowp fleet status
+stackspirit doctor
+stackspirit fleet status
 ```
 
 `doctor` must report no `fail`. `fleet status` shows the home, the projects it knows and whether the
-supervisor is running. On a control machine, the same `vowp fleet status` goes over SSH to the home and
+supervisor is running. On a control machine, the same `stackspirit fleet status` goes over SSH to the home and
 caches the answer with an `as of` time.
 
 ## 2. Register a project
@@ -40,7 +40,7 @@ A project is one git repository registered on the home. For a repository that is
 cd <your-repo>
 git status
 git remote -v
-vowp init --name <your-project>
+stackspirit init --name <your-project>
 ```
 
 `init` writes `vowp.toml`, the framework files and `.vowp/`, creates the project database under
@@ -56,8 +56,8 @@ git commit -m "chore: initialise VOWP"
 For a repository that already has `vowp.toml`, register it without rewriting files:
 
 ```sh
-vowp project add <your-repo>
-vowp project ls
+stackspirit project add <your-repo>
+stackspirit project ls
 ```
 
 The registry commands work from any directory on the home; a path passed to `project add` is a path
@@ -67,18 +67,18 @@ One command can clone, initialise, register and create the orchestrator. The clo
 `<home-parent>/<name>`, where `<home-parent>` is the directory above `~/.vowp`:
 
 ```sh
-vowp project add --git <your-url> --init --orchestrator chat --json
+stackspirit project add --git <your-url> --init --orchestrator chat --json
 ```
 
 The JSON summary names the project, its checkout path, whether this command initialised it and the
-orchestrator card (`null` when `--orchestrator` is omitted). A later `vowp up` starts the supervisor;
+orchestrator card (`null` when `--orchestrator` is omitted). A later `stackspirit up` starts the supervisor;
 the chat orchestrator is reachable through its printed `join.chat` command. Use
 `--orchestrator opencode` or `--orchestrator claude-code` to start a hosted app and its keeper
 instead of `chat`.
 
 To move that orchestrator to an enrolled agent node later, use
-`vowp orchestrator move <your-project> --node <node>`; `--home` moves it back. The move keeps the
-same session id and the one home log. `vowp orchestrator endpoint <your-project> --json` returns
+`stackspirit orchestrator move <your-project> --node <node>`; `--home` moves it back. The move keeps the
+same session id and the one home log. `stackspirit orchestrator endpoint <your-project> --json` returns
 the local UI connection document when you need one; see
 [Operating a home](operating.md#orchestrators).
 
@@ -114,52 +114,52 @@ a value in `vowp.toml`. The full grammar and the generic-CLI form are in
 Start the one supervisor for the home:
 
 ```sh
-vowp up
-vowp status
-vowp fleet status
-vowp fleet queue
+stackspirit up
+stackspirit status
+stackspirit fleet status
+stackspirit fleet queue
 ```
 
-`vowp up` ensures `vowp-home` (the `board` and `capacity` windows) and one `vowp-<project>` session
+`stackspirit up` ensures `vowp-home` (the `board` and `capacity` windows) and one `vowp-<project>` session
 for every non-archived project (including paused ones), then detaches the supervisor. Run it from the
-home, or from a checkout to register that checkout on the way. `vowp up --foreground` is what the systemd unit runs; `--once` runs one tick
+home, or from a checkout to register that checkout on the way. `stackspirit up --foreground` is what the systemd unit runs; `--once` runs one tick
 for a smoke test.
 
-When an enrolled agent node is online, `vowp fleet status` adds a `cluster:` line with the pooled
+When an enrolled agent node is online, `stackspirit fleet status` adds a `cluster:` line with the pooled
 workers and summed RAM, CPU and free disk. A single home reports only its own capacity.
 
-`vowp up` also starts the loopback web window as a separate `vowp-daemon` child, prints
+`stackspirit up` also starts the loopback web window as a separate `vowp-daemon` child, prints
 `web window: http://127.0.0.1:<port>/`, and prints the control-machine command for that actual
 port:
 
 ```text
 web window: http://127.0.0.1:54321/
-remote window: vowp tunnel open window --remote-port 54321
+remote window: stackspirit tunnel open window --remote-port 54321
   local URL: http://127.0.0.1:<local-port>/ (the command prints the chosen port)
 ```
 
 Open the first URL on the home. From a laptop or phone, configure the home once as a control
-machine (`vowp control init --name home <home-ssh-target>`), run the printed
-`vowp tunnel open window --remote-port 54321`, and open the local loopback URL it prints. Pass
+machine (`stackspirit control init --name home <home-ssh-target>`), run the printed
+`stackspirit tunnel open window --remote-port 54321`, and open the local loopback URL it prints. Pass
 `--local-port <n>` when you need a fixed local port. The daemon binds `127.0.0.1` only and the
-existing managed SSH forward is the only route; no public port is opened. `vowp down` stops the
+existing managed SSH forward is the only route; no public port is opened. `stackspirit down` stops the
 window together with the supervisor. The window serves one project: run `up` from that checkout,
 or pass `--project <name>`, when the home has several. If the daemon binary is not installed next
-to `vowp` or on `PATH`, `vowp up` warns and continues without the window; the supervisor is not
+to `vowp` or on `PATH`, `stackspirit up` warns and continues without the window; the supervisor is not
 optional.
 
 Reads need no token. The writes on the pages use the `VOWP_API_TOKEN` the supervisor inherited:
-set it in the environment that runs `vowp up`, enter it in the page's unlock panel, and the page
+set it in the environment that runs `stackspirit up`, enter it in the page's unlock panel, and the page
 keeps it in `sessionStorage` and never in the URL. It unlocks the inbox answer and session switch
 writes only.
 
-`vowp status` is the short screen; `vowp fleet status` is the fleet view, and
-`vowp fleet queue` explains why a ready job is not running. `vowp board --once` prints the board once.
+`stackspirit status` is the short screen; `stackspirit fleet status` is the fleet view, and
+`stackspirit fleet queue` explains why a ready job is not running. `stackspirit board --once` prints the board once.
 With tmux:
 
 ```sh
-vowp attach
-vowp attach <job-id>
+stackspirit attach
+stackspirit attach <job-id>
 ```
 
 The job window is a read-only follower of the session log; it is not a control channel.
@@ -167,7 +167,7 @@ The job window is a read-only follower of the session log; it is not a control c
 ## 5. Add a first job
 
 ```sh
-vowp job add \
+stackspirit job add \
   --id hello-docs \
   --title "Write the hello page" \
   --kind docs \
@@ -204,16 +204,16 @@ how to run it, and where the tests live.
 The page exists, the links resolve, and the report has `status: done`.
 BRIEF
 
-vowp graph
-vowp job show hello-docs --gates --runs
+stackspirit graph
+stackspirit job show hello-docs --gates --runs
 ```
 
 A healthy job moves through `pending → ready → running → gating → reviewing → merging → done`. If it
 needs a human it parks and opens an inbox item:
 
 ```sh
-vowp inbox ls
-vowp inbox answer <id> "Use the existing title style"
+stackspirit inbox ls
+stackspirit inbox answer <id> "Use the existing title style"
 ```
 
 The full brief, gate and report rules are in [Writing jobs](jobs.md).
@@ -224,25 +224,25 @@ The orchestrator is a long-lived session that reads the fleet snapshot, reports 
 before it changes anything. Create one on the home:
 
 ```sh
-vowp orchestrator new --name main --app chat --executor <your-executor>
-vowp orchestrator ls
+stackspirit orchestrator new --name main --app chat --executor <your-executor>
+stackspirit orchestrator ls
 ```
 
 For an app surface, use `--app opencode` or `--app claude-code`; the command prints the desktop,
-phone and `vowp chat` join instructions and writes only project-local configuration under
+phone and `stackspirit chat` join instructions and writes only project-local configuration under
 `~/.vowp/orchestrators/<name>/`. It never edits your global app config. Use the printed session id:
 
 ```sh
-vowp chat <session-id>
+stackspirit chat <session-id>
 ```
 
-`vowp chat` takes the session lease and gives you a plain terminal surface. The useful slash
+`stackspirit chat` takes the session lease and gives you a plain terminal surface. The useful slash
 commands are:
 
 | Command | Effect |
 |---|---|
 | `/status` | Show the session, executor, machine and lease state. |
-| `/takeover` | Take the lease from another live surface in an interactive chat. After `/follow`, reopen with `vowp chat <id> --takeover`. |
+| `/takeover` | Take the lease from another live surface in an interactive chat. After `/follow`, reopen with `stackspirit chat <id> --takeover`. |
 | `/follow` | Drop to read-only follow mode. |
 | `/switch <executor>` | Move the next turn to another harness or model. |
 | `/capsule` | Write a handoff capsule now. |
@@ -250,7 +250,7 @@ commands are:
 
 If the session has no executor and the worker profile has no rung, its first turn needs
 `/switch <executor>`.
-From a control machine, run the same `vowp chat <session-id>`; the CLI routes the command to the home
+From a control machine, run the same `stackspirit chat <session-id>`; the CLI routes the command to the home
 over SSH. From a phone, SSH to the home and run it there; see [Using your phone](phone.md).
 
 ## 7. Stop cleanly
@@ -258,14 +258,14 @@ over SSH. From a phone, SSH to the home and run it there; see [Using your phone]
 On the home:
 
 ```sh
-vowp down
+stackspirit down
 ```
 
 `down` writes a stop request and waits up to 30 seconds for the lock. Running runs are interrupted and
 re-queued as `stalled`, not failed; the tmux windows are left for inspection unless you pass
 `--kill-windows`. The orchestrator session stays on the home and can be resumed later.
 
-Restarting with `vowp up` reconciles from the databases and session logs; nothing needs to be replayed
+Restarting with `stackspirit up` reconciles from the databases and session logs; nothing needs to be replayed
 by hand.
 
 ## Where to go next

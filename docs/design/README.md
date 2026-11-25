@@ -9,6 +9,14 @@ and the command line. The **v0.1 implementation spec** is still the base; the **
 surfaces, secrets, lifecycle and setup changes. `plan.md` is the original design summary;
 `decisions.md` records every place where the v0.1 detailed spec tightens or clarifies it.
 
+## StackSpirit rebrand (v6)
+
+[`stackspirit-engine-rebrand.md`](stackspirit-engine-rebrand.md) is the v6 plan: `stackspirit` is the
+primary CLI, `vowp` the supported alias, and no schema or wire format changes. The operator view is
+the [migration guide](../guides/stackspirit-migration.md) and the
+[deprecation policy](../deprecation-policy.md). The pages in this directory keep the original
+`vowp` command spelling because they are historical specifications of the shared command tree.
+
 ## How to use it
 
 **If you are a contributor**: start with `architecture.md`, then the crate file for the area you want

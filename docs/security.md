@@ -1,5 +1,7 @@
 # Security model
 
+> **VOWP compatibility.** The security model is unchanged by the rename: `.vowp/`, the vault user and existing secrets keep their names, and `vowp` commands behave identically. See the [StackSpirit migration guide](guides/stackspirit-migration.md) and the [deprecation policy](deprecation-policy.md).
+
 VOWP runs agents that edit code, execute commands and, through promotion, can change what is live. The
 security model is built around five limits: the home is the only writer, VOWP drives stock harnesses,
 every job is confined to its own worktree and owned paths, secrets are named and injected only where
@@ -9,7 +11,7 @@ This page describes the model and what it does **not** protect against. The vuln
 policy is in [`SECURITY.md`](../SECURITY.md).
 
 > **Status: current.** The home/control split, leases, MCP write checks, secrets, the daemon's two
-> token-gated writes, lifecycle, backup, gates, promotion, `vowp doctor` and the v0.4 agent node
+> token-gated writes, lifecycle, backup, gates, promotion, `stackspirit doctor` and the v0.4 agent node
 > (WSS, service, rotation, bundle and capacity history) on this page are implemented, and these
 > rules are binding on the code on `main`. The security review checklist and the rollback drill
 > are recorded in [`releases/v0.4-hardening.md`](releases/v0.4-hardening.md); the owner live Mac
@@ -48,7 +50,7 @@ Trust boundaries:
   directories, and to stop at a human approval before public actions.
 - The **home** is authoritative. A control machine and the apps and MCP instance on it never open a
   VOWP database file; every VOWP write goes to the home (over SSH or through the home's MCP server).
-  On the home, the `vowp mcp` server is a `vowp` process: it reads and writes the home database
+  On the home, the `stackspirit mcp` server is a `vowp` process: it reads and writes the home database
   directly, and every write tool checks the session lease. The one exception on a control machine is
   its own snapshot cache, spool, surface state and tunnel table.
 - An **agent node** is trusted to run the harnesses the home assigns and to keep its own node key.
@@ -68,7 +70,7 @@ Trust boundaries:
 | Rule | Enforcement |
 |---|---|
 | **One writer per session** | `sessions/<id>/log.jsonl` is appended only on the home, by the session service or the hidden `session ingest` path. `seq` has no gaps or duplicates; ingest is idempotent by event id. |
-| **The home is authoritative** | A control machine and the apps and MCP instance on it never write a VOWP DB file; their commands route to the home. On the home, the `vowp mcp` server reads and writes the home database directly, and every write tool checks the session lease. A control machine keeps only a snapshot cache, a spool and local surface/tunnel state. |
+| **The home is authoritative** | A control machine and the apps and MCP instance on it never write a VOWP DB file; their commands route to the home. On the home, the `stackspirit mcp` server reads and writes the home database directly, and every write tool checks the session lease. A control machine keeps only a snapshot cache, a spool and local surface/tunnel state. |
 | **No public listener** | The supervisor opens no public HTTP, SSE or API port. The opencode app host and the one-time secret paste page listen on loopback only, and a control machine reaches both through an SSH tunnel; the secret vector is one-time. Claude Remote Control opens no local port: it connects outbound to claude.ai from the home. The optional WSS ingress is a loopback WebSocket listener; only the owner's TLS reverse proxy is public. |
 | **Two daemon writes** | The loopback daemon serves every read without a token. `POST /api/v1/inbox/{id}/answer` and the local `POST /api/v1/sessions/{id}/switch` require `Authorization: Bearer <VOWP_API_TOKEN>`; a daemon started without the variable answers `503` and writes nothing. The token is read at startup, compared in constant time, never logged, echoed or put in a URL, and rotation is a daemon restart. |
 | **No credentials in configuration** | `vowp.toml` holds no token values; `env_pass` contains environment-variable **names**; `HarnessConfig` has no value fields. VOWP stores the values it manages in the secret store, and a listed `env_pass` name may also be forwarded from the process environment (see [Secrets](#secrets)). `vowp doctor` reports presence by name and never calls the network. This covers configuration and argv, not every stored byte: exact-value redaction covers every session event path (including a switch turn and the `session watch` importer), the snapshot, the supervisor log, command-gate evidence and ledger rows. A transformed or encoded copy is not caught (see [Redaction](#redaction)). The app service password is read only by the explicit local endpoint command (see [Endpoint discovery](#endpoint-discovery)); it never enters a card, `snapshot.json`, `fleet status`, `orchestrator ls`, a log or an error. |
@@ -76,8 +78,8 @@ Trust boundaries:
 | **cwd allow-list** | Before a run, the session layer checks that the working directory is inside the job worktree, the project path, the worktree root, `[node].cwd_allow` or the VOWP-owned orchestrator root `<VOWP_HOME>/orchestrators/<name>/`. Anything else, including paths elsewhere under `VOWP_HOME`, is refused. |
 | **Worktree isolation** | One worktree per job on branch `job/<id>`. The `owns_respected` gate checks the diff and uncommitted files against the job's globs; dispatch-time locks prevent overlapping owners from running together. |
 | **One active surface** | A lease row exists at most once per session. A surface without the current token can read in follow mode; every write is refused. A stale lease (60 s without heartbeat) is swept. Takeover drains the old turn, writes a capsule and cuts the old surface off. |
-| **MCP writes check the lease** | Every `vowp mcp` write tool calls `surface::check_lease` with the token from the app's project-local token file. A moved session's old app gets the read-only notice; read tools keep working. |
-| **Project-local app config** | `vowp orchestrator new` writes only under `~/.vowp/orchestrators/<name>/`, never the user's global app config. The opencode pair link is single-use, expires, and is treated as a secret. |
+| **MCP writes check the lease** | Every `stackspirit mcp` write tool calls `surface::check_lease` with the token from the app's project-local token file. A moved session's old app gets the read-only notice; read tools keep working. |
+| **Project-local app config** | `stackspirit orchestrator new` writes only under `~/.vowp/orchestrators/<name>/`, never the user's global app config. The opencode pair link is single-use, expires, and is treated as a secret. |
 | **tmux safety** | Only tagged `vowp-` windows are touched. Every window is a read-only view. There is no respawn or keystroke API; `capture-pane` is display-only and never drives a decision. |
 | **Guarded promotion** | Guards → serving bank → diff → approval → deploy → probe → rollback record. A refusal is staged, never retried with a weakened check. |
 | **Nothing public without a human** | Publishing, deploying, visibility changes, releases and new accounts require an approval inbox item answered by a human, unless the environment is explicitly configured with `approval = "policy"` and the operator passes `--yes`. |
@@ -96,12 +98,12 @@ error messages, commands and the setup plan.
 |---|---|---|---|
 | **vault user** | The `vowp-vault` Unix user and the helper exist, and one sudoers line lets the runtime user run the helper as `vowp-vault`. | `/home/vowp-vault/secrets/<NAME>`, mode 0600. | `vowp-vault` |
 | **basic** | No sudo or no vault user (common on a VPS the owner does not administer as root). | `~/.vowp/secrets/<NAME>`, mode 0600. | the runtime user (`vowp` or the SSH user) |
-| **encrypted** | The owner opts in with `vowp secret upgrade --encrypted`. | `~/.vowp/secrets/encrypted/<NAME>`, age ciphertext, mode 0600; identity in `~/.vowp/secrets/age.key`, mode 0600. | the runtime user |
+| **encrypted** | The owner opts in with `stackspirit secret upgrade --encrypted`. | `~/.vowp/secrets/encrypted/<NAME>`, age ciphertext, mode 0600; identity in `~/.vowp/secrets/age.key`, mode 0600. | the runtime user |
 
 `~/.vowp/secrets/mode` contains `vault`, `basic` or `encrypted` (0600); an absent file means basic
-mode, so the no-sudo path writes no marker. `vowp secret upgrade` prints the one sudo command that
+mode, so the no-sudo path writes no marker. `stackspirit secret upgrade` prints the one sudo command that
 creates the vault user and moves the files; without sudo, VOWP stays in basic mode.
-`vowp secret upgrade --encrypted` encrypts every basic value before it removes any plaintext copy
+`stackspirit secret upgrade --encrypted` encrypts every basic value before it removes any plaintext copy
 and writes the mode file last. It refuses vault-user mode and is idempotent when already encrypted;
 `SecretInfo` metadata (`last4`, timestamps) is preserved. The encrypted backend is the age keyfile
 only; `systemd-creds` is not implemented in this tree.
@@ -124,19 +126,19 @@ keystore.
 ### Commands
 
 ```sh
-vowp secret set <NAME>          # hidden prompt; never an argument, never echoed
-vowp secret set <NAME> --stdin  # read the value from stdin; no TTY required
-vowp secret ls                  # name and last-4 only, plus `storage: <mode>`
-vowp secret ls --json           # {"mode":"…","secrets":[…]} with no values
-vowp secret rm <NAME> --yes
-vowp secret upgrade             # basic -> vault user
-vowp secret upgrade --encrypted # basic -> encrypted at rest
-vowp secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
+stackspirit secret set <NAME>          # hidden prompt; never an argument, never echoed
+stackspirit secret set <NAME> --stdin  # read the value from stdin; no TTY required
+stackspirit secret ls                  # name and last-4 only, plus `storage: <mode>`
+stackspirit secret ls --json           # {"mode":"…","secrets":[…]} with no values
+stackspirit secret rm <NAME> --yes
+stackspirit secret upgrade             # basic -> vault user
+stackspirit secret upgrade --encrypted # basic -> encrypted at rest
+stackspirit secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
 ```
 
 - `set` validates the name (`^[A-Z][A-Z0-9_]{0,63}$`), reads the value from a hidden prompt (no TTY →
-  exit 5 with "run it in a terminal, pipe the value with `vowp secret set NAME --stdin`, or use
-  `vowp secret request`"), writes atomically with mode 0600 (or age ciphertext in encrypted mode),
+  exit 5 with "run it in a terminal, pipe the value with `stackspirit secret set NAME --stdin`, or use
+  `stackspirit secret request`"), writes atomically with mode 0600 (or age ciphertext in encrypted mode),
   and records only the last four characters in the index. The value is never logged, never in argv and
   never in an event.
 - With `--stdin` the value comes from the process stdin, never argv; exactly one trailing `\n` or
@@ -158,7 +160,7 @@ vowp secret request <NAME>      # one-time 127.0.0.1 paste page, URL and expiry
 
 ### Endpoint discovery
 
-`vowp orchestrator endpoint <name> --json` and `vowp agent orchestrator endpoint <name> --json`
+`stackspirit orchestrator endpoint <name> --json` and `stackspirit agent orchestrator endpoint <name> --json`
 return `OrchestratorEndpoint`. The app's service password is returned only by these explicit
 local commands, and only when the app host is live on that machine; the home command never reads
 a node's files and a node-hosted document has `auth: null`. The password appears in no card,
@@ -295,7 +297,7 @@ gated by one bearer token, not by a user account.
   item with `answered_by = "web"` and, when the item belongs to a job, queues the same
   `answer_inbox` request as the CLI; the supervisor applies the request and the browser never
   changes job state directly. The switch runs the same `SessionService` switch as
-  `vowp session switch` against that store, with the CLI's guards and a five-second drain.
+  `stackspirit session switch` against that store, with the CLI's guards and a five-second drain.
   It is local-node only: the request has no node field and the daemon opens no SSH path.
 - **Force.** A running session is refused with `409` unless the request sets
   `force: true`. Force lets the current turn drain for up to five seconds and then stops it;
@@ -324,7 +326,7 @@ credential without a new design.
 - snapshot content and spooled events on a control machine.
 
 Treat both directories like a work journal: back them up if you need them, restrict access to your
-user account, and never paste raw logs into a public issue. `vowp backup` includes the session content
+user account, and never paste raw logs into a public issue. `stackspirit backup` includes the session content
 but not secrets; the control cache is disposable and is not part of a home backup.
 
 VOWP does not encrypt `~/.vowp` or `~/.vowp-control` at rest, except for the secret values stored in
@@ -346,8 +348,8 @@ plaintext. Disk encryption and account permissions are your responsibility.
   immediate child, so a shell cannot leave an orphan running; harness runs are stopped through the
   adapter's interrupt/stop path.
 - **Capacity never kills work.** Admission and brakes stop new runs; capacity itself does not signal
-  an existing run. Other paths can stop a run: switch/takeover, `vowp down`, `vowp job park` and
-  `vowp job cancel`, and stall detection or a keeper restart. Those are explicit operator, keeper or
+  an existing run. Other paths can stop a run: switch/takeover, `stackspirit down`, `stackspirit job park` and
+  `stackspirit job cancel`, and stall detection or a keeper restart. Those are explicit operator, keeper or
   lifecycle actions, not capacity decisions.
 - **No real home/network in tests.** The test suite uses temp directories, a private tmux socket **and**
   a private `TMUX_TMPDIR`, fake harness scripts and recorded fixtures. Running `cargo test` is safe
@@ -357,23 +359,23 @@ plaintext. Disk encryption and account permissions are your responsibility.
 
 ## Apps, MCP and leases
 
-- The opencode app host runs on the home and binds loopback. The desktop joins through `vowp tunnel`
+- The opencode app host runs on the home and binds loopback. The desktop joins through `stackspirit tunnel`
   and the app's own pairing flow; the phone runs `opencode --server` against the loopback port over
   SSH. No public port is opened. The opencode pair link is single-use and expires in five minutes;
   treat it as a secret. Claude Remote Control also runs on the home, but it opens no local port: the
   `claude remote-control` process connects outbound to claude.ai, and the desktop joins at
   `https://claude.ai/code` or the phone in the Claude mobile app. No VOWP tunnel or pair link is
   involved.
-- `vowp orchestrator new` writes only the orchestrator's project-local config under
+- `stackspirit orchestrator new` writes only the orchestrator's project-local config under
   `~/.vowp/orchestrators/<name>/`: `opencode.json` or `.mcp.json`, `AGENTS.md`, `orchestrator.json`,
   the lease token, host state, the transcript cursor (`mirror.json`), the keeper log
   (`keeper.log`) and the keeper pid (`keeper.pid`). It does not edit the user's global app config.
-- `vowp mcp` is a stdio server. Every write tool reads the token file and checks the session lease; a
+- `stackspirit mcp` is a stdio server. Every write tool reads the token file and checks the session lease; a
   stale token cannot write. The actor is recorded as `session:<id>/surface:<surface-id>`.
 - The old surface of a takeover is not closed by VOWP (it cannot close another vendor's window). Its
   VOWP write tools refuse with the takeover notice; its reads continue.
 - The opencode build may report an MCP server as connected without exposing its tools to the model.
-  Configuration is not proof of tool availability; `vowp chat` and Claude Code are the proven tool
+  Configuration is not proof of tool availability; `stackspirit chat` and Claude Code are the proven tool
   paths. Do not treat "connected" as a security control.
 
 ## tmux
@@ -384,11 +386,11 @@ The window manager is deliberately narrow:
   the home (`vowp-<hash>`) and every internal command runs with `-L <socket>` and
   `TMUX_TMPDIR=<home>/tmux`. A command with no private socket, or with the literal socket `default`,
   is refused before tmux is spawned.
-- `vowp attach` execs its tmux client through
+- `stackspirit attach` execs its tmux client through
   `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=<home>/tmux`, so it reaches the private server even when VOWP
   was started from inside your own tmux session.
-- At `vowp up` the socket and the tmux server pid are recorded in `<home>/tmux-server`.
-  `vowp down --kill-windows`, `kill_session` and `kill_window` refuse when the recorded socket or pid
+- At `stackspirit up` the socket and the tmux server pid are recorded in `<home>/tmux-server`.
+  `stackspirit down --kill-windows`, `kill_session` and `kill_window` refuse when the recorded socket or pid
   does not match the live server, so a server VOWP did not create is never cleaned up.
 - It creates or attaches only the `vowp-home` and `vowp-<project>` sessions and tagged windows.
 - It never kills untagged windows, never respawns a pane and never sends keystrokes. There is no
@@ -408,12 +410,12 @@ server when the named directory does not exist.
 
 - A control machine needs key-only SSH to the home. `BatchMode=yes` means a missing key fails instead
   of prompting; a failed key check is a stop, not a reason to enable passwords.
-- `vowp control init` writes `~/.vowp-control/control.json` (0600) with the home target and the absolute
+- `stackspirit control init` writes `~/.vowp-control/control.json` (0600) with the home target and the absolute
   remote home. A control machine installs no supervisor and opens no database.
-- `vowp tunnel open` spawns `ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o
+- `stackspirit tunnel open` spawns `ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o
   ServerAliveInterval=15 -L 127.0.0.1:<local>:<host>:<remote>` in its own process group and records
   the pid in `~/.vowp-control/tunnels.json` (0600). Tunnels are local to the machine that uses them;
-  the home refuses `vowp tunnel`.
+  the home refuses `stackspirit tunnel`.
 - `--node` re-executes a command over SSH with `BatchMode=yes` and a connect timeout. It does not open
   a port or send a token. Arguments are single-quote escaped into one remote command string; no
   argument is interpolated unquoted.
@@ -472,7 +474,7 @@ policy is also asserted in
 
 ### Service files
 
-`vowp agent service install` writes exactly one user-owned unit: a launchd `LaunchAgent` at
+`stackspirit agent service install` writes exactly one user-owned unit: a launchd `LaunchAgent` at
 `~/Library/LaunchAgents/dev.vowp.agent.plist` or a systemd user unit under
 `$XDG_CONFIG_HOME/systemd/user/vowp-agent.service` (else `~/.config/systemd/user/`). The file is
 0600. It contains the binary path, `agent run --foreground --service`, `VOWP_AGENT_HOME` and the
@@ -517,7 +519,7 @@ another uid or is group- or world-writable; group and world read/execute remain 
 read-only shared mirror may be group-readable. The agent's clone and worktrees stay private. Do
 not run as root or install a system-wide unit or a root `LaunchDaemon`.
 
-`vowp agent doctor` checks the state directory's owner and mode, the service unit and the run
+`stackspirit agent doctor` checks the state directory's owner and mode, the service unit and the run
 marker, the local surface states and copied login material. It reports file **names** only
 (`.ssh`, `.claude`, `.env`, `.git-credentials`, `auth.json`) and never reads their contents.
 Named test: `agent_doctor_reports_warnings_by_name_only` in
@@ -527,8 +529,8 @@ Named test: `agent_doctor_reports_warnings_by_name_only` in
 
 A surface token is a `vowp_surf_` secret with a 30-day life. The home's `surface_tokens` rows hold
 only the SHA-256 hash, the 12-character display prefix, the scopes, the timestamps and the
-revocation time — never the token. `vowp surface rotate` prints the prefix and the two expiries,
-never the token; `vowp surface ls` and `agent status` print the prefix and expiry, never the token
+revocation time — never the token. `stackspirit surface rotate` prints the prefix and the two expiries,
+never the token; `stackspirit surface ls` and `agent status` print the prefix and expiry, never the token
 or hash.
 
 There are exactly two plaintext copies:
@@ -636,12 +638,12 @@ Named test: `bundle_result_manifest_and_run_row_carry_no_absolute_path_or_secret
 
 ## Lifecycle and backup
 
-- `production`, `truth`, `open_work` and `secrets` are never auto-deleted. `vowp gc --apply` only
+- `production`, `truth`, `open_work` and `secrets` are never auto-deleted. `stackspirit gc --apply` only
   collects `closed_session`, `run_output`, `worktree`, `job_window`, `sample` and expired `cache`
   entries.
 - A backup includes the global database, every project database, the session content and the catalog,
   with a manifest of SHA-256 hashes and row counts. It **never** includes secrets, encrypted or not;
-  restore them with `vowp secret set`.
+  restore them with `stackspirit secret set`.
 - `--encrypt` uses the external `age` binary. A missing tool is a clear exit 5, never a silent
   unencrypted copy. The external `rsync` and `git` handle offsite copies with argv, not a shell.
 - Restore verifies hashes and row counts in a staging directory before swapping a fresh home into
@@ -678,7 +680,7 @@ Be explicit about the limits:
 - [ ] Run the home as a dedicated non-root user with access only to the projects it needs.
 - [ ] Use key-only SSH in batch mode; disable password authentication once keys work.
 - [ ] Keep `~/.vowp` and `~/.vowp-control` out of shared backups and out of any repository.
-- [ ] Open no public port. Reach the opencode app host and the secret page through `vowp tunnel` only;
+- [ ] Open no public port. Reach the opencode app host and the secret page through `stackspirit tunnel` only;
       Claude Remote Control uses an outbound connection to claude.ai and no tunnel.
 - [ ] Put provider values in the secret store or the service environment; never in `vowp.toml`, a
       command argument or a chat.
@@ -711,7 +713,7 @@ Be explicit about the limits:
       [`crates/vowp-agent/tests/service.rs`](../crates/vowp-agent/tests/service.rs).
 - [ ] On a separate agent account, accept that the harness can read that account's own node key
       and surface tokens. Use its own harness login and provider environment; run
-      `vowp agent doctor` and check that it reports copied logins by name only
+      `stackspirit agent doctor` and check that it reports copied logins by name only
       (`agent_doctor_reports_warnings_by_name_only` in
       [`crates/vowp-cli/tests/doctor.rs`](../crates/vowp-cli/tests/doctor.rs)).
 - [ ] Keep surface-token rotation bounded and auditable. The two plaintext copies are the queued

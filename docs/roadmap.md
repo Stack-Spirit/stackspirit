@@ -216,6 +216,14 @@ enforcement does not exist, so ownership is cooperative for a UI that calls the 
 directly. No version, tag or date is promised. See [`design/v0.5.1/scope.md`](design/v0.5.1/scope.md)
 and [`concepts/home-and-surfaces.md`](concepts/home-and-surfaces.md#who-owns-a-session).
 
+## v6 — StackSpirit names (implemented in the tree, not released)
+
+The CLI, daemon, home, agent, MCP key for new orchestrators, installer and documentation use the
+StackSpirit names; `vowp` and every legacy path remain supported for all of v6. There is no schema
+or wire change. See the [migration guide](guides/stackspirit-migration.md) and the
+[deprecation policy](deprecation-policy.md). Removing a legacy name is a v7 decision and is not
+planned here.
+
 ## Open follow-ups
 
 These follow-ups are drawn from the current code and the 0.3.0 known limitations. The v0.5 rows

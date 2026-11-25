@@ -4,14 +4,14 @@ A job is the unit of work in VOWP. It has a brief (the contract), owned paths (t
 (the checks), a report (the result) and a state in the graph. This guide covers creating a job, writing
 a brief that an agent can follow, choosing gates that prove the work, and reading the result.
 
-> **Status: current.** The `vowp job`, `vowp graph` and supervisor commands (`vowp up`, `vowp status`,
-> `vowp fleet status`) are implemented. A job belongs to one project on the home; with several
+> **Status: current.** The `stackspirit job`, `stackspirit graph` and supervisor commands (`stackspirit up`, `stackspirit status`,
+> `stackspirit fleet status`) are implemented. A job belongs to one project on the home; with several
 > projects, select the checkout or pass `--project <name>`.
 
 ## Create a job
 
 ```sh
-vowp job add \
+stackspirit job add \
   --id example-graph \
   --title "Graph engine: DAG, state machine, scheduler" \
   --kind build \
@@ -48,7 +48,7 @@ It writes the generated front-matter plus your body to `.vowp/jobs/<id>/brief.md
 edges, and leaves the job `pending`; on success it prints `added job <id> (pending)`. It exits 4 if the
 id already exists.
 
-`vowp job update <id>` changes `--title`, `--priority`, `--profile`, `--owns`, `--reads`, `--gates`,
+`stackspirit job update <id>` changes `--title`, `--priority`, `--profile`, `--owns`, `--reads`, `--gates`,
 `--add-needs`, `--remove-needs` or `--note`. A job in `running`, `gating`, `reviewing` or `merging` may
 not change `owns` or `gates`; finish or park it first.
 
@@ -141,7 +141,7 @@ rust_build = [
 ]
 ```
 
-Then `vowp job add --gates rust_build` uses it. A `cmd` gate runs with `sh -c` in the job worktree,
+Then `stackspirit job add --gates rust_build` uses it. A `cmd` gate runs with `sh -c` in the job worktree,
 merges stdout and stderr, records the exit code and the last 200 lines, and kills the process group at
 `timeout_secs` (default 1800). It can require a regex with `expect_pattern`.
 
@@ -229,15 +229,15 @@ woken.
 ## Inspecting and changing state
 
 ```sh
-vowp job ls
-vowp job show example-graph --runs --gates
-vowp job show example-graph --brief
-vowp job show example-graph --report
-vowp graph --mermaid
-vowp graph --export .vowp/graph.yaml
+stackspirit job ls
+stackspirit job show example-graph --runs --gates
+stackspirit job show example-graph --brief
+stackspirit job show example-graph --report
+stackspirit graph --mermaid
+stackspirit graph --export .vowp/graph.yaml
 ```
 
-`vowp job ls` hides terminal `done`, `cancelled` and `replanned` jobs unless you pass `--all`. `job show`
+`stackspirit job ls` hides terminal `done`, `cancelled` and `replanned` jobs unless you pass `--all`. `job show`
 prints the job and its edges; `--runs` adds recent runs with outcomes and costs, and `--gates` adds gate
 results with evidence tails. `--brief` and `--report` print the file contents and return immediately, so
 they are used on their own rather than combined with `--runs`/`--gates`. `graph --export` writes YAML;
@@ -247,13 +247,13 @@ Safe state changes:
 
 | Command | Effect |
 |---|---|
-| `vowp job retry <id>` | `failed → ready` (resets `attempts`, `continues` and `hang_restarts`), `parked → ready` or `stalled → running` (both reset only `continues`); other states exit 4. |
-| `vowp job park <id> [--reason t]` | Any non-terminal → `parked(manual)`; stops the run. Resume with `retry`. |
-| `vowp job cancel <id>` | Any non-terminal → `cancelled`; keeps branch and worktree for inspection. Dependents stay `pending` and are flagged `blocked-by-cancelled`. |
-| `vowp job nudge <id>` | Keeper request: ask the stalled run to continue. |
-| `vowp job restart <id>` | Keeper request: start a fresh process in the same session. |
-| `vowp job replan <id>` | Hand the work back to the planner (`replanned`). |
-| `vowp job fail <id> --reason t` | Keeper request: fail the job with a reason. |
+| `stackspirit job retry <id>` | `failed → ready` (resets `attempts`, `continues` and `hang_restarts`), `parked → ready` or `stalled → running` (both reset only `continues`); other states exit 4. |
+| `stackspirit job park <id> [--reason t]` | Any non-terminal → `parked(manual)`; stops the run. Resume with `retry`. |
+| `stackspirit job cancel <id>` | Any non-terminal → `cancelled`; keeps branch and worktree for inspection. Dependents stay `pending` and are flagged `blocked-by-cancelled`. |
+| `stackspirit job nudge <id>` | Keeper request: ask the stalled run to continue. |
+| `stackspirit job restart <id>` | Keeper request: start a fresh process in the same session. |
+| `stackspirit job replan <id>` | Hand the work back to the planner (`replanned`). |
+| `stackspirit job fail <id> --reason t` | Keeper request: fail the job with a reason. |
 
 The keeper commands write a request row; the next supervisor tick applies it. The `retry`, `park` and
 `cancel` mutations apply directly through the state machine when no supervisor is running; keeper
@@ -266,7 +266,7 @@ requests need a running supervisor to be applied.
 | `owns_respected` fails | The worker edited a path outside `owns`. | Move the change into an owned path or split the job. |
 | The report gate says "missing report" | The worker stopped before writing it, or wrote it in the wrong worktree. | The L2 continue prompt names the exact path; check `.vowp/jobs/<id>/report.md` in the job worktree. |
 | The report gate says "commit not found" | The report lists a sha from before a rebase, or a fabricated sha. | Commit first, then write the report with the real shas. |
-| A job waits in `ready` | No free slot, a capacity brake, an overlapping ownership lock, or a limited provider. | `vowp fleet queue` shows the waiting reason; `vowp capacity show` shows the target and brake. Do not force a second worker. |
+| A job waits in `ready` | No free slot, a capacity brake, an overlapping ownership lock, or a limited provider. | `stackspirit fleet queue` shows the waiting reason; `stackspirit capacity show` shows the target and brake. Do not force a second worker. |
 | A verifier keeps failing | The findings are vague or the job is too large. | Make the verifier's findings concrete; split the job. |
 | A fix loop repeats | The same command fails without new evidence. | After three identical fingerprints the job is moved to `failed` with a no-progress note; VOWP creates a `<id>-decision` job and opens a decision item in the inbox. Read the gate tails. |
 

@@ -2,19 +2,19 @@
 
 A schedule fires an action on a cron expression or a fixed interval: create a job from a template,
 trigger a loop (for example the planner), or run a command. Schedules are rows in the database, so
-`vowp schedule ls` shows their last and next run, and you can pause one without editing
+`stackspirit schedule ls` shows their last and next run, and you can pause one without editing
 `vowp.toml`.
 
-> **Status: current.** The schedule engine, `vowp doctor` validation and the `vowp schedule` commands
+> **Status: current.** The schedule engine, `stackspirit doctor` validation and the `stackspirit schedule` commands
 > are implemented. Schedules are per project; with several projects on the home, select a checkout,
 > pass `--project <name>`, or use `--all` where the command supports it.
 
 ## Add a schedule
 
 ```sh
-vowp schedule add "0 7 * * 1-5" loop l4-planner --name morning-report --tz +02:00 --missed run_once
-vowp schedule add "every 30m" command --name heartbeat -- vowp status --check
-vowp schedule add "0 1 * * *" job-template --name dep-update --template-file deps.json
+stackspirit schedule add "0 7 * * 1-5" loop l4-planner --name morning-report --tz +02:00 --missed run_once
+stackspirit schedule add "every 30m" command --name heartbeat -- stackspirit status --check
+stackspirit schedule add "0 1 * * *" job-template --name dep-update --template-file deps.json
 ```
 
 The first argument is a 5-field cron expression (`min hour day-of-month month day-of-week`) or an
@@ -41,11 +41,11 @@ cron or an interval under 60 seconds exits 2.
 ## List, pause and remove
 
 ```sh
-vowp schedule ls
-vowp schedule --all ls
-vowp schedule pause daily-backup
-vowp schedule resume daily-backup
-vowp schedule rm daily-backup
+stackspirit schedule ls
+stackspirit schedule --all ls
+stackspirit schedule pause daily-backup
+stackspirit schedule resume daily-backup
+stackspirit schedule rm daily-backup
 ```
 
 `ls` prints `NAME SPEC ACTION STATE LAST NEXT STATUS`; `--all` adds every project's rows on the home.
@@ -70,12 +70,12 @@ action = { kind = "command", argv = ["vowp", "backup"], timeout_secs = 600 }
 ```
 
 Validation follows the same rules: exactly one of `cron` or `every`, a 5-field cron, an interval of at
-least 60 seconds, `tz` as `UTC` or `±HH:MM`, and unique names. The full cron parse runs in `vowp doctor`,
-`vowp schedule add` and at supervisor startup; a string that has five fields but is not a
+least 60 seconds, `tz` as `UTC` or `±HH:MM`, and unique names. The full cron parse runs in `stackspirit doctor`,
+`stackspirit schedule add` and at supervisor startup; a string that has five fields but is not a
 valid expression is a configuration error there.
 
 `vowp init` writes `schedules = []`, so it installs **no** schedules. Entries declared in `vowp.toml` are
-created active when the supervisor loads them; pause one with `vowp schedule pause`. The
+created active when the supervisor loads them; pause one with `stackspirit schedule pause`. The
 planner heartbeat is not a schedule; it is L4's own 30-minute heartbeat.
 
 ## Missed runs and idempotency
@@ -108,16 +108,16 @@ action = { kind = "command", argv = ["vowp", "backup"], timeout_secs = 600 }
 when you want a checkpoint at a fixed time. A loop action marks `l4-planner` due.
 
 **Dependency update job.** Write a `NewJob` JSON file and point `job-template` at it. The template is
-validated like `vowp job add`; the generated id is suffixed with the due time so repeated firings do not
+validated like `stackspirit job add`; the generated id is suffixed with the due time so repeated firings do not
 collide.
 
-**Health check.** A command action can run `vowp status --check` every 30 minutes. A non-zero
+**Health check.** A command action can run `stackspirit status --check` every 30 minutes. A non-zero
 exit is recorded in the schedule status and opens one inbox notice per schedule per day.
 
 ## Relationship to loops
 
 Loops are the supervisor's own periodic work (L1–L9); schedules are user-defined rows handled by L9.
-Pause a loop with `vowp loops pause <name>` when you want to stop that category of work; pause
+Pause a loop with `stackspirit loops pause <name>` when you want to stop that category of work; pause
 a schedule when you want to stop one cron entry. Neither cancels a run that is already in progress.
 
 Next: [operating a home](operating.md) for the loop table and backups.

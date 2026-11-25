@@ -1,5 +1,7 @@
 # Install
 
+> **VOWP compatibility.** Commands are shown as `stackspirit`; `vowp` is the same binary under its compatibility name, and an existing home, `vowp.toml` and `~/.vowp` are used in place. See the [StackSpirit migration guide](stackspirit-migration.md) and the [deprecation policy](../deprecation-policy.md).
+
 VOWP 0.4 has two core roles and an optional third:
 
 | Role | What it is | What it owns |
@@ -12,19 +14,19 @@ Most people set up the home first, then make the computer they already use the c
 phone needs no install at all: an SSH app and the owner's key are enough (see
 [Using your phone](phone.md)).
 
-> **Status: current.** `vowp setup plan`, `setup home`, `setup control`, `vowp init`,
-> `vowp project`, `vowp control` and the install script are implemented.
+> **Status: current.** `stackspirit setup plan`, `setup home`, `setup control`, `stackspirit init`,
+> `stackspirit project`, `stackspirit control` and the install script are implemented.
 
 ## The recommended path: let an agent run the setup
 
 The setup contract is designed around one copyable prompt. It names a release tag and sends the
 agent to [the setup contract](../setup/agent-setup.md), which asks the owner five questions once,
-shows the whole plan once and runs it after one approval. The `vowp setup` commands do the work, so
+shows the whole plan once and runs it after one approval. The `stackspirit setup` commands do the work, so
 the result does not depend on which harness runs the prompt. If the README you are reading has the
 prompt, paste it into any harness; if not, run the same commands yourself.
 
 ```sh
-vowp setup plan --target <home-ssh-target> \
+stackspirit setup plan --target <home-ssh-target> \
   --repository <path-on-the-home> \
   --harness <harness> \
   --provider <provider>
@@ -42,7 +44,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 <home-ssh-target> true
 Then apply the home plan:
 
 ```sh
-vowp setup home --target <home-ssh-target> --apply --yes \
+stackspirit setup home --target <home-ssh-target> --apply --yes \
   --repository <path-on-the-home> \
   --harness <harness> \
   --provider <provider>
@@ -56,22 +58,22 @@ cleanly at a hand-off instead of guessing:
 | `preflight` | Checks SSH, OS/architecture, disk, `git`, `tmux` and `curl`; reads no secret. |
 | `user` | Creates a non-root `vowp` user when sudo allows it; otherwise records no-sudo mode. |
 | `install` | Installs the pinned binary and verifies the version. |
-| `home` | Creates the home, the global database and the machine registry, then runs `vowp doctor`. |
+| `home` | Creates the home, the global database and the machine registry, then runs `stackspirit doctor`. |
 | `service` | Installs the user unit `vowp.service`, enables linger and starts it. |
 | `vault` | Creates the vault user when sudo allows it, otherwise uses basic secret mode. It never stores a value. |
 | `projects` | Registers the repositories the owner named. A repository must already have `vowp.toml`; `vowp init` is offered, not forced. |
 | `tunnels` | Nothing by default. Tunnels are opened from the control machine when needed. |
 
 A hand-off exits 5 with a `handoff` object: a sudo command the owner runs, a harness login, a secret
-value entered with `vowp secret set NAME` or `vowp secret request NAME`, or an owner answer. Relay the
+value entered with `stackspirit secret set NAME` or `stackspirit secret request NAME`, or an owner answer. Relay the
 question, wait for the owner, then run the same command again. Never ask for a secret in chat.
 
 When the home phase succeeds, make this computer the control machine:
 
 ```sh
-vowp setup control --apply
-vowp control status
-vowp fleet status
+stackspirit setup control --apply
+stackspirit control status
+stackspirit fleet status
 ```
 
 `setup control` reuses the target from the home run (or takes `--target`) and writes
@@ -86,16 +88,16 @@ that machine:
 
 ```sh
 # on the home
-vowp node enroll mac-studio --label mac
+stackspirit node enroll mac-studio --label mac
 
 # on the Mac, with the printed code on stdin
-vowp agent enroll --target <home-ssh-target> --code-file - --project ~/src/vowp
-vowp agent status
+stackspirit agent enroll --target <home-ssh-target> --code-file - --project ~/src/vowp
+stackspirit agent status
 ```
 
 The agent dials the home; the home never dials the agent. It can run in a terminal with
-`vowp agent run --foreground` or under the service manager with
-`vowp agent service install --now`.
+`stackspirit agent run --foreground` or under the service manager with
+`stackspirit agent service install --now`.
 The WSS alternative, separate-user shape, surface rotation, bundle result and capacity history
 are in [The agent node](agent-node.md). The home remains the only writer.
 
@@ -117,7 +119,7 @@ For a control machine:
 
 - Linux or macOS, `ssh`, and key-only access to the home.
 - The same `vowp` binary for the control commands. It can be installed per user; no service is needed.
-- Optional: the opencode desktop app or a Claude app for the app surfaces. `vowp chat` works in any
+- Optional: the opencode desktop app or a Claude app for the app surfaces. `stackspirit chat` works in any
   terminal and needs nothing extra.
 
 Check the basics on a machine you build on:
@@ -137,7 +139,7 @@ From the repository root, with Rust from [`rust-toolchain.toml`](../../rust-tool
 ```sh
 cargo build --release --workspace
 ./scripts/install.sh --bin target/release/vowp
-vowp --version
+stackspirit --version
 ```
 
 The install script puts the binary in `~/.local/bin` and, unless told otherwise, installs the user
@@ -152,7 +154,7 @@ Use `--linger` to keep the user service available after logout. On a control mac
 `--no-service --no-watchdog` is the normal choice; the home runs the supervisor, not the laptop.
 `--no-service` leaves the unit installed but does not enable or start it; `--no-watchdog` skips the
 watchdog script and its crontab entry (it implies `--no-cron`). The unit is `vowp.service`, one
-service for the whole home, and its `ExecStart` is `vowp up --foreground`.
+service for the whole home, and its `ExecStart` is `stackspirit up --foreground`.
 
 If you build with `cargo install` instead, the binary lands in `$CARGO_HOME/bin` (usually
 `~/.cargo/bin`); add that directory to `PATH` or pass `--root <dir>`.
@@ -168,10 +170,10 @@ cargo install vowp-daemon --version 0.4.0 --locked
 vowp-daemon --help
 ```
 
-`vowp up` looks for `vowp-daemon` next to the running `vowp` executable, then on `PATH`;
+`stackspirit up` looks for `vowp-daemon` next to the running `vowp` executable, then on `PATH`;
 `VOWP_DAEMON_BIN` overrides the lookup. A missing daemon is not fatal: the supervisor prints a warning
 and keeps running without the window. The daemon binds `127.0.0.1` on the home; reach it through the
-managed SSH tunnel that `vowp up` prints.
+managed SSH tunnel that `stackspirit up` prints.
 
 ## Create the home without the setup command
 
@@ -179,8 +181,8 @@ The setup command is only a wrapper around the same local commands. On the home,
 
 ```sh
 cd /path/to/<your-first-repo>
-vowp init --name <your-project>
-vowp doctor
+stackspirit init --name <your-project>
+stackspirit doctor
 ```
 
 `vowp init` writes `vowp.toml`, the framework files, `.vowp/jobs` and `.vowp/checkpoints`, creates the
@@ -188,11 +190,11 @@ home if it does not exist, registers the project and its database, and seeds the
 the generated files before the first run. For each further repository that already has a `vowp.toml`:
 
 ```sh
-vowp project add /path/to/<your-project>
-vowp project ls
+stackspirit project add /path/to/<your-project>
+stackspirit project ls
 ```
 
-The install script does not run `vowp init` for you. Run it once per checkout, or let `setup home
+The install script does not run `stackspirit init` for you. Run it once per checkout, or let `setup home
 --repository <path>` register a checkout that is already initialised.
 
 ## Where things go
@@ -218,13 +220,13 @@ contents. The [security model](../security.md) describes the limits, and
 ## Verify the home
 
 ```sh
-vowp doctor
-vowp fleet status
-vowp setup verify
+stackspirit doctor
+stackspirit fleet status
+stackspirit setup verify
 ```
 
-`doctor` exits 0 only when no check failed. On a control machine, `vowp fleet status` proves that the
-SSH route and the snapshot cache work; `vowp control status` shows the cached `as of` time. If a
+`doctor` exits 0 only when no check failed. On a control machine, `stackspirit fleet status` proves that the
+SSH route and the snapshot cache work; `stackspirit control status` shows the cached `as of` time. If a
 harness or provider check fails, fix it on the home, not on the laptop.
 
 `setup verify` is the end-to-end fixture check: a gc dry run, a fixture project through one fake

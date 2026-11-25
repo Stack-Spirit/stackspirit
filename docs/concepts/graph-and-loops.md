@@ -4,8 +4,8 @@ The graph is the plan; the loops are what keep it moving. A job is a **job node*
 does it, and a gate is how the result is checked. The supervisor is a deterministic program that walks
 the graph every tick, starts work, records evidence and moves states. Models are asked for judgment only.
 
-> **Status: current.** The graph engine and the `vowp job`/`vowp graph` commands are implemented. One
-> supervisor (`vowp up`) runs the loops for every active project on the home, in fairness order.
+> **Status: current.** The graph engine and the `stackspirit job`/`stackspirit graph` commands are implemented. One
+> supervisor (`stackspirit up`) runs the loops for every active project on the home, in fairness order.
 
 ## Jobs
 
@@ -45,7 +45,7 @@ An edge reads **source → target**: `src needs dst`, `src verifies dst`, `src f
 | `escalates` | `src` is a decision job created when attempts are exhausted. |
 | `blocks` | `src` (normally a decision job) blocks the jobs that need the original. |
 
-A `needs` cycle is rejected at `vowp job add` time. Fix jobs run in the original job's branch and
+A `needs` cycle is rejected at `stackspirit job add` time. Fix jobs run in the original job's branch and
 worktree, so a fix never races the job it repairs.
 
 ## The job state machine
@@ -88,12 +88,12 @@ and give the board something honest to show.
 | `cancelled` | A human cancelled it; branch and worktree are kept for inspection. Terminal. |
 
 The transition table, guards and counter effects are in
-[`docs/design/loops.md` §2](../design/loops.md). The CLI exposes the safe subset: `vowp job retry` maps
-`failed → ready`, `parked → ready` and `stalled → running`; anything else is a conflict. `vowp job park`
-and `vowp job cancel` stop a run and keep the evidence. Keeper commands (`nudge`, `restart`, `replan`,
+[`docs/design/loops.md` §2](../design/loops.md). The CLI exposes the safe subset: `stackspirit job retry` maps
+`failed → ready`, `parked → ready` and `stalled → running`; anything else is a conflict. `stackspirit job park`
+and `stackspirit job cancel` stop a run and keep the evidence. Keeper commands (`nudge`, `restart`, `replan`,
 `fail`) enqueue a request row that the next tick applies; the CLI never reaches into a running process.
-These commands are implemented today, including the supervisor commands (`vowp up`,
-`vowp status`) that apply keeper requests.
+These commands are implemented today, including the supervisor commands (`stackspirit up`,
+`stackspirit status`) that apply keeper requests.
 
 ## Scheduling rules
 

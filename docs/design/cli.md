@@ -623,6 +623,21 @@ A stdio MCP server (plain threads, no async runtime) started by an app. Read too
 file on each call, checks the lease and records the actor `session:<id>/surface:<surface-id>`;
 reads still work in follow mode. `tunnel_open`/`tunnel_close` refuse on the home.
 
+### 6.12 `vowp home` (v6)
+
+```
+vowp home migrate --link [--dry-run] [--yes]
+vowp home migrate --move --to <DIR> [--kind home|agent|control] [--no-link] [--dry-run] [--yes]
+```
+
+`stackspirit` is the primary spelling of every command in this document; `vowp` is the supported
+alias. `home migrate --link` creates the StackSpirit symlinks (`~/.stackspirit`,
+`~/.stackspirit-agent`, `~/.stackspirit-control`) that point at the existing legacy directories and
+moves no data; `--dry-run` prints the plan and writes nothing, and without `--dry-run` it needs
+`--yes`. `--move` copies a **stopped** state directory to `--to` (which must not exist), verifies
+it, swaps it in and leaves a symlink at the old path unless `--no-link`. The operator sequence is in
+[`docs/guides/stackspirit-migration.md`](../guides/stackspirit-migration.md).
+
 ## 7. Maintenance and hidden commands
 
 | Command | Behaviour |

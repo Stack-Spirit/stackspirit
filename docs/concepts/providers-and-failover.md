@@ -5,8 +5,8 @@ executors. The first rung whose provider is available runs the work; when a prov
 either moves to the next rung with a capsule or parks the affected jobs and asks the owner. It never
 silently moves work to a paid provider that the profile does not list.
 
-> **Status: current.** Adapters, provider classification, the global limit rows and the `vowp status`,
-> `vowp session`, `vowp inbox` and `vowp cost` commands are implemented on `main`.
+> **Status: current.** Adapters, provider classification, the global limit rows and the `stackspirit status`,
+> `stackspirit session`, `stackspirit inbox` and `stackspirit cost` commands are implemented on `main`.
 
 ## Profiles and ladders
 
@@ -64,8 +64,8 @@ harness ":" model [ "@" effort ] [ "#" variant ]
 - The provider key is `claude` for Claude Code, the text before the first `/` for opencode
   (`opencode:provider/model#max` → `provider`), and the mapping entry name for a generic CLI.
 
-This one string is what you put in a profile, pass to `vowp session switch --to`, or see in
-`vowp session show`.
+This one string is what you put in a profile, pass to `stackspirit session switch --to`, or see in
+`stackspirit session show`.
 
 ## Provider limits
 
@@ -100,7 +100,7 @@ The marks have different lifetimes:
 
 A run on a provider that ends `ok` clears that provider's limit row and its `limit:`, `probe_back:`,
 `probe_back_until:`, `probe_pending:` and `park:` keys: a successful turn is proof the provider works.
-A `credits` or `auth` row is never cleared this way; only `vowp inbox answer <id> resolved` resolves
+A `credits` or `auth` row is never cleared this way; only `stackspirit inbox answer <id> resolved` resolves
 it. In L6's `next_rung`, an expired `unavailable` row is ignored, so a residual mark cannot outrank a
 healthy sibling rung.
 
@@ -149,8 +149,8 @@ has already moved or L6's no-healthy-rung fallback has already parked it. That i
 undone on the next tick, and why the fallback opens exactly one notice instead of a second provider-wide
 park. Harvest does not choose a new action; it only gates this backstop on the recorded policy.
 
-The limit row is written for both policies, so `vowp status` and the ledger show why the
-rung changed. `vowp inbox answer <id> resolved` removes a parked provider's limit row and returns its
+The limit row is written for both policies, so `stackspirit status` and the ledger show why the
+rung changed. `stackspirit inbox answer <id> resolved` removes a parked provider's limit row and returns its
 jobs to `ready`; with `next` the affected session has already moved and the sticky `credits` or `auth`
 row remains until the owner answers the notice.
 
@@ -194,7 +194,7 @@ Every run produces a `Cost`:
 | `price-table` | Estimated from `[providers.<p>.prices]` because the harness reported usage but no cost. |
 | `unknown` | No usable numbers. `usd` is `None`; it is never treated as zero. |
 
-`vowp cost` groups totals by job, role, provider, model or day, shows the source for each row and counts
+`stackspirit cost` groups totals by job, role, provider, model or day, shows the source for each row and counts
 unknown costs separately. Totals are also written to the ledger and to planner checkpoints. There are no
 invented budgets; bounds are on retries, no-progress loops and measured capacity instead.
 
@@ -211,4 +211,4 @@ invented budgets; bounds are on retries, no-progress loops and measured capacity
 - It never changes the capacity target from a model's advice; only the owner applies a target.
 
 Next: [capacity](capacity.md), [Work → Production](work-to-production.md), or the
-[operating guide](../guides/operating.md) for `vowp status` and `vowp cost`.
+[operating guide](../guides/operating.md) for `stackspirit status` and `stackspirit cost`.

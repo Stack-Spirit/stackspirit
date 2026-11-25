@@ -277,7 +277,7 @@ affected jobs and opens one inbox item; it does not switch to an unlisted paid p
 
 ## What capacity never does
 
-- It never kills or signals a running job. Only an explicit switch/takeover or `vowp down` interrupts.
+- It never kills or signals a running job. Only an explicit switch/takeover or `stackspirit down` interrupts.
 - It never changes the target from a model's answer. The advisor writes a proposal and an inbox item;
   the owner applies it.
 - It never treats an unknown estimate as zero. Missing measurements become a labelled default.

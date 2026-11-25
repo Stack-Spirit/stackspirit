@@ -28,14 +28,14 @@ v0.3 has three kinds of place:
   registered as an executor so its own files, browser and tunnels are available to the session.
 
 A **surface** is where a person is talking to a session right now: the opencode desktop app, a Claude
-app, `vowp chat`, or the MCP server those apps call. A session has one append-only log on the home and
+app, `stackspirit chat`, or the MCP server those apps call. A session has one append-only log on the home and
 at most one surface with the **lease** to write to it. Every other surface can follow read-only.
 
 ```
  laptop / phone (control)                         home (the authority)
  ┌─────────────────────────────┐                  ┌──────────────────────────────────────────────┐
  │ opencode desktop / Claude   │                  │ one vowp supervisor                          │
- │ vowp chat / vowp mcp        │   ssh (key)      │  global DB  ~/.vowp/vowp.db                  │
+ │ stackspirit chat / stackspirit mcp        │   ssh (key)      │  global DB  ~/.vowp/vowp.db                  │
  │ snapshot cache, tunnels     │ ───────────────► │  project DBs ~/.vowp/projects/<p>/project.db │
  └─────────────────────────────┘                  │  sessions/<id>/log.jsonl                    │
                                                   │  snapshot.json every tick                    │
@@ -58,7 +58,7 @@ nothing else.
 3. **The database is the truth for decisions; files are the truth for content.** SQLite holds the
    project registry, jobs, edges, gates, runs, costs, limits, surfaces, leases, capacity and inbox rows.
    Briefs, reports, session logs and blobs stay in plain files. Killing every process and restarting
-   `vowp up` reconciles from those two sources.
+   `stackspirit up` reconciles from those two sources.
 4. **Deterministic loops, LLM judgment.** A plain program ticks every 60 seconds and never "decides to
    stop". Models are called only for judgment: planning, diagnosing a stall, reviewing a report, writing
    a handoff, or proposing a capacity target.
@@ -75,7 +75,7 @@ nothing else.
 9. **Humans are never a bottleneck for unrelated work.** A question parks one job and lands in an
    inbox; everything else keeps running.
 10. **Never kill running work for capacity.** Admission and brakes stop new runs. The only interrupts are
-    the explicit switch, takeover and `vowp down` paths.
+    the explicit switch, takeover and `stackspirit down` paths.
 
 ## Vocabulary
 
@@ -83,12 +83,12 @@ nothing else.
 |---|---|
 | **Home** | The machine that owns the global DB, the project DBs, the session logs, the snapshot and the one supervisor. One per installation in v0.3. |
 | **Control machine** | A computer or phone that talks to the home. It holds no truth; it may cache a snapshot. |
-| **Machine** | A registered execution host: the VPS home, a laptop, a desktop. The home is the only machine that writes; a laptop can be an executor machine. The CLI command `vowp node` and the `nodes` table keep the old name for compatibility. |
+| **Machine** | A registered execution host: the VPS home, a laptop, a desktop. The home is the only machine that writes; a laptop can be an executor machine. The CLI command `stackspirit node` and the `nodes` table keep the old name for compatibility. |
 | **Project** | One git repository registered on the home. v0.3 runs every active project under one supervisor. |
 | **Harness** | An agent program: Claude Code, opencode, Codex, Gemini CLI, … |
 | **Adapter** | VOWP code that drives one harness headlessly and turns its output into canonical events. |
 | **Session** | A universal, harness-neutral conversation with a stable id and an append-only event log on the home. |
-| **Surface** | Where a person talks to a session now: an app, `vowp chat` or an MCP server. |
+| **Surface** | Where a person talks to a session now: an app, `stackspirit chat` or an MCP server. |
 | **Lease** | The right of one surface to send input to one session. A lease without a heartbeat for 60 s is free. |
 | **Executor** | One concrete way to run a model: `harness:model[@effort][#variant]`, plus the machine that runs it. |
 | **Profile** | A role's ordered ladder of executors (rung 0 is preferred). |
@@ -101,7 +101,7 @@ nothing else.
 | **Graph** | Jobs plus edges. A DAG except for bounded `fixes` loop edges. |
 | **Gate** | A machine-checkable condition with recorded evidence. |
 | **Loop** | A repeating process with a tick, an input, actions and bounds (L1–L9). |
-| **Supervisor** | The deterministic program that runs the loops (`vowp up`). |
+| **Supervisor** | The deterministic program that runs the loops (`stackspirit up`). |
 | **Role** | `planner`, `keeper`, `worker`, `verifier` or `orchestrator`. |
 | **Slot** | A concurrent worker place, also a tmux window. |
 | **Inbox** | Questions, notices and approvals waiting for a human. Project items live in the project DB; machine items in the global DB. |
@@ -114,7 +114,7 @@ nothing else.
 
 ## The life of one job
 
-1. **Added.** `vowp job add` validates the id and dependencies, parses the gate list, inserts the job and
+1. **Added.** `stackspirit job add` validates the id and dependencies, parses the gate list, inserts the job and
    its `needs` edges, and writes the brief. The planner can do the same through the CLI.
 2. **Ready.** The project's L1 loop sees that every `needs` job is `done` and moves the job from
    `pending` to `ready`.
@@ -166,7 +166,7 @@ directory.
 ├─ runs/<runId>.jsonl          raw harness stdout (debug only)
 ├─ logs/supervisor.log         structured loop log
 ├─ releases.log                append-only promotion and rollback history
-├─ backups/                    `vowp backup` output
+├─ backups/                    `stackspirit backup` output
 └─ inbox/<inboxId>.md          human-readable copy of inbox items
 ```
 
@@ -190,7 +190,7 @@ the databases live in the home. Job worktrees live outside the repository, by de
 `<repo>/../<repo-name>-wt/<job-id>`.
 
 The session log is the authority for conversation content. The corresponding rows in the global DB are
-an index that `vowp reindex` can rebuild. Deleting the database never loses session content; deleting a
+an index that `stackspirit reindex` can rebuild. Deleting the database never loses session content; deleting a
 session directory does. A full backup now includes the session content as well as both database types;
 see [data lifecycle](data-lifecycle.md).
 
@@ -205,7 +205,7 @@ see [data lifecycle](data-lifecycle.md).
 - Measured capacity: host sampling, per-run usage, estimates, admission, brakes, owner targets and an
   advisor that only proposes.
 - Sessions on every surface: leases, takeover, follow mode, remote execution with a durable spool,
-  opencode and Claude app hosts, the MCP server, `vowp chat` and orchestrator sessions.
+  opencode and Claude app hosts, the MCP server, `stackspirit chat` and orchestrator sessions.
 - Control machines: vowp `control init`, snapshot cache, SSH tunnels, and phone access with an SSH app.
 - The v0.3 loopback HTTP/SSE daemon, web/PWA window and phone-friendly board, plus the ACP adapter
   and explicit session pull between machines.

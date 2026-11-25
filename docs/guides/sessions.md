@@ -2,13 +2,13 @@
 
 A **session** is one conversation with a stable VOWP id. It lives on the home: one append-only
 `log.jsonl`, one canonical event sequence and one capsule lineage. A **surface** is where you are
-talking to it right now: `vowp chat` in a terminal, the opencode desktop app, a Claude app, a phone
+talking to it right now: `stackspirit chat` in a terminal, the opencode desktop app, a Claude app, a phone
 over SSH, or the MCP tools an app calls. One surface holds the session's **lease** at a time; every
 other surface can read in follow mode.
 
-> **Status: current.** The session store, adapters, `vowp session` commands, `vowp chat`, leases,
+> **Status: current.** The session store, adapters, `stackspirit session` commands, `stackspirit chat`, leases,
 > takeover, the app hosts and the orchestrator are implemented. `session lease` and
-> `session takeover` are hidden implementation commands; use `vowp chat` for the user path.
+> `session takeover` are hidden implementation commands; use `stackspirit chat` for the user path.
 
 ## One conversation, many surfaces
 
@@ -30,13 +30,13 @@ clear notice and continues read-only, so two devices cannot silently interleave 
 
 ```sh
 # from the project checkout, or add --project <name> to each command
-vowp session ls
-vowp session show <id>
-vowp session show <id> --events 20
-vowp session show <id> --lineage
-vowp session show <id> --capsule
-vowp session tail <id> --pretty
-vowp session tail <id> --follow --from 120
+stackspirit session ls
+stackspirit session show <id>
+stackspirit session show <id> --events 20
+stackspirit session show <id> --lineage
+stackspirit session show <id> --capsule
+stackspirit session tail <id> --pretty
+stackspirit session tail <id> --follow --from 120
 ```
 
 On a home with several projects and no selected checkout, these commands need `--project <name>`;
@@ -50,7 +50,7 @@ what the `job-<id>` tmux window runs, read-only.
 Session ids are ULIDs accepted by a unique prefix of at least six characters. An ambiguous prefix
 exits 2 and lists the candidates. Jobs need the full slug.
 
-A session that has been compacted by `vowp gc --apply` no longer has a full log. `session tail` and
+A session that has been compacted by `stackspirit gc --apply` no longer has a full log. `session tail` and
 `session show --events` exit 3 with `session compacted to capsule <id>; use 'session show
 --capsule'`. `session show --capsule` and `session export` still work; export writes an empty event
 tail and says so.
@@ -58,12 +58,12 @@ tail and says so.
 ## Create and chat
 
 ```sh
-vowp session new --title "Refactor the parser" --executor opencode:<provider>/<model>#max
-vowp chat <id>
-vowp session chat <id>
+stackspirit session new --title "Refactor the parser" --executor opencode:<provider>/<model>#max
+stackspirit chat <id>
+stackspirit session chat <id>
 ```
 
-`session new` creates an interactive session with role `user` and prints its id. `vowp chat <id>` is
+`session new` creates an interactive session with role `user` and prints its id. `stackspirit chat <id>` is
 the guaranteed terminal surface for any machine: run it on the home, or on a control machine where
 the CLI routes it to the home over SSH. On a phone, SSH to the home and run it there.
 
@@ -82,7 +82,7 @@ In a chat, each line is a user turn. Assistant text streams, and tool calls are 
 |---|---|
 | `/switch <executor>` | Run the switch protocol to another harness or model. |
 | `/status` | Show the session, executor, machine and lease state. |
-| `/takeover` | Take the lease from another live surface in an interactive chat. After `/follow`, reopen with `vowp chat <id> --takeover`. |
+| `/takeover` | Take the lease from another live surface in an interactive chat. After `/follow`, reopen with `stackspirit chat <id> --takeover`. |
 | `/follow` | Release the lease and follow read-only. |
 | `/capsule` | Write a capsule now and print its id. |
 | `/help` or `/?` | Print the slash-command list. |
@@ -114,10 +114,10 @@ One surface holds the lease. The rules are deliberately simple:
   It keeps showing new events, but every write is refused. A turn running on the old surface is
   drained for up to five seconds, then interrupted; the events already written stay in the log and a
   capsule is written. The new surface continues from that capsule.
-- `vowp chat --follow` and the `/follow` command release the lease and only read. An interactive
+- `stackspirit chat --follow` and the `/follow` command release the lease and only read. An interactive
   chat then follows until Ctrl-C and accepts no slash commands; a scripted (non-TTY) chat accepts
   `/quit`, `/status` and `/follow`. To take the lease back, reopen with
-  `vowp chat <id> --takeover`.
+  `stackspirit chat <id> --takeover`.
 - A surface that exits normally releases the lease.
 
 VOWP cannot close another vendor's window. The cut-off is enforced where the power is: the VOWP MCP
@@ -131,33 +131,33 @@ The product surfaces are the apps people already use:
 
 | Surface | How it joins | What it can write |
 |---|---|---|
-| `vowp chat` | A terminal on the home, a control machine or a phone over SSH. | Turns, slash commands and capsules through the lease. |
+| `stackspirit chat` | A terminal on the home, a control machine or a phone over SSH. | Turns, slash commands and capsules through the lease. |
 | opencode | An opencode server on the home; the desktop joins through an SSH tunnel and `opencode pair`, the phone runs `opencode --server ...` over SSH. | Its own session; VOWP MCP tools where the app exposes them. |
 | Claude app | Claude Code Remote Control on the home, where a claude.ai login exists; it connects outbound to claude.ai and the desktop or phone joins there. | The same session; VOWP MCP tools after the project-local `.mcp.json` approval. |
-| `vowp mcp` | A stdio MCP server started by the app. | The write tools, each checked against the current lease. |
+| `stackspirit mcp` | A stdio MCP server started by the app. | The write tools, each checked against the current lease. |
 
-`vowp orchestrator new` creates the project-local app config, starts the host and prints the exact
-join instructions for the desktop, the phone and `vowp chat`. It never edits your global app config.
+`stackspirit orchestrator new` creates the project-local app config, starts the host and prints the exact
+join instructions for the desktop, the phone and `stackspirit chat`. It never edits your global app config.
 The opencode app host binds loopback on the home; the control machine reaches it through
-`vowp tunnel open` and no public port is opened. Claude Remote Control opens no local port: it
+`stackspirit tunnel open` and no public port is opened. Claude Remote Control opens no local port: it
 connects outbound to claude.ai from the home, and the desktop or phone joins the Remote Control
 session there. The instructions and the app-host details are in
 [Operating a home](operating.md#orchestrators) and the
 [v0.2 specification](../design/v0.2/home-and-surfaces.md#75-app-surfaces-opencode-claude-mirror-and-resume).
 
-`vowp mcp` exposes read tools (fleet status, queue, inbox, capacity, session tail) and write tools
+`stackspirit mcp` exposes read tools (fleet status, queue, inbox, capacity, session tail) and write tools
 (inbox answer, job add/pause/retry, capacity set, tunnel open/close, secret request, session
 handoff/resume). Every write checks the lease and records the actor. A moved session's old app gets
 the read-only notice instead of a write. The opencode build may load an MCP server and report it
-connected without exposing its tools to the model; in that case `vowp chat` is the tool path, and
+connected without exposing its tools to the model; in that case `stackspirit chat` is the tool path, and
 Claude Code is the other proven MCP path.
 
 ## Switch
 
 ```sh
-vowp session switch <id> --to opencode:<provider>/<model>#max
-vowp session switch <id> --to claude-code:<model>@medium --reason user
-vowp session switch <id> --to <executor> --node <node-name>
+stackspirit session switch <id> --to opencode:<provider>/<model>#max
+stackspirit session switch <id> --to claude-code:<model>@medium --reason user
+stackspirit session switch <id> --to <executor> --node <node-name>
 ```
 
 The switch protocol freezes the session, probes the target, drains the current turn for up to five
@@ -184,8 +184,8 @@ readable.
 ## Capsules
 
 ```sh
-vowp session capsule <id>
-vowp session capsule <id> --print
+stackspirit session capsule <id>
+stackspirit session capsule <id> --print
 ```
 
 A capsule is written automatically on switch, limit, context pressure, job end, export and takeover.
@@ -201,10 +201,10 @@ lose its handoff.
 ## Export and import
 
 ```sh
-vowp session export <id>
-vowp session export <id> --out planner.vowp-bundle.json --tail 50
-vowp session import planner.vowp-bundle.json
-vowp session import planner.vowp-bundle.json --node <node-name> --cwd /srv/project
+stackspirit session export <id>
+stackspirit session export <id> --out planner.vowp-bundle.json --tail 50
+stackspirit session import planner.vowp-bundle.json
+stackspirit session import planner.vowp-bundle.json --node <node-name> --cwd /srv/project
 ```
 
 `export` writes one JSON file (`format: "vowp-bundle-v1"`, default `./<id>.vowp-bundle.json`) with a
@@ -220,7 +220,7 @@ empty event tail and says so.
 `import --same-id` keeps the bundle's session id instead of creating a child:
 
 ```sh
-vowp session import planner.vowp-bundle.json --same-id
+stackspirit session import planner.vowp-bundle.json --same-id
 ```
 
 The import is refused with exit 4 when that id already exists locally (a session row or a session
@@ -240,12 +240,12 @@ Common rejections:
 ## Pull from another machine
 
 ```sh
-vowp session pull <node> <session>
-vowp session pull vps 01KA1V0Z7A0000000000000000
-vowp --json session pull vps 01KA1V0Z7A0000000000000000
-vowp session pull --same-id vps 01KA1V0Z7A0000000000000000
-vowp session pull --full vps 01KA1V0Z7A0000000000000000
-vowp --json session pull --full vps 01KA1V0Z7A0000000000000000
+stackspirit session pull <node> <session>
+stackspirit session pull vps 01KA1V0Z7A0000000000000000
+stackspirit --json session pull vps 01KA1V0Z7A0000000000000000
+stackspirit session pull --same-id vps 01KA1V0Z7A0000000000000000
+stackspirit session pull --full vps 01KA1V0Z7A0000000000000000
+stackspirit --json session pull --full vps 01KA1V0Z7A0000000000000000
 ```
 
 `pull` exports the bundle from the named machine over the existing SSH transport, stages it in a
@@ -266,7 +266,7 @@ child and `--full` cannot be combined with `--same-id`). The files arrive as a
 checked against the manifest's byte sizes and sha256 digests before the directory is renamed into
 `sessions/<id>/`. The resulting directory contains `manifest.json` for inspection. A failed copy,
 digest mismatch, corrupt log or over-cap directory leaves no final `sessions/<id>/` and no staging
-directory. `vowp reindex` then registers the session.
+directory. `stackspirit reindex` then registers the session.
 
 The full-pull limit is 1 GiB (1 073 741 824 bytes), checked from the remote file sizes before
 anything is copied. There is no partial copy and no placeholder for missing blobs: an over-cap or
@@ -304,9 +304,9 @@ copy use `session export` and `session import`.
 ## Watch an interactive Claude Code session
 
 ```sh
-vowp session watch --once
-vowp session watch --follow
-vowp session watch --once --claude-dir ~/.claude
+stackspirit session watch --once
+stackspirit session watch --follow
+stackspirit session watch --once --claude-dir ~/.claude
 ```
 
 `session watch` is an optional importer. It scans `*.jsonl` files under `--claude-dir`
@@ -333,7 +333,7 @@ from cron with `--once` for repeated scans.
 | Context overflow | A capsule is written and a fresh native session starts on the same harness. |
 | Moving between devices | Open the same session on the other surface and answer the takeover prompt. |
 | Trying a different model | `session switch --to ... --reason user`, or `/switch` in chat. |
-| The owner wants to drive | `vowp chat <id>` into the same session; the next turn sees the log and capsule. |
+| The owner wants to drive | `stackspirit chat <id>` into the same session; the next turn sees the log and capsule. |
 
 What survives a switch: the canonical log, the capsule, the last turns as plain text, and the
 lineage. What does not: the harness's native tool-call history and reasoning. That is deliberate;

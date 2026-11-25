@@ -165,7 +165,7 @@ backup test and still opens as an unbound global handle; it is not a full home b
 
 ## Migration and the archive
 
-vowp `migrate` (also run automatically by `vowp up` unless `--no-migrate`) splits a v0.1 home into the global
+vowp `migrate` (also run automatically by `stackspirit up` unless `--no-migrate`) splits a v0.1 home into the global
 database and one database per project. It writes a pre-migration backup first, refuses to run while a
 supervisor is up, verifies row counts per table and records the result in `migration.json` while the
 operation is in flight. vowp `migrate --dry-run` reports what would change; vowp `migrate --rollback <backup>`

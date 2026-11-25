@@ -1,7 +1,7 @@
 //! The framework files embedded in the `vowp` binary.
 //!
 //! Spec: `docs/design/crates/vowp-cli.md` §1 and `framework/README.md`. The source of truth is
-//! the repository `framework/` directory; `vowp init` writes these exact bytes. `CLAUDE.md`
+//! the repository `framework/` directory; `stackspirit init` writes these exact bytes. `CLAUDE.md`
 //! is a one-line import of `AGENTS.md`.
 
 /// One embedded framework file.
@@ -16,17 +16,17 @@ pub struct FrameworkFile {
 /// The orchestrator skill, with the phone join qualified for Claude Remote Control.
 ///
 /// The repository skill is the source. The appended note keeps the copy installed by
-/// `vowp init` from telling a Claude Remote Control owner to use the opencode SSH
+/// `stackspirit init` from telling a Claude Remote Control owner to use the opencode SSH
 /// command for a phone join.
 const ORCHESTRATOR_SKILL: &str = concat!(
     include_str!("../../../framework/skills/vowp-orchestrator/SKILL.md"),
     "\n\n## Phone join by app\n\n\
-     The SSH `join.phone` command is for opencode and `vowp chat`. For Claude Remote Control,\n\
+     The SSH `join.phone` command is for opencode and `stackspirit chat`. For Claude Remote Control,\n\
      open the Claude mobile app and choose the same Remote Control session instead; do not run\n\
      the opencode SSH command there.\n"
 );
 
-/// Every file `vowp init` installs, in install order.
+/// Every file `stackspirit init` installs, in install order.
 pub const FILES: &[FrameworkFile] = &[
     FrameworkFile {
         target: "AGENTS.md",
@@ -94,7 +94,7 @@ mod tests {
             .find(|file| file.target == ".claude/skills/vowp-capacity-advisor/SKILL.md")
             .expect("the capacity advisor skill is installed by vowp init");
         assert!(skill.content.contains("name: vowp-capacity-advisor"));
-        assert!(skill.content.contains("vowp capacity set --target"));
+        assert!(skill.content.contains("stackspirit capacity set --target"));
         assert!(skill.content.contains("never change"));
     }
 

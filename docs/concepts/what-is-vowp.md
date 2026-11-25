@@ -29,7 +29,7 @@ evidence.
 - **Control machine.** A laptop, desktop or phone. It talks to the home over SSH, caches a snapshot
   and opens tunnels. It holds no truth.
 - **Surface.** Where a person talks to a session now: the opencode desktop app, a Claude app,
-  `vowp chat`, or an MCP server. One surface holds the lease; the rest follow read-only.
+  `stackspirit chat`, or an MCP server. One surface holds the lease; the rest follow read-only.
 - **Executor machine.** A registered machine that runs a turn. The home is the default; a laptop can be
   an executor when the work needs its local files, browser or tunnels.
 
@@ -37,7 +37,7 @@ evidence.
 
 A **machine** is a registered execution host: the VPS home, a Mac, a laptop. A **job** is one unit of
 work; when talking about the graph, it is a **job node**. A **slot** is a concurrency place, and a
-**window** is a tmux view. The CLI command `vowp node` and the `nodes` table keep the old name for
+**window** is a tmux view. The CLI command `stackspirit node` and the `nodes` table keep the old name for
 compatibility until the v0.4 rename.
 
 ## Five things that make it a framework
@@ -80,7 +80,7 @@ does not fork a harness, scrape a TUI, or read a login token.
 | Place | Runs | Holds |
 |---|---|---|
 | VPS home | supervisor, jobs, worktrees, harnesses, schedules | all truth |
-| Control machine | app, `vowp chat`, `vowp mcp`, tunnels | snapshot cache, spool, surface state |
+| Control machine | app, `stackspirit chat`, `stackspirit mcp`, tunnels | snapshot cache, spool, surface state |
 | Executor machine | a turn's harness | its own checkout and login |
 | Surface | the conversation | a lease, never the log |
 

@@ -1,5 +1,7 @@
 # Running a home on a VPS
 
+> **VOWP compatibility.** Commands are shown as `stackspirit`; `vowp` works identically. An existing `~/.vowp` home and `vowp.service` unit are kept and updated in place, never duplicated. See the [StackSpirit migration guide](stackspirit-migration.md) and the [deprecation policy](../deprecation-policy.md).
+
 VOWP 0.3 is VPS-first: **the VPS is the framework's home.** One Linux server owns the global database,
 one database per project, every session log and the single supervisor. A laptop, desktop or phone
 is a **control machine**: it talks to the home, caches the last snapshot and opens tunnels, but holds
@@ -7,7 +9,7 @@ no truth. This guide takes a fresh server to a supervised fleet and, where usefu
 control-machine side.
 
 > **Status: current.** The home, project, fleet, capacity, secret, backup and lifecycle commands on
-> this page are implemented. `vowp setup home` installs the same pieces as the manual steps below.
+> this page are implemented. `stackspirit setup home` installs the same pieces as the manual steps below.
 
 The examples use placeholders:
 
@@ -16,7 +18,7 @@ The examples use placeholders:
 | `<your-vps>` | The home's hostname or address. |
 | `<your-user>` | The Linux account that runs VOWP. The setup can create a dedicated `vowp` user. |
 | `<your-repo>` | The path of a git checkout on the home. |
-| `<your-project>` | The project name passed to `vowp init` or `project add`. |
+| `<your-project>` | The project name passed to `stackspirit init` or `project add`. |
 | `<your-harness>` | `opencode` or `claude-code`, installed and signed in on the home. |
 | `<your-model>` | A model identifier that harness accepts. |
 | `<your-provider>` | The provider key used by limits and cost: `claude` for Claude Code, the text before `/` for opencode, or the mapping name for a generic CLI. |
@@ -35,9 +37,9 @@ The recommended way to install the home is the setup path in [Install](install.m
 
 ```sh
 ssh -o BatchMode=yes -o ConnectTimeout=10 <home-ssh-target> true
-vowp setup plan --target <home-ssh-target> \
+stackspirit setup plan --target <home-ssh-target> \
   --repository <your-repo> --harness <your-harness> --provider <your-provider>
-vowp setup home --target <home-ssh-target> --apply --yes \
+stackspirit setup home --target <home-ssh-target> --apply --yes \
   --repository <your-repo> --harness <your-harness> --provider <your-provider>
 ```
 
@@ -74,14 +76,14 @@ From a checkout of this repository as `<your-user>`:
 ```sh
 cargo build --release --workspace
 ./scripts/install.sh --bin target/release/vowp
-vowp --version
+stackspirit --version
 ```
 
 The script installs `~/.local/bin/vowp`, the user unit `vowp.service` and the five-minute watchdog.
 `--no-service` leaves the unit installed but does not enable or start it; `--no-watchdog` skips the
 watchdog script and its crontab entry (it implies `--no-cron`); `--no-cron` alone only leaves the
 crontab unchanged. Use `--linger` so the user manager stays available after logout. The unit runs
-`vowp up --foreground` with `VOWP_HOME=%h/.vowp`; there is one service for the whole home, not one
+`stackspirit up --foreground` with `VOWP_HOME=%h/.vowp`; there is one service for the whole home, not one
 per project.
 
 Check the prerequisites as that user:
@@ -107,7 +109,7 @@ A project is one git repository on the home. The first project can create the ho
 cd <your-repo>
 git status
 git remote -v
-vowp init --name <your-project>
+stackspirit init --name <your-project>
 ```
 
 `vowp init` writes `vowp.toml`, the framework files, `.vowp/jobs` and `.vowp/checkpoints`, creates
@@ -123,8 +125,8 @@ git commit -m "chore: initialise VOWP"
 For every further repository that already has `vowp.toml`:
 
 ```sh
-vowp project add <your-repo>
-vowp project ls
+stackspirit project add <your-repo>
+stackspirit project ls
 ```
 
 `project add` validates the checkout, registers it, creates its database, loop rows and worker slots,
@@ -134,7 +136,7 @@ directory on the home. `_node` is reserved and cannot be a user project.
 One command can clone, initialise, register and create the orchestrator:
 
 ```sh
-vowp project add --git <your-url> --init --orchestrator chat --json
+stackspirit project add --git <your-url> --init --orchestrator chat --json
 ```
 
 The clone lands in `<home-parent>/<name>` (or an explicit target path), the URL must carry no
@@ -145,11 +147,11 @@ credentials, and `--init` leaves an existing `vowp.toml` byte-identical. The sum
 Manage the fleet:
 
 ```sh
-vowp project pause <your-project>       # stop new dispatch; running work finishes
-vowp project resume <your-project>
-vowp project archive <your-project>     # no ticks; the database stays
-vowp project weight <your-project> 2    # fairness weight, 1..=100
-vowp project rm <your-project> --yes    # archive the database and remove the registry row
+stackspirit project pause <your-project>       # stop new dispatch; running work finishes
+stackspirit project resume <your-project>
+stackspirit project archive <your-project>     # no ticks; the database stays
+stackspirit project weight <your-project> 2    # fairness weight, 1..=100
+stackspirit project rm <your-project> --yes    # archive the database and remove the registry row
 ```
 
 `project rm` keeps production records and moves the project's directory under
@@ -228,13 +230,13 @@ All four roles must have a profile. Points to check:
   `[providers.<your-provider>.prices."<your-model>"]` with current per-million-token prices.
   Without it, VOWP reports the cost as `unknown` rather than guessing.
 
-A session can move to another executor later with `vowp session switch` or `/switch` in
-`vowp chat`; see [Sessions and surfaces](sessions.md).
+A session can move to another executor later with `stackspirit session switch` or `/switch` in
+`stackspirit chat`; see [Sessions and surfaces](sessions.md).
 
 ## Check the home
 
 ```sh
-vowp doctor
+stackspirit doctor
 ```
 
 `doctor` prints `ok`, `warn` or `fail` per check and exits 0 only when nothing failed. The checks that
@@ -243,15 +245,15 @@ matter most on a home:
 | Check | If it reports a problem |
 |---|---|
 | `home` | Make `~/.vowp` writable by `<your-user>`, or pass the same `--home` consistently. |
-| `db` | The global database is `$VOWP_HOME/vowp.db` (default `~/.vowp/vowp.db`). Never delete it; restore a backup or run `vowp migrate --dry-run` for a v0.1 home. |
-| `projects` | A project database is missing or does not open. Run `vowp project ls`; a checkout may need `vowp project add`. |
+| `db` | The global database is `$VOWP_HOME/vowp.db` (default `~/.vowp/vowp.db`). Never delete it; restore a backup or run `stackspirit migrate --dry-run` for a v0.1 home. |
+| `projects` | A project database is missing or does not open. Run `stackspirit project ls`; a checkout may need `stackspirit project add`. |
 | `snapshot` | The supervisor has not written a parseable `snapshot.json` yet, or `tmp/` is not writable. Start the supervisor. |
 | `git` / `tmux` | Install the missing program or fix `PATH`. tmux is a warning, but jobs need windows. |
 | `config` | Fix the named key in `vowp.toml`; unknown keys are errors. |
 | `harness:claude-code` / `harness:opencode` | Install the harness or set `[harnesses.<name>].binary` to its absolute path. |
 | `providers` | Set the named environment variable for the service. The value is never printed. |
 | `systemd` / `watchdog` | Install the unit and cron check with `./scripts/install.sh`, or accept the warning. |
-| `supervisor` | Not running. Start `vowp up` or the service if you expect one. |
+| `supervisor` | Not running. Start `stackspirit up` or the service if you expect one. |
 | `disk` | Free at least 1 GB; runs and blobs grow with tool output. |
 
 A missing harness is a `fail` because dispatch would fail later; missing tmux is a `warn`, but a
@@ -260,46 +262,46 @@ dispatched job still needs a window.
 ## Start the supervisor
 
 ```sh
-vowp up                          # ensure the tmux layout, detach the supervisor
-vowp up --foreground             # run the loop in this process (what systemd runs)
-vowp up --no-tmux                # skip windows; jobs still need tmux
-vowp up --once                   # exactly one home tick, then exit
+stackspirit up                          # ensure the tmux layout, detach the supervisor
+stackspirit up --foreground             # run the loop in this process (what systemd runs)
+stackspirit up --no-tmux                # skip windows; jobs still need tmux
+stackspirit up --once                   # exactly one home tick, then exit
 ```
 
 There is **one supervisor for every active project**. `up` creates a `vowp-home` tmux session with
 `board` and `capacity`, plus one `vowp-<project>` session for every non-archived project (including
 paused ones). `--once` is useful as a smoke test; it runs the machine steps, every project in
 round-robin order and the snapshot write. `up` exits 4 if a supervisor already holds the home lock;
-`vowp status` shows the pid.
+`stackspirit status` shows the pid.
 
 `up` runs the v0.1-to-v0.2 migration automatically for an old home, after taking a backup. Pass
 `--no-migrate` only when you intentionally want the refusal instead. The migration refuses while a
 supervisor is running.
 
-When the web-window daemon starts, `vowp up` prints its loopback URL and the control-machine
+When the web-window daemon starts, `stackspirit up` prints its loopback URL and the control-machine
 command for that actual port:
 
 ```text
 web window: http://127.0.0.1:54321/
-remote window: vowp tunnel open window --remote-port 54321
+remote window: stackspirit tunnel open window --remote-port 54321
   local URL: http://127.0.0.1:<local-port>/ (the command prints the chosen port)
 ```
 
 On the laptop or phone, configure the home once as a control machine
-(`vowp control init --name home <home-ssh-target>`), run the printed
-`vowp tunnel open window --remote-port 54321`, and open the local loopback URL it prints. Pass
+(`stackspirit control init --name home <home-ssh-target>`), run the printed
+`stackspirit tunnel open window --remote-port 54321`, and open the local loopback URL it prints. Pass
 `--local-port <n>` when you need a fixed local port. The daemon binds `127.0.0.1` on the home;
 the existing managed SSH forward is the only route, no public port is opened, and the firewall
 still allows only SSH. A missing daemon binary warns and prints no tunnel hint while the
 supervisor keeps running; `up --once` starts no daemon.
 
-Reads need no token. Set `VOWP_API_TOKEN` in the environment that runs `vowp up` (for example a
+Reads need no token. Set `VOWP_API_TOKEN` in the environment that runs `stackspirit up` (for example a
 mode-0600 `EnvironmentFile=` on the user unit) and enter the value in the page's unlock panel to
 enable the inbox answer and session switch writes. The page keeps it in `sessionStorage`, never
-in the URL; `vowp up` never prints it. Rotating it means restarting the daemon with the new value
+in the URL; `stackspirit up` never prints it. Rotating it means restarting the daemon with the new value
 and unlocking again.
 
-Under systemd, do not also start a detached `vowp up`. The unit owns the process:
+Under systemd, do not also start a detached `stackspirit up`. The unit owns the process:
 
 ```sh
 systemctl --user status vowp
@@ -315,13 +317,13 @@ manager available when you are logged out.
 ## Status, fleet and windows
 
 ```sh
-vowp status
-vowp status --check
-vowp fleet status
-vowp fleet queue
-vowp fleet inbox
-vowp board --once
-vowp attach <job-id>
+stackspirit status
+stackspirit status --check
+stackspirit fleet status
+stackspirit fleet queue
+stackspirit fleet inbox
+stackspirit board --once
+stackspirit attach <job-id>
 ```
 
 `status` reports the supervisor, heartbeat, jobs across projects, slots, limits, cost today and the
@@ -332,12 +334,12 @@ waiting, and `fleet inbox` lists open questions and decisions.
 `attach` needs a terminal, so use SSH's TTY allocation from another machine:
 
 ```sh
-ssh -t <home-ssh-target> 'cd /path/to/<your-repo> && vowp attach <job-id>'
+ssh -t <home-ssh-target> 'cd /path/to/<your-repo> && stackspirit attach <job-id>'
 ```
 
-If tmux is unavailable, `vowp attach <job-id>` tails the job's latest session log. To follow it
-yourself, find the session id with `vowp session ls --job <job-id>` and run
-`vowp session tail <session-id> --pretty --follow`.
+If tmux is unavailable, `stackspirit attach <job-id>` tails the job's latest session log. To follow it
+yourself, find the session id with `stackspirit session ls --job <job-id>` and run
+`stackspirit session tail <session-id> --pretty --follow`.
 
 ## Capacity
 
@@ -346,11 +348,11 @@ brakes when the machine is under pressure, and asks the AI keeper for advice. Th
 target; the code enforces it.
 
 ```sh
-vowp capacity show
-vowp capacity report --since 7d
-vowp capacity set --target 5 --reason "five workers during the migration"
-vowp capacity set --target 8 --override --reason "owner override for the release"
-vowp capacity set --mode auto
+stackspirit capacity show
+stackspirit capacity report --since 7d
+stackspirit capacity set --target 5 --reason "five workers during the migration"
+stackspirit capacity set --target 8 --override --reason "owner override for the release"
+stackspirit capacity set --mode auto
 ```
 
 - `auto` is the default: the measured advice becomes the target.
@@ -373,9 +375,9 @@ The full model is in [Operating a home](operating.md#capacity) and the
 VOWP runs its own private tmux server, not the account's default server. The socket name is derived
 from the home, and every internal command runs with `-L <socket>` and
 `TMUX_TMPDIR=<home>/tmux`. At startup VOWP records the socket and server pid in
-`<home>/tmux-server`; `vowp down --kill-windows` refuses a server that does not match that record.
+`<home>/tmux-server`; `stackspirit down --kill-windows` refuses a server that does not match that record.
 
-- Use `vowp down --kill-windows` to close this home's windows. Do not run `tmux kill-server`.
+- Use `stackspirit down --kill-windows` to close this home's windows. Do not run `tmux kill-server`.
 - Do not run `tmux -L default`; VOWP refuses the literal `default` socket.
 - Do not point `TMUX_TMPDIR` at a shared directory such as `/tmp` for VOWP. Let VOWP use its home.
 - If you write scripts or tests, use a unique `tmux -L <unique>` socket **and** a private
@@ -392,17 +394,17 @@ Secrets are referred to by name. There are three modes:
 |---|---|---|
 | **vault user** | The `vowp-vault` user and helper exist (sudo allows them). | `/home/vowp-vault/secrets/<NAME>`, mode 0600. |
 | **basic** | No sudo or no vault user. | `~/.vowp/secrets/<NAME>`, mode 0600, owned by the runtime user. |
-| **encrypted** | The owner runs `vowp secret upgrade --encrypted`. | `~/.vowp/secrets/encrypted/<NAME>`, age ciphertext, mode 0600; key in `~/.vowp/secrets/age.key`, mode 0600. |
+| **encrypted** | The owner runs `stackspirit secret upgrade --encrypted`. | `~/.vowp/secrets/encrypted/<NAME>`, age ciphertext, mode 0600; key in `~/.vowp/secrets/age.key`, mode 0600. |
 
 ```sh
-vowp secret set <NAME>          # hidden prompt; the value is never echoed or in argv
-vowp secret set <NAME> --stdin  # read the value from stdin; works without a TTY
-vowp secret ls                  # names and last four characters only, plus `storage: <mode>`
-vowp secret ls --json           # {"mode":"…","secrets":[…]} with no values
-vowp secret request <NAME>      # one-time loopback paste page, for a desktop owner
-vowp secret rm <NAME> --yes
-vowp secret upgrade             # prints the one sudo command that creates the vault user
-vowp secret upgrade --encrypted # encrypt basic-mode secrets with a local age key
+stackspirit secret set <NAME>          # hidden prompt; the value is never echoed or in argv
+stackspirit secret set <NAME> --stdin  # read the value from stdin; works without a TTY
+stackspirit secret ls                  # names and last four characters only, plus `storage: <mode>`
+stackspirit secret ls --json           # {"mode":"…","secrets":[…]} with no values
+stackspirit secret request <NAME>      # one-time loopback paste page, for a desktop owner
+stackspirit secret rm <NAME> --yes
+stackspirit secret upgrade             # prints the one sudo command that creates the vault user
+stackspirit secret upgrade --encrypted # encrypt basic-mode secrets with a local age key
 ```
 
 On a control machine, `secret set/ls/rm/upgrade` route to the home over SSH; the hidden-prompt `set`
@@ -413,7 +415,7 @@ store when set and otherwise from the process environment. `--stdin` strips exac
 newline and refuses an empty value:
 
 ```sh
-printf '%s\n' "$PROVIDER_KEY" | vowp secret set PROVIDER_KEY --stdin
+printf '%s\n' "$PROVIDER_KEY" | stackspirit secret set PROVIDER_KEY --stdin
 ```
 
 `--encrypted` encrypts every basic value before removing any plaintext copy, writes the mode file
@@ -448,19 +450,19 @@ logins stay under the harness's own control. The full statement is in the
 ## Back up and collect garbage
 
 ```sh
-vowp backup
-vowp backup --to /mnt/backup/
-vowp backup --to rsync://backup.example/vowp --encrypt age1...
-vowp backup --restore /mnt/backup/<timestamp> --to-home /srv/vowp-restored
-vowp gc
-vowp gc --apply
+stackspirit backup
+stackspirit backup --to /mnt/backup/
+stackspirit backup --to rsync://backup.example/vowp --encrypt age1...
+stackspirit backup --restore /mnt/backup/<timestamp> --to-home /srv/vowp-restored
+stackspirit gc
+stackspirit gc --apply
 ```
 
 A backup is one directory with the global database, every project database, the authoritative session
 content and a manifest with hashes and row counts. The default rotation keeps seven daily and four
-weekly backups. Secrets are never backed up; restore them with `vowp secret set`.
+weekly backups. Secrets are never backed up; restore them with `stackspirit secret set`.
 
-`vowp gc` is a dry run by default. `--apply` collects only `closed_session`, `run_output`,
+`stackspirit gc` is a dry run by default. `--apply` collects only `closed_session`, `run_output`,
 `worktree`, `sample` and expired `cache` entries; it never deletes production, truth, open work or
 secrets. The supervisor creates a nightly `gc-nightly` schedule in each project. See
 [Operating a home](operating.md#backups-and-restore) for the restore drill and compaction behaviour.
@@ -471,16 +473,16 @@ v0.3 runs several projects in one home. There is no separate `VOWP_HOME` per pro
 supervisor:
 
 ```sh
-vowp project add /srv/projects/alpha
-vowp project add /srv/projects/beta --weight 2
-vowp project ls
-vowp up
+stackspirit project add /srv/projects/alpha
+stackspirit project add /srv/projects/beta --weight 2
+stackspirit project ls
+stackspirit up
 ```
 
 Each project has its own `projects/<name>/project.db`, its own tmux session and its own jobs. The home
 supervisor ticks them round-robin, sharing the home's CPU, memory, harness logins and provider limits;
 capacity admission and the project weight decide who runs next. A broken project parks itself and
-opens an inbox notice without stopping the others. `vowp project pause` stops new dispatch while
+opens an inbox notice without stopping the others. `stackspirit project pause` stops new dispatch while
 running work finishes.
 
 The old "one project per `VOWP_HOME`" workaround belongs to v0.1. Do not use it on a v0.3 home.
@@ -491,32 +493,32 @@ A laptop or phone does not need its own supervisor. Configure it as a control ma
 write through the home:
 
 ```sh
-vowp control init --name home <home-ssh-target>
-vowp control status
-vowp fleet status
+stackspirit control init --name home <home-ssh-target>
+stackspirit control status
+stackspirit fleet status
 ```
 
-Every project/fleet command on the control machine routes to the home over SSH; `vowp up`, `down` and
+Every project/fleet command on the control machine routes to the home over SSH; `stackspirit up`, `down` and
 `board` refuse there because they need local truth. The rest of the machine-to-machine details,
 including tunnels and executor machines, are in
 [Control machines and extra machines](multi-node.md).
 
 ## Upgrade and migration
 
-1. `vowp down` (or `systemctl --user stop vowp`).
+1. `stackspirit down` (or `systemctl --user stop vowp`).
 2. Install the new binary over the old one.
-3. `vowp doctor` to check the schema and the projects.
-4. `vowp up`.
+3. `stackspirit doctor` to check the schema and the projects.
+4. `stackspirit up`.
 
-A v0.1 home migrates to the split global + per-project layout on the first `vowp up`, after a backup
+A v0.1 home migrates to the split global + per-project layout on the first `stackspirit up`, after a backup
 under `~/.vowp/backups/pre-0.2-<timestamp>.db`. To inspect first:
 
 ```sh
-vowp migrate --dry-run
-vowp migrate --yes
+stackspirit migrate --dry-run
+stackspirit migrate --yes
 ```
 
-`vowp migrate --rollback <backup>` restores the pre-migration home. Migration refuses while a
+`stackspirit migrate --rollback <backup>` restores the pre-migration home. Migration refuses while a
 supervisor is running; session logs are not changed by it. The database written by a newer binary is
 refused rather than guessed at.
 
@@ -546,17 +548,17 @@ outbound access to the git remote and to the harness's provider.
 | Symptom | Check |
 |---|---|
 | `vowp: command not found` under systemd | `PATH` and `ExecStart` in the unit; install with the script so the path is `~/.local/bin/vowp`. |
-| `vowp setup home` exits 5 | Read the `handoff` object: sudo command, harness login, secret name or owner answer. Finish that, re-run the same command. |
-| `vowp up` exits 4 | A supervisor is already running. `vowp status` shows it; use the service instead of a second `up`. |
-| `vowp up` prints no `web window:` line | The daemon binary is missing or did not start; the warning names the reason. Install `vowp-daemon` beside `vowp` or set `VOWP_DAEMON_BIN`. |
-| The window URL does not open from the laptop | Open the tunnel's local loopback URL, not the home's `127.0.0.1` address; run `vowp tunnel ls` from the machine that opened it. |
+| `stackspirit setup home` exits 5 | Read the `handoff` object: sudo command, harness login, secret name or owner answer. Finish that, re-run the same command. |
+| `stackspirit up` exits 4 | A supervisor is already running. `stackspirit status` shows it; use the service instead of a second `up`. |
+| `stackspirit up` prints no `web window:` line | The daemon binary is missing or did not start; the warning names the reason. Install `vowp-daemon` beside `vowp` or set `VOWP_DAEMON_BIN`. |
+| The window URL does not open from the laptop | Open the tunnel's local loopback URL, not the home's `127.0.0.1` address; run `stackspirit tunnel ls` from the machine that opened it. |
 | `doctor` fails a harness | The harness is installed and signed in as `<your-user>`; check `[harnesses.<name>].binary`. |
 | `doctor` reports a provider `absent` | Set the variable in the service environment; VOWP only reports the name. |
 | No tmux session after `up` | Read `~/.vowp/logs/supervisor.log`; install tmux and check the private socket directory. |
-| A job is parked | Read `vowp inbox ls` and `vowp job show <id>`; a provider limit or a question is the usual cause. |
-| A project is paused `broken:` | Fix the reason in the inbox, then `vowp project resume <name>`. |
+| A job is parked | Read `stackspirit inbox ls` and `stackspirit job show <id>`; a provider limit or a question is the usual cause. |
+| A project is paused `broken:` | Fix the reason in the inbox, then `stackspirit project resume <name>`. |
 | Permission denied on the home | Run every command as the runtime user; `~/.vowp` must be owned by that account. |
-| `MigrationRequired` | Stop the supervisor and run `vowp migrate --dry-run`, then `vowp migrate --yes`. |
+| `MigrationRequired` | Stop the supervisor and run `stackspirit migrate --dry-run`, then `stackspirit migrate --yes`. |
 
 The [troubleshooting guide](../troubleshooting.md) covers exit codes, gates, capacity, sessions and
 remote failures. Next: [Control machines and extra machines](multi-node.md), or

@@ -2,7 +2,7 @@
 
 A home is one VPS with one supervisor for every active project. The supervisor is a plain process
 that ticks every 60 seconds, reconciles the databases and session logs, dispatches work and writes a
-snapshot. Everything it knows survives a crash; `vowp up` again reconciles and continues. Control
+snapshot. Everything it knows survives a crash; `stackspirit up` again reconciles and continues. Control
 machines read that snapshot and send writes back to the home.
 
 > **Status: current.** The supervisor, fleet, capacity, project, loop, schedule, backup, gc, secret
@@ -11,44 +11,44 @@ machines read that snapshot and send writes back to the home.
 ## Start and stop
 
 ```sh
-vowp up                          # ensure tmux windows, detach the supervisor
-vowp up --foreground             # run the loop in this process (what systemd runs)
-vowp up --no-tmux                # skip the initial layout; jobs still use tmux windows
-vowp up --once                   # exactly one home tick, then exit
-vowp down                        # stop, wait up to 30 s
-vowp down --kill-windows         # also close this home's tmux windows
-vowp down --force                # send SIGTERM after the wait
+stackspirit up                          # ensure tmux windows, detach the supervisor
+stackspirit up --foreground             # run the loop in this process (what systemd runs)
+stackspirit up --no-tmux                # skip the initial layout; jobs still use tmux windows
+stackspirit up --once                   # exactly one home tick, then exit
+stackspirit down                        # stop, wait up to 30 s
+stackspirit down --kill-windows         # also close this home's tmux windows
+stackspirit down --force                # send SIGTERM after the wait
 ```
 
-`vowp up` exits 4 if a supervisor is already running for the home. There is no per-project
+`stackspirit up` exits 4 if a supervisor is already running for the home. There is no per-project
 supervisor in v0.3. Each tick runs the machine steps once (capacity sample, capacity advice, lease
 sweep, lifecycle, machine requests) and then every active project in round-robin order, followed by the
 snapshot and the heartbeat. A project that fails to start or tick is parked with a reason and does
 not stop the others.
 
-`vowp down` writes `~/.vowp/stop`; a run that is interrupted is finalised as `stalled` and
+`stackspirit down` writes `~/.vowp/stop`; a run that is interrupted is finalised as `stalled` and
 re-queued, not failed. Windows are left open for inspection unless `--kill-windows` is given.
 `--force` is for a supervisor that ignored the stop request, not the normal path.
 
 The supervisor uses `~/.vowp/supervisor.lock` containing its pid. A stale lock left by a killed
 process is detected and replaced; do not delete the database to "fix" a lock. Under systemd, use
-`systemctl --user stop|restart vowp` and do not start a second detached `vowp up`.
+`systemctl --user stop|restart vowp` and do not start a second detached `stackspirit up`.
 
-`vowp up` migrates a v0.1 home automatically after a backup unless `--no-migrate` is passed. See
+`stackspirit up` migrates a v0.1 home automatically after a backup unless `--no-migrate` is passed. See
 [Migration and upgrades](#migration-and-upgrades).
 
 ## Status, fleet and the board
 
 ```sh
-vowp status
-vowp status --json
-vowp status --check             # exit 1 when the heartbeat is older than 3 min
-vowp fleet status
-vowp fleet status --refresh
-vowp fleet queue
-vowp fleet inbox
-vowp board --once
-vowp board --interval 5
+stackspirit status
+stackspirit status --json
+stackspirit status --check             # exit 1 when the heartbeat is older than 3 min
+stackspirit fleet status
+stackspirit fleet status --refresh
+stackspirit fleet queue
+stackspirit fleet inbox
+stackspirit board --once
+stackspirit board --interval 5
 ```
 
 `status` reports the supervisor pid, uptime, last tick age, jobs by state across projects, busy/total
@@ -62,7 +62,7 @@ prints the cached answer with an `as of` time and `stale` marker. `fleet queue` 
 with their waiting reason (`waiting: RAM 1.2 GB short`, `waiting: provider deepseek 429`), and
 `fleet inbox` aggregates open machine and project items.
 
-`vowp board` is the refreshing view. With one project registered and selected it prints the v0.1 project
+`stackspirit board` is the refreshing view. With one project registered and selected it prints the v0.1 project
 board; with several projects, or no project selected, it prints the fleet board with a project column.
 `board --once` prints one frame. The `vowp-home` tmux session has `board` and `capacity` windows; each
 project has its own session.
@@ -70,13 +70,13 @@ project has its own session.
 ## Projects
 
 ```sh
-vowp project ls
-vowp project ls --all
-vowp project pause <name>
-vowp project resume <name>
-vowp project archive <name>
-vowp project rm <name> --yes
-vowp project weight <name> 2
+stackspirit project ls
+stackspirit project ls --all
+stackspirit project pause <name>
+stackspirit project resume <name>
+stackspirit project archive <name>
+stackspirit project rm <name> --yes
+stackspirit project weight <name> 2
 ```
 
 | Command | Effect |
@@ -88,7 +88,7 @@ vowp project weight <name> 2
 | `weight <name> <1..=100>` | Fairness share when several projects compete for capacity. |
 
 A broken project is paused with a `broken:` reason and an inbox notice. Fix the cause, then
-`vowp project resume <name>`; the other projects kept running.
+`stackspirit project resume <name>`; the other projects kept running.
 
 `vowp project add <path>` is the way to add a checkout that already has `vowp.toml`. `vowp init` is
 the way to initialise a new checkout; both create the project database, loops and worker slots.
@@ -100,13 +100,13 @@ every few seconds, stores per-run usage, admits work against a RAM/CPU/disk/prov
 brakes when the machine is under pressure. Running work is never killed by the capacity manager.
 
 ```sh
-vowp capacity show
-vowp capacity report --since 7d
-vowp capacity report --limit 20
-vowp capacity set --target 5 --reason "five workers during the migration"
-vowp capacity set --target 8 --override --reason "owner override for the release"
-vowp capacity set --mode auto
-vowp capacity set --mode fixed --target 4
+stackspirit capacity show
+stackspirit capacity report --since 7d
+stackspirit capacity report --limit 20
+stackspirit capacity set --target 5 --reason "five workers during the migration"
+stackspirit capacity set --target 8 --override --reason "owner override for the release"
+stackspirit capacity set --mode auto
+stackspirit capacity set --mode fixed --target 4
 ```
 
 | Mode | Meaning |
@@ -126,7 +126,7 @@ admitted against the chosen worker node's slots and headroom. The full rule is i
 
 The AI keeper proposes a target every 30 minutes and on events, as a `decision` inbox item. It never
 changes the target itself. The owner answers, and the orchestrator applies it with
-`vowp capacity set`. If a run is OOM-killed, the supervisor records it, parks that job with a notice
+`stackspirit capacity set`. If a run is OOM-killed, the supervisor records it, parks that job with a notice
 and raises its estimate; it does not kill other work.
 
 `[node].max_workers` and `[node].max_verifiers` in `vowp.toml` are per-machine preferences. The machine
@@ -176,18 +176,18 @@ tool output and file contents. The coverage is stated exactly in the
 ## Loops
 
 ```sh
-vowp loops
-vowp loops --all
-vowp loops pause l4-planner
-vowp loops resume l4-planner
+stackspirit loops
+stackspirit loops --all
+stackspirit loops pause l4-planner
+stackspirit loops resume l4-planner
 ```
 
-Loop rows are per project. `vowp loops` uses the selected project; with several projects and no
-selection it exits 2 and lists them, so use `vowp loops --all` or `--project <name>`. The rows are:
+Loop rows are per project. `stackspirit loops` uses the selected project; with several projects and no
+selection it exits 2 and lists them, so use `stackspirit loops --all` or `--project <name>`. The rows are:
 
 | Loop | Default | Does |
 |---|---|---|
-| `l1-supervisor` | 60 s | Reconcile, dispatch and the main tick. Cannot be paused on its own; use `vowp down`. |
+| `l1-supervisor` | 60 s | Reconcile, dispatch and the main tick. Cannot be paused on its own; use `stackspirit down`. |
 | `l2-worker` | event | Continue a worker that stopped before its report (bounded). |
 | `l3-verify` | event | Run the verifier and create bounded fix jobs. |
 | `l4-planner` | 1800 s | Planner heartbeat. |
@@ -202,7 +202,7 @@ action three times without new evidence stops and escalates rather than spinning
 
 ## Schedules
 
-Schedules are per-project rows; see the [schedules guide](schedules.md). `vowp schedule --all ls`
+Schedules are per-project rows; see the [schedules guide](schedules.md). `stackspirit schedule --all ls`
 lists every project's rows. A schedule can create a job, trigger a loop or run a command. Missed runs
 while the machine was down either run once (`run_once`) or are skipped (`skip`); they never replay N
 times. The supervisor creates the nightly `gc-nightly` interval schedule in each project the first
@@ -211,13 +211,13 @@ time lifecycle runs there.
 ## Backups and restore
 
 ```sh
-vowp backup
-vowp backup --to /mnt/backup/
-vowp backup --to /mnt/backup/ --offsite rsync://backup.example/vowp --encrypt age1...
-vowp backup --to /mnt/backup/ --offsite git:<remote>
-vowp backup --restore /mnt/backup/<timestamp> --to-home /srv/vowp-restored
-vowp reindex
-vowp reindex --session <id>
+stackspirit backup
+stackspirit backup --to /mnt/backup/
+stackspirit backup --to /mnt/backup/ --offsite rsync://backup.example/vowp --encrypt age1...
+stackspirit backup --to /mnt/backup/ --offsite git:<remote>
+stackspirit backup --restore /mnt/backup/<timestamp> --to-home /srv/vowp-restored
+stackspirit reindex
+stackspirit reindex --session <id>
 ```
 
 A backup is one directory under `~/.vowp/backups/<UTC timestamp>/` by default, containing:
@@ -233,7 +233,7 @@ directory is a full directory backup. `--offsite` (or an `rsync://` / `git:` tar
 directory with the external `rsync` or `git` binary; `--encrypt` uses the external `age` binary. A
 missing tool is a clear exit 5, never a silent unencrypted copy.
 
-Secrets are never backed up, encrypted or not. Restore them with `vowp secret set NAME` after a
+Secrets are never backed up, encrypted or not. Restore them with `stackspirit secret set NAME` after a
 restore. The manifest says `secrets/: never backed up`.
 
 `--restore <dir> --to-home <dir>` writes a fresh home, verifies every hash and row count in a staging
@@ -241,7 +241,7 @@ directory, runs integrity checks and only then swaps it into place. It refuses t
 non-empty target without `--force`. The restore never reads the live store, so it also works when
 the serving home is lost. Test the restore path before an upgrade if the data matters.
 
-`vowp reindex` rebuilds the session index (`sessions`, `session_events`, `session_natives`,
+`stackspirit reindex` rebuilds the session index (`sessions`, `session_events`, `session_natives`,
 `capsules`) from `sessions/*/log.jsonl`. It is safe while the supervisor runs and prints counts. It
 does not rebuild jobs, gates or decisions; restore a backup instead of hand-editing a database.
 
@@ -263,18 +263,18 @@ Every file VOWP creates belongs to a lifecycle class:
 | `cache` | Control snapshot cache and `tmp/`. Disposable. |
 
 ```sh
-vowp gc
-vowp gc --class run_output
-vowp gc --apply
-vowp gc --older-than 7d
-vowp gc --older-than 7d --class closed_session --apply
+stackspirit gc
+stackspirit gc --class run_output
+stackspirit gc --apply
+stackspirit gc --older-than 7d
+stackspirit gc --older-than 7d --class closed_session --apply
 ```
 
-`vowp gc` is a dry run by default: it lists files per class, bytes and a sample of paths, plus the
+`stackspirit gc` is a dry run by default: it lists files per class, bytes and a sample of paths, plus the
 files and bytes an `--apply` would collect now, and changes nothing. `--apply` deletes only
 `closed_session` (after writing a final capsule and `summary.md`), `run_output`, `worktree`, `sample`
 and expired `cache` entries, and closes `job_window` entries. It never deletes production, truth,
-open work or secrets. The nightly `gc-nightly` schedule runs `vowp gc --apply` once per day per
+open work or secrets. The nightly `gc-nightly` schedule runs `stackspirit gc --apply` once per day per
 project, so it closes orphan job windows too.
 
 `--older-than <duration>` shortens the window for `closed_session` and `run_output` only, for one
@@ -284,7 +284,7 @@ larger-than-ten-year values exit 2. With `--class`, only `closed_session` and `r
 override. A dry run prints `ELIGIBLE` and `ELIGIBLE BYTES` next to each class, so review those before
 adding `--apply`. The pass refuses and lists any session with a live lease, a job that still holds its
 lock (running, stalled, gating, reviewing, fixing or merging), or a running orchestrator. Compaction
-still leaves the session row, capsule and `summary.md`, so `vowp reindex` and `vowp session show`
+still leaves the session row, capsule and `summary.md`, so `stackspirit reindex` and `stackspirit session show`
 continue to work for every remaining session.
 
 After compaction, `session show --events` and `session tail` on that session exit 3 with
@@ -295,13 +295,13 @@ full-log replay after compaction.
 ## Secrets
 
 ```sh
-vowp secret set <NAME>
-vowp secret set <NAME> --stdin
-vowp secret ls
-vowp secret request <NAME>
-vowp secret rm <NAME> --yes
-vowp secret upgrade
-vowp secret upgrade --encrypted
+stackspirit secret set <NAME>
+stackspirit secret set <NAME> --stdin
+stackspirit secret ls
+stackspirit secret request <NAME>
+stackspirit secret rm <NAME> --yes
+stackspirit secret upgrade
+stackspirit secret upgrade --encrypted
 ```
 
 `set` reads a hidden prompt (there is no argument for the value), writes atomically with mode 0600
@@ -324,13 +324,13 @@ The honest limits, the injection path and the redaction coverage are in the
 ## Orchestrators
 
 ```sh
-vowp orchestrator new --name main --app chat --executor <executor>
-vowp orchestrator new --name main --app opencode --project <project>
-vowp orchestrator ls
-vowp orchestrator move main --node <node>
-vowp orchestrator move main --home
-vowp orchestrator stop main
-vowp orchestrator resume main
+stackspirit orchestrator new --name main --app chat --executor <executor>
+stackspirit orchestrator new --name main --app opencode --project <project>
+stackspirit orchestrator ls
+stackspirit orchestrator move main --node <node>
+stackspirit orchestrator move main --home
+stackspirit orchestrator stop main
+stackspirit orchestrator resume main
 ```
 
 An orchestrator is a project-less or project-bound session with the `orchestrator` role. Its
@@ -338,7 +338,7 @@ directory is `~/.vowp/orchestrators/<name>/` and holds only project-local app co
 instructions template, the lease token, host state, the transcript cursor (`mirror.json`), the
 keeper log (`keeper.log`) and the keeper pid (`keeper.pid`). `new` starts the app host where that app
 supports it (an opencode server that binds loopback, or Claude Remote Control, which opens no local
-port and connects outbound to claude.ai) and prints desktop, phone and `vowp chat` join
+port and connects outbound to claude.ai) and prints desktop, phone and `stackspirit chat` join
 instructions. `stop` stops the host and releases the lease; the session stays. `resume` starts it
 again. A host that cannot start is marked `degraded` and does not stop the supervisor.
 
@@ -354,13 +354,13 @@ paired surface for the session. Put the global `--home <DIR>` flag before `orche
 after the command, `--home` is the target switch.
 
 The join instructions use generic `<home-ssh-target>` and `<session>` placeholders; the control
-machine supplies the concrete target. The fallback is always `vowp chat <session-id>`.
+machine supplies the concrete target. The fallback is always `stackspirit chat <session-id>`.
 
 To connect a local UI client to the orchestrator's app process, ask for the endpoint document:
 
 ```sh
-vowp orchestrator endpoint main --json            # on the home: location home or node
-vowp agent orchestrator endpoint main --json      # on the agent machine that runs the app
+stackspirit orchestrator endpoint main --json            # on the home: location home or node
+stackspirit agent orchestrator endpoint main --json      # on the agent machine that runs the app
 ```
 
 A home-hosted live opencode host returns a loopback `url`, the native app session id and Basic
@@ -376,7 +376,7 @@ expired, or `null`) and `access`. `access` is `read_only` unless you pass the li
 id:
 
 ```sh
-vowp orchestrator endpoint main --surface <surface-id>   # access: owner only for the live owner
+stackspirit orchestrator endpoint main --surface <surface-id>   # access: owner only for the live owner
 ```
 
 A UI that must write attaches first. `attach` creates a `desktop-ui` surface, prints a one-time grant
@@ -384,8 +384,8 @@ A UI that must write attaches first. `attach` creates a `desktop-ui` surface, pr
 heartbeating until its stdin reaches end-of-file, when it releases the lease:
 
 ```sh
-vowp orchestrator attach main --holder opencode-desktop --label "StackSpirit · macbook"
-vowp orchestrator attach main --holder opencode-desktop --takeover --json
+stackspirit orchestrator attach main --holder opencode-desktop --label "StackSpirit · macbook"
+stackspirit orchestrator attach main --holder opencode-desktop --takeover --json
 ```
 
 The UI process must start `attach` as a child and keep it alive while the UI writes; closing its stdin
@@ -393,22 +393,22 @@ releases the lease. No detached keeper exists for an attached UI in this release
 without a live `attach` simply has no lease. Treat the grant like a secret: the token is printed once,
 on stdout, and the hold notice goes to stderr so `--json` stays parseable. `attach` works only on a
 home-hosted orchestrator with a live app endpoint: a node-hosted orchestrator is refused, a stopped
-host asks you to run `vowp orchestrator resume <name>` first, and `--node` is not an SSH redirect.
+host asks you to run `stackspirit orchestrator resume <name>` first, and `--node` is not an SSH redirect.
 
 If another surface owns the session (the orchestrator's own app host normally does while it runs),
 `attach` refuses unless you pass `--takeover`, or unless that owner is stale (no heartbeat for 60
 seconds). A takeover replaces the lease, increments the owner
 epoch, writes a capsule and tells the old surface to stop; the old surface keeps following read-only.
-`vowp chat` asks before taking a live lease (`/takeover`, or `--takeover` at start) and `/follow`
+`stackspirit chat` asks before taking a live lease (`/takeover`, or `--takeover` at start) and `/follow`
 returns to read-only. A UI that only observes does not attach; it asks `endpoint` for `owner` and
 `access: read_only` and uses read routes only.
 
 To see who owns a session:
 
 ```sh
-vowp fleet status          # an owners: section, one line per owned recent session
-vowp session lease <id>    # holder, kind, node, mode, state, activity, epoch, expiry
-vowp session show <id>     # an owner: block, or owner: none
+stackspirit fleet status          # an owners: section, one line per owned recent session
+stackspirit session lease <id>    # holder, kind, node, mode, state, activity, epoch, expiry
+stackspirit session show <id>     # an owner: block, or owner: none
 ```
 
 Each `fleet status` line shows the session id, title, label, kind and mode, `holder@node`, state,
@@ -419,19 +419,19 @@ a person's surface fences the run, writes a capsule and leaves the job `ready`.
 
 **Limits.** Ownership is recorded and cooperative: a UI that calls the app's HTTP API directly with
 the engine password is not stopped by it. The loopback engine proxy that would enforce it is **planned
-and deferred**, and there is no node-side proxy, so `vowp agent orchestrator endpoint` reports
+and deferred**, and there is no node-side proxy, so `stackspirit agent orchestrator endpoint` reports
 `read_only` with no home owner view. See [home and surfaces](../concepts/home-and-surfaces.md#who-owns-a-session).
 
 ## Migration and upgrades
 
 A v0.1 home has one `vowp.db` with project tables. v0.2 splits it into `vowp.db` plus
-`projects/<name>/project.db`. `vowp up` migrates automatically after a backup; to inspect or control
+`projects/<name>/project.db`. `stackspirit up` migrates automatically after a backup; to inspect or control
 it:
 
 ```sh
-vowp migrate --dry-run
-vowp migrate --yes
-vowp migrate --rollback ~/.vowp/backups/pre-0.2-<timestamp>.db
+stackspirit migrate --dry-run
+stackspirit migrate --yes
+stackspirit migrate --rollback ~/.vowp/backups/pre-0.2-<timestamp>.db
 ```
 
 The migration:
@@ -447,8 +447,8 @@ The migration:
 refuses while a supervisor is running. The acceptance test for a real v0.1 home is the migration
 test in the release checklist.
 
-Upgrade the binary in this order: stop the supervisor, install the new binary, run `vowp doctor`,
-start `vowp up`. Database migrations are forward-only and keyed by `PRAGMA user_version`; a database
+Upgrade the binary in this order: stop the supervisor, install the new binary, run `stackspirit doctor`,
+start `stackspirit up`. Database migrations are forward-only and keyed by `PRAGMA user_version`; a database
 written by a newer binary is refused rather than guessed at. Back up before an upgrade and test the
 restore path.
 
@@ -456,17 +456,17 @@ restore path.
 
 Once a day:
 
-- `vowp status` and `vowp fleet status` — supervisor healthy, no stuck `running` job, limits resetting.
-- `vowp fleet inbox` — questions and approvals waiting.
-- `vowp capacity show` — target, advice and any brake.
-- `vowp cost --since 1d` — spend and unknown-cost count.
-- `vowp backup` — keep a copy outside the home.
+- `stackspirit status` and `stackspirit fleet status` — supervisor healthy, no stuck `running` job, limits resetting.
+- `stackspirit fleet inbox` — questions and approvals waiting.
+- `stackspirit capacity show` — target, advice and any brake.
+- `stackspirit cost --since 1d` — spend and unknown-cost count.
+- `stackspirit backup` — keep a copy outside the home.
 
 Once a week:
 
 - Read `~/.vowp/logs/supervisor.log` for repeated `WARN`/`ERROR` targets.
 - Check disk space; runs and blobs grow with tool output.
-- Run `vowp gc` (dry run) and review the classes before an `--apply`.
+- Run `stackspirit gc` (dry run) and review the classes before an `--apply`.
 - Review `open_items` and `questions_for_owner` in finished reports.
 
 Next: [Sessions and surfaces](sessions.md) for chat, takeover and switching, or

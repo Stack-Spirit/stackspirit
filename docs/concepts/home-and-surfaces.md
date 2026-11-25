@@ -61,8 +61,8 @@ running.
 
 ## One supervisor, many projects
 
-`vowp up` starts one `NodeSupervisor` process for the whole home. The lock is still
-`~/.vowp/supervisor.lock`; a second `vowp up` exits 4. `vowp up` on a control machine refuses with exit
+`stackspirit up` starts one `NodeSupervisor` process for the whole home. The lock is still
+`~/.vowp/supervisor.lock`; a second `stackspirit up` exits 4. `stackspirit up` on a control machine refuses with exit
 5 because the control machine has no truth to run.
 
 Each tick does a machine pass, then every active project's L1–L9 steps in fairness order:
@@ -82,8 +82,8 @@ work does not stay first. A group with no recorded last admission starts from a 
 and an unreadable registry falls back to name order with that offset. Every active project gets one L1
 tick per home tick. Within a project, job priority decides dispatch order.
 
-`vowp up --once` runs startup plus exactly one home tick, which is useful for a cron check and for
-tests. `vowp down` writes the stop file and waits; `--force` signals the supervisor and
+`stackspirit up --once` runs startup plus exactly one home tick, which is useful for a cron check and for
+tests. `stackspirit down` writes the stop file and waits; `--force` signals the supervisor and
 `--kill-windows` also removes the tmux windows. A systemd user unit with linger keeps the home alive
 across reboots.
 
@@ -97,8 +97,8 @@ windows; it never sends keystrokes, never respawns a pane and never reads screen
 | `vowp-home` | `board` (every project), `capacity` |
 | `vowp-<project>` | `board`, `supervisor`, `planner`, `keeper`, `inbox`, `job-<id>` |
 
-When tmux is absent, `vowp up --no-tmux` runs without windows. `vowp attach` attaches to the
-project's board window; `vowp attach <job-id>` attaches to that job's window, or tails the job's
+When tmux is absent, `stackspirit up --no-tmux` runs without windows. `stackspirit attach` attaches to the
+project's board window; `stackspirit attach <job-id>` attaches to that job's window, or tails the job's
 latest session log when tmux is unavailable.
 
 ## The control machine
@@ -126,7 +126,7 @@ On a control machine:
   vowp `job park` always go to the home; a write never succeeds against the cache;
 - vowp `fleet status` caches the home's `snapshot.json` and prints `as of HH:MM` when the home is
   unreachable; `--refresh` requires SSH and `--cached` never opens a connection;
-- `vowp up`, `vowp down` and `vowp board` refuse because they need local truth.
+- `stackspirit up`, `stackspirit down` and `stackspirit board` refuse because they need local truth.
 
 A path given to vowp `project add` is a path **on the home**, not on the control machine.
 
@@ -138,14 +138,14 @@ vowp `tunnel open <name> --remote-port <n> [--local-port <n>]` starts a managed
 stops one. A tunnel is opened from the machine that will use it; the home refuses `tunnel` because a
 forward there would point at itself.
 
-The phone needs an SSH app and the owner's key. It runs `vowp chat` on the home over SSH. There is no
+The phone needs an SSH app and the owner's key. It runs `stackspirit chat` on the home over SSH. There is no
 VOWP app to install, no browser board and no public port.
 
 ## The read model
 
 Every tick the supervisor writes `~/.vowp/snapshot.json` to a temporary file, fsyncs it and renames it
 into place, so a reader never sees a partial document. The schema is `vowp-snapshot/1`, and
-`vowp schema snapshot` prints its JSON Schema. The snapshot is derived: deleting it loses nothing, and
+`stackspirit schema snapshot` prints its JSON Schema. The snapshot is derived: deleting it loses nothing, and
 vowp `fleet status` recomputes from the databases when the file is missing or older than three ticks.
 
 The snapshot carries:
@@ -182,7 +182,7 @@ export/import. v0.2 adds a transport, a lease and app-host integration. The rule
 
 > **Any surface can continue the same session; only the lease holder writes.**
 
-Surfaces include `vowp chat`, the opencode app, a Claude app and the `mcp` server those apps call. A
+Surfaces include `stackspirit chat`, the opencode app, a Claude app and the `mcp` server those apps call. A
 surface registers once and heartbeats its lease every 5 seconds. If the
 heartbeat is older than 60 seconds the lease is stale and another surface may take it without
 `--takeover`. A clean exit releases the lease. The 60-second window applies to an interactive owner
@@ -254,12 +254,12 @@ writes a capsule and leaves the job `ready`; it does not switch a human executor
 directly with the engine password is not stopped by it. The loopback VOWP engine proxy that would
 hard-enforce ownership is **planned and deferred** (owner decision, 2026-11-20); it does not exist in
 this release. There is no node-side proxy either, so a UI talking to a node's loopback engine is
-outside this release's enforcement, and `vowp agent orchestrator endpoint` reports `access: read_only`
+outside this release's enforcement, and `stackspirit agent orchestrator endpoint` reports `access: read_only`
 with no home owner view.
 
-### `vowp chat`
+### `stackspirit chat`
 
-`vowp chat <session>` is the guaranteed fallback and the reference implementation of the lease rules.
+`stackspirit chat <session>` is the guaranteed fallback and the reference implementation of the lease rules.
 It works in a narrow terminal with no colour and supports:
 
 | Command | Action |
@@ -271,7 +271,7 @@ It works in a narrow terminal with no colour and supports:
 | `/capsule` | Writes a handoff capsule now. |
 | `/quit` | Leaves, releasing the lease. |
 
-`vowp chat --follow` starts read-only. `--takeover` takes the lease before the first turn.
+`stackspirit chat --follow` starts read-only. `--takeover` takes the lease before the first turn.
 `--executor` and `--node` choose the executor and the machine where the first turn runs.
 
 ### Remote execution
@@ -335,7 +335,7 @@ project. vowp `orchestrator new [--name] [--project] --app opencode|claude-code|
 3. writes `orchestrator.json` (0600) with the app, session id, project, executor and state;
 4. writes `opencode.json` or `.mcp.json` registering the `mcp` server with the lease token file;
 5. starts the app host where the app supports one, acquires the lease and prints join instructions for
-   the desktop, the phone and `vowp chat`.
+   the desktop, the phone and `stackspirit chat`.
 
 vowp `orchestrator ls` lists cards; vowp `orchestrator stop` stops the host and releases the lease (the session
 stays); vowp `orchestrator resume` starts it again. The supervisor resumes orchestrators by itself
@@ -384,18 +384,18 @@ refuse, because a tunnel must be opened by the machine that uses it.
 **Caveat.** opencode 2.0.28 can load the MCP server and report it `connected` without exposing its
 tools to the model. The config and the server are real, but VOWP does not promise that an opencode
 orchestrator can call the tools on that build. Claude Code works after the one-time `.mcp.json`
-approval; `vowp chat` is the tool-free fallback. Do not claim a tool call that did not happen.
+approval; `stackspirit chat` is the tool-free fallback. Do not claim a tool call that did not happen.
 
 ## What a surface may write
 
 | Surface | Read | Write | Lease |
 |---|---|---|---|
-| `vowp chat` | yes | turn input and slash commands | required |
+| `stackspirit chat` | yes | turn input and slash commands | required |
 | opencode app via MCP | yes | MCP write tools only | required; checked on every call |
 | Claude app via MCP | yes | MCP write tools only | same |
 | fleet, status, capacity and project CLI families | yes | writes go to the home | no session lease |
 | vowp `session ingest` | yes | event append for one run | token in the grant |
-| `vowp session tail --follow` | yes | no | not required |
+| `stackspirit session tail --follow` | yes | no | not required |
 
 A surface cannot close another vendor's window. The cut-off is enforced where the power is: the lease
 check in every write path and in the ingest stream.
@@ -408,7 +408,7 @@ VOWP refers to a secret by **name** only. No command takes a value as an argumen
   under `/home/vowp-vault/secrets/<NAME>` mode 0600.
 - **Basic mode** (no sudo or no vault user) stores them under `~/.vowp/secrets/<NAME>` mode 0600.
   Setup reports the mode it chose (`basic mode (same user)`) and vowp `secret upgrade` reports the move to
-  the vault user; `vowp doctor` and the board do not print the secret mode in this build.
+  the vault user; `stackspirit doctor` and the board do not print the secret mode in this build.
 
 vowp `secret set` reads from a hidden prompt; vowp `secret ls` shows names and the last four characters;
 vowp `secret rm` deletes; vowp `secret upgrade` prints the one sudo command that moves basic-mode files to the

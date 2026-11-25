@@ -1,6 +1,8 @@
-# VOWP — Virtual Open Work-to-Production
+# StackSpirit Engine — Virtual Open Work-to-Production
 
-**VOWP is a VPS framework for AI agents to work on projects.** It turns one Linux VPS into the
+StackSpirit is the primary product name of this tree; the CLI is `stackspirit`. VOWP is the original name and stays supported.
+
+**StackSpirit Engine (formerly VOWP) is a VPS framework for AI agents to work on projects.** It turns one Linux VPS into the
 always-on **home** for a fleet of agents: a global database, one database per project, append-only
 session logs, a deterministic supervisor, job graphs, loops, cron schedules, measured capacity and a
 single merge queue. You talk to it from the apps you already use; the VPS owns the truth.
@@ -9,6 +11,8 @@ VOWP is not another agent harness and not a model. It drives the harnesses you a
 Code, opencode, Codex and other CLI agents — through their documented headless interfaces, keeps
 their logins out of the loop, and gives them a shared home, history and delivery process. It is MIT
 licensed.
+
+> **VOWP compatibility.** `vowp` is installed beside `stackspirit` with the same command tree, and `vowp.toml`, `~/.vowp`, `VOWP_HOME`, `vowp-daemon` and the `vowp` MCP key keep working throughout v6. Upgrading a live home needs no data move: see the [StackSpirit migration guide](docs/guides/stackspirit-migration.md) and the [deprecation policy](docs/deprecation-policy.md). The public VOWP repository and its release names are unchanged.
 
 ## What you get
 
@@ -20,14 +24,14 @@ licensed.
 | **Fleet and worker tracking** | Register executor machines, track workers and see the whole fleet in one snapshot. |
 | **Systematic execution** | Jobs form a DAG; deterministic L1–L9 loops keep it moving; cron and interval schedules make the work orderly. |
 | **Harness and provider freedom** | Claude Code, opencode, Codex/generic CLI; profile ladders, provider limits and failover. Stock harnesses, no forks. |
-| **Any surface** | opencode desktop, Claude app, `vowp chat` or MCP; SSH tunnels and no public port. |
+| **Any surface** | opencode desktop, Claude app, `stackspirit chat` or MCP; SSH tunnels and no public port. |
 | **Work where the files are** | An outbound Mac or Linux **agent node** can run a local chat or opencode surface and opt-in offloaded jobs; the VPS stays the only home. |
 | **Guarded delivery** | Evidence gates, an independent verifier, one merge queue and reversible Work → Production. |
 
 **Vocabulary:** a **machine** is a registered execution host — the VPS home, your Mac, a laptop. A
 **job** is one unit of work; when talking about the graph, it is a **job node**. A **slot** is a
-concurrency place, and a **window** is a tmux view. The CLI command `vowp node` manages SSH machines;
-`vowp agent` manages the local agent node.
+concurrency place, and a **window** is a tmux view. The CLI command `stackspirit node` manages SSH machines;
+`stackspirit agent` manages the local agent node.
 
 ## How VOWP works
 
@@ -166,17 +170,17 @@ work.
 
 ![Secrets: set through a hidden prompt or a one-time loopback page, stored in a vault, injected into a worker by name; the model only sees the name and last four characters](docs/images/vowp-secrets.png)
 
-You enter a value through a hidden prompt (`vowp secret set NAME`), a pipe
-(`vowp secret set NAME --stdin`, which needs no TTY) or a one-time page on `127.0.0.1` that expires
-in ten minutes (`vowp secret request NAME`). The database stores only the name and last four
+You enter a value through a hidden prompt (`stackspirit secret set NAME`), a pipe
+(`stackspirit secret set NAME --stdin`, which needs no TTY) or a one-time page on `127.0.0.1` that expires
+in ten minutes (`stackspirit secret request NAME`). The database stores only the name and last four
 characters. A worker gets the value injected by **name** through its harness's `env_pass` list; the
-model sees `NAME saved, ends in …4f2a`. Basic mode keeps mode-0600 files; `vowp secret upgrade
---encrypted` can encrypt them at rest with a local age key; `vowp secret ls --json` reports the
+model sees `NAME saved, ends in …4f2a`. Basic mode keeps mode-0600 files; `stackspirit secret upgrade
+--encrypted` can encrypt them at rest with a local age key; `stackspirit secret ls --json` reports the
 active `mode` without values. Values are redacted from the snapshot, session events, capsules and
 reports, blocked by the `secret_scan` gate and the merge queue, and never backed up. An
 orchestrator app's local password is returned only by the explicit
-`vowp orchestrator endpoint <name> --json` command on the home (or
-`vowp agent orchestrator endpoint <name> --json` on the machine that runs the app); it never
+`stackspirit orchestrator endpoint <name> --json` command on the home (or
+`stackspirit agent orchestrator endpoint <name> --json` on the machine that runs the app); it never
 appears in a card, `snapshot.json`, `fleet status`, `orchestrator ls` or a log. The honest
 limit is stated [below](#secrets-honestly).
 
@@ -187,7 +191,7 @@ limit is stated [below](#secrets-honestly).
 A job is done when its gates pass with recorded evidence, not when an agent says so. One merge runs at a
 time per project: rebase onto `main`, run the repository checks, scan the diff for secrets,
 fast-forward and push. A conflict becomes a merge job in the same worktree. Shipping is a separate step:
-`vowp promote` runs guards, snapshots what is live, checks the diff is exactly the intended change,
+`stackspirit promote` runs guards, snapshots what is live, checks the diff is exactly the intended change,
 waits for your approval in the inbox, deploys, probes and records the rollback command.
 
 ## Set up VOWP 0.4.0
@@ -303,8 +307,8 @@ never secrets. See [Data lifecycle](docs/concepts/data-lifecycle.md).
 ## ASIF interchange (v0.4, review draft)
 
 The current tree adds a second session interchange format beside the native bundle:
-`vowp session export <id> --format asif` writes a deterministic `.asif.zip`, and
-`vowp session import <file> --format asif` creates a new idle session from that package, a
+`stackspirit session export <id> --format asif` writes a deterministic `.asif.zip`, and
+`stackspirit session import <file> --format asif` creates a new idle session from that package, a
 standalone `session.json`, a directory or stdin. The daemon window links the same download, serves
 a loss preview and has an `/import` page whose upload is token-gated. `--format bundle` remains the
 default and is unchanged.
@@ -325,7 +329,7 @@ name, URL and expiry. The AI sees `NAME saved, ends in …last4`, never the valu
 - **Vault-user mode** stores files under the separate `vowp-vault` user when sudo can create it.
 - **Basic mode** stores them under `~/.vowp/secrets/` owned by the runtime user at mode 0600. Basic
   mode does not separate the value from the agent's user; the harness runs as that same user.
-- **Encrypted mode** (`vowp secret upgrade --encrypted`) stores age ciphertext under
+- **Encrypted mode** (`stackspirit secret upgrade --encrypted`) stores age ciphertext under
   `~/.vowp/secrets/encrypted/` and keeps the age identity in a mode-0600 `~/.vowp/secrets/age.key`.
   It protects an offline copy of the home without the key; code running as the same user can read
   the key and decrypt the values. There is no key rotation or recovery path, and the key is never

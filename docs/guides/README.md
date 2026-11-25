@@ -8,7 +8,7 @@ Linux peer that dials the home, runs a local surface or an offloaded job, and re
 
 > **Status: current.** The home, control machine, sessions over surfaces, capacity, secrets,
 > lifecycle, backup and agent-node commands in these guides are implemented. For the shortest
-> install path, start with [Install](install.md), which uses the same `vowp setup` commands as the
+> install path, start with [Install](install.md), which uses the same `stackspirit setup` commands as the
 > README prompt.
 
 | Guide | Start here if you want to… |
@@ -22,6 +22,7 @@ Linux peer that dials the home, runs a local surface or an offloaded job, and re
 | [Running a home on a VPS](vps.md) | Prepare the server, register projects, run under systemd and lock down SSH. |
 | [Control machines and extra machines](multi-node.md) | Set up the laptop or phone side, open tunnels and use `--node`. |
 | [The agent node](agent-node.md) | Enroll a Mac or Linux node, run it as a service, pair or rotate surfaces, deploy WSS, return a bundle or read capacity history. |
+| [Migrating to StackSpirit](stackspirit-migration.md) | Upgrade a live home, agents and desktop to the StackSpirit names with no downtime and a binary-only rollback. |
 | [Schedules](schedules.md) | Run a job, loop or command on a cron or interval schedule. |
 
 The vocabulary is the one in the [v0.2 home and surface specification](../design/v0.2/home-and-surfaces.md):

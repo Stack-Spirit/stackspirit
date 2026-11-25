@@ -22,13 +22,13 @@ or create a second advice item of your own.
 
 ## Read the evidence
 
-1. `vowp capacity report --json` — the document the advisor uses: `host`, `target` (current, advised,
+1. `stackspirit capacity report --json` — the document the advisor uses: `host`, `target` (current, advised,
    override), `running`, `brakes`, `reserve_ram_bytes`, `min_disk_bytes`, `estimates`, `waiting` and
    `limits`.
-2. `vowp capacity show` — the same card as plain text for a quick read.
-3. `vowp inbox ls --json` then `vowp inbox show <id>` — the open item whose title starts with
+2. `stackspirit capacity show` — the same card as plain text for a quick read.
+3. `stackspirit inbox ls --json` then `stackspirit inbox show <id>` — the open item whose title starts with
    `Capacity:`.
-4. `vowp fleet status --json` — optional project and run context.
+4. `stackspirit fleet status --json` — optional project and run context.
 
 ## Explain it
 
@@ -48,7 +48,7 @@ or create a second advice item of your own.
 - The owner answers in chat. Only after an explicit yes, run:
 
   ```bash
-  vowp capacity set --target <n> --by owner --reason "<short reason>"
+  stackspirit capacity set --target <n> --by owner --reason "<short reason>"
   ```
 
 - Add `--override` only when the owner explicitly asks for a number above the advised target. Without
@@ -56,7 +56,7 @@ or create a second advice item of your own.
 - Never run `capacity set`, `capacity set --mode auto`, or `--override` on your own initiative. Never
   edit `capacity_targets`, `capacity_advice`, the database or `vowp.toml` directly.
 - If the owner says keep, answer `keep` on the inbox item
-  (`vowp inbox answer <id> keep --by owner`) or dismiss it. The advisor marks the proposal dismissed
+  (`stackspirit inbox answer <id> keep --by owner`) or dismiss it. The advisor marks the proposal dismissed
   on its next turn; the target is unchanged.
 - Applying the proposal with `capacity set --target <n>` marks the linked advice row applied and
   records the actor. That is the only path that changes the target.
@@ -64,7 +64,7 @@ or create a second advice item of your own.
 ## Hard limits
 
 - The AI never changes the target itself. The target changes only through the owner-approved
-  `vowp capacity set` command.
+  `stackspirit capacity set` command.
 - Do not hide a brake, an OOM kill, a provider limit or a waiting job. They are part of the advice.
 - Do not raise `max_workers`, kill a run or edit configuration to make a proposal fit.
 - If the report and the inbox item disagree, say so and trust the report for numbers; report the

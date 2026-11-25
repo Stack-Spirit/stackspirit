@@ -5,7 +5,7 @@ Code, opencode, a generic CLI tool or a future adapter can each take a turn; the
 what the user, the model and the tools did, and a capsule carries the context across the handoff.
 
 > **Status: current.** The store, adapters, session core, leases, remote execution, app hosts and the
-> `vowp session`/`vowp chat` commands are implemented on `main`.
+> `stackspirit session`/`stackspirit chat` commands are implemented on `main`.
 
 ## Why a universal session
 
@@ -23,14 +23,14 @@ sessions as attachments:
 | `sessions/<id>/capsules/*.json` | Handoff documents. |
 | `~/.vowp/orchestrators/<name>/` | Project-local app config, lease token and host state for an orchestrator. |
 
-Deleting `vowp.db` loses no conversation content; `vowp reindex` rebuilds the session index from the
+Deleting `vowp.db` loses no conversation content; `stackspirit reindex` rebuilds the session index from the
 logs. Live surface and lease rows are recreated as surfaces reconnect. Copying a session directory to
 another machine makes it readable there after a reindex. The origin session is never modified by an import.
 
 ## One log, many surfaces
 
 In VOWP 0.3 the same session can be open in the opencode desktop app, a Claude app, a phone over SSH or
-`vowp chat`. Only one of them may write at a time. A **surface** registers once and takes a **lease**;
+`stackspirit chat`. Only one of them may write at a time. A **surface** registers once and takes a **lease**;
 it heartbeats every 5 seconds, and a lease without a heartbeat for 60 seconds is free. A surface without
 the current token can read in **follow mode** and cannot write.
 
@@ -45,7 +45,7 @@ When a second surface wants the session, the interactive choice is a takeover:
 6. the old surface prints `Taken over by phone at 14:05. This surface is now read-only (follow mode).`
    and keeps reading new events.
 
-A pre-attach session with no executor gets the note only. `vowp chat --follow` starts read-only;
+A pre-attach session with no executor gets the note only. `stackspirit chat --follow` starts read-only;
 `--takeover` takes the lease before the first turn. The same rules apply to an app's MCP server: every
 write checks the lease and records the actor, and a moved session's old tools refuse while its reads
 keep working.
@@ -173,7 +173,7 @@ Capsules never contain secrets. The prompt requires references by name only.
 
 ## Switching
 
-`vowp session switch <id> --to <executor> [--node <n>] [--reason user|limit|…]` moves a session to
+`stackspirit session switch <id> --to <executor> [--node <n>] [--reason user|limit|…]` moves a session to
 another executor. The same protocol runs automatically for failover and context pressure.
 
 | Step | What happens |
@@ -242,8 +242,8 @@ directory. Export/import remains an explicit file copy for a backup, a test fixt
 sibling session:
 
 ```sh
-vowp session export <id> --out planner.vowp-bundle.json
-vowp session import planner.vowp-bundle.json --node vps
+stackspirit session export <id> --out planner.vowp-bundle.json
+stackspirit session import planner.vowp-bundle.json --node vps
 ```
 
 A bundle is one JSON document (`format: "vowp-bundle-v1"`) containing the session metadata, a fresh
@@ -255,7 +255,7 @@ origin session is never modified, and importing the same bundle twice creates tw
 
 ## Windows
 
-`vowp up` ensures one `vowp-home` session for the home and one `vowp-<project>` session per active
+`stackspirit up` ensures one `vowp-home` session for the home and one `vowp-<project>` session per active
 project. All windows are views:
 
 | Session | Window | Contents |
@@ -270,14 +270,14 @@ project. All windows are views:
 
 The windows are **views, never control channels**. VOWP tags its windows and only ever kills tagged
 windows. It never sends keystrokes to a harness TUI, never respawns a pane and never reads screen text
-for decisions — logs are authoritative. `vowp attach [job]` attaches to the tmux session; without tmux,
-`vowp attach <job-id>` tails the job's latest session log, and `vowp session ls --job <job-id>` prints
-the session id for `vowp session tail <session-id> --pretty --follow`.
+for decisions — logs are authoritative. `stackspirit attach [job]` attaches to the tmux session; without tmux,
+`stackspirit attach <job-id>` tails the job's latest session log, and `stackspirit session ls --job <job-id>` prints
+the session id for `stackspirit session tail <session-id> --pretty --follow`.
 
 ## Watching an interactive Claude Code session
 
-The optional `vowp session watch` importer records interactive Claude Code transcripts into canonical
-sessions without running the harness. `vowp session watch --once` scans the transcript JSONL under
+The optional `stackspirit session watch` importer records interactive Claude Code transcripts into canonical
+sessions without running the harness. `stackspirit session watch --once` scans the transcript JSONL under
 `$CLAUDE_CONFIG_DIR` or `~/.claude` with read-only opens, maps user/assistant text and tool calls to
 events, and never writes to Claude's files. It stores the processed line count in the home database
 under `watch:<native session id>`; a later scan imports only the new lines and skips a transcript that

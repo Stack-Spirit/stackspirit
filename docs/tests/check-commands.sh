@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Check that every `vowp` command shown in the user documentation exists in the
+# Check that every `stackspirit` (or compatibility `vowp`) command shown in the user documentation exists in the
 # real CLI, and that the documented status matches the implementation: an
 # unimplemented command must be marked *(planned)*, and an implemented command
 # must not be.
@@ -226,9 +226,16 @@ def parse_command(line):
     if not line:
         return None
     # Accept the documented way to run the workspace binary.
-    prefix = "cargo run -p vowp-cli --bin vowp -- "
-    if line.startswith(prefix):
-        line = "vowp " + line[len(prefix):]
+    for prefix in (
+        "cargo run -p vowp-cli --bin vowp -- ",
+        "cargo run -p vowp-cli --bin stackspirit -- ",
+    ):
+        if line.startswith(prefix):
+            line = "vowp " + line[len(prefix):]
+    # `stackspirit` is the primary binary and `vowp` the compatibility alias; they share one
+    # command tree, so both spellings are checked against the same surface.
+    if re.match(r"^stackspirit(\s|$)", line):
+        line = "vowp" + line[len("stackspirit"):]
     if not re.match(r"^vowp(\s|$)", line):
         return None
     # Drop a trailing shell comment. Do not split on '#' without whitespace:

@@ -294,7 +294,7 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, _args: &SetupVerifyArgs) -> Result
         vec![check(
             "home.checks",
             "fail",
-            "vowp home is not initialised; run `vowp setup home` and `vowp setup control` first",
+            "vowp home is not initialised; run `stackspirit setup home` and `stackspirit setup control` first",
         )]
     };
 
