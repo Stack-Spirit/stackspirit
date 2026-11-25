@@ -1,137 +1,143 @@
 name: Release
 
-# A v* tag builds the four supported targets and creates a DRAFT GitHub
-# release. A manual workflow_dispatch run is a dry run: it builds and uploads
-# the same artifacts but never creates or edits a release.
+# tag -> draft -> owner publish -> OIDC npm/PyPI (docs/design/relay-and-packaging.md section 5).
 #
-# The tag build is the public VOWP release (vowp-<version>-<target>.tar.gz).
-# A manual run may set product=stackspirit to build the private
-# stackspirit-<version>-<target>.tar.gz instead, with both CLIs and both daemons;
-# that run only uploads workflow artifacts and publishes nothing.
+#   1. A v<version> tag push builds every artifact and creates a DRAFT GitHub release. It never
+#      touches a registry.
+#   2. The owner reviews the draft and publishes it.
+#   3. The `release: published` event runs publish-npm and publish-pypi, which use GitHub OIDC
+#      (trusted publishing) in the protected `npm` and `pypi` environments. No registry token
+#      exists in this repository. They publish the exact assets of the release and never rebuild.
+#   4. verify-install runs npx and uvx against the published version on clean runners.
 #
-# Third-party actions below are pinned to the commit SHA that the named tag
-# pointed at on 2026-11-09. Update the SHA and the comment together.
+# A manual workflow_dispatch run is a dry build and publishes nothing. With publish=true it skips
+# the build and runs only the publish jobs for an already-PUBLISHED release of that version; those
+# jobs still wait for owner approval of the npm/pypi environments.
+#
+# Public VOWP archives: vowp-<version>-<target>.tar.gz (in the release).
+# Private StackSpirit archives: stackspirit-<version>-<target>.tar.gz (workflow artifact only,
+# never uploaded to the release).
+#
+# Third-party actions are pinned to a commit SHA; the comment names the release tag.
 
 on:
   push:
     tags:
       - "v*"
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build, without the leading v (default: Cargo.toml workspace version)"
+        description: "Version without the leading v (default: Cargo.toml workspace version)"
         required: false
         default: ""
         type: string
-      product:
-        description: "Archive to build: vowp (public release) or stackspirit (private, dry run only)"
+      publish:
+        description: "Publish npm/PyPI from the already-published release (default: dry build)"
         required: false
-        default: vowp
-        type: choice
-        options:
-          - vowp
-          - stackspirit
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
-  # The workspace has no [profile.release] overrides. Set the release profile
-  # from the environment so the archive is small and shipping builds are LTO'd
-  # without changing Cargo.toml.
   CARGO_PROFILE_RELEASE_STRIP: symbols
   CARGO_PROFILE_RELEASE_LTO: thin
   COPYFILE_DISABLE: "1"
 
 jobs:
   prepare:
-    name: Resolve version
+    name: Resolve and check version
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
-      product: ${{ steps.meta.outputs.product }}
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
+      mode: ${{ steps.meta.outputs.mode }}
       notes: ${{ steps.meta.outputs.notes }}
     steps:
-      - name: Checkout
+      - name: Checkout the tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # A release event checks out the release tag; a push builds the pushed tag.
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+          fetch-depth: 0
 
-      - name: Resolve version and release notes
+      - name: Resolve version, mode and release notes
         id: meta
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
           DISPATCH_VERSION: ${{ inputs.version }}
-          DISPATCH_PRODUCT: ${{ inputs.product }}
+          DISPATCH_PUBLISH: ${{ inputs.publish }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
-          # A tag push is always the public product; only a manual run may pick.
-          product="vowp"
-          if [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ] && [ -n "${DISPATCH_PRODUCT:-}" ]; then
-            product="$DISPATCH_PRODUCT"
-          fi
-          case "$product" in
-            vowp|stackspirit) ;;
-            *)
-              echo "::error::unknown product: '$product'"
-              exit 1
+          cargo_version="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml | head -n 1)"
+          version="$cargo_version"
+          mode=build
+          case "$EVENT" in
+            push)
+              version="${GITHUB_REF_NAME#v}"
+              [ "$GITHUB_REF_TYPE" = "tag" ] || { echo "::error::push is only expected for tags"; exit 1; }
+              ;;
+            release)
+              version="${RELEASE_TAG#v}"
+              mode=publish
+              ;;
+            workflow_dispatch)
+              [ -z "${DISPATCH_VERSION:-}" ] || version="$DISPATCH_VERSION"
+              if [ "${DISPATCH_PUBLISH:-false}" = "true" ]; then mode=publish; fi
               ;;
           esac
+          tag="v$version"
 
-          version="${DISPATCH_VERSION:-}"
-          if [ -z "$version" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-            version="${GITHUB_REF_NAME#v}"
-          fi
-          if [ -z "$version" ]; then
-            version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
-          fi
+          publish_flag=()
+          if [ "$mode" = "publish" ]; then publish_flag=(--publish); fi
+          bash scripts/release/check-release.sh --version "$version" --tag "$tag" "${publish_flag[@]}"
 
-          case "$version" in
-            ''|*[!0-9A-Za-z.+-]*)
-              echo "::error::invalid version: '$version'"
-              exit 1
-              ;;
-          esac
-          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
-            echo "::error::version is not semver-like: '$version'"
-            exit 1
-          fi
-
-          crate_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
-          if [ "$version" != "$crate_version" ]; then
-            echo "::error::version $version does not match Cargo.toml workspace version $crate_version"
-            exit 1
-          fi
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match version $version"
-            exit 1
+          if [ "$mode" = "publish" ]; then
+            # The tag must point at a commit on main, and the release must be published (not a draft).
+            git fetch --no-tags origin main
+            commit="$(git rev-list -n 1 "refs/tags/$tag" 2>/dev/null || git rev-parse HEAD)"
+            git merge-base --is-ancestor "$commit" origin/main \
+              || { echo "::error::$tag does not point at a commit on main"; exit 1; }
+            draft="$(gh api "repos/$REPO/releases/tags/$tag" --jq '.draft' 2>/dev/null || echo missing)"
+            [ "$draft" = "false" ] \
+              || { echo "::error::release $tag is '$draft', not published; the owner must publish the draft first"; exit 1; }
           fi
 
           notes="docs/release/${version}.md"
-          if [ ! -f "$notes" ]; then
-            notes="CHANGELOG.md"
-          fi
-
+          [ -f "$notes" ] || notes="CHANGELOG.md"
           {
-            echo "product=$product"
             echo "version=$version"
-            echo "tag=v$version"
+            echo "tag=$tag"
+            echo "mode=$mode"
             echo "notes=$notes"
           } >> "$GITHUB_OUTPUT"
-          echo "version: $version"
-          echo "release notes: $notes"
+          echo "version=$version mode=$mode notes=$notes"
 
   build:
     name: build (${{ matrix.target }})
     needs: prepare
+    if: needs.prepare.outputs.mode == 'build'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # All four targets build on a native runner of the same architecture,
-          # so every archive gets a real `vowp --version` smoke test.
+          # Native runners, so every binary gets a real --version smoke test.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-22.04-arm
@@ -141,12 +147,13 @@ jobs:
           - os: macos-15
             target: aarch64-apple-darwin
     env:
-      PRODUCT: ${{ needs.prepare.outputs.product }}
       VERSION: ${{ needs.prepare.outputs.version }}
       TARGET: ${{ matrix.target }}
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.ref }}
 
       - name: Set up Rust from rust-toolchain.toml
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
@@ -154,48 +161,29 @@ jobs:
           target: ${{ matrix.target }}
           cache: true
 
-      - name: Build
+      - name: Build both CLIs and both daemons
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$PRODUCT" = "stackspirit" ]; then
-            # Both CLIs and both daemons: the daemons live in the vowp-daemon package.
-            cargo build --release --locked -p vowp-cli --bin vowp --bin stackspirit --target "$TARGET"
-            cargo build --release --locked -p vowp-daemon --bin vowp-daemon --bin stackspirit-daemon --target "$TARGET"
-          else
-            cargo build --release --locked -p vowp-cli --bin vowp --target "$TARGET"
-          fi
+          cargo build --release --locked -p vowp-cli --bin vowp --bin stackspirit --target "$TARGET"
+          cargo build --release --locked -p vowp-daemon --bin vowp-daemon --bin stackspirit-daemon --target "$TARGET"
 
-      - name: Smoke test (native)
+      - name: Smoke test both names (native)
         shell: bash
         run: |
           set -euo pipefail
-          out=$("./target/${TARGET}/release/vowp" --version)
-          printf 'vowp --version: %s\n' "$out"
-          case "$out" in
-            "vowp ${VERSION}"*) ;;
-            *)
-              echo "::error::unexpected --version output: $out"
-              exit 1
-              ;;
-          esac
-          if [ "$PRODUCT" = "stackspirit" ]; then
-            out=$("./target/${TARGET}/release/stackspirit" --version)
-            printf 'stackspirit --version: %s\n' "$out"
-            case "$out" in
-              "stackspirit ${VERSION}"*) ;;
-              *)
-                echo "::error::unexpected stackspirit --version output: $out"
-                exit 1
-                ;;
+          out="target/${TARGET}/release"
+          for name in vowp stackspirit; do
+            got=$("$out/$name" --version)
+            printf '%s --version: %s\n' "$name" "$got"
+            case "$got" in
+              "$name ${VERSION}"*) ;;
+              *) echo "::error::unexpected $name --version output: $got"; exit 1 ;;
             esac
-            for daemon in stackspirit-daemon vowp-daemon; do
-              test -x "./target/${TARGET}/release/${daemon}" || {
-                echo "::error::missing daemon binary: ${daemon}"
-                exit 1
-              }
-            done
-          fi
+          done
+          for daemon in vowp-daemon stackspirit-daemon; do
+            test -x "$out/$daemon" || { echo "::error::missing daemon binary: $daemon"; exit 1; }
+          done
 
       - name: Check third-party licence bundle
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -206,69 +194,189 @@ jobs:
           python3 scripts/release/generate-third-party-licenses.py --check
           test -s THIRD-PARTY-LICENSES.md
 
-      - name: Package
+      - name: Package the public VOWP archive and the private StackSpirit archive
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$PRODUCT" = "stackspirit" ]; then
-            out="target/${TARGET}/release"
-            scripts/release/package-archive.sh \
-              --product stackspirit \
-              --version "$VERSION" \
-              --target "$TARGET" \
-              --stackspirit "$out/stackspirit" \
-              --vowp "$out/vowp" \
-              --stackspirit-daemon "$out/stackspirit-daemon" \
-              --vowp-daemon "$out/vowp-daemon" \
-              --dist dist
-          else
-            scripts/release/package-archive.sh \
-              --version "$VERSION" \
-              --target "$TARGET" \
-              --binary "target/${TARGET}/release/vowp" \
-              --dist dist
-          fi
+          out="target/${TARGET}/release"
+          scripts/release/package-archive.sh \
+            --version "$VERSION" --target "$TARGET" \
+            --binary "$out/vowp" --dist dist/public
+          scripts/release/package-archive.sh \
+            --product stackspirit --version "$VERSION" --target "$TARGET" \
+            --stackspirit "$out/stackspirit" --vowp "$out/vowp" \
+            --stackspirit-daemon "$out/stackspirit-daemon" --vowp-daemon "$out/vowp-daemon" \
+            --dist dist/private
 
-      - name: Upload archives
+      - name: Stage the four binaries for npm and wheel assembly
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "stage/${TARGET}/release"
+          for name in stackspirit vowp stackspirit-daemon vowp-daemon; do
+            cp "target/${TARGET}/release/$name" "stage/${TARGET}/release/$name"
+          done
+
+      - name: Upload public archives
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ matrix.target }}
-          path: dist/*
+          name: public-${{ matrix.target }}
+          path: dist/public/*
+          if-no-files-found: error
+
+      - name: Upload private archives (workflow artifact only, never released)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: private-${{ matrix.target }}
+          path: dist/private/*
+          if-no-files-found: error
+
+      - name: Upload staged binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binaries-${{ matrix.target }}
+          path: stage/${{ matrix.target }}/release/*
           if-no-files-found: error
 
   checksums:
-    name: Assemble checksums
-    needs: build
-    runs-on: ubuntu-latest
+    name: Assemble npm tarballs, wheels and checksums
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
     steps:
-      - name: Download archives
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Download public archives
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          path: dist
+          pattern: public-*
+          path: dist/archives
           merge-multiple: true
 
-      - name: Generate and verify SHA256SUMS
+      - name: Download staged binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: binaries-*
+          path: stage-download
+
+      - name: Restore the target/<triple>/release layout and modes
         shell: bash
         run: |
           set -euo pipefail
-          cd dist
-          rm -f SHA256SUMS
-          sha256sum -- *.tar.gz > SHA256SUMS
+          for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+            mkdir -p "stage/$t/release"
+            cp stage-download/binaries-$t/* "stage/$t/release/"
+            # upload-artifact does not preserve the executable bit.
+            chmod 0755 "stage/$t/release/"*
+          done
+
+      - name: Build the platform and root npm tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/release/build-npm-packages.sh --version "$VERSION" \
+            --target "linux-x64=stage/x86_64-unknown-linux-gnu/release" \
+            --target "linux-arm64=stage/aarch64-unknown-linux-gnu/release" \
+            --target "darwin-x64=stage/x86_64-apple-darwin/release" \
+            --target "darwin-arm64=stage/aarch64-apple-darwin/release" \
+            --out dist/npm
+          mkdir -p dist/npm/platform
+          mv dist/npm/stackspirit-linux-*.tgz dist/npm/stackspirit-darwin-*.tgz dist/npm/platform/
+
+      - name: Build the four platform wheels
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/release/build-pypi-wheels.sh --version "$VERSION" --target-dir stage --out dist/pypi
+          test "$(ls dist/pypi/*.whl | wc -l)" -eq 4
+
+      - name: Pre-publish install smoke test of the built artifacts (offline)
+        shell: bash
+        env:
+          npm_config_audit: "false"
+          npm_config_fund: "false"
+          npm_config_update_notifier: "false"
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          root="$PWD"
+          project="$tmp/project"
+          mkdir -p "$project"
+          cat > "$project/package.json" <<JSON
+          {"name":"smoke","version":"1.0.0","private":true,
+           "dependencies":{"stackspirit":"file:$root/dist/npm/stackspirit-$VERSION.tgz"},
+           "overrides":{"@stackspirit/linux-x64":"file:$root/dist/npm/platform/stackspirit-linux-x64-$VERSION.tgz"}}
+          JSON
+          (cd "$project" && npm install --ignore-scripts --no-audit --no-fund)
+          got="$(cd "$project" && npx --no-install stackspirit --version)"
+          echo "npx stackspirit --version: $got"
+          case "$got" in "stackspirit $VERSION"*) ;; *) echo "::error::bad stackspirit version: $got"; exit 1 ;; esac
+          got="$(cd "$project" && npx --no-install vowp --version)"
+          echo "npx vowp --version: $got"
+          case "$got" in "vowp $VERSION"*) ;; *) echo "::error::bad vowp version: $got"; exit 1 ;; esac
+          reply="$(cd "$project" && printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{}}}' | timeout 60 npx --no-install stackspirit mcp | head -n 1)"
+          echo "mcp initialize: $reply"
+          printf '%s' "$reply" | grep -q '"serverInfo"' || { echo "::error::mcp initialize returned no serverInfo"; exit 1; }
+          pip_dir="$tmp/uv"
+          python3 -m venv "$pip_dir"
+          "$pip_dir/bin/pip" install --quiet --no-deps dist/pypi/stackspirit-"$VERSION"-*manylinux*x86_64.whl
+          got="$("$pip_dir/bin/stackspirit" --version)"
+          echo "wheel stackspirit --version: $got"
+          case "$got" in "stackspirit $VERSION"*) ;; *) echo "::error::bad wheel version: $got"; exit 1 ;; esac
+          got="$("$pip_dir/bin/vowp" --version)"
+          case "$got" in "vowp $VERSION"*) ;; *) echo "::error::bad wheel vowp version: $got"; exit 1 ;; esac
+
+      - name: Generate SHA256SUMS over every release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp dist/archives/*.tar.gz dist/archives/*.sha256 release/
+          cp dist/npm/*.tgz dist/npm/platform/*.tgz dist/pypi/*.whl release/
+          cd release
           sha256sum --check --strict ./*.sha256
+          sha256sum -- *.tar.gz *.tgz *.whl > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
           cat SHA256SUMS
+
+      - name: Render the Homebrew formula (an artifact; the owner applies it)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p homebrew
+          cp packaging/homebrew/vowp.rb homebrew/vowp.rb
+          sh packaging/homebrew/update.sh "$VERSION" release/SHA256SUMS homebrew/vowp.rb
 
       - name: Upload release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-assets
-          path: dist/*
+          path: release/*
           if-no-files-found: error
 
-  release:
-    name: Draft release
+      - name: Upload the rendered Homebrew formula
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: homebrew-formula
+          path: homebrew/vowp.rb
+          if-no-files-found: error
+
+  github-release:
+    name: Draft GitHub release
     needs: [prepare, checksums]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.prepare.outputs.product == 'vowp'
+    # Only a tag push creates a release, and only ever a draft. Publishing is the owner's action.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
     steps:
@@ -279,16 +387,184 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-assets
-          path: dist
+          path: release
 
-      - name: Create draft release
+      - name: Create the draft release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: VOWP ${{ needs.prepare.outputs.version }}
           draft: true
-          prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
+          prerelease: false
           body_path: ${{ needs.prepare.outputs.notes }}
-          files: dist/*
+          files: release/*
           fail_on_unmatched_files: true
           generate_release_notes: false
+
+  publish-npm:
+    name: Publish npm (OIDC)
+    needs: [prepare]
+    if: needs.prepare.outputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout the release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download and verify the release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --dir dist --pattern '*.tgz' --pattern '*.tar.gz' --pattern SHA256SUMS
+          (cd dist && grep -E '\.(tgz|tar\.gz)$' SHA256SUMS | sha256sum --check --strict)
+          mkdir -p dist/npm/platform
+          mv dist/stackspirit-linux-*.tgz dist/stackspirit-darwin-*.tgz dist/npm/platform/
+          mv dist/stackspirit-*.tgz dist/npm/
+
+      - name: Attest the archives and npm tarballs
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/npm/*.tgz
+            dist/npm/platform/*.tgz
+
+      - name: Refuse to overwrite an existing npm version
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          for pkg in stackspirit @stackspirit/linux-x64 @stackspirit/linux-arm64 @stackspirit/darwin-x64 @stackspirit/darwin-arm64; do
+            if npm view "$pkg@$VERSION" version >/dev/null 2>&1; then
+              echo "::error::$pkg@$VERSION already exists on npm; publish a patch version instead"
+              exit 1
+            fi
+          done
+
+      - name: Publish with trusted publishing and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Trusted publishing needs a current npm. Platform packages first, root package last.
+          npm install -g npm@11
+          for pkg in dist/npm/platform/*.tgz; do
+            npm publish "$pkg" --provenance --access public
+          done
+          npm publish dist/npm/stackspirit-*.tgz --provenance --access public
+
+  publish-pypi:
+    name: Publish PyPI (OIDC)
+    needs: [prepare]
+    if: needs.prepare.outputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout the release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download and verify the release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --dir dl --pattern '*.whl' --pattern SHA256SUMS
+          (cd dl && grep -E '\.whl$' SHA256SUMS | sha256sum --check --strict)
+          mkdir -p dist/pypi
+          mv dl/*.whl dist/pypi/
+          test "$(ls dist/pypi/*.whl | wc -l)" -eq 4
+
+      - name: Attest the wheels
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/pypi/*.whl
+
+      - name: Refuse to overwrite an existing PyPI version
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          code="$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/stackspirit/$VERSION/json" || true)"
+          if [ "$code" = "200" ]; then
+            echo "::error::stackspirit $VERSION already exists on PyPI; publish a patch version instead"
+            exit 1
+          fi
+
+      - name: Publish with trusted publishing
+        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1.12.4
+        with:
+          packages-dir: dist/pypi
+
+  verify-install:
+    name: Verify install (${{ matrix.os }})
+    needs: [prepare, publish-npm, publish-pypi]
+    if: needs.prepare.outputs.mode == 'publish'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc # v6.4.3
+
+      - name: npx smoke tests (stackspirit and vowp names, mcp initialize)
+        shell: bash
+        run: |
+          set -euo pipefail
+          retry() { for i in 1 2 3 4 5 6 7 8 9 10; do "$@" && return 0; sleep 30; done; return 1; }
+          check() {
+            got="$(retry "$@")"
+            echo "$*: $got"
+            case "$got" in "$EXPECT $VERSION"*) ;; *) echo "::error::unexpected output from $*: $got"; exit 1 ;; esac
+          }
+          EXPECT=stackspirit check npx -y "stackspirit@$VERSION" --version
+          EXPECT=vowp check npx -y -p "stackspirit@$VERSION" vowp --version
+          reply="$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{}}}' | npx -y "stackspirit@$VERSION" mcp | head -n 1)"
+          echo "mcp initialize: $reply"
+          printf '%s' "$reply" | grep -q '"serverInfo"' || { echo "::error::mcp initialize returned no serverInfo"; exit 1; }
+
+      - name: uvx smoke tests (stackspirit and vowp names)
+        shell: bash
+        run: |
+          set -euo pipefail
+          retry() { for i in 1 2 3 4 5 6 7 8 9 10; do "$@" && return 0; sleep 30; done; return 1; }
+          got="$(retry uvx "stackspirit@$VERSION" --version)"
+          echo "uvx stackspirit --version: $got"
+          case "$got" in "stackspirit $VERSION"*) ;; *) echo "::error::unexpected uvx output: $got"; exit 1 ;; esac
+          got="$(retry uvx --from "stackspirit==$VERSION" vowp --version)"
+          echo "uvx vowp --version: $got"
+          case "$got" in "vowp $VERSION"*) ;; *) echo "::error::unexpected uvx vowp output: $got"; exit 1 ;; esac

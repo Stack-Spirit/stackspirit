@@ -18,6 +18,11 @@ been cut and the latest public release remains 0.4.0 (2026-11-18).
 
 ### Changed
 
+- The release workflow now follows tag → draft → owner-publish → OIDC npm/PyPI publish, with
+  pinned actions, restricted permissions, `release`/`npm`/`pypi` environments and install smoke
+  tests; `scripts/release/check-release.sh` and `test-workflow.sh` are new. See
+  [`docs/release/publishing.md`](docs/release/publishing.md). Nothing has been published.
+
 - Documentation, framework skills and templates now use the `stackspirit` command name in every
   instruction; `vowp` remains a supported alias with the same command tree. `.vowp/` paths and
   brief/report paths are unchanged. The CLI and schema reference pages are generated from the
