@@ -606,7 +606,7 @@ export function SettingsPage() {
           This removes only the{" "}
           {pendingRemove ? providerLabel(pendingRemove) : ""} key from this
           Mac&apos;s private key file and refreshes the engine model list. It does not
-          change a VOWP setting or a server secret.
+          change a StackSpirit setting or a server secret.
         </p>
       </Modal>
     </section>

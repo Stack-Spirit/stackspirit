@@ -71,7 +71,7 @@ export function WebInboxDrawer({
           <EmptyState
             icon="◔"
             title="Inbox is clear"
-            body="VOWP did not return any inbox items for this daemon."
+            body="StackSpirit did not return any inbox items for this daemon."
           />
         ) : (
           <ul className="web-list web-inbox-list" aria-label="Inbox items">

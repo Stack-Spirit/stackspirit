@@ -82,7 +82,7 @@ export function SettingsView({
                 <div className="nx-settings__row">
                   <span>
                     Sessions and .asif.zip
-                    <small>Export and import portable session packages when VOWP supports them.</small>
+                    <small>Export and import portable session packages when StackSpirit supports them.</small>
                   </span>
                   <span style={{ display: "flex", gap: 8 }}>
                     <button
@@ -100,7 +100,7 @@ export function SettingsView({
                         disabled={!connected}
                         onClick={onOpenRaw}
                       >
-                        Raw VOWP document
+                        Raw StackSpirit document
                       </button>
                     ) : null}
                   </span>

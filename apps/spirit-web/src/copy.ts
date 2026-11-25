@@ -39,7 +39,7 @@ export const ORCHESTRATORS_UNAVAILABLE =
   "Orchestrators are unavailable — the daemon has no orchestrator read route.";
 
 export const RAW_DOCUMENT_UNAVAILABLE =
-  "Raw VOWP documents are unavailable — the daemon serves board and list documents, not the fleet-status or capacity-report documents.";
+  "Raw StackSpirit documents are unavailable — the daemon serves board and list documents, not the fleet-status or capacity-report documents.";
 
 export const SAME_ORIGIN_REQUIRED =
   "This daemon has no CORS support. Serve this app and /api/v1 from the same origin through the reverse proxy.";

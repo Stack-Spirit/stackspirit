@@ -95,12 +95,12 @@ describe("session ownership banner", () => {
     expect(screen.queryByTestId("ownership-banner")).not.toBeInTheDocument();
   });
 
-  it("stays read-only and never fakes ownership when VOWP lacks takeover", async () => {
+  it("stays read-only and never fakes ownership when StackSpirit lacks takeover", async () => {
     const { user, bridge } = await openGlobal("owner-unsupported");
     const banner = await screen.findByTestId("ownership-banner");
     await user.click(within(banner).getByRole("button", { name: "Take over" }));
     expect(await screen.findByTestId("ownership-error")).toHaveTextContent(
-      "Take over isn't available with this VOWP yet",
+      "Take over isn't available with this StackSpirit yet",
     );
     expect(screen.getByTestId("ownership-banner")).toBeInTheDocument();
     expect(

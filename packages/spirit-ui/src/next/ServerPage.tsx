@@ -108,7 +108,7 @@ export function ServerPage({ serverLabel, onOpenProject, onFormCluster, onPromot
                 <span className="nx-workers__of">of {health.target ?? "?"} active</span>
               </div>
               <Slots running={health.running} slots={health.slots} />
-              {health.advised != null ? <span className="nx-card__foot">VOWP advises {health.advised}</span> : null}
+              {health.advised != null ? <span className="nx-card__foot">StackSpirit advises {health.advised}</span> : null}
             </div>
             <div className="nx-card">
               <span className="nx-card__label">Memory</span>

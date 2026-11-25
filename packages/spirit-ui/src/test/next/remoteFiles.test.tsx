@@ -40,7 +40,7 @@ describe("MockBridge virtual filesystem", () => {
 });
 
 describe("RemoteFilesView", () => {
-  it("browses Home, projects, VOWP Home and Root from the locations list", async () => {
+  it("browses Home, projects, StackSpirit Home and Root from the locations list", async () => {
     const { fleet } = await mount();
     const user = userEvent.setup();
     const nav = screen.getByRole("navigation", { name: "Locations" });
@@ -48,10 +48,10 @@ describe("RemoteFilesView", () => {
     expect(within(nav).getByText("worker checkouts")).toBeInTheDocument();
     expect(within(nav).getByText("live database")).toBeInTheDocument();
 
-    await user.click(within(nav).getByRole("button", { name: /VOWP Home/ }));
+    await user.click(within(nav).getByRole("button", { name: /StackSpirit Home/ }));
     await screen.findByRole("table", { name: /\.vowp/ });
     expect(screen.getByTestId("file-row-vowp.db")).toBeInTheDocument();
-    expect(screen.getByTestId("file-row-vowp.db")).toHaveTextContent("Live VOWP path");
+    expect(screen.getByTestId("file-row-vowp.db")).toHaveTextContent("Live StackSpirit path");
 
     const project = fleet.projects[0]?.name;
     expect(project).toBeTruthy();

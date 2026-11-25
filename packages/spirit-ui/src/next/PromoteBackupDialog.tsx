@@ -110,7 +110,7 @@ export function PromoteBackupDialog({
       >
         <div className="nx-form" data-testid="promote-outcome">
           <p className="nx-form__lede">
-            VOWP restored the backup and started the supervisor on{" "}
+            StackSpirit restored the backup and started the supervisor on{" "}
             <strong>{label}</strong>.
           </p>
           <dl className="nx-cluster__facts">
@@ -119,7 +119,7 @@ export function PromoteBackupDialog({
               <dd>{label}</dd>
             </div>
             <div>
-              <dt>VOWP node</dt>
+              <dt>StackSpirit node</dt>
               <dd className="mono">{outcome.node_name}</dd>
             </div>
             <div>
@@ -137,12 +137,12 @@ export function PromoteBackupDialog({
           </p>
           {newHome.trim() !== "" ? (
             <p className="nx-cluster__note">
-              This promotion used a fresh VOWP home. Update {label}&apos;s VOWP home in Settings
-              before connecting, or VOWP will read the old directory.
+              This promotion used a fresh StackSpirit home. Update {label}&apos;s StackSpirit home in Settings
+              before connecting, or StackSpirit will read the old directory.
             </p>
           ) : null}
           <p className="nx-cluster__note">
-            VOWP never backs up secrets. Re-enter server secret values with{" "}
+            StackSpirit never backs up secrets. Re-enter server secret values with{" "}
             <code>vowp secret set</code> on the restored Home.
           </p>
         </div>
@@ -178,7 +178,7 @@ export function PromoteBackupDialog({
         onSubmit={(event) => void submit(event)}
       >
         <p className="nx-form__lede">
-          This is failover, not a passive switch. VOWP drains the old Home first, restores
+          This is failover, not a passive switch. StackSpirit drains the old Home first, restores
           the chosen backup on a worker and starts it as the new Home.
         </p>
 
@@ -202,7 +202,7 @@ export function PromoteBackupDialog({
         </label>
         {targetNode ? (
           <p className="nx-cluster__note">
-            VOWP node <code>{targetNode}</code> on {targetProfile?.label ?? "the selected server"}.
+            StackSpirit node <code>{targetNode}</code> on {targetProfile?.label ?? "the selected server"}.
           </p>
         ) : null}
 
@@ -221,17 +221,17 @@ export function PromoteBackupDialog({
         </label>
         {backupDir.length > 0 && !backupPathOk ? (
           <span className="nx-form__error">
-            Enter the absolute backup directory VOWP wrote on the target.
+            Enter the absolute backup directory StackSpirit wrote on the target.
           </span>
         ) : null}
 
         <label className="nx-field" htmlFor={ids.home}>
-          New VOWP home on the target (optional)
+          New StackSpirit home on the target (optional)
           <input
             id={ids.home}
             value={newHome}
             disabled={busy}
-            placeholder="Uses the target profile's VOWP home"
+            placeholder="Uses the target profile's StackSpirit home"
             spellCheck={false}
             autoComplete="off"
             aria-invalid={!newHomeOk}
@@ -246,14 +246,14 @@ export function PromoteBackupDialog({
 
         {policy ? (
           <p className="nx-cluster__note">
-            Backup policy: every {formatInterval(policy.every_secs)}, keep {policy.keep}. VOWP
+            Backup policy: every {formatInterval(policy.every_secs)}, keep {policy.keep}. StackSpirit
             refuses a backup older than {formatInterval(policy.every_secs)} before it drains
             Home.
           </p>
         ) : null}
 
         <div className="nx-cluster__warning">
-          <strong>Home must be reachable for the drain.</strong> If VOWP cannot confirm that the old
+          <strong>Home must be reachable for the drain.</strong> If StackSpirit cannot confirm that the old
           Home stopped admitting work, promotion refuses instead of risking two live Homes. Secrets
           are not restored.
         </div>
@@ -277,7 +277,7 @@ export function PromoteBackupDialog({
         {busy ? (
           <p className="nx-cluster__note" role="status">
             Draining Home and restoring the backup. This can take up to 30 minutes if runs are
-            still finishing; StackSpirit shows the result when VOWP returns.
+            still finishing; StackSpirit shows the result when StackSpirit returns.
           </p>
         ) : null}
       </form>

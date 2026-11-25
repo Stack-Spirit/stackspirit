@@ -127,7 +127,7 @@ export function ClusterSection({ onFormCluster, onPromote }: ClusterSectionProps
             ) : null}
             <span className="nx-cluster__source">
               {pooled.source === "vowp_cluster"
-                ? "VOWP reported the pooled totals."
+                ? "StackSpirit reported the pooled totals."
                 : "Pooled totals computed from Home and the visible worker nodes."}
             </span>
           </div>
@@ -258,8 +258,8 @@ export function ClusterSection({ onFormCluster, onPromote }: ClusterSectionProps
         })}
       </ul>
       <p className="nx-cluster__note">
-        Removing a worker only changes StackSpirit&apos;s saved cluster. Its VOWP enrollment and
-        Home&apos;s backup schedule stay until you revoke them in VOWP.
+        Removing a worker only changes StackSpirit&apos;s saved cluster. Its StackSpirit enrollment and
+        Home&apos;s backup schedule stay until you revoke them in StackSpirit.
       </p>
 
       <div className="nx-cluster__backup">
@@ -269,7 +269,7 @@ export function ClusterSection({ onFormCluster, onPromote }: ClusterSectionProps
           <strong>freshness ≤ {formatInterval(config.backup.every_secs)}</strong> at promotion.
         </p>
         <p className="nx-cluster__note">
-          Home registers the schedule in VOWP
+          Home registers the schedule in StackSpirit
           {backupWorkers.length > 0
             ? ` and writes to ${backupWorkers
                 .map((worker) => hostLabel(hosts, worker.host, worker.node_name))

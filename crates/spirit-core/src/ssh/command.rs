@@ -166,6 +166,85 @@ pub fn remote_command(argv: &[String]) -> Result<String, SpiritError> {
     Ok(parts.join(" "))
 }
 
+/// Preferred engine binary name.
+pub const ENGINE_BINARY: &str = "stackspirit";
+/// Legacy engine binary name that existing homes keep using.
+pub const LEGACY_ENGINE_BINARY: &str = "vowp";
+/// Preferred project config file name.
+pub const ENGINE_CONFIG_FILE: &str = "stackspirit.toml";
+/// Legacy project config file name.
+pub const LEGACY_ENGINE_CONFIG_FILE: &str = "vowp.toml";
+/// Preferred home environment variable.
+pub const ENGINE_HOME_ENV: &str = "STACKSPIRIT_HOME";
+/// Legacy home environment variable.
+pub const LEGACY_ENGINE_HOME_ENV: &str = "VOWP_HOME";
+
+/// Returns the engine home from an environment lookup: `STACKSPIRIT_HOME` first, then
+/// `VOWP_HOME`. Empty values are ignored.
+pub fn engine_home_from_env(get: impl Fn(&str) -> Option<String>) -> Option<String> {
+    [ENGINE_HOME_ENV, LEGACY_ENGINE_HOME_ENV]
+        .into_iter()
+        .find_map(|key| get(key).filter(|value| !value.is_empty()))
+}
+
+/// Picks the project config file name: `stackspirit.toml` when `has_file` reports it,
+/// otherwise the legacy `vowp.toml`.
+pub fn engine_config_file(has_file: impl Fn(&str) -> bool) -> &'static str {
+    if has_file(ENGINE_CONFIG_FILE) {
+        ENGINE_CONFIG_FILE
+    } else {
+        LEGACY_ENGINE_CONFIG_FILE
+    }
+}
+
+/// Resolves the local engine program: `stackspirit` when an executable of that name is on
+/// the given `PATH` value, otherwise `vowp`.
+#[must_use]
+pub fn resolve_local_engine_binary(path_env: Option<&str>) -> &'static str {
+    let found = path_env.is_some_and(|path| {
+        std::env::split_paths(path).any(|dir| {
+            let candidate = dir.join(ENGINE_BINARY);
+            std::fs::metadata(&candidate).is_ok_and(|meta| meta.is_file())
+        })
+    });
+    if found {
+        ENGINE_BINARY
+    } else {
+        LEGACY_ENGINE_BINARY
+    }
+}
+
+/// Process-wide record of which engine binary each SSH destination answered to.
+///
+/// The remote command stays a plain single-quoted argv (no shell operators), so the
+/// binary is chosen up front: `vowp` until a probe saw that only `stackspirit` exists.
+static REMOTE_ENGINE_BINARIES: std::sync::Mutex<Vec<(String, &'static str)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Returns the engine program to run on `destination`: `stackspirit` once a probe found
+/// it there, otherwise the legacy `vowp` so existing homes keep working.
+#[must_use]
+pub fn engine_binary_for(destination: &str) -> &'static str {
+    REMOTE_ENGINE_BINARIES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(host, _)| host == destination)
+        .map_or(LEGACY_ENGINE_BINARY, |(_, binary)| *binary)
+}
+
+/// Records the engine program that works on `destination`.
+pub fn set_engine_binary_for(destination: &str, binary: &'static str) {
+    let mut guard = REMOTE_ENGINE_BINARIES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = guard.iter_mut().find(|(host, _)| host == destination) {
+        entry.1 = binary;
+    } else {
+        guard.push((destination.to_owned(), binary));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +272,47 @@ mod tests {
         assert!(!command.contains(';'));
         assert!(!command.contains("&&"));
         assert!(!command.contains('|'));
+    }
+
+    #[test]
+    fn remote_binary_defaults_to_vowp_until_stackspirit_is_recorded() {
+        assert_eq!(engine_binary_for("ss129-host"), "vowp");
+        set_engine_binary_for("ss129-host", ENGINE_BINARY);
+        assert_eq!(engine_binary_for("ss129-host"), "stackspirit");
+        set_engine_binary_for("ss129-host", LEGACY_ENGINE_BINARY);
+        assert_eq!(engine_binary_for("ss129-host"), "vowp");
+        assert_eq!(engine_binary_for("ss129-other"), "vowp");
+    }
+
+    #[test]
+    fn local_binary_prefers_stackspirit_when_on_path() {
+        let dir = std::env::temp_dir().join(format!("ss129-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.display().to_string();
+        assert_eq!(resolve_local_engine_binary(Some(&path)), "vowp");
+        std::fs::write(dir.join("stackspirit"), b"").unwrap();
+        assert_eq!(resolve_local_engine_binary(Some(&path)), "stackspirit");
+        assert_eq!(resolve_local_engine_binary(None), "vowp");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn config_file_prefers_stackspirit_toml() {
+        assert_eq!(engine_config_file(|_| true), "stackspirit.toml");
+        assert_eq!(engine_config_file(|name| name == "vowp.toml"), "vowp.toml");
+        assert_eq!(engine_config_file(|_| false), "vowp.toml");
+    }
+
+    #[test]
+    fn home_env_prefers_stackspirit_home() {
+        let both = |key: &str| Some(format!("/{key}"));
+        assert_eq!(
+            engine_home_from_env(both).as_deref(),
+            Some("/STACKSPIRIT_HOME")
+        );
+        let legacy = |key: &str| (key == "VOWP_HOME").then(|| "/old".to_owned());
+        assert_eq!(engine_home_from_env(legacy).as_deref(), Some("/old"));
+        let empty = |key: &str| (key == "STACKSPIRIT_HOME").then(String::new);
+        assert_eq!(engine_home_from_env(empty), None);
     }
 }

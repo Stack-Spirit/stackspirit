@@ -645,8 +645,8 @@ impl ClusterService {
                 .await?;
         }
 
-        let config_path = project_config_path(&request.home_project.root)?;
-        let current_config = read_remote_text(&home_remote, &config_path).await?;
+        let (config_path, current_config) =
+            read_project_config(&home_remote, &request.home_project.root).await?;
         let (next_config, offload_config_changed) = enable_pooled_compute(&current_config)?;
 
         let backup_target = request
@@ -1404,11 +1404,26 @@ fn parse_unix_seconds(stdout: &[u8], document: &str) -> Result<Timestamp, Spirit
     Ok(Timestamp::from_unix_secs(secs))
 }
 
-fn project_config_path(root: &str) -> Result<String, SpiritError> {
+fn project_config_path(root: &str, file: &str) -> Result<String, SpiritError> {
     validate_remote_path(root, "home project root")?;
-    let path = format!("{}/vowp.toml", root.trim_end_matches('/'));
+    let path = format!("{}/{file}", root.trim_end_matches('/'));
     validate_remote_path(&path, "home project config")?;
     Ok(path)
+}
+
+/// Reads the Home project config, preferring `stackspirit.toml` and falling back to the
+/// legacy `vowp.toml`. Returns the path that was read so a write goes back to the same file.
+async fn read_project_config(
+    remote: &SshRemote,
+    root: &str,
+) -> Result<(String, String), SpiritError> {
+    let preferred = project_config_path(root, crate::ssh::command::ENGINE_CONFIG_FILE)?;
+    if let Ok(text) = read_remote_text(remote, &preferred).await {
+        return Ok((preferred, text));
+    }
+    let legacy = project_config_path(root, crate::ssh::command::LEGACY_ENGINE_CONFIG_FILE)?;
+    let text = read_remote_text(remote, &legacy).await?;
+    Ok((legacy, text))
 }
 
 fn validate_remote_path(path: &str, field: &str) -> Result<(), SpiritError> {

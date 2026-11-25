@@ -323,7 +323,7 @@ describe("NextShell", () => {
     );
   });
 
-  it("shows the exact VOWP gate for server chat and never a fake reply", async () => {
+  it("shows the exact StackSpirit gate for server chat and never a fake reply", async () => {
     await renderConnected("chat-server-gated");
     const error = await screen.findByTestId("chat-error");
     expect(error).toHaveTextContent(
@@ -448,11 +448,11 @@ describe("NextShell", () => {
     return screen.findByRole("dialog", { name: "Add a project" });
   }
 
-  it("has no branch field and says VOWP clones the default branch", async () => {
+  it("has no branch field and says StackSpirit clones the default branch", async () => {
     const { user } = await renderConnected();
     const dialog = await openAddProject(user);
     expect(within(dialog).queryByLabelText(/branch/i)).not.toBeInTheDocument();
-    expect(within(dialog).getByText("VOWP clones the repository's default branch.")).toBeInTheDocument();
+    expect(within(dialog).getByText("StackSpirit clones the repository's default branch.")).toBeInTheDocument();
   });
 
   it("disables the Local choice when no local agent is connected", async () => {

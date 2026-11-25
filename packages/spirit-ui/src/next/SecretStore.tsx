@@ -204,7 +204,7 @@ export function SecretStore() {
       if (outcome.removed) {
         setNotice(`Removed ${secretName}.`);
       } else {
-        setNotice(`VOWP did not report ${secretName} as removed. The list was refreshed.`);
+        setNotice(`StackSpirit did not report ${secretName} as removed. The list was refreshed.`);
       }
       await refreshList();
     } catch (caught) {
@@ -365,7 +365,7 @@ export function SecretStore() {
 
           {visibleEntries && visibleEntries.storage === null ? (
             <p className="nx-secrets__storage-note" data-testid="vault-mode-missing">
-              VOWP did not report a storage mode
+              StackSpirit did not report a storage mode
             </p>
           ) : null}
           {visibleEntries && visibleEntries.storage !== null ? (
@@ -381,7 +381,7 @@ export function SecretStore() {
             <strong>Before your first server secret</strong>
           </div>
           <p>
-            This key will be stored <strong>on {serverLabel} in VOWP&rsquo;s vault</strong>,
+            This key will be stored <strong>on {serverLabel} in StackSpirit&rsquo;s vault</strong>,
             not on this Mac. The assistant only sees secret names and metadata (name, last
             four characters and timestamps), never the value.
           </p>
@@ -510,7 +510,7 @@ function VaultModeBadge({ mode }: { mode: string }) {
       <span className="nx-secrets__mode-badge" data-testid="vault-mode" data-mode={mode}>
         {known ? known.label : mode}
       </span>{" "}
-      {known ? known.note : `VOWP reported this storage mode: ${mode}.`}
+      {known ? known.note : `StackSpirit reported this storage mode: ${mode}.`}
     </p>
   );
 }

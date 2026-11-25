@@ -379,7 +379,9 @@ impl SshVowpClient {
     }
 
     fn base_argv(&self) -> Vec<String> {
-        let mut argv = vec!["vowp".to_owned()];
+        let mut argv = vec![
+            crate::ssh::command::engine_binary_for(&self.remote.target.destination()).to_owned(),
+        ];
         if let Some(home) = &self.home {
             argv.push("--home".to_owned());
             argv.push(home.clone());

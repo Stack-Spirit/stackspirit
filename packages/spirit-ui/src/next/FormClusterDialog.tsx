@@ -338,8 +338,8 @@ export function FormClusterDialog({ hosts, initial, onClose }: FormClusterDialog
           )}
           {errors.workers ? <span className="nx-form__error">{errors.workers}</span> : null}
           <p className="nx-cluster__note">
-            Optional: add the project checkout on each worker so VOWP can run jobs there. Leave it
-            empty to keep that worker&apos;s existing VOWP path maps untouched.
+            Optional: add the project checkout on each worker so StackSpirit can run jobs there. Leave it
+            empty to keep that worker&apos;s existing StackSpirit path maps untouched.
           </p>
         </div>
 
@@ -350,7 +350,7 @@ export function FormClusterDialog({ hosts, initial, onClose }: FormClusterDialog
             <strong>{workers.length}</strong> worker server{workers.length === 1 ? "" : "s"}
           </p>
           <p className="nx-cluster__note">
-            Pooled capacity is Home&apos;s target plus each worker&apos;s VOWP target. StackSpirit reads
+            Pooled capacity is Home&apos;s target plus each worker&apos;s StackSpirit target. StackSpirit reads
             the real total from ClusterHealth after the servers are enrolled and never assumes a
             slot count here.
           </p>

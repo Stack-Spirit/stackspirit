@@ -195,7 +195,7 @@ describe("Settings server secrets", () => {
 
     const warning = screen.getByTestId("secret-first-warning");
     expect(warning).toHaveTextContent("Before your first server secret");
-    expect(warning).toHaveTextContent("on production-vps in VOWP");
+    expect(warning).toHaveTextContent("on production-vps in StackSpirit");
     expect(warning).toHaveTextContent(
       "The assistant only sees secret names and metadata",
     );
@@ -446,10 +446,10 @@ describe("Settings server secrets", () => {
     expect(list).toHaveBeenCalledTimes(1);
   });
 
-  it("says VOWP did not report a storage mode when none is given", async () => {
+  it("says StackSpirit did not report a storage mode when none is given", async () => {
     renderStore({ list: async () => listOf([entry("OPENAI_API_KEY", "9f2a")], null) });
 
-    expect(await screen.findByText("VOWP did not report a storage mode")).toBeInTheDocument();
+    expect(await screen.findByText("StackSpirit did not report a storage mode")).toBeInTheDocument();
     expect(screen.queryByTestId("vault-mode")).not.toBeInTheDocument();
     expect(screen.queryByText(/0\.4\.0/)).not.toBeInTheDocument();
   });
@@ -468,10 +468,10 @@ describe("Settings server secrets", () => {
     expect(badge).toHaveClass("nx-secrets__mode-badge");
     expect(badge).toHaveAttribute("data-mode", mode);
     expect(screen.getByTestId("vault-mode-note")).toHaveTextContent(note);
-    expect(screen.queryByText("VOWP did not report a storage mode")).not.toBeInTheDocument();
+    expect(screen.queryByText("StackSpirit did not report a storage mode")).not.toBeInTheDocument();
   });
 
-  it("shows an unknown storage token raw and says VOWP reported it", async () => {
+  it("shows an unknown storage token raw and says StackSpirit reported it", async () => {
     renderStore({
       list: async () => listOf([entry("OPENAI_API_KEY", "9f2a")], "future_mode"),
     });
@@ -481,7 +481,7 @@ describe("Settings server secrets", () => {
     expect(badge).toHaveClass("nx-secrets__mode-badge");
     expect(badge).toHaveAttribute("data-mode", "future_mode");
     expect(screen.getByTestId("vault-mode-note")).toHaveTextContent(
-      "VOWP reported this storage mode: future_mode.",
+      "StackSpirit reported this storage mode: future_mode.",
     );
   });
 
@@ -491,8 +491,8 @@ describe("Settings server secrets", () => {
       async (): Promise<SecretSetOutcome> => {
         throw {
           code: "not_supported",
-          message: "secret set is not supported by this VOWP build",
-          hint: "Use the server's own VOWP CLI.",
+          message: "secret set is not supported by this StackSpirit build",
+          hint: "Use the server's own StackSpirit CLI.",
           retryable: false,
         };
       },
@@ -509,7 +509,7 @@ describe("Settings server secrets", () => {
 
     const blocked = await screen.findByTestId("secret-set-unavailable");
     expect(blocked).toHaveTextContent(
-      "secret set is not supported by this VOWP build",
+      "secret set is not supported by this StackSpirit build",
     );
     expect(screen.getByLabelText("Secret name")).toBeDisabled();
     expect(screen.getByLabelText("Secret value")).toBeDisabled();

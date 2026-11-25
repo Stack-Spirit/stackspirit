@@ -374,7 +374,7 @@ describe("Form a cluster", () => {
     const form = vi.fn(async () => {
       throw {
         code: "ssh_auth",
-        message: "worker worker-a VOWP preflight: SSH authentication failed",
+        message: "worker worker-a StackSpirit preflight: SSH authentication failed",
         hint: "Check the worker's key login and retry.",
         retryable: false,
       };
@@ -450,7 +450,7 @@ describe("Promote backup to Home", () => {
       resolvePromote?.(OUTCOME);
     });
     const outcome = await screen.findByTestId("promote-outcome");
-    expect(outcome).toHaveTextContent("VOWP restored the backup and started the supervisor on worker-a");
+    expect(outcome).toHaveTextContent("StackSpirit restored the backup and started the supervisor on worker-a");
     expect(outcome).toHaveTextContent("worker-a");
     expect(outcome).toHaveTextContent("2026-11-18 11:30 UTC");
     expect(outcome).toHaveTextContent("The active server has not been switched");

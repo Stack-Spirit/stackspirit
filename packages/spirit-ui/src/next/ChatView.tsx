@@ -409,7 +409,7 @@ function OwnershipBanner({ session }: { session: SessionId }) {
         setError(
           /chat_gated/.test(failure.message)
             ? "Pair this computer as a local node in Settings to take sessions over. This session stays read-only until then."
-            : "Take over isn't available with this VOWP yet. This session stays read-only.",
+            : "Take over isn't available with this StackSpirit yet. This session stays read-only.",
         );
       } else {
         setError(failure.message);
@@ -618,7 +618,7 @@ function HostControl({
       const failure = toSpiritError(caught);
       setError(
         isNotSupported(failure.code, failure.message)
-          ? "This VOWP cannot move orchestrators yet. The chat stays on its current host."
+          ? "This StackSpirit cannot move orchestrators yet. The chat stays on its current host."
           : failure.message,
       );
     } finally {

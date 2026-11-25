@@ -44,7 +44,7 @@ export function SetupPanel({ error }: { error: SpiritErrorDto | null }) {
           <span>Web cockpit · read-only</span>
         </div>
       </div>
-      <Panel title="Connect to the VOWP daemon" tone="warn">
+      <Panel title="Connect to the StackSpirit daemon" tone="warn">
         <p>
           This Web build talks to one loopback daemon through a same-origin reverse proxy or
           the Vite development proxy. There is no fixed port and no mock fallback.

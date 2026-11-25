@@ -156,7 +156,7 @@ export function validateClusterDraft(
     const node = worker.nodeName.trim();
     if (!NODE_NAME.test(node)) {
       errors.nodeNames[worker.hostId] =
-        "Use a lowercase VOWP node name: letters, digits and dashes, 1–64 characters.";
+        "Use a lowercase StackSpirit node name: letters, digits and dashes, 1–64 characters.";
     } else if (usedNodes.has(node)) {
       errors.nodeNames[worker.hostId] = "Node names must be unique inside the cluster.";
     } else {
@@ -170,7 +170,7 @@ export function validateClusterDraft(
   }
 
   if (!Number.isInteger(draft.everySecs) || draft.everySecs < 60) {
-    errors.every = "VOWP's shortest backup schedule is 60 seconds.";
+    errors.every = "StackSpirit's shortest backup schedule is 60 seconds.";
   }
   if (!Number.isInteger(draft.keep) || draft.keep < 1 || draft.keep > 1000) {
     errors.keep = "Keep between 1 and 1000 copies.";
@@ -178,7 +178,7 @@ export function validateClusterDraft(
 
   if (!PROJECT_NAME.test(draft.projectName.trim())) {
     errors.projectName =
-      "Use the lowercase project slug VOWP stores: letters, digits and dashes.";
+      "Use the lowercase project slug StackSpirit stores: letters, digits and dashes.";
   }
   if (!isAbsoluteRemotePath(draft.projectRoot)) {
     errors.projectRoot =

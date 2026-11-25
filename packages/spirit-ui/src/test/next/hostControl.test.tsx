@@ -98,7 +98,7 @@ describe("session host control", () => {
       await screen.findByRole("button", { name: "Local · local-mac" }),
     );
     expect(await screen.findByTestId("orchestrator-host-error")).toHaveTextContent(
-      "This VOWP cannot move orchestrators",
+      "This StackSpirit cannot move orchestrators",
     );
     expect(screen.getByTestId("orchestrator-host")).toHaveTextContent("Home");
   });

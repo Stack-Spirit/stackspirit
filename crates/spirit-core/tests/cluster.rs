@@ -159,7 +159,110 @@ async fn form_with_two_servers_writes_the_expected_commands_and_config() {
     let runner = runner(vec![
         version_ok(),                                       // Home preflight
         version_ok(),                                       // Worker preflight
-        CommandOutput::ok(HOME_CONFIG.as_bytes().to_vec()), // cat
+        CommandOutput::fail(1, b"No such file".to_vec()),   // cat stackspirit.toml
+        CommandOutput::ok(HOME_CONFIG.as_bytes().to_vec()), // cat vowp.toml
+        node_enroll_json(),                                 // node enroll on Home
+        agent_enroll_json(),                                // agent enroll on Worker
+        CommandOutput::ok(Vec::new()),                      // agent service install
+        paths_add_json(),                                   // agent paths add
+        CommandOutput::ok(Vec::new()),                      // tee
+        CommandOutput::ok(Vec::new()),                      // schedule add
+    ]);
+    let service = ClusterService::new(store, runner.clone(), "/tmp/opencode/known_hosts");
+
+    let formed = service.form(&request).await.unwrap();
+    assert_eq!(formed.backup_schedule, CLUSTER_BACKUP_SCHEDULE);
+    assert_eq!(formed.config.workers.len(), 1);
+    assert_eq!(
+        formed.config.workers[0].agent_state,
+        ClusterAgentState::Enrolled
+    );
+
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 10);
+
+    assert!(remote_argv(&calls[0]).contains("'--version'"));
+    assert!(remote_argv(&calls[1]).contains("'--version'"));
+    assert_eq!(remote_argv(&calls[2]), "'cat' '/srv/demo/stackspirit.toml'");
+    assert_eq!(remote_argv(&calls[3]), "'cat' '/srv/demo/vowp.toml'");
+
+    let enroll = remote_argv(&calls[4]);
+    assert!(enroll.contains("'node' 'enroll' 'worker-1'"), "{enroll}");
+    assert!(!enroll.contains(NODE_CODE), "{enroll}");
+
+    let agent_enroll = remote_argv(&calls[5]);
+    for expected in [
+        "'agent' 'enroll'",
+        "'--target' 'owner@192.0.2.10'",
+        "'--code-file' '-'",
+    ] {
+        assert!(
+            agent_enroll.contains(expected),
+            "{expected}: {agent_enroll}"
+        );
+    }
+    assert!(!agent_enroll.contains(NODE_CODE), "{agent_enroll}");
+    assert_eq!(
+        calls[5].stdin.as_deref(),
+        Some(format!("{NODE_CODE}\n").as_bytes())
+    );
+
+    let install = remote_argv(&calls[6]);
+    assert!(
+        install.contains("'agent' 'service' 'install' '--now'"),
+        "{install}"
+    );
+
+    let paths = remote_argv(&calls[7]);
+    for expected in [
+        "'agent' 'paths' 'add'",
+        "'--project' '/srv/demo'",
+        "'--name' 'demo'",
+        "'--allow' 'src'",
+    ] {
+        assert!(paths.contains(expected), "{expected}: {paths}");
+    }
+
+    let tee = remote_argv(&calls[8]);
+    assert_eq!(tee, "'tee' '/srv/demo/vowp.toml'");
+    let written = String::from_utf8(calls[8].stdin.clone().unwrap()).unwrap();
+    assert!(written.contains("enabled = true"));
+    assert!(written.contains("default = \"any\""));
+    assert!(written.contains("result_transport = \"bundle\""));
+    assert!(written.contains("max_remote_runs = 5"), "{written}");
+    assert!(written.contains("pause_on_home_brake = true"), "{written}");
+    assert!(written.contains("[offload.projects.demo]"), "{written}");
+    assert!(
+        written.contains("allow_kinds = [\"build\", \"test\"]"),
+        "{written}"
+    );
+    assert!(!written.contains("default_placement"));
+
+    let schedule = remote_argv(&calls[9]);
+    for expected in [
+        "'schedule' 'add' 'every 1d' 'command'",
+        "'--name' 'cluster-backup'",
+        "'--' 'vowp' 'backup' '--to' 'backup@192.0.2.20:/srv/vowp-backups'",
+    ] {
+        assert!(schedule.contains(expected), "{expected}: {schedule}");
+    }
+
+    let debug = format!("{formed:?}");
+    assert!(!debug.contains(NODE_CODE), "{debug}");
+}
+
+#[tokio::test]
+async fn form_prefers_and_writes_back_stackspirit_toml_when_present() {
+    let store = empty_store();
+    let home = add_host(&store, "home-vps", "192.0.2.10", None);
+    let worker = add_host(&store, "worker-vps", "192.0.2.20", None);
+    let config = form_config(&home, &[(&worker, "worker-1", ClusterWorkerRole::Backup)]);
+    let request = form_request(config, &worker);
+
+    let runner = runner(vec![
+        version_ok(),                                       // Home preflight
+        version_ok(),                                       // Worker preflight
+        CommandOutput::ok(HOME_CONFIG.as_bytes().to_vec()), // cat stackspirit.toml
         node_enroll_json(),                                 // node enroll on Home
         agent_enroll_json(),                                // agent enroll on Worker
         CommandOutput::ok(Vec::new()),                      // agent service install
@@ -182,7 +285,7 @@ async fn form_with_two_servers_writes_the_expected_commands_and_config() {
 
     assert!(remote_argv(&calls[0]).contains("'--version'"));
     assert!(remote_argv(&calls[1]).contains("'--version'"));
-    assert_eq!(remote_argv(&calls[2]), "'cat' '/srv/demo/vowp.toml'");
+    assert_eq!(remote_argv(&calls[2]), "'cat' '/srv/demo/stackspirit.toml'");
 
     let enroll = remote_argv(&calls[3]);
     assert!(enroll.contains("'node' 'enroll' 'worker-1'"), "{enroll}");
@@ -222,7 +325,7 @@ async fn form_with_two_servers_writes_the_expected_commands_and_config() {
     }
 
     let tee = remote_argv(&calls[7]);
-    assert_eq!(tee, "'tee' '/srv/demo/vowp.toml'");
+    assert_eq!(tee, "'tee' '/srv/demo/stackspirit.toml'");
     let written = String::from_utf8(calls[7].stdin.clone().unwrap()).unwrap();
     assert!(written.contains("enabled = true"));
     assert!(written.contains("default = \"any\""));

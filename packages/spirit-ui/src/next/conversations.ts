@@ -905,8 +905,8 @@ export const useConversations = create<ConversationState>((set, get) => ({
         attached: false,
         error: {
           code: "gate",
-          message: "chat_gated: Project creation needs VOWP 0.5's `vowp project add`.",
-          hint: "Create the project in VOWP, then reopen this conversation.",
+          message: "chat_gated: Project creation needs StackSpirit's `stackspirit project add`.",
+          hint: "Create the project in StackSpirit, then reopen this conversation.",
           retryable: false,
         },
         last_event_at: nowIso(),
@@ -929,8 +929,8 @@ export const useConversations = create<ConversationState>((set, get) => ({
       id: nextLocalId("preview"),
       role: "assistant",
       text: [
-        `Preview reply. In the real app I'll set up "${request.name}": clone or link the code on the server, register it with VOWP, and open its orchestrator.`,
-        "Preview: project creation runs here once VOWP's project API is connected.",
+        `Preview reply. In the real app I'll set up "${request.name}": clone or link the code on the server, register it with StackSpirit, and open its orchestrator.`,
+        "Preview: project creation runs here once StackSpirit's project API is connected.",
       ],
       created_at: nowIso(),
       origin: "preview",

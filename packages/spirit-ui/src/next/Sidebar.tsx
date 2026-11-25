@@ -339,7 +339,7 @@ function ServerCard({
                   onOpenRaw();
                 }}
               >
-                Raw VOWP document
+                Raw StackSpirit document
               </MenuItem>
             </>
           ) : null}

@@ -11,7 +11,7 @@ import { PageHeader } from "./PageHeader";
 
 /** The exact seatbelt warning shown before touching a live VOWP path. */
 export const SEATBELT_TEXT =
-  "This is a live VOWP system path — moving or deleting it may interrupt running work. Continue anyway?";
+  "This is a live StackSpirit system path — moving or deleting it may interrupt running work. Continue anyway?";
 /** The exact placeholder shown for a secret-like file until it is revealed locally. */
 export const MASKED_TEXT = "Secret file hidden by default — never sent to AI";
 
@@ -446,11 +446,11 @@ function FilesBrowser({ files, projects, initialPath, onBack }: { files: Files; 
                 ))}
             </ul>
           )}
-          <h2 className="nx-files__side-title">VOWP</h2>
+          <h2 className="nx-files__side-title">StackSpirit</h2>
           <ul>
             <li>
-              <LocationButton active={inVowpHome && listing?.path.endsWith("/.vowp")} label="VOWP Home" path="~/.vowp" onOpen={load} sub="~/.vowp" />
-              <ul className="nx-files__badges" aria-label="What lives in the VOWP home">
+              <LocationButton active={inVowpHome && listing?.path.endsWith("/.vowp")} label="StackSpirit Home" path="~/.vowp" onOpen={load} sub="~/.vowp" />
+              <ul className="nx-files__badges" aria-label="What lives in the StackSpirit home">
                 {VOWP_LOCATION_BADGES.map((badge) => (
                   <li key={badge.name}>
                     <code>{badge.name}</code> <span>{badge.text}</span>
@@ -590,7 +590,7 @@ function FilesBrowser({ files, projects, initialPath, onBack }: { files: Files; 
                         <td>
                           <span className="nx-files__kind">{isDir ? "Folder" : entry.kind === "symlink" ? "Link" : "File"}</span>
                           {entry.is_secret_like ? <span className="nx-files__chip nx-files__chip--secret">Secret</span> : null}
-                          {entry.is_protected_hint ? <span className="nx-files__chip nx-files__chip--live">Live VOWP path</span> : null}
+                          {entry.is_protected_hint ? <span className="nx-files__chip nx-files__chip--live">Live StackSpirit path</span> : null}
                         </td>
                         <td className="nx-files__num">{isDir ? "—" : formatBytes(entry.size_bytes)}</td>
                         <td>
@@ -740,7 +740,7 @@ function FilesBrowser({ files, projects, initialPath, onBack }: { files: Files; 
         <Modal
           open
           danger
-          title="Live VOWP path"
+          title="Live StackSpirit path"
           onClose={() => setDialog(null)}
           footer={
             <>

@@ -176,7 +176,7 @@ export function AddProjectDialog({
               />
             </label>
             <p className="nx-form__hint" id={`${ids.url}-note`}>
-              VOWP clones the repository's default branch.
+              StackSpirit clones the repository's default branch.
             </p>
           </>
         ) : (

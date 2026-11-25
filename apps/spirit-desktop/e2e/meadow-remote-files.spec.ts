@@ -30,14 +30,14 @@ async function openFiles(page: Page, theme: "light" | "dark") {
 }
 
 for (const theme of ["light", "dark"] as const) {
-  test(`browses Home, VOWP Home and Projects, and previews a file (${theme})`, async ({ page }) => {
+  test(`browses Home, StackSpirit Home and Projects, and previews a file (${theme})`, async ({ page }) => {
     const files = await openFiles(page, theme);
     const nav = files.getByRole("navigation", { name: "Locations" });
     await expect(nav).toContainText("live database");
 
-    await nav.getByRole("button", { name: /VOWP Home/ }).click();
+    await nav.getByRole("button", { name: /StackSpirit Home/ }).click();
     await expect(files.getByRole("table", { name: /\.vowp/ })).toBeVisible();
-    await expect(files.getByTestId("file-row-vowp.db")).toContainText("Live VOWP path");
+    await expect(files.getByTestId("file-row-vowp.db")).toContainText("Live StackSpirit path");
     await expect(files.getByTestId("file-row-logs")).toContainText("supervisor logs");
 
     await files.getByRole("button", { name: "Home" }).first().click();
@@ -92,13 +92,13 @@ for (const theme of ["light", "dark"] as const) {
 
   test(`warns before deleting the live vowp.db (${theme})`, async ({ page }) => {
     const files = await openFiles(page, theme);
-    await files.getByRole("navigation", { name: "Locations" }).getByRole("button", { name: /VOWP Home/ }).click();
+    await files.getByRole("navigation", { name: "Locations" }).getByRole("button", { name: /StackSpirit Home/ }).click();
     await files.getByRole("button", { name: "Actions for vowp.db" }).click();
     await page.getByRole("menuitem", { name: "Delete" }).click();
     await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
-    const seatbelt = page.getByRole("dialog", { name: "Live VOWP path" });
+    const seatbelt = page.getByRole("dialog", { name: "Live StackSpirit path" });
     await expect(seatbelt.getByTestId("seatbelt-text")).toHaveText(
-      "This is a live VOWP system path — moving or deleting it may interrupt running work. Continue anyway?",
+      "This is a live StackSpirit system path — moving or deleting it may interrupt running work. Continue anyway?",
     );
     await expectNoWcagViolations(page);
     await seatbelt.getByRole("button", { name: "Cancel" }).click();

@@ -192,7 +192,13 @@ impl VowpEndpointResolver {
         if !valid_orchestrator_name(name) {
             return Err(not_configured(name, "the orchestrator name is not usable"));
         }
-        let mut command = Command::new("vowp");
+        let search_path = self
+            .path_env
+            .clone()
+            .or_else(|| std::env::var_os("PATH"))
+            .map(|path| path.to_string_lossy().into_owned());
+        let program = crate::ssh::command::resolve_local_engine_binary(search_path.as_deref());
+        let mut command = Command::new(program);
         command
             .args(["agent", "orchestrator", "endpoint", name, "--json"])
             .stdin(std::process::Stdio::null())

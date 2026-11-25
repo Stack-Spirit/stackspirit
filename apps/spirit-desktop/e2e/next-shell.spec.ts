@@ -419,7 +419,7 @@ test("add project dialog meets WCAG 2.2 AA", async ({ page }) => {
   await dialog.getByLabel("Repository URL").fill("https://github.com/acme/billing-api.git");
   await expect(dialog.getByLabel("Project name")).toHaveValue("billing-api");
   await expect(dialog.getByLabel("Branch")).toHaveCount(0);
-  await expect(dialog.getByText("VOWP clones the repository's default branch.")).toBeVisible();
+  await expect(dialog.getByText("StackSpirit clones the repository's default branch.")).toBeVisible();
   await expect(dialog.getByRole("checkbox", { name: /Create the chat on this Mac/ })).toBeChecked();
   await expectNoWcagViolations(page);
 });
