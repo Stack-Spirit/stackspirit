@@ -1084,6 +1084,23 @@ fn default_relay_reconnect_max_secs() -> u64 {
     60
 }
 
+/// True when `url` starts with `scheme` and its authority is a loopback IP literal.
+///
+/// The cleartext schemes are accepted for loopback tests only; the check parses the authority so
+/// `http://127.0.0.1.example.com` is not mistaken for loopback.
+fn relay_loopback_url(url: &str, scheme: &str) -> bool {
+    let Some(rest) = url.strip_prefix(scheme) else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    authority
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|address| address.ip().is_loopback())
+        || authority
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 /// The optional `[relay]` table: the machine's StackSpirit relay connector and local policy.
 ///
 /// Spec: `docs/design/relay-and-packaging.md` §6.2. The `allow_*` booleans are the machine's
@@ -1190,12 +1207,12 @@ impl RelayConfig {
                 )));
             }
         }
-        if !self.api_url.starts_with("https://") && !self.api_url.starts_with("http://127.0.0.1") {
+        if !self.api_url.starts_with("https://") && !relay_loopback_url(&self.api_url, "http://") {
             return Err(ProtocolError::Config(
                 "relay.api_url must be https:// (or loopback http:// for tests)".to_owned(),
             ));
         }
-        if !self.relay_url.starts_with("wss://") && !self.relay_url.starts_with("ws://127.0.0.1") {
+        if !self.relay_url.starts_with("wss://") && !relay_loopback_url(&self.relay_url, "ws://") {
             return Err(ProtocolError::Config(
                 "relay.relay_url must be wss:// (or loopback ws:// for tests)".to_owned(),
             ));
@@ -1209,7 +1226,7 @@ impl RelayConfig {
                 "relay.ssh_address must be a loopback socket address such as 127.0.0.1:22".to_owned(),
             ));
         }
-        if !self.daemon_url.is_empty() && !self.daemon_url.starts_with("http://127.0.0.1") {
+        if !self.daemon_url.is_empty() && !relay_loopback_url(&self.daemon_url, "http://") {
             return Err(ProtocolError::Config(
                 "relay.daemon_url must be empty or start with http://127.0.0.1".to_owned(),
             ));
