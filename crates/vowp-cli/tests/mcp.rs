@@ -655,7 +655,7 @@ fn mcp_initialize_and_tools_list() {
     assert_eq!(code, 0, "{stderr}");
     let values = responses(&stdout);
     let init = response(&values, 1);
-    assert_eq!(init["result"]["serverInfo"]["name"], "stackspirit-engine");
+    assert_eq!(init["result"]["serverInfo"]["name"], "stackspirit");
     assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
     let tools = response(&values, 2)["result"]["tools"]
         .as_array()
@@ -718,13 +718,12 @@ fn stackspirit_mcp_serves_the_same_identity_tools_and_backend_as_vowp_mcp() {
         assert_eq!(call["result"]["isError"], json!(false), "{call}");
     }
     let values = &outputs[1];
+    assert_eq!(response(values, 1)["result"]["serverInfo"]["name"], "stackspirit");
+    assert_eq!(response(values, 3)["result"]["serverInfo"]["name"], "stackspirit");
+    assert_eq!(response(values, 1)["result"]["serverInfo"]["title"], "StackSpirit");
     assert_eq!(
-        response(values, 1)["result"]["serverInfo"]["name"],
-        "stackspirit-engine"
-    );
-    assert_eq!(
-        response(values, 3)["result"]["serverInfo"]["name"],
-        "stackspirit-engine"
+        response(values, 1)["result"]["serverInfo"]["description"],
+        "StackSpirit (formerly VOWP): a local supervisor for AI coding agents"
     );
     assert_eq!(
         response(values, 1)["result"]["serverInfo"]["version"],
@@ -770,7 +769,7 @@ fn mcp_server_discover_answered() {
     let values = responses(&stdout);
     let discover = response(&values, 1);
     assert!(discover.get("error").is_none(), "{discover}");
-    assert_eq!(discover["result"]["serverInfo"]["name"], "stackspirit-engine");
+    assert_eq!(discover["result"]["serverInfo"]["name"], "stackspirit");
 }
 
 #[test]
@@ -1320,7 +1319,7 @@ fn mcp_proxy_serves_initialize_list_and_ping_without_a_home() {
     assert!(stderr.is_empty(), "the proxy writes errors to stdout: {stderr}");
     let values = responses(&stdout);
     let init = response(&values, 1);
-    assert_eq!(init["result"]["serverInfo"]["name"], "stackspirit-engine");
+    assert_eq!(init["result"]["serverInfo"]["name"], "stackspirit");
     assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(response(&values, 2)["result"], json!({}));
     let tools = response(&values, 3)["result"]["tools"]

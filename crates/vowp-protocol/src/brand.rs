@@ -1,4 +1,4 @@
-//! Product naming shared by every crate: the StackSpirit Engine brand and the legacy VOWP names.
+//! Product naming shared by every crate: the StackSpirit brand and the legacy VOWP names.
 //!
 //! Phase 1 of the rebrand (`docs/design/stackspirit-engine-rebrand.md`) is additive: the new
 //! names are accepted everywhere, the old names keep working, and no on-disk default moves.
@@ -7,9 +7,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Product display name.
-pub const PRODUCT_NAME: &str = "StackSpirit Engine";
+pub const PRODUCT_NAME: &str = "StackSpirit";
 /// One-line product description used by `--help` and the MCP server info.
-pub const PRODUCT_DESCRIPTION: &str = "StackSpirit Engine (formerly VOWP): a local supervisor for AI coding agents";
+pub const PRODUCT_DESCRIPTION: &str = "StackSpirit (formerly VOWP): a local supervisor for AI coding agents";
 /// New home environment variable; wins over [`LEGACY_HOME_ENV`].
 pub const HOME_ENV: &str = "STACKSPIRIT_HOME";
 /// Legacy home environment variable.

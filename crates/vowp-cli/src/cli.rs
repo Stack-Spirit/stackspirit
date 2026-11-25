@@ -151,7 +151,7 @@ impl Parser for Cli {
         if stackspirit {
             command = command
                 .name("stackspirit")
-                .about("StackSpirit Engine (formerly VOWP): local-first supervisor for AI coding agents");
+                .about("StackSpirit (formerly VOWP): local-first supervisor for AI coding agents");
         }
         let matches = command.try_get_matches_from(args)?;
         ParsedCli::from_arg_matches(&matches).map(|mut parsed| {

@@ -1,4 +1,4 @@
-//! The `stackspirit` binary is the same CLI as `vowp`, with StackSpirit Engine branding,
+//! The `stackspirit` binary is the same CLI as `vowp`, with StackSpirit branding,
 //! `STACKSPIRIT_HOME` precedence and `stackspirit.toml` discovery. Hermetic: temp dirs only.
 
 use std::path::Path;
@@ -48,7 +48,7 @@ fn stackspirit_binary_matches_vowp_cli() {
     let help_old = run(env!("CARGO_BIN_EXE_vowp"), &[], &["--help"], dir.path());
     // `vowp --help` keeps its legacy banner; only `stackspirit --help` carries the new one.
     assert!(stdout(&help_old).starts_with("VOWP: local-first supervisor for AI coding agents"));
-    assert!(stdout(&help_new).starts_with("StackSpirit Engine (formerly VOWP)"));
+    assert!(stdout(&help_new).starts_with("StackSpirit (formerly VOWP)"));
     assert_eq!(
         stdout(&help_new)
             .replace("Usage: stackspirit", "Usage: vowp")
@@ -57,7 +57,7 @@ fn stackspirit_binary_matches_vowp_cli() {
             .collect::<Vec<_>>(),
         stdout(&help_old).lines().skip(1).collect::<Vec<_>>()
     );
-    assert!(stdout(&help_new).contains("StackSpirit Engine"));
+    assert!(!stdout(&help_new).contains("Engine"), "{}", stdout(&help_new));
 }
 
 #[test]
