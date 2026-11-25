@@ -31,7 +31,9 @@ pub mod log;
 pub mod loops;
 pub mod offload;
 pub mod ops;
+pub mod relay;
 pub mod release;
+pub mod remote;
 pub mod report;
 pub mod run;
 pub mod schema;
@@ -80,7 +82,11 @@ pub use offload::*;
 #[allow(unused_imports)]
 pub use ops::*;
 #[allow(unused_imports)]
+pub use relay::*;
+#[allow(unused_imports)]
 pub use release::*;
+#[allow(unused_imports)]
+pub use remote::*;
 #[allow(unused_imports)]
 pub use report::*;
 #[allow(unused_imports)]

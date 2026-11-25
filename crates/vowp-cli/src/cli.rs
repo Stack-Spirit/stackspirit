@@ -21,6 +21,7 @@ use crate::cmd::mcp::McpArgs;
 use crate::cmd::migrate::MigrateArgs;
 use crate::cmd::orchestrator::OrchestratorArgs;
 use crate::cmd::project::ProjectArgs;
+use crate::cmd::relay::RelayArgs;
 use crate::cmd::secret::{SecretArgs, VaultAdminArgs, VaultExecArgs};
 use crate::cmd::setup::SetupArgs;
 use crate::cmd::tunnel::TunnelArgs;
@@ -52,6 +53,7 @@ pub const V0_2_COMMANDS: &[&str] = &[
     "agent",
     "surface",
     "offload",
+    "relay",
     "__exec",
     "__vault-exec",
     "__vault-admin",
@@ -400,6 +402,8 @@ pub enum Command {
         #[command(subcommand)]
         command: SurfaceCommand,
     },
+    /// Enroll, inspect or run the StackSpirit relay connector.
+    Relay(RelayArgs),
     /// Print the binary version.
     Version,
     /// Hidden: what the tmux windows run.

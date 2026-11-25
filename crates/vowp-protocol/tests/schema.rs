@@ -181,6 +181,15 @@ const LISTED_TYPES: &[&str] = &[
     "AsifLoss",
     "AsifReport",
     "AsifImportResponse",
+    "RelayFrame",
+    "RemoteFrame",
+    "Scope",
+    "ClientKind",
+    "MachineState",
+    "MachineCapabilities",
+    "Jwk",
+    "ExecChannel",
+    "RelayConfig",
 ];
 
 /// Decodes one JSON value into a concrete type.

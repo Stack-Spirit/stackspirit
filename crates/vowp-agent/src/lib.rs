@@ -18,6 +18,7 @@ pub mod executor;
 pub mod isolation;
 pub mod key;
 pub mod orchestrator;
+pub mod relay;
 pub mod service;
 pub mod socket;
 pub mod spool;
@@ -63,6 +64,10 @@ pub use orchestrator::{
     ORCHESTRATOR_START_TIMEOUT, ORCHESTRATOR_STOP_GRACE, ORCHESTRATOR_XDG_DIR, ORCHESTRATORS_DIR, OrchestratorConfig,
     OrchestratorHost, OrchestratorHostState, PrepareOutcome, PreparedHost, SurfaceAttachment, SurfaceBinding, app_name,
     redact_detail, validate_name,
+};
+pub use relay::{
+    Connector, ConnectorOptions, ConnectorOutcome, ConnectorReport, RelayError, RelayJson, RelayKey, RelayPaths,
+    StatusReport,
 };
 pub use service::{
     CommandRecord, InstallOptions, InstallReport, LAUNCHD_LABEL, LAUNCHD_PLIST, LOG_DIR, LOG_FILE, RUN_MARKER,

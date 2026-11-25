@@ -32,6 +32,7 @@ pub mod orchestrator;
 pub mod plan;
 pub mod project;
 pub mod promote;
+pub mod relay;
 pub mod schedule;
 pub mod schema;
 pub mod secret;
@@ -101,6 +102,7 @@ pub fn dispatch(ctx: &Ctx, io: &mut dyn IoStreams, command: Command) -> Result<i
             "home commands run without a project context".to_owned(),
         )),
         Command::Mcp(args) => mcp::run(ctx, io, &args),
+        Command::Relay(args) => relay::run(ctx, io, &args),
         Command::Agent { .. } => Err(CliError::Invalid(
             "agent commands run without a project context".to_owned(),
         )),

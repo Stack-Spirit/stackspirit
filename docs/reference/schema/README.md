@@ -46,6 +46,7 @@ python3 docs/reference/check-reference.py
 | `Capsule` | [capsule.md](capsule.md) |
 | `CapsuleDraft` | [capsule-draft.md](capsule-draft.md) |
 | `CatalogEntry` | [catalog-entry.md](catalog-entry.md) |
+| `ClientKind` | [client-kind.md](client-kind.md) |
 | `ClusterCapacity` | [cluster-capacity.md](cluster-capacity.md) |
 | `Cost` | [cost.md](cost.md) |
 | `CostReport` | [cost-report.md](cost-report.md) |
@@ -56,6 +57,7 @@ python3 docs/reference/check-reference.py
 | `EventEnvelope` | [event-envelope.md](event-envelope.md) |
 | `EventPage` | [event-page.md](event-page.md) |
 | `Evidence` | [evidence.md](evidence.md) |
+| `ExecChannel` | [exec-channel.md](exec-channel.md) |
 | `FleetQueueRow` | [fleet-queue-row.md](fleet-queue-row.md) |
 | `FleetStatus` | [fleet-status.md](fleet-status.md) |
 | `Gate` | [gate.md](gate.md) |
@@ -77,12 +79,15 @@ python3 docs/reference/check-reference.py
 | `JobPage` | [job-page.md](job-page.md) |
 | `JobPatch` | [job-patch.md](job-patch.md) |
 | `JoinInstructions` | [join-instructions.md](join-instructions.md) |
+| `Jwk` | [jwk.md](jwk.md) |
 | `Lease` | [lease.md](lease.md) |
 | `LeaseMode` | [lease-mode.md](lease-mode.md) |
 | `LeaseStatus` | [lease-status.md](lease-status.md) |
 | `LedgerEntry` | [ledger-entry.md](ledger-entry.md) |
 | `Limit` | [limit.md](limit.md) |
 | `Loop` | [loop.md](loop.md) |
+| `MachineCapabilities` | [machine-capabilities.md](machine-capabilities.md) |
+| `MachineState` | [machine-state.md](machine-state.md) |
 | `MergeCard` | [merge-card.md](merge-card.md) |
 | `MigrationCount` | [migration-count.md](migration-count.md) |
 | `MigrationReport` | [migration-report.md](migration-report.md) |
@@ -113,8 +118,11 @@ python3 docs/reference/check-reference.py
 | `ProjectEntry` | [project-entry.md](project-entry.md) |
 | `ProjectSnapshot` | [project-snapshot.md](project-snapshot.md) |
 | `QueueJobCard` | [queue-job-card.md](queue-job-card.md) |
+| `RelayConfig` | [relay-config.md](relay-config.md) |
+| `RelayFrame` | [relay-frame.md](relay-frame.md) |
 | `Release` | [release.md](release.md) |
 | `RemoteEvent` | [remote-event.md](remote-event.md) |
+| `RemoteFrame` | [remote-frame.md](remote-frame.md) |
 | `RemoteLine` | [remote-line.md](remote-line.md) |
 | `RemoteRunState` | [remote-run-state.md](remote-run-state.md) |
 | `ReportFrontMatter` | [report-front-matter.md](report-front-matter.md) |
@@ -127,6 +135,7 @@ python3 docs/reference/check-reference.py
 | `RunningCapacity` | [running-capacity.md](running-capacity.md) |
 | `RunningJobCard` | [running-job-card.md](running-job-card.md) |
 | `Schedule` | [schedule.md](schedule.md) |
+| `Scope` | [scope.md](scope.md) |
 | `SecretInfo` | [secret-info.md](secret-info.md) |
 | `SecretRequest` | [secret-request.md](secret-request.md) |
 | `Session` | [session.md](session.md) |

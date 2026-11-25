@@ -1,0 +1,66 @@
+{
+  "account_id": "acct_01JQ9B7M5X6P8S1T3W4Y5Z6A7B",
+  "c2m_iv": "82cfed44",
+  "c2m_key": "100c81e9b94154bf3f3346b9aa97d1dd04cf72287f873dfb731328fec44bf666",
+  "channel_id": "01JQ8Z6K4W5N7R9T2V3X4Y5Z6A",
+  "client_key": {
+    "crv": "P-256",
+    "kty": "EC",
+    "x": "AhfmF_C2RDkoJ4-WmZ5pojpPLBUr321s32bluAKC1O0",
+    "y": "GUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q"
+  },
+  "client_nonce": "oaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaE",
+  "client_private_key": "1111111111111111111111111111111111111111111111111111111111111111",
+  "client_thumbprint": "OEurnbzOGbRad4qOD9lNK8VYMQGvg5cmLnVKeydAqL4",
+  "description": "Cross-language vector for docs/design/relay-and-packaging.md section 6.5. Test keys only.",
+  "frames": [
+    {
+      "aad": "53535231010100000195d1f34c9c2d4f84e85b1f49e2fcca0000000000000001",
+      "ciphertext": "e236e1440aafa0f7ffd522a1757d5b02f854a7ebe1d8a0fe8dc43a0a1d12423e62cf0c12cf8bdadb5ba3443d763b9f5cd52fbdab677be68615b6f1d73c7ad21f945b14a5667dac42992c602797a89bb3cd4b0770de9ebd413ac0f78d6503b6fe1de0157fb1ec44f3064947dad89601899b3f07aca2e4a58805caea4c90a61fd1ff752a380cfa93a8f133b4",
+      "direction": "c2m",
+      "frame": "53535231010100000195d1f34c9c2d4f84e85b1f49e2fcca00000000000000010000008be236e1440aafa0f7ffd522a1757d5b02f854a7ebe1d8a0fe8dc43a0a1d12423e62cf0c12cf8bdadb5ba3443d763b9f5cd52fbdab677be68615b6f1d73c7ad21f945b14a5667dac42992c602797a89bb3cd4b0770de9ebd413ac0f78d6503b6fe1de0157fb1ec44f3064947dad89601899b3f07aca2e4a58805caea4c90a61fd1ff752a380cfa93a8f133b4",
+      "nonce": "82cfed440000000000000001",
+      "plaintext": "{\"type\":\"http_request\",\"stream\":1,\"method\":\"GET\",\"path\":\"/api/v1/health\",\"headers\":{\"Accept\":\"application/json\"},\"body\":\"\"}",
+      "sequence": 1
+    },
+    {
+      "aad": "53535231010100000195d1f34c9c2d4f84e85b1f49e2fcca0000000000000001",
+      "ciphertext": "3f270e0a40ea36f451f19114accafae0f5c1864f1dc7ac5c4a42dd577f2a8102e52f3f44689344f7815460cad4c5fcdf47caae6d5230162507ffaa2b3c28b58a07ac23b68fb030b9286378352e84976826c203f6bff9da563d9ad9bd56b8a05b07d6cca8c122b898d223ce813c4f",
+      "direction": "m2c",
+      "frame": "53535231010100000195d1f34c9c2d4f84e85b1f49e2fcca00000000000000010000006e3f270e0a40ea36f451f19114accafae0f5c1864f1dc7ac5c4a42dd577f2a8102e52f3f44689344f7815460cad4c5fcdf47caae6d5230162507ffaa2b3c28b58a07ac23b68fb030b9286378352e84976826c203f6bff9da563d9ad9bd56b8a05b07d6cca8c122b898d223ce813c4f",
+      "nonce": "2e3f8b5d0000000000000001",
+      "plaintext": "{\"type\":\"http_response\",\"stream\":1,\"status\":200,\"headers\":{\"Content-Type\":\"application/json\"}}",
+      "sequence": 1
+    }
+  ],
+  "identity_public": "17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+  "identity_secret": "3333333333333333333333333333333333333333333333333333333333333333",
+  "m2c_iv": "2e3f8b5d",
+  "m2c_key": "bd06a7f941c06004e5367478625e11d8e372aca6d36add9317167786044a927e",
+  "machine_auth": {
+    "account_id": "acct_01JQ9B7M5X6P8S1T3W4Y5Z6A7B",
+    "canonical": "STACKSPIRIT-RELAY-AUTH-V1\nmch_01JQ8Z6K4W5N7R9T2V3X4Y5Z6A\nacct_01JQ9B7M5X6P8S1T3W4Y5Z6A7B\ned25519:17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce\nrelay-01\nsess-01\nnonce-01\n2026-11-25T12:00:00.000Z",
+    "key_id": "ed25519:17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+    "machine_id": "mch_01JQ8Z6K4W5N7R9T2V3X4Y5Z6A",
+    "nonce": "nonce-01",
+    "relay_id": "relay-01",
+    "server_time": "2026-11-25T12:00:00.000Z",
+    "session_id": "sess-01",
+    "signature": "f0cf5be2620c134c8295b8dd2239c5f07a0f473484fc25520b67270b0b8a9fd023a90e98dc39a2fa47fef51ae1068928a585325af6fd18b24a78debbc6d2bf0c"
+  },
+  "machine_id": "mch_01JQ8Z6K4W5N7R9T2V3X4Y5Z6A",
+  "machine_key": {
+    "crv": "P-256",
+    "kty": "EC",
+    "x": "1lqTl3yqPRsIGFL_V6eeRl8WYFdzBLrq1QXdOkhYnPM",
+    "y": "UBheiVNy32Ih6joTdVfkc_3bZ1XwW9UHw8Uz_OnJEoU"
+  },
+  "machine_nonce": "srKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrI",
+  "machine_private_key": "2222222222222222222222222222222222222222222222222222222222222222",
+  "machine_signature": "8d20127fdd18cee56ee0aa485de870a704032ae037665e8c970c746d65110de9bcfdb87858dc505bfa5c6fbcc43a391fada9349c07820a173ff0e5e277a9ba03",
+  "shared_secret": "ccfc261f58193c98ca4ad4a53bbac6f0ee29bc4d48438090446908622ca79af6",
+  "test_only": true,
+  "ticket_jti": "jti_01JQ8Z6K4W5N7R9T2V3X4Y5Z6B",
+  "transcript": "stackspirit-e2e-v1\n01JQ8Z6K4W5N7R9T2V3X4Y5Z6A\n{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"AhfmF_C2RDkoJ4-WmZ5pojpPLBUr321s32bluAKC1O0\",\"y\":\"GUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q\"}\n{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"1lqTl3yqPRsIGFL_V6eeRl8WYFdzBLrq1QXdOkhYnPM\",\"y\":\"UBheiVNy32Ih6joTdVfkc_3bZ1XwW9UHw8Uz_OnJEoU\"}\noaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaE\nsrKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrI\nmch_01JQ8Z6K4W5N7R9T2V3X4Y5Z6A\nacct_01JQ9B7M5X6P8S1T3W4Y5Z6A7B\njti_01JQ8Z6K4W5N7R9T2V3X4Y5Z6B",
+  "transcript_sha256": "35e22d1da4087b4db75d15d1b6f79df79f26c5a54224884ee716d837757fb113"
+}

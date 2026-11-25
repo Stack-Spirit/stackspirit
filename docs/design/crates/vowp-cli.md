@@ -35,6 +35,7 @@ crates/vowp-cli/
   src/cmd/agent.rs    (`agent enroll|paths|pair|run|status|service|doctor` plus hidden `agent gateway`; no store or project context for the Mac commands)
   src/agent_exec.rs   (`CoreRunHandler`: the Mac assignment executor used by `agent run`, including bundle chunking)
   src/cmd/surface.rs  (`surface pair|ls|rotate|revoke`; home-only global-store surface pairing)
+  src/cmd/relay.rs    (`relay enroll|status|run|rotate-key`; a thin shell over `vowp_agent::relay`)
   src/mcp/{mod,jsonrpc,tools,backend,proxy}.rs  (home stdio MCP server and Mac-side local proxy)
   src/framework.rs    embeds the templates from the repo `framework/` dir with include_str!/include_dir-free explicit list; `init` writes them
   tests/*.rs          tests for the commands
@@ -345,6 +346,24 @@ too-wide file keeps the agent's typed `config_invalid` code but is invalid input
 (exit 2), the same class as the home command's invalid error, with no path or secret in the
 message. The password is only in `--json`.
 
+### Relay commands (`cmd/relay.rs`)
+
+Spec: `docs/design/relay-and-packaging.md` §6.2 and §6.3; the library is `vowp_agent::relay`
+([`vowp-agent.md`](vowp-agent.md) §10). The commands act on the node home (`--home`) and its
+`config.toml` `[relay]` table, so the home must be initialised; they need no project and never
+start a daemon.
+
+| Command | Behaviour |
+|---|---|
+| `relay enroll` | reads the one-time token from `--token-file <path>`, `--token-stdin` or `STACKSPIRIT_ENROLL_TOKEN` (in that order; **there is no token flag**, so it cannot reach a process list or shell history), generates or reuses `relay.key`, calls the API, writes `relay.json`, and sets `[relay] enabled = true` plus the API/relay URLs (and `--serve-project`) in `config.toml`, keeping every other key (comments in `config.toml` are not preserved: the file is re-serialised and validated before it replaces the old one). `--name` defaults to the host name; `--api-url` and `--relay-url` override the table. A second enrollment is exit 4 and makes no API call. |
+| `relay status` | prints enrollment, local scope policy and the connector's last state; `--json` prints `StatusReport`. Neither form contains the credential, a token or a private key. |
+| `relay run` | runs `Connector` in the foreground until SIGTERM/SIGINT. A disabled relay is exit 2 (`relay is disabled`), a missing enrollment exit 3, a revoked machine exit 5 and a superseded connector exit 4; a stop is exit 0. Event lines go to stderr. The loopback daemon is found through `[relay].daemon_url` or `<home>/web-window` per request; `run` never starts one. |
+| `relay rotate-key` | signs a rotation request with the old key, installs the new `relay.key` atomically and prints the new key id (`--json`: `{"key_id"}`). Restart `relay run` to use it. |
+
+`--serve-project` is the enroll flag for the served project name because `--project` is the global
+project selector. Relay API errors map to exit 7 with the API's sanitised error code and never the
+request body.
+
 ### Local chat (`chat --agent`)
 
 `vowp chat --agent --session <id> [--executor <exec>] [--node <name>]` runs the Phase 1 local
@@ -546,6 +565,13 @@ refusal cases in `tests/agent.rs`; and
 `tests/capacity.rs`. `agent_doctor_reports_warnings_by_name_only` is in `tests/doctor.rs`. They
 use temporary homes, fake manager commands, a fake gateway and real git where needed; no real
 launchd, systemd, network or home directory is touched.
+
+`relay_enroll_status_and_rotate_through_the_cli`, `relay_enroll_refuses_a_token_flag_and_wants_a_token_source`,
+`relay_enroll_reads_the_token_from_stdin_and_reports_a_rejected_token`,
+`relay_run_refuses_when_disabled_or_not_enrolled` and
+`relay_run_reconnects_in_the_background_and_stops_on_sigterm` are in `tests/relay.rs`. They use a
+fake loopback API, a temporary home and the real binaries (SIGTERM for `run`); no network, real
+tmux or home directory is touched.
 
 ## 6. Out of scope
 Shell completions (v0.2), TUI board beyond redraw loop, windows (OS) support.

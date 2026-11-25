@@ -1050,6 +1050,189 @@ pub struct IngressConfig {
     pub wss: WssIngressConfig,
 }
 
+fn default_relay_api_url() -> String {
+    "https://api.stackspirit.io".to_owned()
+}
+fn default_relay_url() -> String {
+    "wss://relay.stackspirit.io/v1/machine".to_owned()
+}
+fn default_relay_key_file() -> String {
+    "relay.key".to_owned()
+}
+fn default_relay_credential_file() -> String {
+    "relay.json".to_owned()
+}
+fn default_relay_true() -> bool {
+    true
+}
+fn default_relay_ssh_address() -> String {
+    "127.0.0.1:22".to_owned()
+}
+fn default_relay_ssh_user() -> String {
+    "stackspirit".to_owned()
+}
+fn default_relay_max_channels() -> u32 {
+    64
+}
+fn default_relay_heartbeat_secs() -> u64 {
+    20
+}
+fn default_relay_reconnect_min_secs() -> u64 {
+    1
+}
+fn default_relay_reconnect_max_secs() -> u64 {
+    60
+}
+
+/// The optional `[relay]` table: the machine's StackSpirit relay connector and local policy.
+///
+/// Spec: `docs/design/relay-and-packaging.md` §6.2. The `allow_*` booleans are the machine's
+/// local policy: a ticket can never enable a scope that is false here. `enabled = false` (the
+/// default) makes `stackspirit relay run` exit with "relay is disabled". Secrets never appear in
+/// this table: the credential and key live in separate files named here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelayConfig {
+    /// Whether `stackspirit relay run` may connect. Defaults to off.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Base URL of the StackSpirit API.
+    #[serde(default = "default_relay_api_url")]
+    pub api_url: String,
+    /// Machine WebSocket endpoint of the relay.
+    #[serde(default = "default_relay_url")]
+    pub relay_url: String,
+    /// Relay key file name, relative to the home.
+    #[serde(default = "default_relay_key_file")]
+    pub key_file: String,
+    /// Credential file name, relative to the home.
+    #[serde(default = "default_relay_credential_file")]
+    pub credential_file: String,
+    /// The project this machine serves; empty means the home's only project.
+    #[serde(default)]
+    pub project: String,
+    /// Allow GET requests to the daemon's `/api/v1` surface.
+    #[serde(default = "default_relay_true")]
+    pub allow_http_read: bool,
+    /// Allow the explicit daemon write routes.
+    #[serde(default)]
+    pub allow_http_write: bool,
+    /// Allow read-only MCP tools.
+    #[serde(default = "default_relay_true")]
+    pub allow_mcp_read: bool,
+    /// Allow MCP tools that change state.
+    #[serde(default)]
+    pub allow_mcp_write: bool,
+    /// Allow the TCP/SSH channel.
+    #[serde(default)]
+    pub allow_ssh: bool,
+    /// Allow the exec channel.
+    #[serde(default)]
+    pub allow_exec: bool,
+    /// Where the SSH channel connects; a client cannot choose.
+    #[serde(default = "default_relay_ssh_address")]
+    pub ssh_address: String,
+    /// Account used by `stackspirit ssh`.
+    #[serde(default = "default_relay_ssh_user")]
+    pub ssh_user: String,
+    /// Loopback daemon URL; empty means read `<home>/web-window`.
+    #[serde(default)]
+    pub daemon_url: String,
+    /// Concurrent channel limit.
+    #[serde(default = "default_relay_max_channels")]
+    pub max_channels: u32,
+    /// Heartbeat interval in seconds.
+    #[serde(default = "default_relay_heartbeat_secs")]
+    pub heartbeat_secs: u64,
+    /// First reconnect delay in seconds.
+    #[serde(default = "default_relay_reconnect_min_secs")]
+    pub reconnect_min_secs: u64,
+    /// Reconnect delay cap in seconds.
+    #[serde(default = "default_relay_reconnect_max_secs")]
+    pub reconnect_max_secs: u64,
+}
+
+impl Default for RelayConfig {
+    /// Matches the serde defaults: disabled, read-only, loopback SSH, 64 channels.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_url: default_relay_api_url(),
+            relay_url: default_relay_url(),
+            key_file: default_relay_key_file(),
+            credential_file: default_relay_credential_file(),
+            project: String::new(),
+            allow_http_read: true,
+            allow_http_write: false,
+            allow_mcp_read: true,
+            allow_mcp_write: false,
+            allow_ssh: false,
+            allow_exec: false,
+            ssh_address: default_relay_ssh_address(),
+            ssh_user: default_relay_ssh_user(),
+            daemon_url: String::new(),
+            max_channels: default_relay_max_channels(),
+            heartbeat_secs: default_relay_heartbeat_secs(),
+            reconnect_min_secs: default_relay_reconnect_min_secs(),
+            reconnect_max_secs: default_relay_reconnect_max_secs(),
+        }
+    }
+}
+
+impl RelayConfig {
+    /// Checks the table's invariants: file names stay inside the home, URLs have the right
+    /// scheme, the SSH target is loopback, and the timing values are sane.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        for (key, value) in [("key_file", &self.key_file), ("credential_file", &self.credential_file)] {
+            if value.is_empty() || value.contains('/') || value.contains('\\') || value == ".." || value == "." {
+                return Err(ProtocolError::Config(format!(
+                    "relay.{key} must be a plain file name inside the home"
+                )));
+            }
+        }
+        if !self.api_url.starts_with("https://") && !self.api_url.starts_with("http://127.0.0.1") {
+            return Err(ProtocolError::Config(
+                "relay.api_url must be https:// (or loopback http:// for tests)".to_owned(),
+            ));
+        }
+        if !self.relay_url.starts_with("wss://") && !self.relay_url.starts_with("ws://127.0.0.1") {
+            return Err(ProtocolError::Config(
+                "relay.relay_url must be wss:// (or loopback ws:// for tests)".to_owned(),
+            ));
+        }
+        let ssh_ok = self
+            .ssh_address
+            .parse::<std::net::SocketAddr>()
+            .is_ok_and(|address| address.ip().is_loopback());
+        if !ssh_ok {
+            return Err(ProtocolError::Config(
+                "relay.ssh_address must be a loopback socket address such as 127.0.0.1:22".to_owned(),
+            ));
+        }
+        if !self.daemon_url.is_empty() && !self.daemon_url.starts_with("http://127.0.0.1") {
+            return Err(ProtocolError::Config(
+                "relay.daemon_url must be empty or start with http://127.0.0.1".to_owned(),
+            ));
+        }
+        if self.max_channels == 0 || self.max_channels > 128 {
+            return Err(ProtocolError::Config(
+                "relay.max_channels must be between 1 and 128".to_owned(),
+            ));
+        }
+        if self.heartbeat_secs == 0 {
+            return Err(ProtocolError::Config(
+                "relay.heartbeat_secs must be at least 1".to_owned(),
+            ));
+        }
+        if self.reconnect_min_secs == 0 || self.reconnect_max_secs < self.reconnect_min_secs {
+            return Err(ProtocolError::Config(
+                "relay.reconnect_min_secs must be at least 1 and not above relay.reconnect_max_secs".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The node-level configuration file, `~/.vowp/config.toml`.
 ///
 /// It carries the node-wide subset of [`VowpConfig`]: it has no `[project]` table.
@@ -1074,12 +1257,17 @@ pub struct NodeFile {
     /// Optional ingress listeners. WSS is off by default.
     #[serde(default)]
     pub ingress: IngressConfig,
+    /// The StackSpirit relay connector and its local policy. Off by default.
+    #[serde(default)]
+    pub relay: RelayConfig,
 }
 
 impl NodeFile {
-    /// Parses the node-level configuration file.
+    /// Parses the node-level configuration file and validates the `[relay]` table.
     pub fn from_toml(s: &str) -> Result<Self, ProtocolError> {
-        toml::from_str(s).map_err(|err| ProtocolError::Config(err.to_string()))
+        let node: NodeFile = toml::from_str(s).map_err(|err| ProtocolError::Config(err.to_string()))?;
+        node.relay.validate()?;
+        Ok(node)
     }
 }
 

@@ -1037,6 +1037,7 @@ pub struct NodeFile {
     #[serde(default)] pub harnesses: BTreeMap<String, HarnessConfig>,
     #[serde(default)] pub capsule: CapsuleConfig,
     #[serde(default)] pub ingress: IngressConfig,
+    #[serde(default)] pub relay: RelayConfig,      // §16.15; off by default
 }
 #[serde(deny_unknown_fields)]
 pub struct IngressConfig { #[serde(default)] pub wss: WssIngressConfig }
@@ -1174,8 +1175,8 @@ pub enum ServiceError { #[error("{0}")] Failed(String), #[error("not found: {0}"
 /// Capsule, CapsuleDraft, Job, NewJob, Gate, Evidence, ReportFrontMatter, BriefFrontMatter,
 /// VowpConfig, Schedule, Release, InboxItem, Run, Session, Limit, Cost, ...; plus the v0.2
 /// capacity, surface/lease, snapshot, catalog, vault, fleet, tunnel and migration types in
-/// §16, the v0.4 local-node and offload types in §16.7–16.8, and the app-surface frames in
-/// §16.12).
+/// §16, the v0.4 local-node and offload types in §16.7–16.8, the app-surface frames in
+/// §16.12, and the StackSpirit relay documents in §16.15).
 pub fn all_schemas() -> std::collections::BTreeMap<&'static str, serde_json::Value>;
 pub fn schema_for_name(name: &str) -> Option<serde_json::Value>;
 ```
@@ -2240,3 +2241,49 @@ has `url`, `native_session_id` and `auth` all `null`. The URL must be
 `http://127.0.0.1:<port>` or `http://localhost:<port>`; anything else is refused. Errors
 name the orchestrator and the failure class, never a path, port, password, token or pair
 link.
+
+### 16.15 StackSpirit relay (`relay`, `remote`, `config`)
+
+Defined by `docs/design/relay-and-packaging.md` §6. All of these are pure data: no I/O, no
+cryptography. The P-256/HKDF/AES-GCM channel lives in `vowp-agent` (`vowp_agent::relay`).
+
+```rust
+#[serde(tag = "type")]          // wire tags are dotted: "machine.hello", "channel.open", ...
+pub enum RelayFrame {
+    MachineHello { v, machine_id, account_id, key_id, public_key, credential, agent_version, capabilities: MachineCapabilities, sent_at },
+    RelayChallenge { v, relay_id, session_id, nonce, server_time, heartbeat_secs, max_frame_bytes, features },
+    MachineAuth { v, signature },
+    RelayWelcome { v, relay_id, session_id, machine_id, account_id, heartbeat_secs, max_frame_bytes, features },
+    MachineStatus { v, state: MachineState, channels: u32, sent_at },
+    ClientHello { v, machine_id, ticket, client_id, kind: ClientKind, protocol, capabilities, client_key: Jwk, client_nonce, sent_at },
+    ClientWelcome { v, relay_id, session_id, channel_id, machine_id, account_id, expires_at, features },
+    ChannelOpen { v, channel_id, machine_id, client_id, kind, ticket, scopes: Vec<Scope>, client_key: Jwk, client_nonce },
+    ChannelAccept { v, channel_id, machine_key: Jwk, machine_nonce, machine_key_id, machine_signature, suite },
+    ChannelReject { v, channel_id, code, message, retryable },
+    ChannelClose { v, channel_id, code, message },
+    Superseded { v, reason }, Ping { v, nonce }, Pong { v, nonce },
+    Error { v, code, message, retryable },
+}
+pub enum Scope { HttpRead, HttpWrite, McpRead, McpWrite, Ssh, Exec }   // "http.read", ..., "ssh", "exec"
+#[serde(rename_all = "snake_case")] pub enum ClientKind { Web, Cli, Desktop, Mcp }
+#[serde(rename_all = "snake_case")] pub enum MachineState { Online, Degraded, Offline, Revoked }
+pub struct MachineCapabilities { protocol, http, mcp, ssh, exec, max_channels, projects }  // all defaulted
+pub struct Jwk { kty, crv, x, y }                      // EC P-256 public key only; `canonical()` is RFC 7638
+pub struct RelayDataFrame { channel_id: [u8; 16], sequence: u64, ciphertext: Vec<u8> }  // binary, `SSR1`
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RemoteFrame { Hello, HelloAck, HttpRequest, HttpResponse, HttpBody, HttpCancel,
+    McpRequest, McpResponse, McpCancel, TcpOpen, TcpData, TcpClose, ExecStart, ExecData,
+    ExecResize, ExecExit, StreamError, Ping, Pong, Close }
+#[serde(deny_unknown_fields)]
+pub struct RelayConfig {            // the `[relay]` table of `NodeFile`; `enabled = false` by default
+    enabled, api_url, relay_url, key_file, credential_file, project,
+    allow_http_read (true), allow_http_write (false), allow_mcp_read (true), allow_mcp_write (false),
+    allow_ssh (false), allow_exec (false), ssh_address ("127.0.0.1:22"), ssh_user ("stackspirit"),
+    daemon_url (""), max_channels (64), heartbeat_secs (20), reconnect_min_secs (1), reconnect_max_secs (60),
+}
+```
+
+Readers ignore unknown fields, reject an unknown `type` and an unsupported `v`
+(`RelayFrame::from_json`), and treat a missing required field as an error. The WebSocket close
+codes (`1000`, `1009`, `1013`, `4001`, `4004`, `4008`–`4012`) and the string error codes
+(`relay::codes`) are constants. `RelayConfig::validate` runs inside `NodeFile::from_toml`.

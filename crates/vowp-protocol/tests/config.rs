@@ -6,7 +6,7 @@ use pretty_assertions::assert_eq;
 
 use vowp_protocol::config::{
     Approval, CapsuleConfig, IngressConfig, MergeConfig, NodeConfig, NodeFile, OffloadConfig, OnCreditsExhausted,
-    ProjectConfig, ResultTransport, VowpConfig, WssIngressConfig,
+    ProjectConfig, RelayConfig, ResultTransport, VowpConfig, WssIngressConfig,
 };
 use vowp_protocol::{CmdGate, Executor, Gate, JobKind, Placement, ProtocolError};
 
@@ -766,5 +766,100 @@ fn offload_accepts_the_bundle_and_push_transports() {
     assert!(
         err.to_string().contains("carrier-pigeon"),
         "error names the value: {err}"
+    );
+}
+
+/// The exact `[relay]` table from `docs/design/relay-and-packaging.md` §6.2.
+const RELAY_TABLE: &str = r#"
+[relay]
+enabled = true
+api_url = "https://api.stackspirit.io"
+relay_url = "wss://relay.stackspirit.io/v1/machine"
+key_file = "relay.key"
+credential_file = "relay.json"
+project = "vowp"
+allow_http_read = true
+allow_http_write = false
+allow_mcp_read = true
+allow_mcp_write = false
+allow_ssh = false
+allow_exec = false
+ssh_address = "127.0.0.1:22"
+ssh_user = "stackspirit"
+max_channels = 64
+heartbeat_secs = 20
+reconnect_min_secs = 1
+reconnect_max_secs = 60
+"#;
+
+#[test]
+fn node_file_parses_the_documented_relay_table() {
+    let node = NodeFile::from_toml(RELAY_TABLE).expect("documented relay table");
+    assert!(node.relay.enabled);
+    assert_eq!(node.relay.project, "vowp");
+    assert!(node.relay.allow_http_read && node.relay.allow_mcp_read);
+    assert!(!node.relay.allow_http_write && !node.relay.allow_mcp_write);
+    assert!(!node.relay.allow_ssh && !node.relay.allow_exec);
+    assert_eq!(
+        node.relay.daemon_url, "",
+        "an empty daemon_url means read <home>/web-window"
+    );
+    assert_eq!(node.relay.max_channels, 64);
+    assert_eq!(node.relay.reconnect_max_secs, 60);
+    let text = toml::to_string_pretty(&node).expect("serialise");
+    assert_eq!(NodeFile::from_toml(&text).expect("reparse"), node);
+}
+
+#[test]
+fn relay_is_off_and_read_only_by_default() {
+    let node = NodeFile::from_toml("").expect("empty node file");
+    assert_eq!(node.relay, RelayConfig::default());
+    assert!(!node.relay.enabled, "enabled = false is the default");
+    assert!(node.relay.allow_http_read && node.relay.allow_mcp_read);
+    for denied in [
+        node.relay.allow_http_write,
+        node.relay.allow_mcp_write,
+        node.relay.allow_ssh,
+        node.relay.allow_exec,
+    ] {
+        assert!(!denied, "writes, ssh and exec are opt-in");
+    }
+    let minimal = NodeFile::from_toml("[relay]\nenabled = true\n").expect("minimal relay table");
+    assert_eq!(minimal.relay.relay_url, "wss://relay.stackspirit.io/v1/machine");
+    assert_eq!(minimal.relay.heartbeat_secs, 20);
+}
+
+#[test]
+fn relay_table_refuses_unknown_keys_and_unsafe_values() {
+    let error = NodeFile::from_toml("[relay]\nnot_a_key = 1\n").expect_err("deny_unknown_fields");
+    assert!(error.to_string().contains("not_a_key"), "{error}");
+    for (bad, needle) in [
+        ("key_file = \"../relay.key\"", "key_file"),
+        ("key_file = \"/etc/relay.key\"", "key_file"),
+        ("credential_file = \"\"", "credential_file"),
+        ("api_url = \"http://example.com\"", "api_url"),
+        ("relay_url = \"ws://example.com/v1/machine\"", "relay_url"),
+        ("ssh_address = \"10.0.0.5:22\"", "ssh_address"),
+        ("ssh_address = \"example.com:22\"", "ssh_address"),
+        ("daemon_url = \"http://example.com/\"", "daemon_url"),
+        ("max_channels = 0", "max_channels"),
+        ("max_channels = 129", "max_channels"),
+        ("heartbeat_secs = 0", "heartbeat_secs"),
+        ("reconnect_min_secs = 0", "reconnect_min_secs"),
+        ("reconnect_min_secs = 90", "reconnect_min_secs"),
+    ] {
+        let error = NodeFile::from_toml(&format!("[relay]\n{bad}\n")).expect_err(bad);
+        assert!(error.to_string().contains(needle), "{bad}: {error}");
+    }
+    NodeFile::from_toml("[relay]\napi_url = \"http://127.0.0.1:9\"\nrelay_url = \"ws://127.0.0.1:9/v1/machine\"\ndaemon_url = \"http://127.0.0.1:4000/\"\nssh_address = \"[::1]:22\"\n")
+        .expect("loopback test endpoints are accepted");
+}
+
+#[test]
+fn project_config_does_not_accept_a_relay_table() {
+    let text = format!("{BASE}\n[relay]\nenabled = true\n");
+    assert!(
+        VowpConfig::from_toml(&text).is_err(),
+        "[relay] is a node-file table, not a vowp.toml table"
     );
 }

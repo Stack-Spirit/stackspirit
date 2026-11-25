@@ -15,8 +15,12 @@ categories = ["development-tools", "command-line-utilities", "network-programmin
 include = ["src/**", "Cargo.toml", "README.md"]
 
 [dependencies]
+aes-gcm = "0.11.1"
+base64 = "0.23.1"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4.3"
+hkdf = "0.13.0"
+p256 = { version = "0.14.0", features = ["ecdh"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 rustls = "0.23.46"
 rustls-native-certs = "0.8.5"

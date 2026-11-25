@@ -28,7 +28,7 @@ use crate::capacity::{
 };
 use crate::capsule::{Capsule, CapsuleDraft};
 use crate::catalog::{BackupFile, BackupReport, CatalogEntry, GcClassReport, GcReport};
-use crate::config::VowpConfig;
+use crate::config::{RelayConfig, VowpConfig};
 use crate::cost::Cost;
 use crate::event::EventEnvelope;
 use crate::executor::Profile;
@@ -42,7 +42,9 @@ use crate::offload::{
     SurfaceResume, SurfaceResumeResult, WaitingReason,
 };
 use crate::ops::{FleetQueueRow, FleetStatus, MigrationCount, MigrationReport, Tunnel};
+use crate::relay::{ClientKind, Jwk, MachineCapabilities, MachineState, RelayFrame, Scope};
 use crate::release::Release;
+use crate::remote::{ExecChannel, RemoteFrame};
 use crate::report::{BriefFrontMatter, ReportFrontMatter};
 use crate::run::{Run, Worker};
 use crate::session::{LedgerEntry, Node, Project, Session, Switch};
@@ -219,6 +221,16 @@ pub fn all_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     schemas.insert("AsifLoss", schema_value::<AsifLoss>());
     schemas.insert("AsifReport", schema_value::<AsifReport>());
     schemas.insert("AsifImportResponse", schema_value::<AsifImportResponse>());
+    // StackSpirit relay documents (control frames, remote frames and the `[relay]` table).
+    schemas.insert("RelayFrame", schema_value::<RelayFrame>());
+    schemas.insert("RemoteFrame", schema_value::<RemoteFrame>());
+    schemas.insert("Scope", schema_value::<Scope>());
+    schemas.insert("ClientKind", schema_value::<ClientKind>());
+    schemas.insert("MachineState", schema_value::<MachineState>());
+    schemas.insert("MachineCapabilities", schema_value::<MachineCapabilities>());
+    schemas.insert("Jwk", schema_value::<Jwk>());
+    schemas.insert("ExecChannel", schema_value::<ExecChannel>());
+    schemas.insert("RelayConfig", schema_value::<RelayConfig>());
     schemas
 }
 

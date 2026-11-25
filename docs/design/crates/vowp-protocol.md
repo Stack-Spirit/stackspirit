@@ -38,6 +38,8 @@ crates/vowp-protocol/
   src/api.rs          // v0.3 loopback API documents: Health, Board, BoardRun, BoardLimit, Page<T>, JobPage, JobAction, JobActionResponse, SessionPage, NodePage, SessionDetail, EventPage, InboxPage, InboxAnswerRequest, SessionSwitchRequest, CostReport, CostRow, CostTotal, ApiError
   src/adapter.rs      // Adapter, AdapterRun, StartInput, RunSummary, AdapterCapabilities, ProbeResult, AdapterError
   src/services.rs     // SessionOps, NewSession, TurnRequest, TurnResult, SwitchRequest, CancelToken, ServiceError
+  src/relay.rs        // relay control frames, scopes, close/error codes, binary data-frame header (types.md §16.15)
+  src/remote.rs       // RemoteFrame, ExecChannel: the E2E plaintext frames (types.md §16.15)
   src/schema.rs       // all_schemas, schema_for_name
   tests/fixtures/     // JSON examples from types.md, vowp.example.toml
   tests/*.rs
@@ -55,6 +57,14 @@ Its nested `agent::surface` module holds the Phase 3 app-surface frame payloads
 `src/offload.rs` holds the v0.4 offload wire format (`Placement`, `NodeFallback`,
 `WaitingReason`, `AssignmentPayload`, `RunRejectReason`, `RemoteRunState` and the resume
 records); see rule 15.
+
+`src/relay.rs` and `src/remote.rs` hold the StackSpirit relay wire types
+(`docs/design/relay-and-packaging.md` §6.3, §6.5, §6.6): `RelayFrame`, `RelayDataFrame`,
+`Scope`, `ClientKind`, `MachineState`, `MachineCapabilities`, `Jwk`, `RemoteFrame`, the
+`codes` string constants and the WebSocket close-code constants. They are pure data: no I/O, no
+clock and no cryptography. `[relay]` is `config::RelayConfig`, a `NodeFile` table (not a
+`vowp.toml` table). The P-256/HKDF/AES-GCM channel is in `vowp-agent`, so this crate does not
+acquire AES or elliptic-curve dependencies; see rule 18.
 
 `lib.rs` declares **all** modules and re-exports with `pub use <module>::*;` for every module.
 
@@ -242,6 +252,24 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
     age-keyfile mode; `SecretInfo` still carries only the name, last four characters and
     timestamps.
 
+18. **Relay frames.** `RelayFrame` is tagged by a **dotted** `type` (`machine.hello`,
+    `relay.challenge`, `machine.auth`, `relay.welcome`, `machine.status`, `client.hello`,
+    `client.welcome`, `channel.open`, `channel.accept`, `channel.reject`, `channel.close`,
+    `superseded`, `ping`, `pong`, `error`); `RemoteFrame` uses snake_case tags. Readers ignore
+    unknown fields, reject an unknown `type`, reject a missing required field and
+    (`RelayFrame::from_json`) reject any `v` other than 1; optional fields (`features`,
+    `capabilities`, `retryable`, `headers`, `body`, `project`, `session`) default. A control frame over
+    65,536 bytes is refused before parsing and a remote plaintext over 768 KiB is refused in both
+    directions. `RelayDataFrame` is the exact 36-byte-prefixed binary layout
+    (`SSR1`, version 1, type 1, zero flags, 16 raw ULID bytes, big-endian `u64` sequence,
+    big-endian `u32` length); `from_bytes` rejects bad magic, version, type (the reserved rekey
+    type `2` too), non-zero flags, a length that disagrees with the message, a truncated prefix and a
+    message over 1,048,576 bytes, and `to_bytes` never produces an over-cap frame. `Jwk::canonical`
+    is the RFC 7638 form with escaped members, so a hostile member cannot add a key.
+    `RelayConfig::validate` (called by `NodeFile::from_toml`) keeps `key_file`/`credential_file`
+    plain names inside the home, requires `https`/`wss` (loopback `http`/`ws` only for tests),
+    a loopback `ssh_address` and `daemon_url`, `max_channels` in 1..=128 and sane timings.
+
 ## 5. Error enum
 
 `ProtocolError` (types.md §2). `kind()` mapping: `InvalidId|InvalidTimestamp|InvalidExecutor|InvalidGate|FrontMatter → InvalidInput`,
@@ -334,6 +362,21 @@ offset used by the adapters to read wall-clock reset times like `resets 11pm`. v
 | `orchestrator_card_decodes_a_v0_2_row_without_a_node` | a v0.2 card without `node` decodes to `node: None` and its old `running` state |
 | `orchestrator_endpoint_round_trips_home_and_node_documents` | home and node `OrchestratorEndpoint` documents round-trip; `location` is `home`/`node`, the home document carries `url`/`native_session_id`/Basic `auth`, and the node document has all three null |
 | `orchestrator_endpoint_schema_is_exported_and_auth_debug_redacts_the_password` | `OrchestratorLocation`, `OrchestratorAuth` and `OrchestratorEndpoint` have schemas; `OrchestratorAuth` requires `header`/`scheme`/`username`/`password`; its `Debug` and the endpoint's `Debug` print `[REDACTED]` and never the password |
+| `every_relay_frame_round_trips_with_its_dotted_type_tag` | all 15 `RelayFrame` variants round-trip and carry their dotted `type` and `v: 1` (`tests/relay.rs`) |
+| `relay_frames_ignore_unknown_fields_and_default_optional_ones` | an unknown field is ignored; `features`, `capabilities` and `retryable` default |
+| `relay_frames_reject_unknown_types_versions_and_missing_fields` | the snake_case tag, an unknown type, `v: 2`, a missing `nonce` and a missing `v` all fail |
+| `a_control_frame_over_the_cap_is_refused_before_parsing` | a 70,000-byte control frame fails with the 65536 cap in the message |
+| `scopes_use_their_dotted_wire_names` | the six scopes serialise as `http.read` … `exec` and `http_read` is refused |
+| `canonical_jwk_is_rfc_7638_sorted_and_compact` | `{"crv","kty","x","y"}` order, no whitespace, and a hostile member cannot inject a key |
+| `every_remote_frame_round_trips_with_a_snake_case_tag` | all 20 `RemoteFrame` variants round-trip |
+| `remote_frames_default_optionals_ignore_unknowns_and_reject_bad_input` | defaults, unknown fields, missing fields, unknown types and the stream-id range |
+| `an_oversized_remote_frame_is_refused_both_ways` | an 800 KB plaintext is refused by the sender and by the reader |
+| `data_frame_header_layout_is_exact` | every header byte, the big-endian sequence and length, and `aad == bytes[..32]` |
+| `data_frames_reject_every_malformation` | truncation, magic, version, the reserved rekey type, flags, length, trailing bytes and both size caps |
+| `node_file_parses_the_documented_relay_table` | the exact `[relay]` table of the design page parses and round-trips (`tests/config.rs`) |
+| `relay_is_off_and_read_only_by_default` | `enabled = false`, reads on, writes/ssh/exec off |
+| `relay_table_refuses_unknown_keys_and_unsafe_values` | unknown keys, path-like file names, cleartext remote URLs, non-loopback SSH/daemon and bad limits fail |
+| `project_config_does_not_accept_a_relay_table` | `vowp.toml` refuses `[relay]` |
 
 ## 7. Out of scope / v0.2
 

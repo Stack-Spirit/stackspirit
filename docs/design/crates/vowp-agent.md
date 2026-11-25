@@ -33,6 +33,11 @@ crates/vowp-agent/
   src/spool.rs      Spool, SpoolAppend, acked.json and the 2 GiB cap
   src/status.rs     AgentStatus, ConnectionState, spool and surface-expiry readers
   src/worktree.rs   PathMap, WorktreeManager, Worktree, JobBundle, push/cleanup and the disk guard
+  src/relay/mod.rs  RelayError, the loopback/TLS network layer, enroll, refresh_credential, rotate_key, status_report
+  src/relay/key.rs  RelayKey (relay.key/relay.pub), RelayJson (relay.json), RelayStatusFile, atomic writes
+  src/relay/auth.rs machine challenge canonical strings, ES256 JWT/JWKS, ticket verification, replay caches
+  src/relay/crypto.rs P-256 ECDH, HKDF-SHA256, AES-256-GCM channel, canonical transcript
+  src/relay/connector.rs the machine connector loop, channel table, HTTP request policy and loopback proxy
   tests/service.rs  temp HOME/XDG, fake service manager, unit text, drain and isolation
   tests/transport.rs in-memory and loopback TLS frames, route policy and fingerprint changes
   tests/surface_pair.rs  hermetic in-memory home for `AgentClient::pair`
@@ -44,6 +49,8 @@ crates/vowp-agent/
   tests/socket.rs   real Unix socket plus in-memory home for attach/detach, tool calls and the read cache
   tests/cache.rs    temporary state dir, injected timestamps and the cache bounds
   tests/worktree.rs temporary origin/clone plus real git for create/reuse/cleanup/push
+  tests/relay.rs    fake API, fake relay, fake client and fake daemon on 127.0.0.1 for the relay machine side
+  tests/relay_vectors.rs  the committed cross-language vector (fixtures/relay-vectors.json)
 ```
 
 `~/.vowp-agent` is the default state directory. `VOWP_AGENT_HOME` overrides it; tests always set
@@ -1380,8 +1387,9 @@ remote cases to the protocol's `RunRejectReason` vocabulary. There is no `unwrap
 The home-side gateway, store methods, node enrollment codes, node commands, runs, leases and
 offload are separate crates or jobs. The WSS transport and listener are in this crate; TLS
 termination, the reverse proxy, ACME and certificate storage are the owner's, not VOWP's. Windows
-service support, a root `LaunchDaemon`, a system-wide systemd unit, a hosted relay and installing
-for another user are out of scope. `vowp agent run` supports the foreground and service modes;
+service support, a root `LaunchDaemon`, a system-wide systemd unit and installing for another
+user are out of scope. The StackSpirit relay machine side is §10; the Cloudflare relay, the
+clients and `stackspirit ssh` are slice 6. `vowp agent run` supports the foreground and service modes;
 `--role` is carried in `RunOptions`. `vowp agent surface start|attach|detach` is a later v0.4
 slice; this crate supplies the orchestrator host it can call. This crate serves the local agent
 socket that the shipped `vowp mcp --agent-socket … --surface …` proxy uses; the CLI command and
@@ -1390,3 +1398,145 @@ The real harness runner (adapter selection, worktree creation,
 environment resolution and result push or bundle) lives in `vowp-cli`'s `CoreRunHandler`; this
 crate supplies the transport, spool, replay and bundle chunking and tests them with a fake
 handler.
+
+## 10. StackSpirit relay machine side (`relay/`)
+
+Spec: `docs/design/relay-and-packaging.md` §6 and §10.5. The wire types are in `vowp-protocol`
+(`relay`, `remote`, `config::RelayConfig`); this crate holds everything that signs, encrypts, opens
+a socket or writes a file. `stackspirit relay enroll|status|run|rotate-key` in `vowp-cli` is a thin
+shell over it. No Cloudflare code, no client code and no SSH code lives here: the fake relay and
+fake client in `tests/relay.rs` implement only the control frames and forward opaque data.
+
+### Files and modes
+
+| File (in the node home) | Mode | Contents |
+|---|---|---|
+| `relay.key` | 0600 | 32-byte Ed25519 secret, lowercase hex; **not** `node.key` |
+| `relay.pub` | 0644 | the public key, lowercase hex |
+| `relay.json` | 0600 | machine id, account id, `key_id` (`ed25519:<hex>`), URLs and the ES256 credential |
+| `relay-status.json` | 0600 | connector state, pid, channel count, connection count, last error code; no credential |
+| `relay-jwks.json` | 0644 | cached API signing keys, at most 24 hours old; public data |
+
+All writes are same-directory temporary file plus rename. `RelayKey::load` and `RelayJson::load`
+refuse a file that is group or world accessible. `[relay].key_file`/`credential_file` rename the
+first and third file and must be plain names inside the home.
+
+### Enrollment, refresh and rotation
+
+* `enroll` takes the one-time `ssm_` token as an argument of the library call, never from the
+  environment. It reuses an existing `relay.key` (written before the call so a retry keeps the same
+  public key) or generates one, derives the `Idempotency-Key` from SHA-256 of the token and public
+  key, calls `POST /v1/machines/enroll`, validates the URLs in the answer against the `[relay]`
+  rules, and writes `relay.json`. An existing `relay.json` is `AlreadyEnrolled`. The token is never
+  stored, logged, returned in `EnrollOutcome` or put in an error.
+* `refresh_credential` signs `STACKSPIRIT-CREDENTIAL-V1\n<machine_id>\n<key_id>\n<signed_at>` and
+  rewrites `relay.json`. A `403` is `RelayError::Revoked`.
+* `rotate_key` generates a new key, signs
+  `STACKSPIRIT-ROTATE-V1\n<machine_id>\n<old_key_id>\n<new_key_id>\n<new_public_key>\n<signed_at>`
+  with **both** keys (`signature`, `new_signature`), calls `POST /v1/machines/{id}/keys`, and only
+  then replaces `relay.key`/`relay.pub`/`relay.json`. The rotate request body is this slice's
+  contract for the API in slice 6; the page of record fixes only the endpoint.
+* API errors map to `RelayError::Api { status, code }` with a sanitised code; the body is never echoed.
+
+### Authentication (`relay/auth.rs`)
+
+`machine_auth_canonical` is the eight-field string with one `\n` between fields and no trailing
+newline; `sign_machine_auth`/`verify_machine_auth` use the relay key. `NonceSet` rejects a repeated
+challenge nonce; `ReplayCache` remembers a ticket `jti` for 600 seconds. `Jwt` parses an ES256
+token and verifies it against a `Jwks`: the header must be `ES256` and carry a `kid` the set
+publishes; `alg: none`, an unknown `kid` or an empty key set is rejected, so there is no
+trust-any-key fallback. `verify_ticket` checks signature, issuer, audience, expiry (`ticket_expired`),
+a lifetime of at most 300 seconds, machine, account, `mkey` and `mkey_id`, and that `cnf.jkt` equals
+the RFC 7638 thumbprint of the `channel.open` client key (key substitution is `ticket_invalid`); the
+`jti` is consumed last, so a second use is `ticket_replayed`. `CredentialClaims::decode` reads the
+credential's `exp` without verifying it: the relay verifies the credential, the machine only decides
+when to refresh.
+
+### End-to-end channel (`relay/crypto.rs`)
+
+`EphemeralKey` is a P-256 key whose private half is never printed. `ChannelKeys::derive` computes
+`salt = SHA-256(T)`, `prk = HKDF-Extract(salt, Z)` and the four expands with the labels
+`stackspirit c2m key`+`0x01`, `stackspirit m2c key`+`0x01`, `stackspirit c2m iv`,
+`stackspirit m2c iv`. `transcript` is the nine-line canonical string. `machine_accept` generates the
+ephemeral key and nonce, signs the transcript with the relay key, runs ECDH and HKDF and returns the
+`channel.accept` values plus the machine's `ChannelCipher`; `client_finish` is the matching client
+half and verifies the machine signature with the ticket's `mkey` **before** deriving a key.
+`ChannelCipher::seal`/`open` use the nonce `iv || seq` (4 + 8 bytes), the 32-byte data-frame header
+as AAD, strictly increasing sequences starting at 1, and an unchanged receive state after a failure.
+An invalid curve point, a wrong coordinate length and an all-zero ECDH result are refused.
+`tests/fixtures/relay-vectors.json` (`test_only: true`) pins the transcript, shared secret, keys,
+IVs, signature and two full data frames; it was also reproduced with an independent Python
+implementation, and slice 6's TypeScript test reads the same file.
+
+### Connector (`relay/connector.rs`)
+
+`Connector::run` refuses a disabled relay (`relay is disabled`), then loops: load `relay.key` and
+`relay.json` (the key id must match), refresh the credential when it expires within 600 seconds (or
+after the relay answered `unauthenticated`), open one WebSocket with the subprotocol
+`stackspirit-relay/1`, send `machine.hello`, sign the `relay.challenge`, wait for `relay.welcome`,
+then serve. While online it sends `machine.status` every heartbeat, answers `ping`, refreshes an
+expiring credential in the background and drops the connection when the relay is silent for three
+heartbeats. A dropped connection reconnects with `min * 2^n` seconds capped at
+`reconnect_max_secs` plus up to 25 % jitter; a session that logged in resets the exponent. The
+outcomes are `Stopped` (stop flag), `Revoked` (a `403` on refresh or an `error` frame with code
+`revoked`; no further attempt) and `Superseded` (a `superseded` frame or close `4008`; the old
+connection does not fight the new one). `NotEnrolled`, `Key` and `Config` errors are fatal and
+returned.
+
+`channel.open` handling: a duplicate channel id, a channel over `max_channels`, another machine id,
+an invalid client key, an empty scope list, a client kind that differs from the ticket and a
+requested scope outside the ticket **or** outside local policy (`allow_*`) are each a
+`channel.reject` with a stable code; the ticket is re-verified against the API JWKS (memory, then
+`relay-jwks.json` if fresh, then the API, refetching at most every 30 seconds when a key is unknown).
+On success the machine answers `channel.accept` and keeps a `Channel` with its cipher and granted
+scopes. The first encrypted frame must be `Hello`; a requested scope the channel was not granted
+closes the channel with `scope_denied`, and `HelloAck` carries the authoritative grant. A data frame
+that fails authentication closes the channel with `crypto_error` and never reaches the daemon.
+
+Streams: `HttpRequest` is checked by `validate_http_request` (absolute path under `/api/v1/`, no
+`..`, `//`, `\`, encoded dot, slash or NUL, no control characters, query at most 2 KiB with no
+`token`/`key`/`secret`/`auth`/`code` key, `GET` and `POST` only, `POST` only on the ten write routes,
+request headers limited to `Accept`, `Content-Type`, `Last-Event-ID` and `If-None-Match`) and by the
+scope (`GET` needs `http.read`, `POST` needs `http.write`). It runs on a worker thread against the
+loopback daemon found through `[relay].daemon_url` or `<home>/web-window` (re-read per request;
+loopback `http` only; **never started** by the connector), forwards only the listed response
+headers (never `Set-Cookie`), chunks bodies at 256 KiB raw, bounds a normal response to 8 MiB, and
+streams `text/event-stream` for up to one hour with `HttpCancel` support. A write request carries
+`Authorization: Bearer <VOWP_API_TOKEN>` added by the machine from `ConnectorOptions::api_token`;
+the token is never logged or sent to the client. `McpRequest`, `TcpOpen` and `ExecStart` answer
+`StreamError{not_implemented}` when their scope was granted and `scope_denied` otherwise; slice 6
+wires them. Stream id `0` is a protocol violation and closes the channel.
+
+The log sink receives only fixed event lines with ids and stable codes (connected, online with the
+session id, channel accepted/rejected/closed with the channel id, dropped with a code and a delay,
+credential refreshed); it never receives a payload, ticket, credential, key or URL.
+
+### Named tests
+
+`tests/relay_vectors.rs`: `relay_crypto_matches_the_cross_language_vector`,
+`relay_crypto_rejects_tampered_ciphertext`, `relay_crypto_enforces_strict_sequence_order`,
+`relay_handshake_signature_is_checked_before_keys_are_derived`,
+`relay_crypto_rejects_invalid_peer_keys`,
+`machine_auth_canonical_string_and_signature_match_the_fixed_vector`.
+`tests/relay.rs`: `relay_rejects_a_bad_machine_signature`, `relay_rejects_a_replayed_challenge_nonce`,
+`relay_rejects_an_expired_credential`, `relay_rejects_an_expired_ticket`,
+`relay_ticket_binds_machine_key_client_key_and_signature`, `relay_replay_cache_forgets_after_ten_minutes`,
+`machine_connector_serves_one_http_read_through_the_relay`,
+`machine_connector_streams_server_sent_events_and_stops_them_on_cancel`,
+`relay_channel_rejects_a_scope_escalation`, `relay_channel_rejects_a_replayed_ticket`,
+`relay_channel_rejects_expired_substituted_and_foreign_tickets`,
+`machine_connector_types_unwired_channels_and_enforces_http_policy`,
+`machine_connector_never_starts_a_daemon_and_discovers_web_window`,
+`machine_connector_enforces_the_channel_limit`,
+`relay_channel_closes_with_crypto_error_on_a_tampered_data_frame`,
+`relay_frame_cap_closes_without_partial_frame`, `machine_connector_reconnects_with_backoff`,
+`machine_connector_backoff_resets_after_a_good_session`, `machine_connector_refreshes_a_credential`,
+`machine_connector_refreshes_after_the_relay_refuses_a_credential`,
+`machine_connector_stops_when_the_machine_is_revoked`, `machine_connector_stops_when_superseded`,
+`machine_connector_refuses_to_start_unsafely`, `relay_enroll_writes_private_files_0600`,
+`relay_enroll_does_not_log_the_token`, `relay_enroll_retry_reuses_the_key_and_the_idempotency_key`,
+`relay_enroll_refuses_a_non_loopback_cleartext_api`,
+`relay_rotate_key_replaces_the_key_atomically_and_updates_the_record`,
+`relay_refresh_credential_requires_the_matching_key`,
+`relay_status_report_holds_no_credential_token_or_private_key` and `relay_http_policy_table`. All run
+on loopback in temporary directories with a fake API, a fake relay, a fake client and a fake daemon.
