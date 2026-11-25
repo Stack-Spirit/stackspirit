@@ -1536,6 +1536,10 @@ pub struct AgentServiceInstallArgs {
     /// Run the current-user manager commands after writing the unit.
     #[arg(long)]
     pub now: bool,
+    /// Replace the legacy generated unit with the StackSpirit one: stop and disable the old
+    /// unit, write the new one, enable it. Needs `--now` (or `--print` to preview).
+    #[arg(long)]
+    pub rename_unit: bool,
 }
 
 /// Arguments for `vowp agent service uninstall`.

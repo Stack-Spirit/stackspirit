@@ -288,6 +288,12 @@ impl ServiceSpec {
 
     /// Builds the current user's spec from `HOME`, `XDG_CONFIG_HOME`, `PATH` and `id -u`.
     pub fn for_current_user(binary: PathBuf, state_dir: PathBuf) -> Result<Self, ServiceError> {
+        Self::for_current_user_unselected(binary, state_dir)?.select_flavor()
+    }
+
+    /// Like [`ServiceSpec::for_current_user`] but without choosing a flavor by existence; the
+    /// flavor starts as [`ServiceFlavor::StackSpirit`]. Used by an explicit `--rename-unit`.
+    pub fn for_current_user_unselected(binary: PathBuf, state_dir: PathBuf) -> Result<Self, ServiceError> {
         let platform = ServicePlatform::current().ok_or(ServiceError::UnsupportedPlatform)?;
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -297,7 +303,7 @@ impl ServiceSpec {
             .filter(|path| path.is_absolute());
         let path_env = std::env::var("PATH").unwrap_or_else(|_| DEFAULT_PATH.to_owned());
         let uid = isolation::current_uid()?;
-        Self {
+        Ok(Self {
             platform,
             binary,
             state_dir,
@@ -306,8 +312,7 @@ impl ServiceSpec {
             path_env,
             uid,
             flavor: ServiceFlavor::StackSpirit,
-        }
-        .select_flavor()
+        })
     }
 
     /// Returns the unit path for this platform and flavor.

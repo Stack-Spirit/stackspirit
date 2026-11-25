@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use vowp_agent::service::{
-    self, InstallOptions, ServiceError, ServicePlatform, ServiceSpec, SystemManager, run_marker_path,
+    self, InstallOptions, ServiceError, ServiceFlavor, ServicePlatform, ServiceSpec, SystemManager, run_marker_path,
 };
 use vowp_agent::{
     AgentClient, AgentConfig, AgentError, AgentStatus, ConnectionState, IsolationError, NodeKey, OrchestratorHost,
@@ -1024,14 +1024,23 @@ fn current_user_service_spec() -> Result<ServiceSpec, CliError> {
 
 /// Runs `agent service install [--print] [--force] [--now]`.
 fn service_install(global: &Global, io: &mut dyn IoStreams, args: &AgentServiceInstallArgs) -> Result<i32, CliError> {
-    let spec = current_user_service_spec()?;
+    let spec = if args.rename_unit {
+        // An explicit rename targets the StackSpirit unit even though a legacy one exists.
+        let binary = std::env::current_exe()?;
+        let state_dir = crate::ctx::agent_state_dir()?;
+        ServiceSpec::for_current_user_unselected(binary, state_dir)
+            .map_err(map_service_error)?
+            .with_flavor(ServiceFlavor::StackSpirit)
+    } else {
+        current_user_service_spec()?
+    };
     let report = service::install(
         &spec,
         &InstallOptions {
             print_only: args.print,
             force: args.force,
             now: args.now,
-            rename_unit: false,
+            rename_unit: args.rename_unit,
         },
         &SystemManager,
     )
