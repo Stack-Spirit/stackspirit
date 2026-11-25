@@ -181,11 +181,11 @@ describe("Sessions drawer gate state", () => {
     expect(screen.getByText("Unknown")).toBeInTheDocument();
     expect(screen.getByTestId("sessions-import")).toBeDisabled();
     expect(screen.getByTestId("sessions-import-reason")).toHaveTextContent(
-      "Probe the VOWP home to check this capability.",
+      "Probe the host to check this capability.",
     );
     expect(
       screen.getByTestId(`session-export-reason-${EXPORT_SESSION_ID}`),
-    ).toHaveTextContent("Probe the VOWP home to check this capability.");
+    ).toHaveTextContent("Probe the host to check this capability.");
   });
 
   it("labels a session with its real VOWP state", async () => {

@@ -108,7 +108,7 @@ export function errorTitle(error: SpiritErrorDto): string {
     case "conflict":
       return "The host changed before the action finished";
     case "refused":
-      return "VOWP refused the action";
+      return "StackSpirit refused the action";
     case "limit":
       return "A provider limit is blocking this work";
     case "auth":
@@ -126,17 +126,17 @@ export function errorTitle(error: SpiritErrorDto): string {
     case "remote_timeout":
       return "The host did not answer in time";
     case "vowp_missing":
-      return "VOWP is not installed on this host";
+      return "StackSpirit is not installed on this host";
     case "vowp_incompatible":
-      return "VOWP speaks an incompatible contract";
+      return "This host runs an incompatible StackSpirit version";
     case "vowp_command":
-      return "VOWP rejected the command";
+      return "StackSpirit rejected the command";
     case "parse":
-      return "VOWP returned a document StackSpirit could not read";
+      return "The host returned a document StackSpirit could not read";
     case "keychain":
       return "The local keychain failed";
     case "engine":
-      return "The StackSpirit Engine needs attention";
+      return "StackSpirit needs attention";
     case "gate":
       return "A capability gate is not ready";
     case "io":

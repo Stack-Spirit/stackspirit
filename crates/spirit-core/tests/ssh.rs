@@ -408,3 +408,47 @@ fn ssh_target_validation_rejects_injection_shapes() {
     assert!(SshTarget::new("owner", "192.0.2.10", 0).is_err());
     assert_eq!(target().known_hosts_pattern(), "[192.0.2.10]:2222");
 }
+
+#[tokio::test]
+async fn remote_engine_falls_back_to_vowp_on_exit_127_and_records_it() {
+    use spirit_core::ssh::SshRemote;
+    use spirit_core::ssh::command::engine_binary_for;
+
+    let target = SshTarget::new("fallback", "192.0.2.77", 22).unwrap();
+    let destination = target.destination();
+    assert_eq!(engine_binary_for(&destination), "stackspirit");
+    let runner = Arc::new(FakeCommandRunner::new(vec![
+        CommandOutput::fail(127, b"stackspirit: command not found".to_vec()),
+        CommandOutput::ok(b"vowp 0.4.0\n".to_vec()),
+        CommandOutput::ok(b"vowp 0.4.0\n".to_vec()),
+    ]));
+    let remote = SshRemote::new(runner.clone(), target, options(false));
+    let argv = vec!["stackspirit".to_owned(), "--version".to_owned()];
+
+    let output = remote.run(&argv).await.expect("fallback succeeds");
+    assert!(output.success());
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls[0]
+            .args
+            .last()
+            .unwrap()
+            .contains("'stackspirit' '--version'")
+    );
+    assert!(calls[1].args.last().unwrap().contains("'vowp' '--version'"));
+    assert_eq!(engine_binary_for(&destination), "vowp");
+
+    // The recorded binary is used first on the next call.
+    remote.run(&argv).await.expect("second run");
+    assert_eq!(runner.call_count(), 3);
+    assert!(
+        runner
+            .last_call()
+            .unwrap()
+            .args
+            .last()
+            .unwrap()
+            .contains("'vowp' '--version'")
+    );
+}

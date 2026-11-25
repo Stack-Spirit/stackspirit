@@ -347,7 +347,7 @@ class MockRemoteFs {
     if (mockProtectedPath(path) && !confirmed) {
       this.fail(
         "conflict",
-        "protected_path: this is a live VOWP system path",
+        "protected_path: this is a live system path",
         "Moving or deleting it may interrupt running work. Confirm to continue anyway.",
       );
     }
@@ -531,7 +531,7 @@ const ASIF_IMPORT_LOSSES: AsifLoss[] = [
     kind: "session-id-changed",
     stage: "translation",
     scope: "native",
-    message: "The imported session received a new VOWP session id.",
+    message: "The imported session received a new session id.",
   },
 ];
 
@@ -679,7 +679,7 @@ export class MockBridge implements SpiritBridge {
         provider: "deepseek",
         access: "included",
         context_tokens: 128000,
-        notes: "Included with StackSpirit Engine; no key required.",
+        notes: "Included with StackSpirit; no key required.",
         verified_at: now,
       },
       {
@@ -701,7 +701,7 @@ export class MockBridge implements SpiritBridge {
       choice: { type: "bundled" },
       state: readyEngine ? { state: "ready" } : { state: "stopped" },
       version: readyEngine ? "0.1.0-mock" : null,
-      binary_path: readyEngine ? "/Applications/StackSpirit Engine/mock" : null,
+      binary_path: readyEngine ? "/Applications/StackSpirit/mock" : null,
       port: readyEngine ? 43117 : null,
       selected_model: readyEngine ? (this.modelChoices[0] ?? null) : null,
       included_models_available: readyEngine,
@@ -1404,8 +1404,8 @@ export class MockBridge implements SpiritBridge {
       if (this.scenario === "owner-unsupported") {
         throw errorDto(
           "gate",
-          "not_supported: the installed VOWP does not provide `session takeover`",
-          "Update VOWP to 0.5.1 or newer. The banner stays read-only.",
+          "not_supported: the installed StackSpirit does not provide `session takeover`",
+          "Update StackSpirit to 0.5.1 or newer. The banner stays read-only.",
         );
       }
       const currentOwner = this.fleetView?.session_owners?.find(
@@ -1455,7 +1455,7 @@ export class MockBridge implements SpiritBridge {
       if (this.scenario === "asif-strict-refusal" && strict) {
         throw errorDto(
           "refused",
-          "VOWP refused the ASIF export: a blocking or integrity loss was found.",
+          "StackSpirit refused the ASIF export: a blocking or integrity loss was found.",
           "Review the declared losses, or choose allow-loss explicitly. StackSpirit has no force switch.",
         );
       }
@@ -1831,8 +1831,8 @@ export class MockBridge implements SpiritBridge {
       if (input.resume === false && input.session !== "setup") {
         throw errorDto(
           "chat_not_mirrored",
-          "A new global or project session must be created in VOWP; preview does not create an unmirrored session.",
-          "Create or recreate the orchestrator in VOWP, then attach.",
+          "A new global or project session must be created in StackSpirit; preview does not create an unmirrored session.",
+          "Create or recreate the orchestrator, then attach.",
         );
       }
       const existing = this.chatSessions.get(input.session);
@@ -1888,7 +1888,7 @@ export class MockBridge implements SpiritBridge {
         throw errorDto(
           "session_lost",
           "The stored native session no longer exists.",
-          "Recreate the orchestrator session in VOWP, then attach.",
+          "Recreate the orchestrator session, then attach.",
         );
       }
       if (!this.chatSessions.has(session)) {
@@ -2717,7 +2717,7 @@ export class MockBridge implements SpiritBridge {
     if (this.scenario === "chat-engine-stopped") {
       throw errorDto(
         "engine_not_ready",
-        "The bundled StackSpirit Engine is stopped.",
+        "The bundled StackSpirit engine is stopped.",
         "Start the engine in Settings → Engine, then retry.",
         true,
       );
@@ -2725,22 +2725,22 @@ export class MockBridge implements SpiritBridge {
     if (this.scenario === "chat-external-engine") {
       throw errorDto(
         "engine_external",
-        "The setup assistant needs the bundled StackSpirit Engine; the external harness is model-only.",
+        "The setup assistant needs the bundled StackSpirit engine; the external harness is model-only.",
         "Switch to the bundled engine in Settings → Advanced.",
       );
     }
     if (this.scenario === "chat-server-gated" && session !== "setup") {
       throw errorDto(
         "chat_gated",
-        "Server chat needs VOWP 0.5's `vowp orchestrator endpoint`.",
-        "Update to VOWP 0.5, then retry; the app-owned SSH forward is not approved.",
+        "Server chat needs a newer StackSpirit on the host.",
+        "Update StackSpirit on the host, then retry; the app-owned SSH forward is not approved.",
       );
     }
     if (this.scenario === "chat-session-lost" && session !== "setup") {
       throw errorDto(
         "session_lost",
         "The stored native session no longer exists.",
-        "Recreate the orchestrator session in VOWP, then attach.",
+        "Recreate the orchestrator session, then attach.",
       );
     }
   }
@@ -2766,7 +2766,7 @@ export class MockBridge implements SpiritBridge {
     throw errorDto(
       "gate",
       gateActionReason(this.gateSnapshot, action) || "The ASIF action is unavailable.",
-      "Probe the VOWP home gates, then retry.",
+      "Probe the host gates, then retry.",
     );
   }
 
@@ -4555,7 +4555,7 @@ export class MockBridge implements SpiritBridge {
             {
               path: "report.estimates",
               code: "truncated",
-              detail: "VOWP capped the estimate list; the view labels the truncation.",
+              detail: "The host capped the estimate list; the view labels the truncation.",
             },
           ]
         : [];

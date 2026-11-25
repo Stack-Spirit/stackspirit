@@ -116,7 +116,7 @@ describe("StackSpirit Engine first-run flow", () => {
     expect(screen.queryByText("Uses your provider key")).not.toBeInTheDocument();
     expect(
       screen.getByRole("radio", { name: new RegExp(included.label) }),
-    ).toHaveAttribute("aria-label", `${included.label}, StackSpirit Engine`);
+    ).toHaveAttribute("aria-label", `${included.label}, StackSpirit`);
     expect(
       screen.queryByRole("radio", { name: new RegExp(paid.label) }),
     ).not.toBeInTheDocument();

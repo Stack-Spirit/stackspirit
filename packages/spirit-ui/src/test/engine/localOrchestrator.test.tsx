@@ -84,7 +84,7 @@ describe("D6 local orchestrator Engine panel", () => {
     expect(within(local).getByRole("button", { name: "Run locally" })).toBeDisabled();
     const panel = screen.getByTestId("local-orchestrator-panel");
     expect(within(panel).getByTestId("local-orchestrator-reason")).toHaveTextContent(
-      /local VOWP agent is not connected/,
+      /local StackSpirit agent is not connected/,
     );
   });
 

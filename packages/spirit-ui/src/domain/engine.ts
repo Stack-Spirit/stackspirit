@@ -24,9 +24,9 @@ export const ASIF_MILESTONES = ["v4-asif-core", "v4-asif-cli"] as const;
 
 export const NOT_IMPLEMENTED_COPY = "Not implemented in this build.";
 export const GATE_NOT_IMPLEMENTED_LOCAL =
-  "VOWP is ready; local orchestrator execution is not implemented in this build.";
+  "StackSpirit is ready; local orchestrator execution is not implemented in this build.";
 export const GATE_NOT_IMPLEMENTED_ASIF =
-  "VOWP is ready; ASIF export and import are not implemented in this build.";
+  "StackSpirit is ready; ASIF export and import are not implemented in this build.";
 
 const PROVIDER_LABELS: Record<string, string> = {
   anthropic: "Anthropic",
@@ -59,18 +59,18 @@ export function providerLabel(provider: string): string {
 
 /**
  * The provider shown on an included-model row. The bundled engine's own provider id
- * is an implementation detail (PLAN §8.5.1), so it is presented as StackSpirit Engine.
+ * is an implementation detail (PLAN §8.5.1), so it is presented as StackSpirit.
  */
 export function modelProviderLabel(provider: string): string {
   return ENGINE_INTERNAL_PROVIDERS.has(provider.trim().toLowerCase())
-    ? "StackSpirit Engine"
+    ? "StackSpirit"
     : providerLabel(provider);
 }
 
 /** Keeps bundled engine implementation branding out of included-model notes. */
 export function modelNotes(provider: string, notes: string): string {
   if (!ENGINE_INTERNAL_PROVIDERS.has(provider.trim().toLowerCase())) return notes;
-  return notes.replace(/\bopencode\b/gi, "StackSpirit Engine");
+  return notes.replace(/\bopencode\b/gi, "StackSpirit");
 }
 
 export type { EngineProvider };
@@ -300,7 +300,7 @@ export function localSessionStateTone(state: string): Tone {
 
 /** The local-orchestrator prerequisite copy, including the exact missing labels. */
 export function localOrchestratorReason(gates: GateSnapshot | null): string {
-  if (!gates) return "Probe the VOWP home to check local orchestrator support.";
+  if (!gates) return "Probe the host to check local orchestrator support.";
   return gateActionReason(gates, "local_orchestrator");
 }
 
@@ -325,24 +325,24 @@ export function gateActionReason(
   gates: GateSnapshot | null,
   action: GateAction,
 ): string {
-  if (!gates) return "Probe the VOWP home to check this capability.";
+  if (!gates) return "Probe the host to check this capability.";
   if (action === "local_orchestrator") {
     const gate = gates.local_orchestrator;
     if (gate.state === "waiting_for_vowp_phase3") {
-      return `Waiting for VOWP Phase 2/3. Missing: ${gate.missing.join(" · ")}`;
+      return `Waiting for host support. Missing: ${gate.missing.join(" · ")}`;
     }
     if (gate.state === "incompatible") {
-      return `Incompatible VOWP node surface: ${gate.detected} (required ${gate.required}).`;
+      return `Incompatible host surface: ${gate.detected} (required ${gate.required}).`;
     }
     if (gate.state === "unreachable") {
-      return `The VOWP home could not be reached: ${gate.detail}`;
+      return `The host could not be reached: ${gate.detail}`;
     }
-    if (gate.state === "probing") return "Probing the VOWP home.";
+    if (gate.state === "probing") return "Probing the host.";
     if (gate.state === "unknown") {
-      return "Probe the VOWP home to check local orchestrator support.";
+      return "Probe the host to check local orchestrator support.";
     }
     if (gates.local_agent.state !== "connected") {
-      return "The local VOWP agent is not connected. Enroll it on this Mac first.";
+      return "The local StackSpirit agent is not connected. Enroll it on this Mac first.";
     }
     if (!gates.features.local_orchestrator_actions) {
       return GATE_NOT_IMPLEMENTED_LOCAL;
@@ -352,17 +352,17 @@ export function gateActionReason(
 
   const gate = gates.asif;
   if (gate.state === "waiting_for_vowp_asif") {
-    return `Waiting for VOWP ASIF. Missing: ${gate.missing.join(" · ")}`;
+    return `Waiting for host ASIF support. Missing: ${gate.missing.join(" · ")}`;
   }
   if (gate.state === "incompatible") {
     return `Incompatible ASIF surface: ${gate.detected} (required ${gate.required}).`;
   }
   if (gate.state === "unreachable") {
-    return `The VOWP home could not be reached: ${gate.detail}`;
+    return `The host could not be reached: ${gate.detail}`;
   }
-  if (gate.state === "probing") return "Probing the VOWP home.";
+  if (gate.state === "probing") return "Probing the host.";
   if (gate.state === "unknown") {
-    return "Probe the VOWP home to check ASIF support.";
+    return "Probe the host to check ASIF support.";
   }
   if (!gates.features.asif_actions) return GATE_NOT_IMPLEMENTED_ASIF;
   const proven = action === "asif_export" ? gate.export : gate.import;

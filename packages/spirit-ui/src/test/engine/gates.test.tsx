@@ -49,7 +49,7 @@ describe("VOWP capability gate cards", () => {
     expect(within(local).queryByText(/local cache/)).not.toBeInTheDocument();
     expect(within(local).getByRole("button", { name: "Run locally" })).toBeDisabled();
     expect(
-      within(local).getAllByText(/Waiting for VOWP Phase 2\/3/).length,
+      within(local).getAllByText(/Waiting for host support/).length,
     ).toBeGreaterThan(0);
 
     expect(within(asif).getByText("Waiting")).toBeInTheDocument();
@@ -122,7 +122,7 @@ describe("VOWP capability gate cards", () => {
     expect(within(local).getByRole("button", { name: "Run locally" })).toBeDisabled();
     expect(
       within(local).getByText(
-        "VOWP is ready; local orchestrator execution is not implemented in this build.",
+        "StackSpirit is ready; local orchestrator execution is not implemented in this build.",
       ),
     ).toBeInTheDocument();
   });
@@ -135,7 +135,7 @@ describe("VOWP capability gate cards", () => {
     expect(within(asif).getByRole("button", { name: "Import .asif.zip" })).toBeDisabled();
     expect(
       within(asif).getAllByText(
-        "VOWP is ready; ASIF export and import are not implemented in this build.",
+        "StackSpirit is ready; ASIF export and import are not implemented in this build.",
       ).length,
     ).toBeGreaterThan(0);
   });
@@ -258,7 +258,7 @@ describe("VOWP capability gate cards", () => {
     const local = screen.getByTestId("gate-card-local");
     expect(within(local).getByRole("button", { name: "Run locally" })).toBeDisabled();
     expect(
-      within(local).getByText(/local VOWP agent is not connected/),
+      within(local).getByText(/local StackSpirit agent is not connected/),
     ).toBeInTheDocument();
   });
 });

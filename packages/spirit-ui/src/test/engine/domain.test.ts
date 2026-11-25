@@ -74,11 +74,11 @@ describe("engine domain helpers", () => {
   });
 
   it("included models keep engine implementation branding out of the main path", () => {
-    expect(modelProviderLabel("opencode")).toBe("StackSpirit Engine");
-    expect(modelProviderLabel("opencode-go")).toBe("StackSpirit Engine");
+    expect(modelProviderLabel("opencode")).toBe("StackSpirit");
+    expect(modelProviderLabel("opencode-go")).toBe("StackSpirit");
     expect(modelProviderLabel("deepseek")).toBe("DeepSeek");
     expect(modelNotes("opencode", "Free OpenCode model for a limited time")).toBe(
-      "Free StackSpirit Engine model for a limited time",
+      "Free StackSpirit model for a limited time",
     );
     expect(modelNotes("deepseek", "Any note")).toBe("Any note");
   });
@@ -161,7 +161,7 @@ describe("engine domain helpers", () => {
     local.local_agent.state = "not_installed";
     expect(gateActionEnabled(local, "local_orchestrator")).toBe(false);
     expect(gateActionReason(local, "local_orchestrator")).toContain(
-      "local VOWP agent is not connected",
+      "local StackSpirit agent is not connected",
     );
   });
 
@@ -174,7 +174,7 @@ describe("engine domain helpers", () => {
       evidence: ["session export --format asif: exit 2"],
     };
     expect(gateActionReason(gates, "asif_export")).toBe(
-      "Waiting for VOWP ASIF. Missing: v4-asif-core · v4-asif-cli",
+      "Waiting for host ASIF support. Missing: v4-asif-core · v4-asif-cli",
     );
     expect(PHASE3_MILESTONES).toContain("backfill");
     expect(PHASE3_MILESTONES).toContain("local cache");

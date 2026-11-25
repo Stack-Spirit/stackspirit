@@ -84,10 +84,19 @@ fn classifies_secret_like_names() {
 
 #[test]
 fn classifies_protected_live_paths() {
-    for name in ["vowp.db", "vowp.db-wal", "vowp.db-shm", "vowp.toml", ".ssh"] {
+    for name in [
+        "vowp.db",
+        "vowp.db-wal",
+        "vowp.db-shm",
+        "vowp.toml",
+        "stackspirit.toml",
+        ".ssh",
+    ] {
         assert!(is_protected_name(name), "{name}");
     }
     assert!(!is_protected_name("vowp.toml.bak"));
+    assert!(!is_protected_name("stackspirit.toml.bak"));
+    assert!(is_protected_path("~/.vowp/stackspirit.toml"));
     assert!(is_protected_path("~/.ssh"));
     assert!(is_protected_path("/home/o/.ssh/authorized_keys"));
     assert!(is_protected_path("~/.vowp/vowp.db"));

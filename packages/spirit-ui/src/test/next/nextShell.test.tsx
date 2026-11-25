@@ -181,7 +181,7 @@ describe("NextShell", () => {
     await user.click(screen.getByTestId("connect-prompt-chat"));
 
     const error = await screen.findByTestId("chat-error");
-    expect(error).toHaveTextContent("The bundled StackSpirit Engine is stopped.");
+    expect(error).toHaveTextContent("The bundled StackSpirit engine is stopped.");
     expect(error).toHaveTextContent("Settings → Engine");
     expect(screen.queryByText(/Preview reply\./)).not.toBeInTheDocument();
     expect(screen.queryByRole("form", { name: "Secure server details" })).not.toBeInTheDocument();
@@ -327,7 +327,7 @@ describe("NextShell", () => {
     await renderConnected("chat-server-gated");
     const error = await screen.findByTestId("chat-error");
     expect(error).toHaveTextContent(
-      "Server chat needs VOWP 0.5's `vowp orchestrator endpoint`.",
+      "Server chat needs a newer StackSpirit on the host.",
     );
     expect(error).toHaveAttribute("data-gate", "true");
     expect(within(error).queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
