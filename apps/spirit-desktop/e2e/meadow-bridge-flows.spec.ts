@@ -401,7 +401,7 @@ test("the server chat gate keeps the composer disabled and invents no reply", as
     await expect(gate).toBeVisible();
     await expect(gate).toHaveAttribute("data-gate", "true");
     await expect(gate).toContainText(
-      "Server chat needs VOWP 0.5's `vowp orchestrator endpoint`",
+      "Server chat needs a newer StackSpirit on the host.",
     );
     await expect(page.getByTestId("session-location")).toContainText("Not connected");
     await expect(page.getByRole("textbox", { name: "Message" })).toBeDisabled();
