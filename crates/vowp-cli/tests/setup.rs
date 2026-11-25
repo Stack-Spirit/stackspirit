@@ -866,7 +866,7 @@ fn setup_home_is_idempotent() {
         machine
             .remote
             .path()
-            .join(".config/systemd/user/vowp.service")
+            .join(".config/systemd/user/stackspirit.service")
             .is_file(),
         "the user unit must exist"
     );
@@ -929,10 +929,10 @@ fn setup_home_starts_an_enabled_but_inactive_unit() {
     assert_eq!(outcome["status"], "ok", "{outcome}");
     let log = machine.tools_log();
     let active = log
-        .find("systemctl --user is-active vowp.service")
+        .find("systemctl --user is-active stackspirit.service")
         .unwrap_or_else(|| panic!("missing is-active call: {log}"));
     let started = log
-        .find("systemctl --user enable --now vowp.service")
+        .find("systemctl --user enable --now stackspirit.service")
         .unwrap_or_else(|| panic!("an enabled but inactive unit must be started: {log}"));
     assert!(active < started, "check activity before starting: {log}");
     let check = outcome["checks"]
@@ -945,7 +945,7 @@ fn setup_home_starts_an_enabled_but_inactive_unit() {
         check["detail"]
             .as_str()
             .unwrap_or_default()
-            .contains("started vowp.service"),
+            .contains("started stackspirit.service"),
         "{check}"
     );
     assert!(
@@ -953,7 +953,7 @@ fn setup_home_starts_an_enabled_but_inactive_unit() {
             .as_array()
             .expect("changed")
             .iter()
-            .any(|path| path == "systemd:vowp.service"),
+            .any(|path| path == "systemd:stackspirit.service"),
         "{outcome}"
     );
 }
@@ -1004,7 +1004,7 @@ fn setup_home_creates_the_vowp_user_when_sudo_is_passwordless() {
         machine
             .remote
             .path()
-            .join(".config/systemd/user/vowp.service")
+            .join(".config/systemd/user/stackspirit.service")
             .is_file(),
         "the user unit must exist"
     );
@@ -1745,7 +1745,8 @@ fn setup_home_installs_the_per_user_binary_when_only_path_vowp_exists() {
         "setup must install the binary beside the home even when PATH has one: {}",
         installed.display()
     );
-    let unit = std::fs::read_to_string(machine.remote.path().join(".config/systemd/user/vowp.service")).expect("unit");
+    let unit =
+        std::fs::read_to_string(machine.remote.path().join(".config/systemd/user/stackspirit.service")).expect("unit");
     assert!(unit.contains("ExecStart=%h/.local/bin/vowp"), "{unit}");
     let log = machine.log();
     assert!(
@@ -1827,7 +1828,8 @@ fn setup_home_installs_from_a_non_traversable_login_home() {
         "setup must install the binary from an unsearchable login home: {}",
         installed.display()
     );
-    let unit = std::fs::read_to_string(machine.remote.path().join(".config/systemd/user/vowp.service")).expect("unit");
+    let unit =
+        std::fs::read_to_string(machine.remote.path().join(".config/systemd/user/stackspirit.service")).expect("unit");
     assert!(unit.contains("ExecStart=%h/.local/bin/vowp"), "{unit}");
     let log = machine.log();
     assert!(
@@ -2052,6 +2054,170 @@ fn embedded_service_unit_matches_the_release_template() {
     let embedded = include_str!("../src/setup/vowp.service");
     let release = include_str!("../../../scripts/vowp.service");
     assert_eq!(embedded, release, "the embedded unit must match scripts/vowp.service");
+}
+
+#[test]
+fn embedded_stackspirit_service_unit_matches_the_release_template() {
+    let embedded = include_str!("../src/setup/stackspirit.service");
+    let release = include_str!("../../../scripts/stackspirit.service");
+    assert_eq!(
+        embedded, release,
+        "the embedded unit must match scripts/stackspirit.service"
+    );
+}
+
+#[test]
+fn both_service_templates_carry_both_home_names_and_the_same_home() {
+    for (name, text) in [
+        ("vowp.service", include_str!("../src/setup/vowp.service")),
+        ("stackspirit.service", include_str!("../src/setup/stackspirit.service")),
+    ] {
+        assert!(
+            text.contains("Environment=STACKSPIRIT_HOME=%h/.vowp\n"),
+            "{name}:\n{text}"
+        );
+        assert!(text.contains("Environment=VOWP_HOME=%h/.vowp\n"), "{name}:\n{text}");
+        assert!(text.contains("WorkingDirectory=%h/.vowp\n"), "{name}:\n{text}");
+    }
+    assert!(include_str!("../src/setup/vowp.service").contains("ExecStart=%h/.local/bin/vowp up --foreground"));
+    assert!(
+        include_str!("../src/setup/stackspirit.service")
+            .contains("ExecStart=%h/.local/bin/stackspirit up --foreground")
+    );
+}
+
+/// Runs `setup home --apply` against `machine` and returns the process output.
+fn setup_home_apply(machine: &Machine) -> std::process::Output {
+    machine.run_with_sudo(
+        "password",
+        &[
+            "--json",
+            "setup",
+            "home",
+            "--target",
+            "fake.example",
+            "--apply",
+            "--yes",
+        ],
+    )
+}
+
+#[test]
+fn setup_home_updates_an_existing_vowp_unit_in_place_and_adds_no_second_unit() {
+    let machine = Machine::new();
+    machine.write_ssh();
+    machine.write_tools("password");
+    machine.write_remote_vowp();
+    let dir = machine.remote.path().join(".config/systemd/user");
+    std::fs::create_dir_all(&dir).expect("unit dir");
+    std::fs::write(dir.join("vowp.service"), "[Service]\nExecStart=/old/vowp\n").expect("old unit");
+
+    let output = setup_home_apply(&machine);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("vowp.service")).expect("unit"),
+        include_str!("../src/setup/vowp.service"),
+        "the legacy unit is rewritten in place with both env names"
+    );
+    assert!(
+        !dir.join("stackspirit.service").exists(),
+        "a legacy host must not gain a second unit"
+    );
+    let log = machine.tools_log();
+    assert!(log.contains("enable --now vowp.service"), "{log}");
+    assert!(
+        !log.contains("stackspirit.service"),
+        "no call may name the new unit: {log}"
+    );
+    assert_eq!(
+        log.matches("enable --now vowp.service").count(),
+        1,
+        "exactly one enable/start call: {log}"
+    );
+}
+
+#[test]
+fn setup_home_uses_the_stackspirit_unit_on_a_fresh_host() {
+    let machine = Machine::new();
+    machine.write_ssh();
+    machine.write_tools("password");
+    machine.write_remote_vowp();
+
+    let output = setup_home_apply(&machine);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dir = machine.remote.path().join(".config/systemd/user");
+    let unit = std::fs::read_to_string(dir.join("stackspirit.service")).expect("fresh unit");
+    assert!(unit.contains("Environment=STACKSPIRIT_HOME=%h/.vowp"), "{unit}");
+    assert!(unit.contains("Environment=VOWP_HOME=%h/.vowp"), "{unit}");
+    assert!(!dir.join("vowp.service").exists(), "a fresh host gets one unit only");
+    let log = machine.tools_log();
+    assert_eq!(log.matches("enable --now stackspirit.service").count(), 1, "{log}");
+    assert!(!log.contains("vowp.service"), "{log}");
+}
+
+#[test]
+fn setup_home_points_the_fresh_unit_at_stackspirit_when_that_binary_exists() {
+    let machine = Machine::new();
+    machine.write_ssh();
+    machine.write_tools("password");
+    machine.write_remote_vowp();
+    let bin = machine.remote.path().join(".local/bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    write_exec(&bin.join("stackspirit"), "#!/bin/sh\nexit 0\n");
+
+    let output = setup_home_apply(&machine);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let unit = std::fs::read_to_string(machine.remote.path().join(".config/systemd/user/stackspirit.service"))
+        .expect("fresh unit");
+    assert_eq!(unit, include_str!("../src/setup/stackspirit.service"));
+}
+
+#[test]
+fn setup_home_refuses_when_both_units_exist_and_changes_nothing() {
+    let machine = Machine::new();
+    machine.write_ssh();
+    machine.write_tools("password");
+    machine.write_remote_vowp();
+    let dir = machine.remote.path().join(".config/systemd/user");
+    std::fs::create_dir_all(&dir).expect("unit dir");
+    std::fs::write(dir.join("vowp.service"), "old legacy\n").expect("legacy unit");
+    std::fs::write(dir.join("stackspirit.service"), "old new\n").expect("new unit");
+
+    let output = setup_home_apply(&machine);
+    assert!(!output.status.success(), "both units is a conflict");
+    assert_eq!(output.status.code(), Some(4), "conflict exit code");
+    let stderr = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stderr.contains("vowp.service") && stderr.contains("stackspirit.service"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("vowp.service")).expect("legacy"),
+        "old legacy\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("stackspirit.service")).expect("new"),
+        "old new\n"
+    );
+    let log = machine.tools_log();
+    assert!(!log.contains("enable --now"), "no unit is started on a conflict: {log}");
 }
 
 // --- scripts/install.sh ----------------------------------------------------

@@ -148,10 +148,14 @@ fn web_window_file(paths: &NodePaths) -> PathBuf {
 
 /// Parses the daemon's one startup line into a printable loopback URL.
 ///
-/// `vowp-daemon` binds `127.0.0.1` only and prints `vowp-daemon: listening on http://…`;
-/// anything else is ignored rather than surfaced as a window address.
+/// Both daemons bind `127.0.0.1` only and print `vowp-daemon: listening on http://…`; a
+/// `stackspirit-daemon:` prefix is accepted too so either spelling can be started during a
+/// mixed-version rollout. Anything else is ignored rather than surfaced as a window address.
 fn parse_web_window_address(line: &str) -> Option<String> {
-    let address = line.strip_prefix("vowp-daemon: listening on ")?.trim();
+    let address = line
+        .strip_prefix("vowp-daemon: listening on ")
+        .or_else(|| line.strip_prefix("stackspirit-daemon: listening on "))?
+        .trim();
     if !address.starts_with("http://127.0.0.1:") {
         return None;
     }
@@ -210,19 +214,53 @@ fn select_daemon_project(paths: &NodePaths, checkout: Option<&Path>) -> Result<O
     })
 }
 
-/// Returns the daemon binary: `VOWP_DAEMON_BIN`, the `vowp` sibling, then `PATH`.
+/// Returns the daemon binary.
 ///
-/// `VOWP_DAEMON_BIN` is an explicit override for tests and unusual installs; normal runs
-/// keep the two shipped binaries together, so the sibling lookup wins before `PATH`.
+/// Order: `STACKSPIRIT_DAEMON_BIN`, `VOWP_DAEMON_BIN`, `stackspirit-daemon` beside this
+/// binary, `vowp-daemon` beside this binary, then `PATH` for both. The two `*_DAEMON_BIN`
+/// variables are explicit overrides for tests and unusual installs; normal runs keep the
+/// shipped binaries together, so the sibling lookup wins before `PATH`.
 fn daemon_binary() -> PathBuf {
-    if let Some(path) = std::env::var_os("VOWP_DAEMON_BIN") {
-        return PathBuf::from(path);
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let path = std::env::var_os("PATH");
+    select_daemon_binary(
+        std::env::var_os("STACKSPIRIT_DAEMON_BIN"),
+        std::env::var_os("VOWP_DAEMON_BIN"),
+        exe_dir.as_deref(),
+        path.as_deref(),
+    )
+}
+
+/// Pure discovery behind [`daemon_binary`]; `path` is a `PATH`-style list.
+fn select_daemon_binary(
+    stackspirit_override: Option<std::ffi::OsString>,
+    vowp_override: Option<std::ffi::OsString>,
+    exe_dir: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    for value in [stackspirit_override, vowp_override].into_iter().flatten() {
+        if !value.is_empty() {
+            return PathBuf::from(value);
+        }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(directory) = exe.parent() {
-            let sibling = directory.join("vowp-daemon");
+    const NAMES: [&str; 2] = ["stackspirit-daemon", "vowp-daemon"];
+    if let Some(directory) = exe_dir {
+        for name in NAMES {
+            let sibling = directory.join(name);
             if sibling.is_file() {
                 return sibling;
+            }
+        }
+    }
+    if let Some(path) = path {
+        for directory in std::env::split_paths(path) {
+            for name in NAMES {
+                let candidate = directory.join(name);
+                if candidate.is_file() {
+                    return candidate;
+                }
             }
         }
     }
@@ -1604,6 +1642,80 @@ impl Log for FileLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::{OsStr, OsString};
+
+    fn touch(directory: &Path, name: &str) -> PathBuf {
+        let path = directory.join(name);
+        std::fs::write(&path, "#!/bin/sh\n").expect("write fake daemon");
+        path
+    }
+
+    #[test]
+    fn startup_line_accepts_both_daemon_prefixes_and_only_loopback() {
+        assert_eq!(
+            parse_web_window_address("vowp-daemon: listening on http://127.0.0.1:4000").as_deref(),
+            Some("http://127.0.0.1:4000/")
+        );
+        assert_eq!(
+            parse_web_window_address("stackspirit-daemon: listening on http://127.0.0.1:4001").as_deref(),
+            Some("http://127.0.0.1:4001/")
+        );
+        assert_eq!(
+            parse_web_window_address("spirit-daemon: listening on http://127.0.0.1:1"),
+            None
+        );
+        assert_eq!(
+            parse_web_window_address("stackspirit-daemon: listening on http://0.0.0.0:4001"),
+            None
+        );
+    }
+
+    #[test]
+    fn daemon_discovery_follows_the_documented_order() {
+        let beside = tempfile::tempdir().expect("beside");
+        let on_path = tempfile::tempdir().expect("path dir");
+        let path_list = std::env::join_paths([on_path.path()]).expect("join path");
+        let os = |value: &str| Some(OsString::from(value));
+
+        // Overrides: STACKSPIRIT_DAEMON_BIN first, then VOWP_DAEMON_BIN.
+        assert_eq!(
+            select_daemon_binary(os("/s"), os("/v"), Some(beside.path()), Some(&path_list)),
+            PathBuf::from("/s")
+        );
+        assert_eq!(
+            select_daemon_binary(None, os("/v"), Some(beside.path()), Some(&path_list)),
+            PathBuf::from("/v")
+        );
+
+        // PATH holds both; nothing beside the binary yet.
+        touch(on_path.path(), "vowp-daemon");
+        let path_new = touch(on_path.path(), "stackspirit-daemon");
+        assert_eq!(
+            select_daemon_binary(None, None, Some(beside.path()), Some(&path_list)),
+            path_new,
+            "PATH prefers stackspirit-daemon"
+        );
+
+        // Beside the binary: legacy only, then the new sibling wins.
+        let legacy = touch(beside.path(), "vowp-daemon");
+        assert_eq!(
+            select_daemon_binary(None, None, Some(beside.path()), Some(&path_list)),
+            legacy,
+            "a sibling beats PATH"
+        );
+        let sibling = touch(beside.path(), "stackspirit-daemon");
+        assert_eq!(
+            select_daemon_binary(None, None, Some(beside.path()), Some(&path_list)),
+            sibling,
+            "stackspirit-daemon beside the binary wins over vowp-daemon"
+        );
+
+        // Nothing found: the legacy bare name, resolved by the OS.
+        assert_eq!(
+            select_daemon_binary(None, None, None, Some(OsStr::new(""))),
+            PathBuf::from("vowp-daemon")
+        );
+    }
 
     #[test]
     fn print_tick_report_surfaces_a_degraded_project_and_fails_the_tick() {

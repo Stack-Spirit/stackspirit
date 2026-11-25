@@ -250,6 +250,7 @@ fn agent_service_install_never_calls_the_manager_without_now() {
             print_only: true,
             now: true,
             force: false,
+            rename_unit: false,
         },
         &FakeManager::available(),
     )
@@ -663,4 +664,161 @@ fn agent_service_status_reads_the_manager() {
     assert!(!status.available, "a missing manager reports unavailable, not an error");
     assert_eq!(status.loaded, None);
     assert!(unavailable.calls().is_empty());
+}
+
+// --- unit selection (StackSpirit rebrand) -----------------------------------------------
+
+use vowp_agent::service::{STACKSPIRIT_LAUNCHD_LABEL, ServiceFlavor};
+
+fn write_generated(path: &Path) {
+    fs::create_dir_all(path.parent().expect("unit parent")).expect("unit dir");
+    fs::write(path, format!("# {SERVICE_MARKER}\nold\n")).expect("generated unit");
+}
+
+fn selected(platform: ServicePlatform, home: &Path, state: &Path) -> ServiceSpec {
+    test_spec(platform, home, state, None)
+        .select_flavor()
+        .expect("select flavor")
+}
+
+#[test]
+fn a_fresh_host_selects_the_stackspirit_unit_and_a_legacy_host_keeps_its_own() {
+    let (_guard, home, state) = private_home();
+    let fresh = selected(ServicePlatform::SystemdUser, &home, &state);
+    assert_eq!(fresh.flavor, ServiceFlavor::StackSpirit);
+    assert_eq!(fresh.unit_name(), "stackspirit-agent.service");
+    assert_eq!(
+        fresh.unit_path().expect("path"),
+        home.join(".config/systemd/user/stackspirit-agent.service")
+    );
+
+    write_generated(&home.join(".config/systemd/user/vowp-agent.service"));
+    let legacy = selected(ServicePlatform::SystemdUser, &home, &state);
+    assert_eq!(legacy.flavor, ServiceFlavor::Legacy);
+    assert_eq!(legacy.unit_name(), "vowp-agent.service");
+
+    let (_guard, mac_home, mac_state) = private_home();
+    let mac = selected(ServicePlatform::Launchd, &mac_home, &mac_state);
+    assert_eq!(mac.unit_name(), STACKSPIRIT_LAUNCHD_LABEL);
+    assert!(mac.render_launchd().contains("<string>dev.stackspirit.agent</string>"));
+    write_generated(&mac_home.join("Library/LaunchAgents/dev.vowp.agent.plist"));
+    assert_eq!(
+        selected(ServicePlatform::Launchd, &mac_home, &mac_state).unit_name(),
+        "dev.vowp.agent"
+    );
+}
+
+#[test]
+fn both_agent_units_are_a_conflict_and_nothing_is_written() {
+    let (_guard, home, state) = private_home();
+    write_generated(&home.join(".config/systemd/user/vowp-agent.service"));
+    write_generated(&home.join(".config/systemd/user/stackspirit-agent.service"));
+    let error = test_spec(ServicePlatform::SystemdUser, &home, &state, None)
+        .select_flavor()
+        .expect_err("two units conflict");
+    assert!(matches!(error, ServiceError::UnitConflict { .. }), "{error}");
+    assert_eq!(error.exit_code(), 4);
+
+    // Even with an explicit spec, install never writes beside the other generated unit.
+    let spec = test_spec(ServicePlatform::SystemdUser, &home, &state, None).with_flavor(ServiceFlavor::StackSpirit);
+    let manager = FakeManager::available();
+    let error = install(
+        &spec,
+        &InstallOptions {
+            now: true,
+            ..InstallOptions::default()
+        },
+        &manager,
+    )
+    .expect_err("install refuses a second unit");
+    assert!(matches!(error, ServiceError::UnitConflict { .. }), "{error}");
+    assert!(manager.calls().is_empty());
+}
+
+#[test]
+fn both_flavors_carry_both_agent_home_names() {
+    let (_guard, home, state) = private_home();
+    for flavor in [ServiceFlavor::Legacy, ServiceFlavor::StackSpirit] {
+        for platform in [ServicePlatform::SystemdUser, ServicePlatform::Launchd] {
+            let text = test_spec(platform, &home, &state, None)
+                .with_flavor(flavor)
+                .render()
+                .expect("render");
+            assert!(
+                text.contains("STACKSPIRIT_AGENT_HOME"),
+                "{flavor:?} {platform:?}\n{text}"
+            );
+            assert!(text.contains("VOWP_AGENT_HOME"), "{flavor:?} {platform:?}\n{text}");
+        }
+    }
+}
+
+#[test]
+fn rename_unit_is_explicit_and_stops_disables_writes_and_enables_in_order() {
+    let (_guard, home, state) = private_home();
+    let legacy = home.join(".config/systemd/user/vowp-agent.service");
+    write_generated(&legacy);
+    let spec = test_spec(ServicePlatform::SystemdUser, &home, &state, None).with_flavor(ServiceFlavor::StackSpirit);
+
+    // Without --now the rename would leave two units, so it is refused before any write.
+    let manager = FakeManager::available();
+    let error = install(
+        &spec,
+        &InstallOptions {
+            rename_unit: true,
+            ..InstallOptions::default()
+        },
+        &manager,
+    )
+    .expect_err("rename needs --now");
+    assert!(matches!(error, ServiceError::Rename(_)), "{error}");
+    assert!(legacy.is_file(), "nothing was touched");
+
+    let report = install(
+        &spec,
+        &InstallOptions {
+            rename_unit: true,
+            now: true,
+            ..InstallOptions::default()
+        },
+        &manager,
+    )
+    .expect("rename");
+    assert!(report.installed);
+    assert!(!legacy.exists(), "the old generated unit is removed");
+    assert!(home.join(".config/systemd/user/stackspirit-agent.service").is_file());
+    let calls: Vec<String> = manager.calls().iter().map(|call| call.join(" ")).collect();
+    assert_eq!(
+        calls,
+        vec![
+            "systemctl --user disable --now vowp-agent.service",
+            "systemctl --user daemon-reload",
+            "systemctl --user daemon-reload",
+            "systemctl --user enable --now stackspirit-agent.service",
+        ],
+        "one stop/disable of the old unit, then one reload and one enable of the new"
+    );
+}
+
+#[test]
+fn rename_unit_never_touches_a_foreign_legacy_unit() {
+    let (_guard, home, state) = private_home();
+    let legacy = home.join(".config/systemd/user/vowp-agent.service");
+    fs::create_dir_all(legacy.parent().expect("parent")).expect("dir");
+    fs::write(&legacy, "[Service]\nDescription=someone else\n").expect("foreign");
+    let spec = test_spec(ServicePlatform::SystemdUser, &home, &state, None).with_flavor(ServiceFlavor::StackSpirit);
+    let manager = FakeManager::available();
+    let error = install(
+        &spec,
+        &InstallOptions {
+            rename_unit: true,
+            now: true,
+            ..InstallOptions::default()
+        },
+        &manager,
+    )
+    .expect_err("foreign unit");
+    assert!(matches!(error, ServiceError::ForeignUnit { .. }), "{error}");
+    assert!(legacy.is_file());
+    assert!(manager.calls().is_empty());
 }

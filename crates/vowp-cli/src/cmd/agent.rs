@@ -1031,6 +1031,7 @@ fn service_install(global: &Global, io: &mut dyn IoStreams, args: &AgentServiceI
             print_only: args.print,
             force: args.force,
             now: args.now,
+            rename_unit: false,
         },
         &SystemManager,
     )
@@ -1040,7 +1041,7 @@ fn service_install(global: &Global, io: &mut dyn IoStreams, args: &AgentServiceI
             io,
             &ServiceInstallOutput {
                 installed: report.installed,
-                unit: spec.platform.unit_name(),
+                unit: spec.unit_name(),
                 run_marker: report.run_marker.is_some(),
                 linger: report.linger_hint.clone(),
             },
@@ -1103,20 +1104,20 @@ fn service_uninstall(
             io,
             &ServiceUninstallOutput {
                 removed: report.removed,
-                unit: spec.platform.unit_name(),
+                unit: spec.unit_name(),
             },
         )?;
     } else if report.removed {
         writeln!(
             io.out(),
             "removed unit {}; the agent state and every token are kept",
-            spec.platform.unit_name()
+            spec.unit_name()
         )?;
     } else {
         writeln!(
             io.out(),
             "no VOWP-generated unit {} at {}; nothing removed",
-            spec.platform.unit_name(),
+            spec.unit_name(),
             report.unit_path.display()
         )?;
     }
@@ -1146,7 +1147,7 @@ fn service_status(global: &Global, io: &mut dyn IoStreams, _args: &AgentServiceS
             io,
             &ServiceStatusOutput {
                 available: status.available,
-                unit: spec.platform.unit_name(),
+                unit: spec.unit_name(),
                 state,
                 loaded: status.loaded,
                 pid: status.pid,
@@ -1337,7 +1338,7 @@ fn check_agent_service(state_dir: &Path, checks: &mut AgentDoctorChecks) {
             return;
         }
     };
-    let unit_name = spec.platform.unit_name();
+    let unit_name = spec.unit_name();
     let unit_present = spec.unit_path().map(|path| path.is_file()).unwrap_or(false);
     let marker_present = run_marker_path(state_dir).is_file();
     let mut problems = Vec::new();
@@ -1496,6 +1497,10 @@ fn service_error_detail(error: &ServiceError) -> String {
             "the service unit path holds a file VOWP did not generate; run `vowp agent service install --force`"
                 .to_owned()
         }
+        ServiceError::UnitConflict { .. } => {
+            "both the legacy and the StackSpirit agent unit exist; remove one by hand or rename explicitly".to_owned()
+        }
+        ServiceError::Rename(message) => message.clone(),
         ServiceError::ManagerMissing { command } => {
             format!("the service manager command is not available: {command}")
         }

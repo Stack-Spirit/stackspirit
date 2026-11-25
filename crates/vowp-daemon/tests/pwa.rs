@@ -269,3 +269,60 @@ fn service_worker_shell_includes_the_import_page_and_a_bumped_cache_name() {
         "/import must not embed the daemon write token"
     );
 }
+
+/// Starts a real daemon binary on a loopback ephemeral port against `fixture`'s temporary home.
+///
+/// Returns the child, its first stdout line and its bound address. The environment is scrubbed
+/// so neither the real home nor a real tmux server can be reached.
+fn spawn_daemon_binary(binary: &str, fixture: &BoardFixture) -> (std::process::Child, String, std::net::SocketAddr) {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(binary)
+        .arg("--home")
+        .arg(fixture.paths.root())
+        .arg("--project")
+        .arg(fixture.project.as_str())
+        .arg("--port")
+        .arg("0")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_API_TOKEN")
+        .env_remove("STACKSPIRIT_API_TOKEN")
+        .env("STACKSPIRIT_HOME", fixture.paths.root())
+        .env("VOWP_HOME", fixture.paths.root())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn daemon binary");
+    let mut line = String::new();
+    BufReader::new(child.stdout.as_mut().expect("daemon stdout"))
+        .read_line(&mut line)
+        .expect("daemon startup line");
+    let line = line.trim().to_owned();
+    let address = line
+        .strip_prefix("vowp-daemon: listening on http://")
+        .unwrap_or_else(|| panic!("unexpected startup line: {line:?}"))
+        .parse()
+        .expect("loopback address");
+    (child, line, address)
+}
+
+#[test]
+fn both_daemon_binaries_print_the_legacy_line_and_serve_the_board_on_loopback() {
+    for binary in [
+        env!("CARGO_BIN_EXE_vowp-daemon"),
+        env!("CARGO_BIN_EXE_stackspirit-daemon"),
+    ] {
+        let fixture = BoardFixture::new();
+        let (mut child, line, address) = spawn_daemon_binary(binary, &fixture);
+        assert!(address.ip().is_loopback(), "{binary}: {line}");
+        let response = get(address, "/api/v1/board");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(response.status, 200, "{binary}: {}", response.body);
+        let board: Value = serde_json::from_str(&response.body).expect("board JSON");
+        assert!(board.is_object(), "{binary}: the board is a JSON object");
+    }
+}

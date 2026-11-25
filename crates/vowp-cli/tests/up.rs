@@ -960,6 +960,8 @@ impl Drop for SupervisorProcess {
 /// own temporary directory. The stderr line deliberately contains the token and home path
 /// so the supervisor's forwarder is tested for redaction.
 struct FakeDaemon {
+    /// The override variable that points `vowp up` at the script.
+    bin_var: &'static str,
     _tools: tempfile::TempDir,
     script: PathBuf,
     args: PathBuf,
@@ -971,10 +973,21 @@ struct FakeDaemon {
 impl FakeDaemon {
     /// Writes the fake daemon script and its recording paths.
     fn new() -> Self {
+        Self::named("vowp-daemon", "VOWP_DAEMON_BIN", "vowp-daemon")
+    }
+
+    /// Writes a fake `stackspirit-daemon` that prints the `stackspirit-daemon:` startup line and
+    /// is selected through `STACKSPIRIT_DAEMON_BIN`.
+    fn stackspirit() -> Self {
+        Self::named("stackspirit-daemon", "STACKSPIRIT_DAEMON_BIN", "stackspirit-daemon")
+    }
+
+    /// Writes the fake script as `file_name`, selected by `bin_var`, printing `prefix:` first.
+    fn named(file_name: &str, bin_var: &'static str, prefix: &str) -> Self {
         use std::os::unix::fs::PermissionsExt;
 
         let tools = tempfile::tempdir().expect("fake daemon tools");
-        let script = tools.path().join("vowp-daemon");
+        let script = tools.path().join(file_name);
         let args = tools.path().join("daemon.args");
         let token = tools.path().join("daemon.token");
         let pid = tools.path().join("daemon.pid");
@@ -985,7 +998,7 @@ printf '%s|%s' "${STACKSPIRIT_HOME-}" "${VOWP_HOME-}" > "$FAKE_DAEMON_ARGS.env"
 printf '%s' "${VOWP_API_TOKEN-}" > "$FAKE_DAEMON_TOKEN"
 printf '%s\n' "$$" > "$FAKE_DAEMON_PID"
 printf '%s\n' "fake-daemon stderr: home=$FAKE_DAEMON_HOME token=${VOWP_API_TOKEN-}" >&2
-printf '%s\n' "vowp-daemon: listening on http://127.0.0.1:54321"
+printf '%s\n' "DAEMON_PREFIX: listening on http://127.0.0.1:54321"
 trap 'kill "$child" 2>/dev/null; printf stopped > "$FAKE_DAEMON_STOPPED"; exit 0' TERM INT
 while :; do
   sleep 0.2 &
@@ -993,9 +1006,11 @@ while :; do
   wait "$child"
 done
 "#;
+        let body = body.replace("DAEMON_PREFIX", prefix);
         std::fs::write(&script, body).expect("fake daemon script");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod daemon");
         Self {
+            bin_var,
             _tools: tools,
             script,
             args,
@@ -1008,7 +1023,7 @@ done
     /// Returns the environment that points `vowp up` at this fake daemon.
     fn envs(&self, token: &str, home: &Path) -> Vec<(&'static str, String)> {
         vec![
-            ("VOWP_DAEMON_BIN", self.script.display().to_string()),
+            (self.bin_var, self.script.display().to_string()),
             ("FAKE_DAEMON_ARGS", self.args.display().to_string()),
             ("FAKE_DAEMON_TOKEN", self.token.display().to_string()),
             ("FAKE_DAEMON_PID", self.pid.display().to_string()),
@@ -1793,6 +1808,30 @@ fn up_exports_both_home_names_with_one_value_to_the_daemon_child() {
         std::fs::read_to_string(&recorded).expect("recorded env"),
         format!("{home}|{home}"),
         "the daemon child must see STACKSPIRIT_HOME and VOWP_HOME with the supervisor's home"
+    );
+    kill_signal(supervisor.pid(), "TERM");
+    supervisor
+        .wait_for_exit(Duration::from_secs(15))
+        .expect("SIGTERM must stop the supervisor");
+}
+
+#[test]
+fn up_starts_the_stackspirit_daemon_and_accepts_its_startup_prefix() {
+    let env = common::TestEnv::new();
+    let fake = FakeDaemon::stackspirit();
+    assert_eq!(fake.bin_var, "STACKSPIRIT_DAEMON_BIN");
+    let mut supervisor = SupervisorProcess::spawn_with(
+        env.home_path(),
+        env.project_path(),
+        &fake.envs("test-token", env.home_path()),
+    );
+    let daemon_pid = wait_for_fake_daemon(&fake, &supervisor);
+    assert!(daemon_pid > 0);
+    assert!(
+        eventually(|| supervisor.stdout().contains("web window: http://127.0.0.1:54321/")),
+        "a `stackspirit-daemon:` startup line must surface the window; stdout:\n{}\nstderr:\n{}",
+        supervisor.stdout(),
+        supervisor.stderr()
     );
     kill_signal(supervisor.pid(), "TERM");
     supervisor

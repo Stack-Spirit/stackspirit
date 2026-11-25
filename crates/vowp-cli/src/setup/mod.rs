@@ -528,16 +528,14 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
         idempotent: true,
     });
 
-    let mut service_commands = vec![transit(vec![
-        "sh".to_owned(),
-        "-c".to_owned(),
-        "umask 077; mkdir -p \"$HOME/.config/systemd/user\" && cat > \"$HOME/.config/systemd/user/vowp.service\""
-            .to_owned(),
-    ])];
+    // A fresh host gets `stackspirit.service`; `setup home` instead updates an existing
+    // `vowp.service` in place (and refuses when both exist), by reading the home's unit files.
+    let unit = commands::STACKSPIRIT_UNIT_NAME;
+    let mut service_commands = vec![transit(commands::write_unit_argv(unit))];
     service_commands.push(transit(commands::systemctl_argv("daemon-reload")));
-    service_commands.push(transit(commands::systemctl_argv("is-enabled vowp.service")));
-    service_commands.push(transit(commands::systemctl_argv("is-active vowp.service")));
-    service_commands.push(transit(commands::systemctl_argv("enable --now vowp.service")));
+    service_commands.push(transit(commands::systemctl_argv(&format!("is-enabled {unit}"))));
+    service_commands.push(transit(commands::systemctl_argv(&format!("is-active {unit}"))));
+    service_commands.push(transit(commands::systemctl_argv(&format!("enable --now {unit}"))));
     service_commands.push(if effective_user == probe.user {
         vec![
             "loginctl".to_owned(),
@@ -554,9 +552,11 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
     });
     phases.push(SetupPhase {
         id: "service".to_owned(),
-        title: "Install the user systemd unit, enable linger and start it".to_owned(),
+        title:
+            "Install the user systemd unit (an existing vowp.service is updated in place), enable linger and start it"
+                .to_owned(),
         commands: service_commands,
-        files: vec![format!("{effective_home}/.config/systemd/user/vowp.service")],
+        files: vec![format!("{effective_home}/.config/systemd/user/{unit}")],
         requires: if effective_user == probe.user {
             vec!["systemd".to_owned()]
         } else {

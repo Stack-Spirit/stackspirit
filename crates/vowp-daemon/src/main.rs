@@ -14,7 +14,7 @@ use vowp_daemon::{
 };
 
 #[tokio::main]
-async fn main() -> ExitCode {
+pub async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

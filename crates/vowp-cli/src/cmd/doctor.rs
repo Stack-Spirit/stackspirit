@@ -764,19 +764,30 @@ fn provider_env_prefix(provider: &str) -> String {
 }
 
 /// Checks for the systemd user unit installed by the ops scripts.
+///
+/// The home unit is selected by existence: an existing `vowp.service` is reported as is (it
+/// keeps working), a `stackspirit.service` is reported when that is the one present, and both
+/// existing together is a warning because a host must have exactly one supervisor unit.
 fn check_systemd(checks: &mut Checks) {
     match home_dir() {
         Some(home) => {
-            let unit = home.join(".config/systemd/user/vowp.service");
-            checks.push(
-                "systemd",
-                if unit.is_file() {
-                    CheckStatus::Ok
-                } else {
-                    CheckStatus::Warn
-                },
-                format!("{}", unit.display()),
-            );
+            let directory = home.join(".config/systemd/user");
+            let legacy = directory.join("vowp.service");
+            let current = directory.join("stackspirit.service");
+            let (status, detail) = match (legacy.is_file(), current.is_file()) {
+                (true, true) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "both {} and {} exist; keep exactly one (stop and disable the other)",
+                        legacy.display(),
+                        current.display()
+                    ),
+                ),
+                (true, false) => (CheckStatus::Ok, format!("{}", legacy.display())),
+                (false, true) => (CheckStatus::Ok, format!("{}", current.display())),
+                (false, false) => (CheckStatus::Warn, format!("{}", current.display())),
+            };
+            checks.push("systemd", status, detail);
         }
         None => checks.push("systemd", CheckStatus::Warn, "HOME is not set"),
     }

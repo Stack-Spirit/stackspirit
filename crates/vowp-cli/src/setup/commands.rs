@@ -87,9 +87,25 @@ pub fn systemctl_argv(arguments: &str) -> Vec<String> {
     ]
 }
 
-/// The embedded unit is the release unit; a test keeps it identical to
-/// `scripts/vowp.service`.
-const SERVICE_UNIT: &str = include_str!("vowp.service");
+/// The embedded legacy unit; a test keeps it identical to `scripts/vowp.service`.
+pub const SERVICE_UNIT: &str = include_str!("vowp.service");
+/// The embedded StackSpirit unit; a test keeps it identical to `scripts/stackspirit.service`.
+pub const STACKSPIRIT_SERVICE_UNIT: &str = include_str!("stackspirit.service");
+/// The legacy home unit name, updated in place on an existing host.
+pub const LEGACY_UNIT_NAME: &str = "vowp.service";
+/// The home unit name a fresh host gets.
+pub const STACKSPIRIT_UNIT_NAME: &str = "stackspirit.service";
+
+/// Returns the shell command that writes a user unit named `unit_name` from stdin.
+pub fn write_unit_argv(unit_name: &str) -> Vec<String> {
+    vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!(
+            "umask 077; mkdir -p \"$HOME/.config/systemd/user\" && cat > \"$HOME/.config/systemd/user/{unit_name}\""
+        ),
+    ]
+}
 
 /// An `ssh` runner for one target.
 pub struct SshRunner {
@@ -1202,28 +1218,56 @@ impl Executor {
         Ok(None)
     }
 
+    /// Returns the StackSpirit unit text for this host.
+    ///
+    /// The unit runs `stackspirit` when that binary is installed under the per-user prefix; the
+    /// pinned release setup installs may predate it, in which case the unit runs the `vowp`
+    /// binary that is there instead of pointing at a missing file.
+    fn stackspirit_unit_text(&mut self) -> Result<String, CliError> {
+        let binary = format!("{}/.local/bin/stackspirit", self.remote_home);
+        let present = self.remote(vec!["test".to_owned(), "-x".to_owned(), binary], None)?;
+        Ok(if present.success() {
+            STACKSPIRIT_SERVICE_UNIT.to_owned()
+        } else {
+            STACKSPIRIT_SERVICE_UNIT.replace("%h/.local/bin/stackspirit up", "%h/.local/bin/vowp up")
+        })
+    }
+
     /// Phase 5: the user systemd unit, linger and start.
     fn service_phase(&mut self) -> Result<Option<SetupHandoff>, CliError> {
         self.phase = "service".to_owned();
-        let unit_path = format!("{}/.config/systemd/user/vowp.service", self.remote_home);
-        let existing = self.remote(vec!["cat".to_owned(), unit_path.clone()], None)?;
-        if !existing.success() || existing.stdout != SERVICE_UNIT {
-            let output = self.remote(
-                vec![
-                    "sh".to_owned(),
-                    "-c".to_owned(),
-                    "umask 077; mkdir -p \"$HOME/.config/systemd/user\" && cat > \"$HOME/.config/systemd/user/vowp.service\""
-                        .to_owned(),
-                ],
-                Some(SERVICE_UNIT.as_bytes()),
-            )?;
+        let legacy_path = format!("{}/.config/systemd/user/{LEGACY_UNIT_NAME}", self.remote_home);
+        let new_path = format!("{}/.config/systemd/user/{STACKSPIRIT_UNIT_NAME}", self.remote_home);
+        let legacy = self.remote(vec!["cat".to_owned(), legacy_path.clone()], None)?;
+        let fresh = self.remote(vec!["cat".to_owned(), new_path.clone()], None)?;
+        // The unit is selected by existence and never written beside an existing one.
+        let (unit_name, unit_path, expected, existing) = match (legacy.success(), fresh.success()) {
+            (true, true) => {
+                return Err(CliError::Conflict(format!(
+                    "both {legacy_path} and {new_path} exist; stop and disable the one you do not want, \
+                     remove it, then re-run setup (setup never renames a unit automatically)"
+                )));
+            }
+            (true, false) => (LEGACY_UNIT_NAME, legacy_path, SERVICE_UNIT.to_owned(), legacy),
+            (false, _) => (STACKSPIRIT_UNIT_NAME, new_path, self.stackspirit_unit_text()?, fresh),
+        };
+        if !existing.success() || existing.stdout != expected {
+            let output = self.remote(write_unit_argv(unit_name), Some(expected.as_bytes()))?;
             if !output.success() {
                 return Err(self.failed("installing the systemd unit", &output));
             }
             self.changed.push(unit_path);
-            self.check("service.unit", "ok", "installed the user systemd unit");
+            self.check(
+                "service.unit",
+                "ok",
+                format!("installed the user systemd unit {unit_name}"),
+            );
         } else {
-            self.check("service.unit", "ok", "the user systemd unit is current");
+            self.check(
+                "service.unit",
+                "ok",
+                format!("the user systemd unit {unit_name} is current"),
+            );
         }
 
         if !self.probe.tools.get("systemctl").copied().unwrap_or(false) {
@@ -1241,24 +1285,24 @@ impl Executor {
                     format!("systemctl --user daemon-reload failed: {}", reload.detail()),
                 );
             } else {
-                let enabled = self.remote(systemctl_argv("is-enabled vowp.service"), None)?;
-                let active = self.remote(systemctl_argv("is-active vowp.service"), None)?;
+                let enabled = self.remote(systemctl_argv(&format!("is-enabled {unit_name}")), None)?;
+                let active = self.remote(systemctl_argv(&format!("is-active {unit_name}")), None)?;
                 if !enabled.success() || !active.success() {
                     // `is-enabled` is not enough: after `vowp down` the unit stays enabled
                     // but inactive, so a rerun must start it again.
-                    let started = self.remote(systemctl_argv("enable --now vowp.service"), None)?;
+                    let started = self.remote(systemctl_argv(&format!("enable --now {unit_name}")), None)?;
                     if started.success() {
-                        self.changed.push("systemd:vowp.service".to_owned());
-                        self.check("service.enabled", "ok", "enabled and started vowp.service");
+                        self.changed.push(format!("systemd:{unit_name}"));
+                        self.check("service.enabled", "ok", format!("enabled and started {unit_name}"));
                     } else {
                         self.check(
                             "service.enabled",
                             "warn",
-                            format!("could not enable vowp.service: {}", started.detail()),
+                            format!("could not enable {unit_name}: {}", started.detail()),
                         );
                     }
                 } else {
-                    self.check("service.enabled", "ok", "vowp.service is enabled and active");
+                    self.check("service.enabled", "ok", format!("{unit_name} is enabled and active"));
                 }
             }
         }

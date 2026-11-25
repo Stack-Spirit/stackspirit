@@ -523,3 +523,48 @@ fn agent_doctor_warns_when_a_surface_token_expires_within_seven_days() {
         "doctor never prints a token: {stdout}"
     );
 }
+
+/// Runs doctor and returns the `systemd` check as `(status, detail)`.
+fn systemd_check(env: &common::TestEnv) -> (String, String) {
+    let bin = fake_bin();
+    let output = run_doctor(env, bin.path());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
+    let check = find_check(&report, "systemd");
+    (
+        check["status"].as_str().unwrap_or_default().to_owned(),
+        check["detail"].as_str().unwrap_or_default().to_owned(),
+    )
+}
+
+#[test]
+fn doctor_reports_the_home_unit_that_exists_and_flags_a_second_one() {
+    let env = common::TestEnv::new();
+    let dir = env.home_path().join(".config/systemd/user");
+
+    // Fresh host: the StackSpirit unit is the one expected, and it is missing (a warning).
+    let (status, detail) = systemd_check(&env);
+    assert_eq!(status, "warn", "{detail}");
+    assert!(detail.ends_with("stackspirit.service"), "{detail}");
+
+    // An existing legacy unit keeps working and is the one reported.
+    std::fs::create_dir_all(&dir).expect("unit dir");
+    std::fs::write(dir.join("vowp.service"), "[Service]\n").expect("legacy unit");
+    let (status, detail) = systemd_check(&env);
+    assert_eq!(status, "ok", "{detail}");
+    assert!(detail.ends_with("vowp.service"), "{detail}");
+
+    // Both units on one host is a conflict doctor names.
+    std::fs::write(dir.join("stackspirit.service"), "[Service]\n").expect("new unit");
+    let (status, detail) = systemd_check(&env);
+    assert_eq!(status, "warn", "{detail}");
+    assert!(
+        detail.contains("both") && detail.contains("keep exactly one"),
+        "{detail}"
+    );
+
+    // Only the StackSpirit unit: ok.
+    std::fs::remove_file(dir.join("vowp.service")).expect("remove legacy");
+    let (status, detail) = systemd_check(&env);
+    assert_eq!(status, "ok", "{detail}");
+    assert!(detail.ends_with("stackspirit.service"), "{detail}");
+}
