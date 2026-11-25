@@ -13,6 +13,15 @@
 # THIRD-PARTY-LICENSES.md. The script refuses a missing or empty input and
 # prints the sorted tar listing.
 #
+# Private StackSpirit archive (never the public release):
+#   scripts/release/package-archive.sh --product stackspirit \
+#     --version 0.5.1-dev --target x86_64-unknown-linux-gnu \
+#     --stackspirit target/<t>/release/stackspirit --vowp target/<t>/release/vowp \
+#     --stackspirit-daemon target/<t>/release/stackspirit-daemon \
+#     --vowp-daemon target/<t>/release/vowp-daemon --dist dist
+# builds dist/stackspirit-<version>-<target>.tar.gz with all four binaries and
+# refuses to build it when any CLI or daemon binary is missing or empty.
+#
 # Exit status: 0 on success, 2 on a usage error, 1 on a packaging failure.
 
 set -euo pipefail
@@ -20,7 +29,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
 usage() {
-  sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 fail() {
@@ -32,6 +41,11 @@ version=
 target=
 binary=
 dist=dist
+product=vowp
+stackspirit_bin=
+vowp_bin=
+stackspirit_daemon_bin=
+vowp_daemon_bin=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -55,6 +69,31 @@ while [ "$#" -gt 0 ]; do
       dist=$2
       shift 2
       ;;
+    --product)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      product=$2
+      shift 2
+      ;;
+    --stackspirit)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      stackspirit_bin=$2
+      shift 2
+      ;;
+    --vowp)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      vowp_bin=$2
+      shift 2
+      ;;
+    --stackspirit-daemon)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      stackspirit_daemon_bin=$2
+      shift 2
+      ;;
+    --vowp-daemon)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      vowp_daemon_bin=$2
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -69,7 +108,13 @@ done
 
 [ -n "$version" ] || { usage >&2; exit 2; }
 [ -n "$target" ] || { usage >&2; exit 2; }
-[ -n "$binary" ] || { usage >&2; exit 2; }
+case "$product" in
+  vowp) [ -n "$binary" ] || { usage >&2; exit 2; } ;;
+  stackspirit)
+    [ -z "$binary" ] || fail "--binary is the public VOWP input; use --stackspirit, --vowp, --stackspirit-daemon and --vowp-daemon"
+    ;;
+  *) fail "unknown product: $product (use vowp or stackspirit)" ;;
+esac
 case "$version" in
   *[!0-9A-Za-z.+-]*) fail "invalid version: $version" ;;
 esac
@@ -77,14 +122,30 @@ case "$target" in
   *[!0-9A-Za-z_.-]*) fail "invalid target: $target" ;;
 esac
 
-[ -f "$binary" ] || fail "binary is missing: $binary"
-[ -s "$binary" ] || fail "binary is empty: $binary"
+# The binaries this product must carry: "<archive member>=<input path>".
+if [ "$product" = stackspirit ]; then
+  members=(
+    "stackspirit=$stackspirit_bin"
+    "vowp=$vowp_bin"
+    "stackspirit-daemon=$stackspirit_daemon_bin"
+    "vowp-daemon=$vowp_daemon_bin"
+  )
+else
+  members=("vowp=$binary")
+fi
+for entry in "${members[@]}"; do
+  member=${entry%%=*}
+  path=${entry#*=}
+  [ -n "$path" ] || fail "the $member binary was not given"
+  [ -f "$path" ] || fail "$member binary is missing: $path"
+  [ -s "$path" ] || fail "$member binary is empty: $path"
+done
 for file in LICENSE README.md THIRD-PARTY-LICENSES.md; do
   [ -f "$ROOT/$file" ] || fail "$file is missing from $ROOT"
   [ -s "$ROOT/$file" ] || fail "$file is empty in $ROOT"
 done
 
-name="vowp-${version}-${target}"
+name="${product}-${version}-${target}"
 staging="$dist/$name"
 archive="$dist/$name.tar.gz"
 
@@ -97,11 +158,17 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-cp "$binary" "$staging/vowp"
-chmod 0755 "$staging/vowp"
+required=()
+for entry in "${members[@]}"; do
+  member=${entry%%=*}
+  cp "${entry#*=}" "$staging/$member"
+  chmod 0755 "$staging/$member"
+  required+=("$member")
+done
 cp "$ROOT/LICENSE" "$ROOT/README.md" "$ROOT/THIRD-PARTY-LICENSES.md" "$staging/"
+required+=(LICENSE README.md THIRD-PARTY-LICENSES.md)
 
-for file in vowp LICENSE README.md THIRD-PARTY-LICENSES.md; do
+for file in "${required[@]}"; do
   [ -s "$staging/$file" ] || fail "$file is missing or empty in $staging"
 done
 
@@ -115,4 +182,9 @@ else
   (cd "$dist" && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
 fi
 
-(cd "$dist" && tar -tzf "${name}.tar.gz" | sort)
+# Verify the archive itself, not only the staging directory.
+listing=$(cd "$dist" && tar -tzf "${name}.tar.gz" | sort)
+for file in "${required[@]}"; do
+  printf '%s\n' "$listing" | grep -Fxq "$name/$file" || fail "archive is missing $name/$file"
+done
+printf '%s\n' "$listing"

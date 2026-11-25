@@ -72,3 +72,20 @@ there; do not commit the unfilled template.
   `LICENSE` under the formula's `doc` directory.
 - Runs `vowp --version` as the formula test.
 - Requires no build tools; the archive is a prebuilt binary.
+
+## Private StackSpirit formula
+
+`stackspirit.rb` is the private counterpart: formula `stackspirit` (never
+`stackspirit-engine`), archives `stackspirit-<version>-<target>.tar.gz` from
+the private `Stack-Spirit/stackspirit-engine` releases, and it installs
+`stackspirit`, `vowp`, `stackspirit-daemon` and `vowp-daemon`. Its test runs
+both `stackspirit --version` and `vowp --version`. Nothing is published or
+tapped from this repository.
+
+```sh
+STACKSPIRIT_RELEASE_BASE_URL=<private release base url> \
+  packaging/homebrew/update.sh --product stackspirit 0.5.1-dev
+packaging/homebrew/update.sh --product stackspirit 0.5.1-dev /path/to/SHA256SUMS /tmp/stackspirit.rb
+```
+
+The public `vowp.rb` and its update command are unchanged.

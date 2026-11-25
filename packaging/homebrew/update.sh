@@ -1,7 +1,11 @@
 #!/bin/sh
 # update.sh — fill packaging/homebrew/vowp.rb from a release SHA256SUMS file.
 #
-# Usage: update.sh <version> [SHA256SUMS] [formula]
+# Usage: update.sh [--product vowp|stackspirit] <version> [SHA256SUMS] [formula]
+#
+# --product stackspirit fills the private stackspirit.rb from the private
+# stackspirit-<version>-<target>.tar.gz hashes. There is no public default URL
+# for it: pass a SHA256SUMS path or set STACKSPIRIT_RELEASE_BASE_URL.
 #
 # With no SHA256SUMS path, the file is downloaded from
 # https://github.com/syver777/vowp/releases/download/v<version>/SHA256SUMS
@@ -13,13 +17,14 @@ set -eu
 PROGRAM=update.sh
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 DEFAULT_RELEASE_BASE_URL=https://github.com/syver777/vowp/releases/download
-FORMULA=$SCRIPT_DIR/vowp.rb
+FORMULA=
+PRODUCT=vowp
 CHECKSUMS=
 TMP_DIR=
 
 usage() {
     cat <<'EOF'
-Usage: update.sh <version> [SHA256SUMS] [formula]
+Usage: update.sh [--product vowp|stackspirit] <version> [SHA256SUMS] [formula]
 
 Fill the Homebrew formula with the version and the four archive SHA256 hashes
 from a release SHA256SUMS file. When SHA256SUMS is omitted it is downloaded
@@ -27,7 +32,11 @@ from the GitHub release for <version>. The formula defaults to vowp.rb next to
 this script.
 
 Environment:
-  VOWP_RELEASE_BASE_URL   release download base URL
+  VOWP_RELEASE_BASE_URL          release download base URL (vowp)
+  STACKSPIRIT_RELEASE_BASE_URL   private release base URL (stackspirit; required
+                                 when SHA256SUMS is not given)
+
+With --product stackspirit the formula defaults to stackspirit.rb.
 EOF
 }
 
@@ -45,6 +54,15 @@ case "${1:-}" in
         usage
         exit 0
         ;;
+    --product)
+        [ "$#" -ge 2 ] || die "--product needs vowp or stackspirit"
+        PRODUCT=$2
+        shift 2
+        ;;
+esac
+case "$PRODUCT" in
+    vowp|stackspirit) ;;
+    *) die "unknown product: $PRODUCT (use vowp or stackspirit)" ;;
 esac
 
 [ "$#" -ge 1 ] || {
@@ -59,6 +77,9 @@ if [ "$#" -ge 3 ]; then
     FORMULA=$3
 fi
 [ "$#" -le 3 ] || die "too many arguments (try --help)"
+if [ -z "$FORMULA" ]; then
+    FORMULA=$SCRIPT_DIR/$PRODUCT.rb
+fi
 
 case "$VERSION" in
     ''|*[!0-9A-Za-z.+-]*)
@@ -70,7 +91,12 @@ if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z
 fi
 
 if [ -z "$CHECKSUMS" ]; then
-    base=${VOWP_RELEASE_BASE_URL:-$DEFAULT_RELEASE_BASE_URL}
+    if [ "$PRODUCT" = stackspirit ]; then
+        base=${STACKSPIRIT_RELEASE_BASE_URL:-}
+        [ -n "$base" ] || die "set STACKSPIRIT_RELEASE_BASE_URL or pass a SHA256SUMS path; the private release has no public URL"
+    else
+        base=${VOWP_RELEASE_BASE_URL:-$DEFAULT_RELEASE_BASE_URL}
+    fi
     base=${base%/}
     case "$base" in
         https://*) curl_proto='=https' ;;
@@ -113,7 +139,7 @@ hash_for() {
 
 checked_hash() {
     target=$1
-    archive="vowp-${VERSION}-${target}.tar.gz"
+    archive="${PRODUCT}-${VERSION}-${target}.tar.gz"
     hash=$(hash_for "$archive") || die "no SHA256 for $archive in $CHECKSUMS"
     case "$hash" in
         ''|*[!0-9a-fA-F]*) die "invalid SHA256 for $archive" ;;
@@ -182,7 +208,7 @@ if ! awk \
     die "formula must have one version line and four platform sha256 lines: $FORMULA"
 fi
 
-if grep -Eq '__VOWP_|__SHA256_' "$out"; then
+if grep -Eq '__VOWP_|__STACKSPIRIT_|__SHA256_' "$out"; then
     die "formula still contains placeholders after the update"
 fi
 if ! grep -q "^[[:space:]]*version \"$VERSION\"[[:space:]]*$" "$out"; then

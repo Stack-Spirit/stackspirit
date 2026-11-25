@@ -3,9 +3,10 @@
 #
 # L1 step 13 rewrites `$VOWP_HOME/heartbeat` (unix seconds, ASCII) every tick.
 # This script runs from cron every five minutes, and restarts `vowp.service`
-# through the user systemd manager, or starts `vowp up --detach` when systemd
-# is unavailable. It only restarts the supervisor; job state is reconciled by
-# the next L1 tick.
+# (or `stackspirit.service` on a fresh StackSpirit host) through the user systemd
+# manager, or starts `vowp up --detach` (`stackspirit up --detach` when only the
+# new name is installed) when systemd is unavailable. It only restarts the
+# supervisor; job state is reconciled by the next L1 tick.
 #
 # Spec: docs/design/loops.md §10 (L8 — watchdog); heartbeat layout:
 # docs/design/architecture.md §3. Keep this script in sync with
@@ -13,7 +14,13 @@
 
 set -eu
 
-PROGRAM=vowp-watchdog.sh
+# The installer copies this script as vowp-watchdog.sh (existing hosts) or
+# stackspirit-watchdog.sh (fresh StackSpirit hosts); report under that name.
+PROGRAM=${0##*/}
+case "$PROGRAM" in
+    vowp-watchdog.sh|stackspirit-watchdog.sh) ;;
+    *) PROGRAM=vowp-watchdog.sh ;;
+esac
 MAX_AGE_SECS=180
 DRY_RUN=0
 
@@ -21,7 +28,8 @@ usage() {
     cat <<'EOF'
 Usage: vowp-watchdog.sh [--dry-run]
 
-Checks the supervisor heartbeat in $VOWP_HOME/heartbeat (default ~/.vowp)
+Checks the supervisor heartbeat in $VOWP_HOME/heartbeat ($STACKSPIRIT_HOME when
+VOWP_HOME is unset; default ~/.vowp)
 and restarts the supervisor when it is missing, unparsable, or older than
 180 seconds. --dry-run prints what would happen without changing anything.
 EOF
@@ -63,7 +71,17 @@ if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
     fi
 fi
 
-VOWP_HOME=${VOWP_HOME:-"$HOME/.vowp"}
+# Both home variable names point at the same directory for the supervisor.
+VOWP_HOME=${VOWP_HOME:-${STACKSPIRIT_HOME:-"$HOME/.vowp"}}
+STACKSPIRIT_HOME=$VOWP_HOME
+export VOWP_HOME STACKSPIRIT_HOME
+
+# The supervisor unit is chosen by existence, like the installer: an existing
+# vowp.service wins, then stackspirit.service, else the legacy name.
+UNIT=vowp.service
+if [ ! -e "$HOME/.config/systemd/user/vowp.service" ] && [ -e "$HOME/.config/systemd/user/stackspirit.service" ]; then
+    UNIT=stackspirit.service
+fi
 HEARTBEAT=$VOWP_HOME/heartbeat
 WATCHDOG_LOG=$VOWP_HOME/logs/watchdog.log
 
@@ -115,7 +133,7 @@ fi
 if [ "$DRY_RUN" -eq 1 ]; then
     printf '%s: dry-run: %s; would restart the supervisor\n' "$PROGRAM" "$reason"
     if command -v systemctl >/dev/null 2>&1; then
-        printf '%s: would run: systemctl --user restart vowp.service\n' "$PROGRAM"
+        printf '%s: would run: systemctl --user restart %s\n' "$PROGRAM" "$UNIT"
     else
         printf '%s: would run: vowp up --detach\n' "$PROGRAM"
     fi
@@ -132,26 +150,32 @@ log_event() {
     fi
 }
 
+# The CLI for the fallback: the legacy name when present, else the new one.
+CLI=vowp
+if ! command -v vowp >/dev/null 2>&1 && command -v stackspirit >/dev/null 2>&1; then
+    CLI=stackspirit
+fi
+
 restarted=0
 if command -v systemctl >/dev/null 2>&1; then
-    if systemctl --user restart vowp.service; then
+    if systemctl --user restart "$UNIT"; then
         restarted=1
-        log_event "$reason; restarted vowp.service with systemctl --user"
+        log_event "$reason; restarted $UNIT with systemctl --user"
     else
-        log_event "$reason; systemctl --user restart vowp.service failed; trying vowp up --detach"
+        log_event "$reason; systemctl --user restart $UNIT failed; trying $CLI up --detach"
     fi
 fi
 
 if [ "$restarted" -eq 0 ]; then
-    if command -v vowp >/dev/null 2>&1; then
-        if vowp up --detach; then
+    if command -v "$CLI" >/dev/null 2>&1; then
+        if "$CLI" up --detach; then
             restarted=1
-            log_event "$reason; started the supervisor with 'vowp up --detach'"
+            log_event "$reason; started the supervisor with '$CLI up --detach'"
         else
-            log_event "$reason; 'vowp up --detach' failed"
+            log_event "$reason; '$CLI up --detach' failed"
         fi
     else
-        log_event "$reason; no systemd restart and no vowp binary on PATH"
+        log_event "$reason; no systemd restart and no vowp or stackspirit binary on PATH"
     fi
 fi
 
