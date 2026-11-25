@@ -756,11 +756,10 @@ fn link_with_a_missing_explicit_home_is_an_error_and_writes_nothing() {
     ] {
         let output = run(dir.path(), &[env], &["home", "migrate", "--link", "--dry-run"]);
         assert!(!output.status.success(), "{env:?} must fail");
-        assert!(
-            text(&output.stderr).contains("does not exist"),
-            "{}",
-            text(&output.stderr)
-        );
+        let stderr = text(&output.stderr);
+        assert!(stderr.contains("does not exist"), "{stderr}");
+        assert!(stderr.contains(env.0), "must name the variable: {stderr}");
+        assert!(stderr.contains(env.1), "must name the path: {stderr}");
     }
     let flagged = run(
         dir.path(),
