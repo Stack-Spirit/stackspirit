@@ -25,10 +25,49 @@ VOWP_HOME_DIR=$HOME_DIR/.vowp
 SRC_BIN=$TMP/src/vowp
 
 mkdir -p "$FAKEBIN" "$FAKEDATE" "$TMP/logs" "$HOME_DIR" "$TMP/src"
-for fake in systemctl crontab loginctl vowp claude opencode curl; do
+for fake in systemctl crontab loginctl vowp claude opencode; do
     cp "$FAKES_DIR/$fake" "$FAKEBIN/$fake"
     chmod 0755 "$FAKEBIN/$fake"
 done
+# The fake curl is written here (not kept under fakes/) so it stays with this runner.
+cat > "$FAKEBIN/curl" <<'FAKE_CURL_EOF'
+#!/bin/sh
+# Fake `curl` for scripts/tests/run.sh. Never touches the network: a download
+# of https://host/path/<name> is served from $FAKE_CURL_DIR/<name>, and a name
+# that is not there fails like a 404. Every URL is logged in $FAKE_CURL_LOG.
+
+set -eu
+
+out=
+url=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o)
+            out=$2
+            shift 2
+            ;;
+        --retry|--connect-timeout|--proto|--proto-redir|--max-time|-w)
+            shift 2
+            ;;
+        -*)
+            shift
+            ;;
+        *)
+            url=$1
+            shift
+            ;;
+    esac
+done
+
+printf '%s\n' "$url" >> "${FAKE_CURL_LOG:?FAKE_CURL_LOG is not set}"
+file=${FAKE_CURL_DIR:?FAKE_CURL_DIR is not set}/${url##*/}
+if [ ! -f "$file" ]; then
+    printf 'curl: (22) The requested URL returned error: 404\n' >&2
+    exit 22
+fi
+cp "$file" "${out:?fake curl needs -o}"
+FAKE_CURL_EOF
+chmod 0755 "$FAKEBIN/curl"
 cp "$FAKES_DIR/date" "$FAKEDATE/date"
 chmod 0755 "$FAKEDATE/date"
 cat > "$SRC_BIN" <<'EOF'
