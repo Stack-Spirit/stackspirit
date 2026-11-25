@@ -822,3 +822,47 @@ fn rename_unit_never_touches_a_foreign_legacy_unit() {
     assert!(legacy.is_file());
     assert!(manager.calls().is_empty());
 }
+
+#[test]
+fn rename_unit_resolves_a_both_unit_host() {
+    let (_guard, home, state) = private_home();
+    let legacy = home.join(".config/systemd/user/vowp-agent.service");
+    let new = home.join(".config/systemd/user/stackspirit-agent.service");
+    write_generated(&legacy);
+    write_generated(&new);
+    let spec = test_spec(ServicePlatform::SystemdUser, &home, &state, None).with_flavor(ServiceFlavor::StackSpirit);
+    let manager = FakeManager::available();
+    let report = install(
+        &spec,
+        &InstallOptions {
+            rename_unit: true,
+            now: true,
+            ..InstallOptions::default()
+        },
+        &manager,
+    )
+    .expect("rename resolves the conflict");
+    assert!(report.installed);
+    assert!(!legacy.exists(), "the legacy unit is removed");
+    assert!(new.is_file());
+    let calls: Vec<String> = manager.calls().iter().map(|call| call.join(" ")).collect();
+    assert_eq!(
+        calls.first().map(String::as_str),
+        Some("systemctl --user disable --now vowp-agent.service")
+    );
+    assert_eq!(
+        calls.last().map(String::as_str),
+        Some("systemctl --user enable --now stackspirit-agent.service")
+    );
+}
+
+#[test]
+fn a_fresh_stackspirit_unit_is_described_as_stackspirit() {
+    let (_guard, home, state) = private_home();
+    let text = test_spec(ServicePlatform::SystemdUser, &home, &state, None)
+        .with_flavor(ServiceFlavor::StackSpirit)
+        .render()
+        .expect("render");
+    assert!(text.contains("Description=StackSpirit local agent"), "{text}");
+    assert!(!text.contains("Description=VOWP"), "{text}");
+}

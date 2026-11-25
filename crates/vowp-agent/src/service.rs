@@ -405,10 +405,14 @@ impl ServiceSpec {
         let binary = systemd_quote(&self.binary.display().to_string());
         let state = systemd_quote(&self.state_dir.display().to_string());
         let path = systemd_quote(&self.path_env);
+        let description = match self.flavor {
+            ServiceFlavor::Legacy => "VOWP local agent",
+            ServiceFlavor::StackSpirit => "StackSpirit local agent",
+        };
         format!(
             r#"# {SERVICE_MARKER}
 [Unit]
-Description=VOWP local agent
+Description={description}
 After=network-online.target
 Wants=network-online.target
 
@@ -666,12 +670,6 @@ pub fn install(
         let existing = fs::read_to_string(&other_path).unwrap_or_default();
         if !existing.contains(SERVICE_MARKER) {
             return Err(ServiceError::ForeignUnit { path: other_path });
-        }
-        if unit_path.exists() {
-            return Err(ServiceError::UnitConflict {
-                legacy: other_path,
-                stackspirit: unit_path,
-            });
         }
         if !options.print_only && !options.now {
             return Err(ServiceError::Rename(
