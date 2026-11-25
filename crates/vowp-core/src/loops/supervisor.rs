@@ -513,6 +513,17 @@ impl Supervisor {
         }
     }
 
+    /// Applies `NeedsSatisfied` only to a job that is still `Pending`.
+    ///
+    /// A rediscovered child (for example a verify job reused after a retry) can already be
+    /// terminal or running; the event is invalid there and would abort the whole tick.
+    fn start_if_pending(&mut self, id: &JobId) -> Result<(), CoreError> {
+        if self.store.require_job(id)?.state == JobState::Pending {
+            self.apply_simple(id, JobEvent::NeedsSatisfied, None)?;
+        }
+        Ok(())
+    }
+
     /// Applies one job event with no findings and optional note.
     pub(crate) fn apply_simple(&mut self, job: &JobId, event: JobEvent, note: Option<String>) -> Result<(), CoreError> {
         self.apply_with(job, event, None, Vec::new(), note).map(|_| ())
@@ -1170,7 +1181,7 @@ impl Supervisor {
                     let evidence = self.store.gate_results_for(&original.id, original.attempts)?;
                     let diff = self.diff_summary(&original);
                     let verify = l3_verify::create_verify_job(&self.store, &self.deps, &original, &evidence, &diff)?;
-                    self.apply_simple(&verify.id, JobEvent::NeedsSatisfied, None)?;
+                    self.start_if_pending(&verify.id)?;
                     handled += 1;
                 }
                 Some(verify) if verify.state == JobState::Done => {
@@ -1207,7 +1218,11 @@ impl Supervisor {
 
     /// Retries one verify job with an unusable verdict, then parks the original (T37).
     pub(crate) fn retry_or_park_verify(&mut self, original: &Job, error: &CoreError) -> Result<(), CoreError> {
-        let retry_id = JobId::parse(&format!("{}-verify-{}-r1", original.id, original.attempts))?;
+        let base_id = match self.find_verify_job(original)? {
+            Some(latest) => latest.id.as_str().trim_end_matches("-r1").to_owned(),
+            None => format!("{}-verify-{}", original.id, original.attempts),
+        };
+        let retry_id = JobId::parse(&format!("{base_id}-r1"))?;
         if let Some(retry) = self.store.job(&retry_id)? {
             // A restart may find the retry already created. A pending retry only needs to be
             // made ready; a finished retry means the single retry was already spent.
@@ -1223,7 +1238,8 @@ impl Supervisor {
         if self.verify_retries.insert(key) {
             let evidence = self.store.gate_results_for(&original.id, original.attempts)?;
             let diff = self.diff_summary(original);
-            let retry = l3_verify::create_verify_retry_job(&self.store, &self.deps, original, &evidence, &diff)?;
+            let retry =
+                l3_verify::create_verify_retry_job(&self.store, &self.deps, original, &base_id, &evidence, &diff)?;
             self.deps.log.log(
                 Level::Warn,
                 "l3",
@@ -1721,7 +1737,7 @@ impl Supervisor {
         self.repeat_guards.remove(&job.id);
         reconcile::close_job_window(&self.deps, &self.project, &job.id);
         let decision = dispatch::create_decision_job(&self.deps, &self.store, job)?;
-        self.apply_with(&decision.id, JobEvent::NeedsSatisfied, None, Vec::new(), None)?;
+        self.start_if_pending(&decision.id)?;
         let failed = self.store.require_job(&job.id)?;
         self.open_job_inbox(&failed, InboxKind::Decision)?;
         self.repeat_tripped = Some(job.id.to_string());
@@ -1930,7 +1946,7 @@ impl Supervisor {
                 let evidence = self.store.gate_results_for(&job.id, job.attempts)?;
                 let diff = self.diff_summary(&job);
                 let verify = l3_verify::create_verify_job(&self.store, &self.deps, &job, &evidence, &diff)?;
-                self.apply_with(&verify.id, JobEvent::NeedsSatisfied, None, Vec::new(), None)?;
+                self.start_if_pending(&verify.id)?;
             }
             Effect::CreateFixJob { kind } => {
                 let job = self.store.require_job(job_id)?;
@@ -1945,7 +1961,7 @@ impl Supervisor {
             Effect::CreateDecisionJob => {
                 let job = self.store.require_job(job_id)?;
                 let decision = dispatch::create_decision_job(&self.deps, &self.store, &job)?;
-                self.apply_with(&decision.id, JobEvent::NeedsSatisfied, None, Vec::new(), None)?;
+                self.start_if_pending(&decision.id)?;
             }
             Effect::CleanupWorktree => {
                 let job = self.store.require_job(job_id)?;
@@ -2338,11 +2354,10 @@ impl Supervisor {
             kind: Some(JobKind::Verify),
             ..JobFilter::default()
         })?;
-        let suffix = format!("-verify-{}", original.attempts);
-        let retry_suffix = format!("{suffix}-r1");
+        let prefix = format!("{}-verify-{}", original.id, original.attempts);
         let mut matches = Vec::new();
         for job in jobs {
-            if !job.id.as_str().ends_with(&suffix) && !job.id.as_str().ends_with(&retry_suffix) {
+            if !l3_verify::is_verify_id_for(job.id.as_str(), &prefix) {
                 continue;
             }
             for edge in self.store.edges_of(&job.id)? {

@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use vowp_graph::JobEvent;
 use vowp_protocol::{
-    Edge, EdgeKind, Evidence, Gate, GateResult, Job, JobId, JobKind, NewJob, Report, ReportGate, ReviewGate, Role,
-    Verdict,
+    Edge, EdgeKind, Evidence, Gate, GateResult, Job, JobId, JobKind, JobState, NewJob, Report, ReportGate, ReviewGate,
+    Role, Verdict,
 };
 use vowp_store::Store;
 
@@ -18,6 +18,12 @@ use crate::CoreError;
 use crate::deps::Deps;
 
 /// Builds and inserts the verify job for `original`.
+///
+/// Id scheme: `{job}-verify-{attempts}` for the first verify of an attempt. A retried job
+/// resets `attempts`, so that id can already exist from an earlier round. A non-terminal
+/// existing job is reused (a restarted tick); a terminal one is never reused, because its
+/// verdict belongs to the earlier round. The new verify takes the next free generation id
+/// `{job}-verify-{attempts}-g{n}` (n = 1, 2, ...).
 pub(crate) fn create_verify_job(
     store: &Store,
     deps: &Deps,
@@ -25,30 +31,58 @@ pub(crate) fn create_verify_job(
     evidence: &[GateResult],
     diff_summary: &str,
 ) -> Result<Job, CoreError> {
-    create_verify_job_with_suffix(store, deps, original, evidence, diff_summary, "")
+    let base = format!("{}-verify-{}", original.id, original.attempts);
+    let mut candidate = base.clone();
+    let mut generation = 0u32;
+    while let Some(existing) = store.job(&JobId::parse(&candidate)?)? {
+        if !is_terminal(&existing) {
+            return Ok(existing);
+        }
+        generation += 1;
+        candidate = format!("{base}-g{generation}");
+    }
+    create_verify_job_with_id(store, deps, original, evidence, diff_summary, &candidate)
 }
 
-/// Creates the single retry of a verify job whose report had no usable verdict (T37).
+/// Creates the single retry of the verify job `base_id` whose report had no usable verdict (T37).
 pub(crate) fn create_verify_retry_job(
     store: &Store,
     deps: &Deps,
     original: &Job,
+    base_id: &str,
     evidence: &[GateResult],
     diff_summary: &str,
 ) -> Result<Job, CoreError> {
-    create_verify_job_with_suffix(store, deps, original, evidence, diff_summary, "-r1")
+    create_verify_job_with_id(store, deps, original, evidence, diff_summary, &format!("{base_id}-r1"))
 }
 
-/// Creates a verify job with an id suffix (`""` or `"-r1"`).
-fn create_verify_job_with_suffix(
+/// Whether `id` names a verify job for the attempt `prefix` (`{job}-verify-{attempts}`):
+/// the prefix followed by an optional `-g{n}` generation and an optional `-r1` retry.
+pub(crate) fn is_verify_id_for(id: &str, prefix: &str) -> bool {
+    let Some(rest) = id.strip_prefix(prefix) else {
+        return false;
+    };
+    let rest = rest.strip_suffix("-r1").unwrap_or(rest);
+    match rest.strip_prefix("-g") {
+        None => rest.is_empty(),
+        Some(n) => !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()),
+    }
+}
+
+fn is_terminal(job: &Job) -> bool {
+    matches!(job.state, JobState::Done | JobState::Cancelled | JobState::Failed)
+}
+
+/// Creates a verify job with the exact id `id` (reusing it if it already exists).
+fn create_verify_job_with_id(
     store: &Store,
     deps: &Deps,
     original: &Job,
     evidence: &[GateResult],
     diff_summary: &str,
-    suffix: &str,
+    id: &str,
 ) -> Result<Job, CoreError> {
-    let id = JobId::parse(&format!("{}-verify-{}{suffix}", original.id, original.attempts))?;
+    let id = JobId::parse(id)?;
     if store.job(&id)?.is_some() {
         // invariant: a retried supervisor tick reuses the existing verify job.
         return Ok(store.require_job(&id)?);
@@ -310,7 +344,7 @@ mod tests {
     };
     use vowp_store::{NodePaths, Store};
 
-    use super::{create_verify_job_with_suffix, verify_prompt};
+    use super::{create_verify_job, verify_prompt};
     use crate::Deps;
     use crate::SystemGit;
     use crate::deps::{AdapterRegistry, FixedRng, SystemRunner};
@@ -555,7 +589,7 @@ mod tests {
             .expect("workspace");
         let original = store.require_job(&original.id).expect("original");
 
-        let verify = create_verify_job_with_suffix(&store, &deps, &original, &[], "", "").expect("verify job");
+        let verify = create_verify_job(&store, &deps, &original, &[], "").expect("verify job");
         assert_eq!(verify.id.as_str(), "demo-verify-0");
 
         let brief_path = worktree.join(&verify.brief);

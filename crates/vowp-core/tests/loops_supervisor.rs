@@ -1388,3 +1388,69 @@ fn dispatch_brief_precedence_copies_project_then_keeps_worktree_then_falls_back(
         "with neither source, the generated fallback must be written"
     );
 }
+
+/// Runs a retry of a failed build job whose deterministic `-verify-0` id already exists in
+/// `old_state`, and asserts the new round gets a fresh verify instead of reusing it.
+fn retry_with_stale_verify(name: &str, old_state: JobState) {
+    let adapter = Arc::new(ScriptAdapter::new(
+        vowp_protocol::HarnessKind::Opencode,
+        report_script(name, Some("pass"), "done"),
+    ));
+    let node = TestNode::with_adapter(true, adapter);
+    let original = reviewing_job(&node, name);
+    let store = node.store();
+    let old = node.insert_job(
+        &verify_id(name, 0),
+        JobKind::Verify,
+        vowp_protocol::Role::Verifier,
+        Some(vec![]),
+    );
+    store
+        .add_edge(&vowp_protocol::Edge {
+            src: old.id.clone(),
+            dst: original.id.clone(),
+            kind: EdgeKind::Verifies,
+        })
+        .expect("verifies edge");
+    node.force_state(&old, old_state);
+    node.force_state(&original, JobState::Failed);
+    push(
+        &store,
+        &Request::RetryJob {
+            job: original.id.clone(),
+        },
+    )
+    .expect("request");
+    let mut supervisor = node.supervisor();
+    node.tick_until(&mut supervisor, 80, |store| {
+        store.require_job(&original.id).expect("original").state == JobState::Merging
+    });
+    let verifies: Vec<_> = store
+        .list_jobs(&JobFilter {
+            kind: Some(JobKind::Verify),
+            ..JobFilter::default()
+        })
+        .expect("jobs")
+        .into_iter()
+        .filter(|job| job.id != old.id)
+        .collect();
+    assert_eq!(verifies.len(), 1, "exactly one fresh verify: {verifies:?}");
+    assert_eq!(verifies[0].id.as_str(), format!("{}-g1", verify_id(name, 0)));
+    assert_eq!(verifies[0].state, JobState::Done);
+    assert_eq!(store.require_job(&old.id).expect("old").state, old_state);
+}
+
+#[test]
+fn retry_after_done_verify_starts_a_fresh_verify() {
+    retry_with_stale_verify("retry-stale-done", JobState::Done);
+}
+
+#[test]
+fn retry_after_cancelled_verify_starts_a_fresh_verify() {
+    retry_with_stale_verify("retry-stale-cancelled", JobState::Cancelled);
+}
+
+#[test]
+fn start_verify_with_existing_failed_verify_does_not_error() {
+    retry_with_stale_verify("retry-stale-failed", JobState::Failed);
+}
