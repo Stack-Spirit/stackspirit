@@ -240,6 +240,11 @@ fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result
     if let Command::Doctor(args) = &command {
         return cmd::doctor::run(&global, io, args);
     }
+    // `home migrate` plans from the filesystem and must write nothing on a dry run, so it runs
+    // before `Ctx::build` (whose `Store::open` creates WAL files and may migrate a database).
+    if let Command::Home(args) = &command {
+        return cmd::home::run(&global, io, args);
+    }
     // `schema` prints static protocol types. It needs no project, `vowp.toml` or
     // initialised home, so it runs before `Ctx::build` applies its "run vowp init" guard.
     if let Command::Schema(args) = &command {

@@ -1443,7 +1443,9 @@ fn spawn_app(
     }
     if app == OrchestratorApp::Chat {
         // `vowp chat --agent` must use the same agent state as the host that started it.
-        command.env("VOWP_AGENT_HOME", state_dir);
+        command
+            .env("STACKSPIRIT_AGENT_HOME", state_dir)
+            .env("VOWP_AGENT_HOME", state_dir);
     }
     if let Some(path) = path_lookup
         && !program.contains('/')

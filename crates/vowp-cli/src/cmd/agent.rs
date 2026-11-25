@@ -79,7 +79,7 @@ fn orchestrator_endpoint(
     io: &mut dyn IoStreams,
     args: &AgentOrchestratorEndpointArgs,
 ) -> Result<i32, CliError> {
-    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let state_dir = crate::ctx::agent_state_dir()?;
     let host = OrchestratorHost::new(state_dir);
     let endpoint = host.endpoint(&args.name).map_err(map_host_error)?;
     if global.json {
@@ -302,7 +302,7 @@ fn enroll(global: &Global, io: &mut dyn IoStreams, args: &AgentEnrollArgs) -> Re
             "`vowp agent enroll` needs --target <ssh-target> or --wss <url>".to_owned(),
         ));
     }
-    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let state_dir = crate::ctx::agent_state_dir()?;
     let path_maps = enrollment_path_maps(&state_dir, args)?;
     let code = read_code(io, &args.code_file)?;
     validate_enrollment_code(&code).map_err(map_agent_error)?;
@@ -428,7 +428,7 @@ fn enrollment_path_maps(state_dir: &Path, args: &AgentEnrollArgs) -> Result<Vec<
 /// a surface token or any other secret; it only loads and rewrites the private `agent.json`.
 /// Spec: `docs/design/v0.4/hardening.md` §2.2.
 fn trust(global: &Global, io: &mut dyn IoStreams, args: &AgentTrustArgs) -> Result<i32, CliError> {
-    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let state_dir = crate::ctx::agent_state_dir()?;
     let mut config = load_trust_config(&state_dir)?;
     let TransportConfig::Wss { tls, fingerprint, .. } = &mut config.transport else {
         return Err(CliError::Guard(
@@ -523,7 +523,7 @@ fn paths(global: &Global, io: &mut dyn IoStreams, args: &AgentPathsArgs) -> Resu
 }
 
 fn paths_add(global: &Global, io: &mut dyn IoStreams, args: &AgentPathsAddArgs) -> Result<i32, CliError> {
-    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let state_dir = crate::ctx::agent_state_dir()?;
     let mut config = load_agent_config(&state_dir)?;
     let map = path_map_from_checkout(
         Path::new(&args.project),
@@ -542,7 +542,7 @@ fn paths_add(global: &Global, io: &mut dyn IoStreams, args: &AgentPathsAddArgs) 
 }
 
 fn paths_rm(global: &Global, io: &mut dyn IoStreams, args: &AgentPathsRmArgs) -> Result<i32, CliError> {
-    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let state_dir = crate::ctx::agent_state_dir()?;
     let mut config = load_agent_config(&state_dir)?;
     let project = ProjectName::parse(&args.project_name)
         .map_err(|_| CliError::Invalid(format!("invalid project name {:?}", args.project_name)))?;
@@ -559,7 +559,7 @@ fn paths_rm(global: &Global, io: &mut dyn IoStreams, args: &AgentPathsRmArgs) ->
 }
 
 fn paths_ls(global: &Global, io: &mut dyn IoStreams) -> Result<i32, CliError> {
-    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let state_dir = crate::ctx::agent_state_dir()?;
     let config = load_agent_config(&state_dir)?;
     if global.json {
         print_json(io, &config.path_maps)?;
@@ -673,7 +673,7 @@ fn print_path_map(io: &mut dyn IoStreams, map: &AgentPathMap) -> Result<(), CliE
 }
 
 fn pair(global: &Global, io: &mut dyn IoStreams, args: &AgentPairArgs) -> Result<i32, CliError> {
-    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let state_dir = crate::ctx::agent_state_dir()?;
     let code = read_code(io, &args.code_file)?;
     let session = SessionId::parse(&args.session)
         .map_err(|_| CliError::Invalid(format!("invalid session id {:?}", args.session)))?;
@@ -740,7 +740,7 @@ fn pair_through_agent_socket(
 }
 
 fn run_agent(global: &Global, io: &mut dyn IoStreams, args: &AgentRunArgs) -> Result<i32, CliError> {
-    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let state_dir = crate::ctx::agent_state_dir()?;
     check_run_isolation(&state_dir)?;
     let config = AgentConfig::load(&state_dir).map_err(map_agent_error)?;
     let key = NodeKey::load(&state_dir).map_err(map_agent_error)?;
@@ -833,7 +833,7 @@ fn install_stop_flag(stop: &Arc<AtomicBool>) -> Result<(), CliError> {
 }
 
 fn status(global: &Global, io: &mut dyn IoStreams, _args: &AgentStatusArgs) -> Result<i32, CliError> {
-    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let state_dir = crate::ctx::agent_state_dir()?;
     let config = AgentConfig::load(&state_dir).map_err(|error| match error {
         AgentError::NotEnrolled(_) => CliError::NotFound(format!(
             "agent is not enrolled under {}; run `vowp agent enroll --target <ssh-target> --code-file -`",
@@ -1018,7 +1018,7 @@ fn service(global: &Global, io: &mut dyn IoStreams, args: &AgentServiceArgs) -> 
 /// Builds the current user's service specification.
 fn current_user_service_spec() -> Result<ServiceSpec, CliError> {
     let binary = std::env::current_exe()?;
-    let state_dir = AgentConfig::default_state_dir().map_err(map_agent_error)?;
+    let state_dir = crate::ctx::agent_state_dir()?;
     ServiceSpec::for_current_user(binary, state_dir).map_err(map_service_error)
 }
 
@@ -1223,17 +1223,13 @@ pub fn service_error_exit_code(error: &ServiceError) -> i32 {
 /// Runs `vowp agent doctor`: local warnings, never failures.
 fn doctor(global: &Global, io: &mut dyn IoStreams, _args: &AgentDoctorArgs) -> Result<i32, CliError> {
     let mut checks = AgentDoctorChecks::default();
-    match AgentConfig::default_state_dir() {
+    match crate::ctx::agent_state_dir() {
         Ok(state_dir) => {
             check_agent_state_dir(&state_dir, &mut checks);
             check_agent_service(&state_dir, &mut checks);
             check_agent_surfaces(&state_dir, &mut checks);
             check_copied_logins(&state_dir, &mut checks);
         }
-        Err(AgentError::Config(_)) => checks.warn(
-            "state_dir",
-            "HOME is not set; the agent state and service cannot be checked",
-        ),
         Err(error) => checks.warn("state_dir", error.to_string()),
     }
     let report = AgentDoctorReport {

@@ -17,6 +17,7 @@ pub mod exec;
 pub mod fleet;
 pub mod gc;
 pub mod graph;
+pub mod home;
 pub mod inbox;
 pub mod init;
 pub mod job;
@@ -96,6 +97,9 @@ pub fn dispatch(ctx: &Ctx, io: &mut dyn IoStreams, command: Command) -> Result<i
         Command::Control(args) => control::run(ctx, io, &args),
         Command::Orchestrator(args) => orchestrator::run(ctx, io, &args),
         Command::Migrate(args) => migrate::run(ctx, io, &args),
+        Command::Home(_) => Err(CliError::Invalid(
+            "home commands run without a project context".to_owned(),
+        )),
         Command::Mcp(args) => mcp::run(ctx, io, &args),
         Command::Agent { .. } => Err(CliError::Invalid(
             "agent commands run without a project context".to_owned(),

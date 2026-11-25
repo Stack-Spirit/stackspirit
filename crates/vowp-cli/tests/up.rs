@@ -981,6 +981,7 @@ impl FakeDaemon {
         let stopped = tools.path().join("daemon.stopped");
         let body = r#"#!/bin/sh
 printf '%s\n' "$@" > "$FAKE_DAEMON_ARGS"
+printf '%s|%s' "${STACKSPIRIT_HOME-}" "${VOWP_HOME-}" > "$FAKE_DAEMON_ARGS.env"
 printf '%s' "${VOWP_API_TOKEN-}" > "$FAKE_DAEMON_TOKEN"
 printf '%s\n' "$$" > "$FAKE_DAEMON_PID"
 printf '%s\n' "fake-daemon stderr: home=$FAKE_DAEMON_HOME token=${VOWP_API_TOKEN-}" >&2
@@ -1765,6 +1766,38 @@ fn wait_for_fake_daemon(fake: &FakeDaemon, supervisor: &SupervisorProcess) -> u3
         supervisor.stderr()
     );
     fake.pid().expect("fake daemon pid")
+}
+
+#[test]
+fn up_exports_both_home_names_with_one_value_to_the_daemon_child() {
+    let env = common::TestEnv::new();
+    let fake = FakeDaemon::new();
+    let mut supervisor = SupervisorProcess::spawn_with(
+        env.home_path(),
+        env.project_path(),
+        &fake.envs("test-token", env.home_path()),
+    );
+    wait_for_fake_daemon(&fake, &supervisor);
+    let recorded = {
+        let mut name = fake.args.clone().into_os_string();
+        name.push(".env");
+        PathBuf::from(name)
+    };
+    assert!(
+        eventually(|| recorded.is_file()),
+        "the fake daemon recorded no environment; stderr:\n{}",
+        supervisor.stderr()
+    );
+    let home = env.home_path().display().to_string();
+    assert_eq!(
+        std::fs::read_to_string(&recorded).expect("recorded env"),
+        format!("{home}|{home}"),
+        "the daemon child must see STACKSPIRIT_HOME and VOWP_HOME with the supervisor's home"
+    );
+    kill_signal(supervisor.pid(), "TERM");
+    supervisor
+        .wait_for_exit(Duration::from_secs(15))
+        .expect("SIGTERM must stop the supervisor");
 }
 
 #[test]

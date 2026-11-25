@@ -416,16 +416,24 @@ struct ControlPointer {
     remote_home: String,
 }
 
-/// Reads `~/.vowp-control/control.json` or `$VOWP_CONTROL_HOME/control.json`, when present.
+/// Reads `control.json` from the resolved control directory (`STACKSPIRIT_CONTROL_HOME`,
+/// `VOWP_CONTROL_HOME`, `~/.stackspirit-control` or `~/.vowp-control`), when present.
 fn read_control_config() -> Result<Option<ControlPointer>, CliError> {
-    let root = match std::env::var_os("VOWP_CONTROL_HOME").filter(|value| !value.is_empty()) {
-        Some(root) => PathBuf::from(root),
-        None => {
-            let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) else {
-                return Ok(None);
-            };
-            PathBuf::from(home).join(".vowp-control")
-        }
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    read_control_config_with(|name| std::env::var_os(name), home.as_deref())
+}
+
+/// [`read_control_config`] against an explicit environment lookup and `$HOME`.
+fn read_control_config_with(
+    get: impl Fn(&str) -> Option<std::ffi::OsString>,
+    home: Option<&Path>,
+) -> Result<Option<ControlPointer>, CliError> {
+    let root = match vowp_store::resolve_state(vowp_store::StateKind::Control, None, get, home) {
+        Ok(resolved) => resolved.path,
+        Err(error @ vowp_store::ResolveError::Conflict { .. }) => return Err(CliError::Conflict(error.to_string())),
+        Err(_) => return Ok(None),
     };
     let path = root.join("control.json");
     if !path.is_file() {
@@ -454,4 +462,57 @@ fn print_status(ctx: &Ctx, io: &mut dyn IoStreams, grant: &TurnGrant, replay: bo
         writeln!(io.out(), "{document}")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    const POINTER: &str = r#"{"home":"home-a","ssh_target":"ssh-a","remote_home":"/h"}"#;
+
+    fn write(dir: &Path) {
+        std::fs::create_dir_all(dir).expect("dir");
+        std::fs::write(dir.join("control.json"), POINTER).expect("control.json");
+    }
+
+    fn none(_: &str) -> Option<std::ffi::OsString> {
+        None
+    }
+
+    #[test]
+    fn reads_the_stackspirit_named_control_directory() {
+        let home = tempfile::tempdir().expect("home");
+        write(&home.path().join(".stackspirit-control"));
+        let pointer = read_control_config_with(none, Some(home.path())).expect("reads");
+        assert_eq!(pointer.expect("pointer").ssh_target, "ssh-a");
+    }
+
+    #[test]
+    fn reads_the_legacy_control_directory_and_the_new_variable() {
+        let home = tempfile::tempdir().expect("home");
+        write(&home.path().join(".vowp-control"));
+        assert!(
+            read_control_config_with(none, Some(home.path()))
+                .expect("legacy")
+                .is_some()
+        );
+        let other = tempfile::tempdir().expect("other");
+        write(other.path());
+        let var = other.path().as_os_str().to_owned();
+        let pointer = read_control_config_with(
+            |name| (name == "STACKSPIRIT_CONTROL_HOME").then(|| var.clone()),
+            Some(home.path()),
+        )
+        .expect("env");
+        assert!(pointer.is_some());
+    }
+
+    #[test]
+    fn two_control_directories_conflict() {
+        let home = tempfile::tempdir().expect("home");
+        write(&home.path().join(".stackspirit-control"));
+        write(&home.path().join(".vowp-control"));
+        let error = read_control_config_with(none, Some(home.path())).expect_err("conflict");
+        assert!(matches!(error, CliError::Conflict(_)), "{error}");
+    }
 }

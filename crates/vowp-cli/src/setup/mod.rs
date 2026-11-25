@@ -334,7 +334,7 @@ impl Probe {
     }
 }
 
-/// Wraps a remote argv so it runs as `effective`, with `VOWP_HOME` set.
+/// Wraps a remote argv so it runs as `effective`, with both `STACKSPIRIT_HOME` and `VOWP_HOME` set to the same value.
 ///
 /// A command that already runs as the login user is left alone. A sudo transition is an
 /// argv prefix, never a shell string, so every argument keeps its exact value.
@@ -348,6 +348,7 @@ pub fn as_user(login_user: &str, effective: &str, home: &str, argv: Vec<String>)
         effective.to_owned(),
         "-H".to_owned(),
         "env".to_owned(),
+        format!("STACKSPIRIT_HOME={home}/.vowp"),
         format!("VOWP_HOME={home}/.vowp"),
     ];
     wrapped.extend(argv);

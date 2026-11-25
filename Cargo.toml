@@ -100,6 +100,10 @@ name = "graph"
 path = "crates/vowp-cli/tests/graph.rs"
 
 [[test]]
+name = "home"
+path = "crates/vowp-cli/tests/home.rs"
+
+[[test]]
 name = "inbox"
 path = "crates/vowp-cli/tests/inbox.rs"
 
@@ -150,6 +154,10 @@ path = "crates/vowp-cli/tests/schedule.rs"
 [[test]]
 name = "session"
 path = "crates/vowp-cli/tests/session.rs"
+
+[[test]]
+name = "setup"
+path = "crates/vowp-cli/tests/setup.rs"
 
 [[test]]
 name = "setup_verify"

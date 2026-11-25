@@ -1201,6 +1201,46 @@ fn chat_turn_revoked_lease_follows_from_the_pre_release_sequence() {
     );
 }
 
+#[test]
+fn chat_executor_child_gets_both_control_home_names_with_one_value() {
+    let env = common::TestEnv::new();
+    configure(&env, &capsule_reply());
+    let id = create(&env);
+    let dir = env.home_path().join("fake-env-exec");
+    std::fs::create_dir_all(&dir).expect("fake exec dir");
+    let script = dir.join("vowp-exec");
+    let record = dir.join("env.txt");
+    let body = format!(
+        "#!/bin/sh\nprintf '%s|%s' \"${{STACKSPIRIT_CONTROL_HOME-}}\" \"${{VOWP_CONTROL_HOME-}}\" > '{}'\nexit 75\n",
+        record.display()
+    );
+    std::fs::write(&script, body).expect("fake exec script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let mut command = env.command(env!("CARGO_BIN_EXE_vowp"));
+    command
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .args(["chat", &id])
+        .env("VOWP_EXEC_BIN", &script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn vowp chat");
+    send_chat(&mut child, "hello\n/quit\n");
+    let _ = child.wait_with_output().expect("wait for chat");
+    let recorded = std::fs::read_to_string(&record).expect("the executor child recorded its environment");
+    let surface = env
+        .home_path()
+        .join("spool")
+        .join(".local-surface")
+        .display()
+        .to_string();
+    assert_eq!(recorded, format!("{surface}|{surface}"));
+}
+
 /// Prepares an enrolled agent with a paired surface for `session`.
 ///
 /// The node name matches the test home's local node so the gateway accepts the session

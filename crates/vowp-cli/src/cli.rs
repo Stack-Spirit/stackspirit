@@ -15,6 +15,7 @@ use crate::cmd::control::ControlArgs;
 use crate::cmd::exec::ExecArgs;
 use crate::cmd::fleet::FleetArgs;
 use crate::cmd::gc::GcArgs;
+use crate::cmd::home::HomeArgs;
 use crate::cmd::lease::{LeaseArgs, TakeoverArgs};
 use crate::cmd::mcp::McpArgs;
 use crate::cmd::migrate::MigrateArgs;
@@ -46,6 +47,7 @@ pub const V0_2_COMMANDS: &[&str] = &[
     "control",
     "orchestrator",
     "migrate",
+    "home",
     "mcp",
     "agent",
     "surface",
@@ -280,7 +282,7 @@ pub struct Global {
     /// Project name or path; defaults to the nearest ancestor with `stackspirit.toml` or `vowp.toml`.
     #[arg(long, global = true, value_name = "NAME|PATH")]
     pub project: Option<String>,
-    /// Node home (default `$STACKSPIRIT_HOME`, then `$VOWP_HOME`, else `~/.vowp`).
+    /// Node home (default `$STACKSPIRIT_HOME`, then `$VOWP_HOME`, else `~/.stackspirit` or `~/.vowp`).
     #[arg(long, global = true, value_name = "DIR")]
     pub home: Option<PathBuf>,
     /// Disable colour even when stdout is a terminal.
@@ -381,6 +383,8 @@ pub enum Command {
     Orchestrator(OrchestratorArgs),
     /// Migrate a v0.1 home to the v0.2 layout.
     Migrate(MigrateArgs),
+    /// Link or move the home between the StackSpirit and legacy directory names.
+    Home(HomeArgs),
     /// Run the stdio MCP server or the Mac-side proxy.
     Mcp(McpArgs),
     /// Enroll, run or inspect the Mac-side agent.

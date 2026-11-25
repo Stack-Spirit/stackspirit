@@ -46,7 +46,9 @@ pub use migrate::{
     MigrationCount, MigrationReport, migrate_rollback, migrate_v01, migrate_v01_dry_run, migrate_v02, migrate_v03,
     migrate_v04, migrate_v05, resume_migration,
 };
-pub use paths::NodePaths;
+pub use paths::{
+    NodePaths, ResolveError, ResolvedState, StateKind, StateSource, resolve_state, resolve_state_from_env,
+};
 pub use reconcile::{CrossDbReconcile, ReconcileCounts};
 pub use repo_surfaces::{SurfaceToken, hash_lease_token};
 

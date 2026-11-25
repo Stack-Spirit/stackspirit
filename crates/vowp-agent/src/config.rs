@@ -234,13 +234,20 @@ impl AgentConfig {
         self.path_maps.len() != before
     }
 
-    /// Returns the default state directory (`$VOWP_AGENT_HOME`, else `$HOME/.vowp-agent`).
+    /// Returns the state directory from the environment only: `$STACKSPIRIT_AGENT_HOME`, then
+    /// `$VOWP_AGENT_HOME`, else `$HOME/.vowp-agent`.
+    ///
+    /// The CLI does not use this: it resolves with `vowp_store::resolve_state`, which also
+    /// prefers a real `~/.stackspirit-agent` and reports a conflict. This remains for callers
+    /// that only need the legacy-compatible default.
     pub fn default_state_dir() -> Result<PathBuf, AgentError> {
-        if let Some(dir) = std::env::var_os("VOWP_AGENT_HOME") {
-            return Ok(PathBuf::from(dir));
+        for name in ["STACKSPIRIT_AGENT_HOME", "VOWP_AGENT_HOME"] {
+            if let Some(dir) = std::env::var_os(name).filter(|value| !value.is_empty()) {
+                return Ok(PathBuf::from(dir));
+            }
         }
         let home = std::env::var_os("HOME")
-            .ok_or_else(|| AgentError::Config("HOME is not set; pass VOWP_AGENT_HOME".to_owned()))?;
+            .ok_or_else(|| AgentError::Config("HOME is not set; pass STACKSPIRIT_AGENT_HOME".to_owned()))?;
         Ok(PathBuf::from(home).join(AGENT_DIR_NAME))
     }
 

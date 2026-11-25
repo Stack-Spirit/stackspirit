@@ -79,10 +79,23 @@ impl Checks {
 
 /// Runs `vowp doctor`.
 pub fn run(global: &Global, io: &mut dyn IoStreams, _args: &DoctorArgs) -> Result<i32, CliError> {
-    let paths = ctx::node_paths(global)?;
+    let mut checks = Checks::default();
+    let resolved = match ctx::resolve_state(vowp_store::StateKind::Home, global.home.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(CliError::Conflict(detail)) => {
+            // A conflict is reported, not raised: doctor is the tool the owner runs to see it.
+            checks.push("home", CheckStatus::Fail, detail);
+            check_state_dirs(&mut checks);
+            return print_report(global, io, checks);
+        }
+        Err(error) => return Err(error),
+    };
+    let paths = vowp_store::NodePaths::new(&resolved.path);
     let root = paths.root();
     let runner: Arc<dyn CommandRunner> = Arc::new(SystemRunner);
-    let mut checks = Checks::default();
+
+    check_home_selection(&resolved, &mut checks);
+    check_state_dirs(&mut checks);
 
     check_home(root, &mut checks);
     check_db(&paths, &mut checks);
@@ -133,6 +146,11 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, _args: &DoctorArgs) -> Resul
     check_supervisor(&paths, &mut checks);
     check_disk(runner.as_ref(), root, &mut checks);
 
+    print_report(global, io, checks)
+}
+
+/// Prints the checks and returns the exit code (1 when any check failed).
+fn print_report(global: &Global, io: &mut dyn IoStreams, checks: Checks) -> Result<i32, CliError> {
     let ok = checks.healthy();
     if global.json {
         let report = DoctorReport {
@@ -153,6 +171,125 @@ pub fn run(global: &Global, io: &mut dyn IoStreams, _args: &DoctorArgs) -> Resul
         writeln!(io.out(), "{}", if ok { "doctor: ok" } else { "doctor: failures found" })?;
     }
     Ok(if ok { 0 } else { 1 })
+}
+
+/// Opens a node home read-only and runs the integrity and schema checks.
+///
+/// Used by `home migrate --move` to verify a copy; never writes.
+pub(crate) fn verify_home_read_only(paths: &vowp_store::NodePaths) -> Result<(), String> {
+    let store = Store::open_read_only(paths, None).map_err(|error| error.to_string())?;
+    store.integrity_check().map_err(|error| error.to_string())?;
+    store.global_schema_version().map_err(|error| error.to_string())?;
+    let mut checks = Checks::default();
+    check_schema(paths, &mut checks);
+    match checks.items.iter().find(|check| check.status == CheckStatus::Fail) {
+        Some(check) => Err(check.detail.clone()),
+        None => Ok(()),
+    }
+}
+
+/// Reports which home was selected, why, and the node config file.
+///
+/// A legacy name is a warning with the migration hint, never a failure.
+fn check_home_selection(resolved: &vowp_store::ResolvedState, checks: &mut Checks) {
+    use vowp_store::StateSource;
+    let source = match &resolved.source {
+        StateSource::Flag => "--home".to_owned(),
+        StateSource::Env(name) => format!("${name}"),
+        StateSource::Existing => "~/.stackspirit".to_owned(),
+        StateSource::ExistingLegacy => "~/.vowp".to_owned(),
+        StateSource::Fresh => "default for a fresh machine".to_owned(),
+    };
+    let config = resolved.path.join("config.toml");
+    let config_text = if config.is_file() {
+        format!("config {}", config.display())
+    } else {
+        "no config.toml".to_owned()
+    };
+    let detail = format!("selected {} ({source}); {config_text}", resolved.path.display());
+    if resolved.legacy {
+        checks.push(
+            "home-path",
+            CheckStatus::Warn,
+            format!("{detail}; legacy name in use, see `stackspirit home migrate --link --dry-run`"),
+        );
+    } else {
+        checks.push("home-path", CheckStatus::Ok, detail);
+    }
+    if let Some(warning) = &resolved.warning {
+        checks.push("home-env", CheckStatus::Warn, warning.clone());
+    }
+}
+
+/// Reports the agent and control state directories when this machine has them.
+fn check_state_dirs(checks: &mut Checks) {
+    check_broken_links(checks);
+    for (kind, name, file) in [
+        (vowp_store::StateKind::Agent, "agent-state", "agent.json"),
+        (vowp_store::StateKind::Control, "control-state", "control.json"),
+    ] {
+        match vowp_store::resolve_state_from_env(kind, None) {
+            Ok(resolved) => {
+                let config = resolved.path.join(file);
+                let present = config.is_file()
+                    || (resolved.source == vowp_store::StateSource::ExistingLegacy && resolved.path.is_dir());
+                if !present {
+                    continue;
+                }
+                let detail = if config.is_file() {
+                    format!("selected {}; config {}", resolved.path.display(), config.display())
+                } else {
+                    format!("selected {}; no {file} yet", resolved.path.display())
+                };
+                if resolved.legacy {
+                    checks.push(
+                        name,
+                        CheckStatus::Warn,
+                        format!("{detail}; legacy name in use, see `stackspirit home migrate --link --dry-run`"),
+                    );
+                } else {
+                    checks.push(name, CheckStatus::Ok, detail);
+                }
+            }
+            Err(error) => {
+                let status = match error {
+                    vowp_store::ResolveError::Conflict { .. } => CheckStatus::Fail,
+                    _ => CheckStatus::Warn,
+                };
+                checks.push(name, status, error.to_string());
+            }
+        }
+    }
+}
+
+/// Warns about a dangling symlink at any `~/.stackspirit*` or `~/.vowp*` state name.
+fn check_broken_links(checks: &mut Checks) {
+    let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let home = PathBuf::from(home);
+    for kind in [
+        vowp_store::StateKind::Home,
+        vowp_store::StateKind::Agent,
+        vowp_store::StateKind::Control,
+    ] {
+        for name in [kind.new_dir_name(), kind.legacy_dir_name()] {
+            let path = home.join(name);
+            if let Ok(target) = std::fs::read_link(&path)
+                && !path.exists()
+            {
+                checks.push(
+                    "state-link",
+                    CheckStatus::Warn,
+                    format!(
+                        "{} is a broken symlink to {}; remove it or point it at a real directory",
+                        path.display(),
+                        target.display()
+                    ),
+                );
+            }
+        }
+    }
 }
 
 /// Checks that the node home exists and accepts a write.
