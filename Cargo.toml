@@ -144,6 +144,10 @@ name = "promote"
 path = "crates/vowp-cli/tests/promote.rs"
 
 [[test]]
+name = "relay"
+path = "crates/vowp-cli/tests/relay.rs"
+
+[[test]]
 name = "remote"
 path = "crates/vowp-cli/tests/remote.rs"
 

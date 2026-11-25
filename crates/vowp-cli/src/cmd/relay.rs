@@ -326,10 +326,3 @@ fn rotate_command(ctx: &Ctx, io: &mut dyn IoStreams, home: &Path) -> Result<i32,
     }
     Ok(0)
 }
-
-// The package root is the workspace root, so Cargo does not auto-discover the
-// `crates/vowp-cli/tests/` directory. Compile the owned relay suite as a library test
-// instead; the shared root `Cargo.toml` stays untouched.
-#[cfg(test)]
-#[path = "../../tests/relay.rs"]
-mod integration_tests;

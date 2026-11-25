@@ -179,6 +179,11 @@ python3 docs/reference/check-reference.py
 | [`stackspirit offload`](#stackspirit-offload) | Show the effective offload policy or the offload read model |
 | [`stackspirit offload policy`](#stackspirit-offload-policy) | Show the effective offload policy |
 | [`stackspirit offload status`](#stackspirit-offload-status) | Show nodes, live assignments and waiting jobs |
+| [`stackspirit relay`](#stackspirit-relay) | Enroll, inspect or run the StackSpirit relay connector |
+| [`stackspirit relay enroll`](#stackspirit-relay-enroll) | Enroll this machine with the relay using a one-time token and write relay.key |
+| [`stackspirit relay status`](#stackspirit-relay-status) | Show relay enrollment and connector state; never prints a credential or key |
+| [`stackspirit relay run`](#stackspirit-relay-run) | Run the relay connector in the foreground until stopped |
+| [`stackspirit relay rotate-key`](#stackspirit-relay-rotate-key) | Replace relay.key with a new key registered through a signed request |
 | [`stackspirit __exec`](#stackspirit-__exec) | Hidden: remote executor client |
 | [`stackspirit __vault-exec`](#stackspirit-__vault-exec) | Hidden: vault read/inject helper |
 | [`stackspirit __vault-admin`](#stackspirit-__vault-admin) | Hidden: vault write helper |
@@ -232,6 +237,7 @@ Commands:
   mcp           Run the stdio MCP server or the Mac-side proxy
   agent         Enroll, run or inspect the Mac-side agent
   surface       Create, list or revoke a paired local surface; `--node` names the surface's node
+  relay         Enroll, inspect or run the StackSpirit relay connector
   version       Print the binary version
 
 Options:
@@ -3159,7 +3165,7 @@ Options:
 ```text
 Run the stdio MCP server or the Mac-side proxy
 
-Usage: stackspirit mcp [OPTIONS] --surface <ID>
+Usage: stackspirit mcp [OPTIONS]
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
@@ -3721,6 +3727,108 @@ Options:
 Show nodes, live assignments and waiting jobs
 
 Usage: stackspirit offload status [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `stackspirit.toml` or `vowp.toml`
+      --home <DIR>           Node home (default `$STACKSPIRIT_HOME`, then `$VOWP_HOME`, else `~/.stackspirit` or `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+### `stackspirit relay`
+
+```text
+Enroll, inspect or run the StackSpirit relay connector
+
+Usage: stackspirit relay [OPTIONS] <COMMAND>
+
+Commands:
+  enroll      Enroll this machine with the relay using a one-time token and write relay.key
+  status      Show relay enrollment and connector state; never prints a credential or key
+  run         Run the relay connector in the foreground until stopped
+  rotate-key  Replace relay.key with a new key registered through a signed request
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `stackspirit.toml` or `vowp.toml`
+      --home <DIR>           Node home (default `$STACKSPIRIT_HOME`, then `$VOWP_HOME`, else `~/.stackspirit` or `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `stackspirit relay enroll`
+
+```text
+Enroll this machine with the relay using a one-time token and write relay.key
+
+Usage: stackspirit relay enroll [OPTIONS]
+
+Options:
+      --json                     Print one machine-readable JSON document on stdout
+      --token-file <PATH>        Read the one-time enrollment token from this file
+      --node <NAME>              Run the command on that node over ssh
+      --token-stdin              Read the one-time enrollment token from stdin
+      --name <NAME>              Machine display name; defaults to the host name
+      --project <NAME|PATH>      Project name or path; defaults to the nearest ancestor with `stackspirit.toml` or `vowp.toml`
+      --home <DIR>               Node home (default `$STACKSPIRIT_HOME`, then `$VOWP_HOME`, else `~/.stackspirit` or `~/.vowp`)
+      --serve-project <PROJECT>  Project this machine serves (not the global `--project` selector); defaults to `[relay].project`
+      --api-url <URL>            API base URL; defaults to `[relay].api_url`
+      --no-color                 Disable colour even when stdout is a terminal
+  -q, --quiet                    Suppress non-essential human output
+      --relay-url <URL>          Relay machine endpoint; defaults to `[relay].relay_url`
+  -v, --verbose...               Increase log verbosity (`-v`, `-vv`)
+  -h, --help                     Print help
+```
+
+#### `stackspirit relay status`
+
+```text
+Show relay enrollment and connector state; never prints a credential or key
+
+Usage: stackspirit relay status [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `stackspirit.toml` or `vowp.toml`
+      --home <DIR>           Node home (default `$STACKSPIRIT_HOME`, then `$VOWP_HOME`, else `~/.stackspirit` or `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `stackspirit relay run`
+
+```text
+Run the relay connector in the foreground until stopped
+
+Usage: stackspirit relay run [OPTIONS]
+
+Options:
+      --json                 Print one machine-readable JSON document on stdout
+      --node <NAME>          Run the command on that node over ssh
+      --project <NAME|PATH>  Project name or path; defaults to the nearest ancestor with `stackspirit.toml` or `vowp.toml`
+      --home <DIR>           Node home (default `$STACKSPIRIT_HOME`, then `$VOWP_HOME`, else `~/.stackspirit` or `~/.vowp`)
+      --no-color             Disable colour even when stdout is a terminal
+  -q, --quiet                Suppress non-essential human output
+  -v, --verbose...           Increase log verbosity (`-v`, `-vv`)
+  -h, --help                 Print help
+```
+
+#### `stackspirit relay rotate-key`
+
+```text
+Replace relay.key with a new key registered through a signed request
+
+Usage: stackspirit relay rotate-key [OPTIONS]
 
 Options:
       --json                 Print one machine-readable JSON document on stdout
