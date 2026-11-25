@@ -992,9 +992,15 @@
     min-width: 44px;
   }
 
-  .web-shell .view-nav__item,
-  .web-shell .drawer__close {
+  .web-shell .view-nav__item {
     min-height: 44px;
+  }
+
+  /* Drawer portals its header outside .web-shell, so target it directly. */
+  .drawer .btn,
+  .drawer__header .btn {
+    min-height: 44px;
+    min-width: 44px;
   }
 
   .web-shell pre,

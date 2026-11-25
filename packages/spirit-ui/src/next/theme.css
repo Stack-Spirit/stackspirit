@@ -4400,6 +4400,24 @@ button.nx-node:hover {
     min-width: 44px;
   }
 
+  .nx-suggest button,
+  .nx-icon-btn,
+  .nx-link,
+  .nx-segment button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .nx-link {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .nx-search,
+  .nx-page input[type="search"] {
+    min-height: 44px;
+  }
+
   .nx-composer textarea {
     font-size: 16px; /* stops iOS zooming on focus */
   }

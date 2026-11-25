@@ -3,9 +3,14 @@ import { expect, test, type Page } from "@playwright/test";
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
 async function noHorizontalOverflow(page: Page) {
-  const overflow = await page.evaluate(
-    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
-  );
+  // html/body/.nx clip overflow-x, so documentElement.scrollWidth alone hides real overflow.
+  const overflow = await page.evaluate(() => {
+    const root = document.querySelector<HTMLElement>(".web-shell");
+    const widths = [document.documentElement, document.body, root]
+      .filter((el): el is HTMLElement => el !== null)
+      .map((el) => el.scrollWidth - el.clientWidth);
+    return Math.max(...widths);
+  });
   expect(overflow).toBeLessThanOrEqual(0);
 }
 

@@ -10,9 +10,14 @@ test.use({
 });
 
 async function expectNoHorizontalOverflow(page: Page) {
-  const overflow = await page.evaluate(
-    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
-  );
+  // html/body/.nx clip overflow-x, so documentElement.scrollWidth alone hides real overflow.
+  const overflow = await page.evaluate(() => {
+    const root = document.querySelector<HTMLElement>("[data-testid='next-shell']");
+    const widths = [document.documentElement, document.body, root]
+      .filter((el): el is HTMLElement => el !== null)
+      .map((el) => el.scrollWidth - el.clientWidth);
+    return Math.max(...widths);
+  });
   expect(overflow).toBeLessThanOrEqual(0);
 }
 
@@ -30,6 +35,24 @@ test("phone viewport: drawer navigation reaches Chat, Inbox and Workers without 
   const box = await toggle.boundingBox();
   expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
   expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+
+  const sessions = page.getByRole("navigation", { name: "Sessions" });
+  const openDrawer = async () => {
+    await page.getByTestId("mobile-nav-toggle").click();
+    await expect(page.getByRole("complementary", { name: "Sessions and servers" })).toBeVisible();
+  };
+
+  await openDrawer();
+  await sessions.getByRole("button", { name: /^vowp/ }).click();
+  await sessions.getByRole("button", { name: /^Orchestrator/ }).first().click();
+  await expect(page.getByRole("complementary", { name: "Sessions and servers" })).toBeHidden();
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  await openDrawer();
+  await sessions.getByRole("button", { name: /^Workers/ }).click();
+  await expect(page.getByRole("heading", { name: "vowp · Workers", level: 1 })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
 
   await page.getByTestId("mobile-inbox").click();
   await expect(page.getByRole("heading", { name: "Inbox", level: 1 })).toBeVisible();
