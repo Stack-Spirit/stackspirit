@@ -1,0 +1,29 @@
+{
+  "name": "stackspirit",
+  "version": "0.6.0",
+  "description": "StackSpirit: local-first supervisor for AI coding agents",
+  "license": "MIT",
+  "homepage": "https://stackspirit.io",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Stack-Spirit/stackspirit.git",
+    "directory": "packaging/npm/stackspirit"
+  },
+  "bugs": { "url": "https://github.com/Stack-Spirit/stackspirit/issues" },
+  "engines": { "node": ">=18" },
+  "bin": {
+    "stackspirit": "bin/stackspirit.js",
+    "vowp": "bin/vowp.js",
+    "stackspirit-daemon": "bin/stackspirit-daemon.js",
+    "vowp-daemon": "bin/vowp-daemon.js"
+  },
+  "files": ["bin/", "lib/", "README.md", "LICENSE"],
+  "optionalDependencies": {
+    "@stackspirit/linux-x64": "0.6.0",
+    "@stackspirit/linux-arm64": "0.6.0",
+    "@stackspirit/darwin-x64": "0.6.0",
+    "@stackspirit/darwin-arm64": "0.6.0"
+  },
+  "publishConfig": { "access": "public" },
+  "scripts": { "test": "node --test test/*.test.js" }
+}

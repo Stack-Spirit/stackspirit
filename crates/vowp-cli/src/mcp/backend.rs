@@ -40,12 +40,31 @@ const JOB_WAIT: Duration = Duration::from_secs(5);
 pub struct Backend<'a> {
     ctx: &'a Ctx,
     opts: &'a McpOptions,
+    /// True in the no-session server: only the five read tools run and `opts` is a placeholder
+    /// that no read path consults.
+    read_only: bool,
 }
 
 impl<'a> Backend<'a> {
     /// Creates a backend for `ctx` and the server options.
     pub fn new(ctx: &'a Ctx, opts: &'a McpOptions) -> Self {
-        Self { ctx, opts }
+        Self {
+            ctx,
+            opts,
+            read_only: false,
+        }
+    }
+
+    /// Creates the backend of the read-only no-session server.
+    ///
+    /// `placeholder` carries no real session; [`Backend::call`] refuses every tool except the
+    /// five reads and `session_tail` there requires an explicit session on the local home.
+    pub fn read_only(ctx: &'a Ctx, placeholder: &'a McpOptions) -> Self {
+        Self {
+            ctx,
+            opts: placeholder,
+            read_only: true,
+        }
     }
 
     /// Dispatches one tool and returns its JSON value.
@@ -55,6 +74,10 @@ impl<'a> Backend<'a> {
         let args = arguments
             .as_object()
             .ok_or_else(|| ToolError::invalid("arguments must be a JSON object"))?;
+
+        if self.read_only {
+            return self.call_read_only(name, args);
+        }
 
         match name {
             "fleet_status" => self.fleet_status(opt_str(args, "project")?),
@@ -140,6 +163,35 @@ impl<'a> Backend<'a> {
                 }
             }
             other => Err(ToolError::new("invalid_input", format!("unknown tool: {other}"))),
+        }
+    }
+
+    /// Dispatches one of the five read tools for the no-session server.
+    ///
+    /// Anything else is refused here too, so a caller that skips the front-door check still
+    /// cannot reach a write path.
+    fn call_read_only(&self, name: &str, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        match name {
+            "fleet_status" => self.fleet_status(opt_str(args, "project")?),
+            "fleet_queue" => self.fleet_queue(opt_str(args, "project")?, opt_str(args, "state")?),
+            "inbox_list" => self.inbox_list(opt_str(args, "project")?, opt_bool(args, "all")?.unwrap_or(false)),
+            "capacity_report" => self.capacity_report(),
+            "session_tail" => {
+                if opt_str(args, "session")?.is_none() {
+                    return Err(ToolError::invalid(
+                        "session_tail needs a session id in the read-only server",
+                    ));
+                }
+                if self.is_control() {
+                    return Err(ToolError::refused(
+                        "session_tail in the read-only server runs on the home only",
+                    ));
+                }
+                self.session_tail(args)
+            }
+            other => Err(ToolError::refused(format!(
+                "{other} is not available in the read-only server"
+            ))),
         }
     }
 

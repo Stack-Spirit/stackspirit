@@ -1,5 +1,8 @@
 # vowp (npm)
 
+> **FROZEN.** This legacy package is kept for reference and is not published from this repository.
+> Uninstall it (`npm uninstall -g vowp`) and install `stackspirit` instead; the `vowp` command is still provided.
+
 The npm package for **VOWP** — a local-first supervisor for AI coding agents.
 It installs the prebuilt `vowp` binary for your platform; Rust is not
 required.

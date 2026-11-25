@@ -82,6 +82,45 @@ impl std::fmt::Display for ToolError {
     }
 }
 
+/// The read tools the no-session server lists and serves.
+pub const READ_ONLY_TOOLS: [&str; 5] = [
+    "fleet_status",
+    "fleet_queue",
+    "inbox_list",
+    "capacity_report",
+    "session_tail",
+];
+
+/// Returns the `tools/list` result of the read-only server: the five read tools.
+///
+/// `session_tail` takes its session as a required argument because there is no session to
+/// default to.
+pub fn read_only_definitions() -> Value {
+    let mut all = definitions();
+    let tools: Vec<Value> = all["tools"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter(|tool| {
+                    tool["name"]
+                        .as_str()
+                        .is_some_and(|name| READ_ONLY_TOOLS.contains(&name))
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    all["tools"] = Value::Array(tools);
+    if let Some(tail) = all["tools"]
+        .as_array_mut()
+        .and_then(|list| list.iter_mut().find(|tool| tool["name"] == "session_tail"))
+    {
+        tail["inputSchema"]["required"] = json!(["session"]);
+        tail["inputSchema"]["properties"]["session"]["description"] = json!("Session id or unique prefix.");
+    }
+    all
+}
+
 /// Returns the MCP `tools/list` result.
 pub fn definitions() -> Value {
     json!({

@@ -54,6 +54,59 @@ pub(crate) fn serve_with_ctx(ctx: &Ctx, io: &mut dyn IoStreams, opts: &McpOption
     serve_jsonrpc(io, |request| handle_request(&backend, &definitions, request))
 }
 
+/// Serves the read-only no-session MCP server until stdin closes.
+///
+/// Spec: `docs/design/relay-and-packaging.md` §3.7. It lists only the five read tools and
+/// answers a write tool with JSON-RPC `-32601`; it never opens a writable store, creates a
+/// surface or lease, or logs a request.
+pub(crate) fn serve_read_only_with_ctx(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
+    let placeholder = McpOptions {
+        session: SessionId::parse("00000000000000000000000000")?,
+        surface: SurfaceId("read-only".to_owned()),
+        token_file: PathBuf::new(),
+    };
+    let backend = Backend::read_only(ctx, &placeholder);
+    let definitions = tools::read_only_definitions();
+    serve_jsonrpc(io, |request| handle_read_only(&backend, &definitions, request))
+}
+
+/// Handles one request of the read-only server; notifications return `None`.
+fn handle_read_only(backend: &Backend<'_>, tools: &Value, request: &jsonrpc::Request) -> Option<Value> {
+    if request.is_notification() {
+        return None;
+    }
+    let id = request.id_value();
+    let result = if let Some(mut result) = local_method(request, tools) {
+        if request.method == "initialize" {
+            result["serverInfo"]["name"] = json!("stackspirit-engine");
+        }
+        result
+    } else if request.method == "tools/call" {
+        let (name, arguments) = match tools_call(request) {
+            Ok(call) => call,
+            Err(response) => return Some(response),
+        };
+        if !tools::READ_ONLY_TOOLS.contains(&name.as_str()) {
+            return Some(jsonrpc::error_response(
+                id,
+                jsonrpc::METHOD_NOT_FOUND,
+                &format!(
+                    "tool {name} is not available in the read-only server; \
+                     the full server needs --session, --surface and --token-file"
+                ),
+            ));
+        }
+        tools::call(backend, &name, &arguments)
+    } else {
+        return Some(jsonrpc::error_response(
+            id,
+            jsonrpc::METHOD_NOT_FOUND,
+            &format!("method not found: {}", request.method),
+        ));
+    };
+    Some(jsonrpc::success(id, result))
+}
+
 /// Reads newline-delimited requests from stdin and writes one response per request.
 ///
 /// Both the home server and the local proxy share this loop: framing, notifications and

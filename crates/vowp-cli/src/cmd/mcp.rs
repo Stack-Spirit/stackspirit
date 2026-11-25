@@ -16,49 +16,55 @@ use crate::mcp::proxy::ProxyOptions;
 use crate::{CliError, Ctx, IoStreams};
 
 /// Arguments for `vowp mcp`.
+///
+/// With none of `--session`, `--surface`, `--token-file` and `--agent-socket`, the command
+/// serves the read-only no-session server (`docs/design/relay-and-packaging.md` §3.7).
+/// Supplying any one of the three home flags requires all three.
 #[derive(Debug, Clone, Args)]
 pub struct McpArgs {
     /// Session the server writes to (home mode; not with --agent-socket).
-    #[arg(
-        long,
-        value_name = "ID",
-        required_unless_present = "agent_socket",
-        conflicts_with = "agent_socket"
-    )]
+    #[arg(long, value_name = "ID", conflicts_with = "agent_socket")]
     pub session: Option<String>,
     /// Surface id this server represents.
     #[arg(long, value_name = "ID")]
-    pub surface: String,
+    pub surface: Option<String>,
     /// File that holds the lease token (home mode; not with --agent-socket).
-    #[arg(
-        long,
-        value_name = "FILE",
-        required_unless_present = "agent_socket",
-        conflicts_with = "agent_socket"
-    )]
+    #[arg(long, value_name = "FILE", conflicts_with = "agent_socket")]
     pub token_file: Option<PathBuf>,
     /// Unix socket served by `vowp agent run`; selects the local MCP proxy.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", requires = "surface")]
     pub agent_socket: Option<PathBuf>,
 }
 
-/// Runs the home `vowp mcp` server.
+/// Runs the home `vowp mcp` server: full session mode, or the read-only mode with no flags.
 pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &McpArgs) -> Result<i32, CliError> {
-    let session_text = args
-        .session
-        .as_deref()
-        .ok_or_else(|| CliError::Invalid("--session is required without --agent-socket".to_owned()))?;
-    let token_file = args
-        .token_file
-        .as_ref()
-        .ok_or_else(|| CliError::Invalid("--token-file is required without --agent-socket".to_owned()))?;
+    if args.session.is_none() && args.surface.is_none() && args.token_file.is_none() {
+        return crate::mcp::serve_read_only_with_ctx(ctx, io);
+    }
+    let missing: Vec<&str> = [
+        ("--session", args.session.is_none()),
+        ("--surface", args.surface.is_none()),
+        ("--token-file", args.token_file.is_none()),
+    ]
+    .iter()
+    .filter(|(_, absent)| *absent)
+    .map(|(name, _)| *name)
+    .collect();
+    let (Some(session_text), Some(surface), Some(token_file)) =
+        (args.session.as_deref(), args.surface.as_ref(), args.token_file.as_ref())
+    else {
+        return Err(CliError::Invalid(format!(
+            "the full MCP server needs --session, --surface and --token-file together; missing {}",
+            missing.join(", ")
+        )));
+    };
     let session = SessionId::parse(session_text)?;
-    if args.surface.trim().is_empty() {
+    if surface.trim().is_empty() {
         return Err(CliError::Invalid("--surface must not be empty".to_owned()));
     }
     let opts = McpOptions {
         session,
-        surface: SurfaceId(args.surface.clone()),
+        surface: SurfaceId(surface.clone()),
         token_file: token_file.clone(),
     };
     crate::mcp::serve_with_ctx(ctx, io, &opts)
@@ -76,10 +82,14 @@ pub fn run_proxy(io: &mut dyn IoStreams, args: &McpArgs) -> Result<i32, CliError
             "--session and --token-file are not used with --agent-socket".to_owned(),
         ));
     }
-    if args.surface.trim().is_empty() {
+    let surface_text = args
+        .surface
+        .as_deref()
+        .ok_or_else(|| CliError::Invalid("--surface is required with --agent-socket".to_owned()))?;
+    if surface_text.trim().is_empty() {
         return Err(CliError::Invalid("--surface must not be empty".to_owned()));
     }
-    let surface = SurfaceId(args.surface.clone());
+    let surface = SurfaceId(surface_text.to_owned());
     vowp_agent::validate_surface_id(&surface)
         .map_err(|_| CliError::Invalid("--surface must be a 26-character ULID".to_owned()))?;
     let opts = ProxyOptions {

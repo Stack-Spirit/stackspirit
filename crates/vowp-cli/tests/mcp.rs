@@ -1697,3 +1697,159 @@ fn mcp_session_resume_reports_structured_ownership_and_refusal() {
     assert_eq!(context["is_owner"], true, "{context}");
     assert_eq!(context["owner"]["holder"], "mcp");
 }
+
+/// Runs a real `vowp mcp <args>` child against the temporary home with scripted stdin.
+fn run_mcp_child(env: &TestEnv, args: &[&str], input: &str) -> (i32, String, String) {
+    let mut child = Command::new(vowp_binary())
+        .current_dir(env.project_path())
+        .env("HOME", env.home_path())
+        .env("TMUX_TMPDIR", env.home_path())
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("VOWP_CONTROL_HOME")
+        .arg("--home")
+        .arg(env.home_path())
+        .arg("--project")
+        .arg(env.project_path())
+        .arg("mcp")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn vowp mcp");
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(input.as_bytes()).expect("write MCP stdin");
+    }
+    drop(child.stdin.take());
+    let output = child.wait_with_output().expect("MCP child output");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn mcp_without_a_session_is_read_only() {
+    let env = TestEnv::new();
+    let input = format!(
+        "{}\n{}\n{}\n",
+        request(
+            1,
+            "initialize",
+            json!({"protocolVersion": "2025-03-26", "capabilities": {}})
+        ),
+        request(2, "tools/list", json!({})),
+        request(3, "ping", json!({})),
+    );
+    let (code, stdout, stderr) = run_mcp_child(&env, &[], &input);
+    assert_eq!(
+        code, 0,
+        "the no-flag server must not exit with a missing-flag error: {stderr}"
+    );
+    let values = responses(&stdout);
+    let init = response(&values, 1);
+    assert_eq!(init["result"]["serverInfo"]["name"], "stackspirit-engine");
+    assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
+    assert!(response(&values, 3)["result"].is_object());
+    let mut tools: Vec<&str> = response(&values, 2)["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    tools.sort_unstable();
+    assert_eq!(
+        tools,
+        [
+            "capacity_report",
+            "fleet_queue",
+            "fleet_status",
+            "inbox_list",
+            "session_tail"
+        ]
+    );
+}
+
+#[test]
+fn mcp_without_a_session_serves_reads() {
+    let env = TestEnv::new();
+    let session = create_session(&env);
+    append_note_events(&env, &session, 2);
+    let input = format!(
+        "{}\n{}\n{}\n",
+        tool_call(1, "fleet_status", json!({})),
+        tool_call(2, "session_tail", json!({"session": session})),
+        tool_call(3, "session_tail", json!({})),
+    );
+    let (code, stdout, stderr) = run_mcp_child(&env, &[], &input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    assert_eq!(response(&values, 1)["result"]["isError"], false, "{values:?}");
+    let tail = tool_text(response(&values, 2));
+    assert!(tail.as_array().is_some_and(|events| events.len() >= 2), "{tail}");
+    // No session is bound, so a tail without one is a tool error, not a guess.
+    assert_eq!(response(&values, 3)["result"]["isError"], true);
+}
+
+#[test]
+fn mcp_without_a_session_refuses_a_write() {
+    let env = TestEnv::new();
+    let before = env
+        .store()
+        .ledger_since(&LedgerFilter::default())
+        .expect("ledger rows")
+        .len();
+    let input = format!(
+        "{}\n{}\n{}\n",
+        tool_call(
+            1,
+            "capacity_set",
+            json!({"target": 3, "mode": "fixed", "override": true})
+        ),
+        tool_call(
+            2,
+            "job_add",
+            json!({"id": "x1", "title": "t", "kind": "build", "role": "worker"})
+        ),
+        tool_call(3, "inbox_answer", json!({"id": "abc", "answer": "yes"})),
+    );
+    let (code, stdout, stderr) = run_mcp_child(&env, &[], &input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    for id in 1..=3 {
+        let reply = response(&values, id);
+        assert_eq!(reply["error"]["code"], -32601, "{reply}");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("--session"),
+            "{reply}"
+        );
+        assert!(reply.get("result").is_none(), "{reply}");
+    }
+    let after = env
+        .store()
+        .ledger_since(&LedgerFilter::default())
+        .expect("ledger rows")
+        .len();
+    assert_eq!(before, after, "a read-only server must not write the ledger");
+    assert!(
+        env.store().latest_capacity_target().expect("target query").is_none(),
+        "no capacity target may be written"
+    );
+}
+
+#[test]
+fn mcp_partial_session_flags_are_an_error_not_a_read_only_fallback() {
+    let env = TestEnv::new();
+    let (code, stdout, stderr) = run_mcp_child(&env, &["--surface", "surf-test"], "");
+    assert_ne!(code, 0, "partial group must fail: {stdout}");
+    assert!(
+        stderr.contains("--session") && stderr.contains("--token-file"),
+        "{stderr}"
+    );
+    assert!(stdout.is_empty(), "{stdout}");
+}
