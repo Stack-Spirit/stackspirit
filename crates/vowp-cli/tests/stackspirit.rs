@@ -38,13 +38,24 @@ fn stackspirit_binary_matches_vowp_cli() {
     let new = run(env!("CARGO_BIN_EXE_stackspirit"), &[], &["--version"], dir.path());
     let old = run(env!("CARGO_BIN_EXE_vowp"), &[], &["--version"], dir.path());
     assert!(new.status.success());
-    assert_eq!(stdout(&new), stdout(&old));
+    assert!(stdout(&new).starts_with("stackspirit "), "{}", stdout(&new));
+    assert!(stdout(&old).starts_with("vowp "), "{}", stdout(&old));
+    let version_new = run(env!("CARGO_BIN_EXE_stackspirit"), &[], &["version"], dir.path());
+    let version_old = run(env!("CARGO_BIN_EXE_vowp"), &[], &["version"], dir.path());
+    assert!(stdout(&version_new).starts_with("stackspirit "));
+    assert!(stdout(&version_old).starts_with("vowp "));
     let help_new = run(env!("CARGO_BIN_EXE_stackspirit"), &[], &["--help"], dir.path());
     let help_old = run(env!("CARGO_BIN_EXE_vowp"), &[], &["--help"], dir.path());
-    // Only the usage line may differ: clap shows the invoked binary name.
+    // `vowp --help` keeps its legacy banner; only `stackspirit --help` carries the new one.
+    assert!(stdout(&help_old).starts_with("VOWP: local-first supervisor for AI coding agents"));
+    assert!(stdout(&help_new).starts_with("StackSpirit Engine (formerly VOWP)"));
     assert_eq!(
-        stdout(&help_new).replace("Usage: stackspirit", "Usage: vowp"),
-        stdout(&help_old)
+        stdout(&help_new)
+            .replace("Usage: stackspirit", "Usage: vowp")
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>(),
+        stdout(&help_old).lines().skip(1).collect::<Vec<_>>()
     );
     assert!(stdout(&help_new).contains("StackSpirit Engine"));
 }

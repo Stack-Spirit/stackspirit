@@ -148,7 +148,12 @@ fn version(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
             }),
         )?;
     } else {
-        writeln!(io.out(), "vowp {} ({git}) schema {schema}", env!("CARGO_PKG_VERSION"))?;
+        writeln!(
+            io.out(),
+            "{} {} ({git}) schema {schema}",
+            crate::cli::binary_brand(),
+            env!("CARGO_PKG_VERSION")
+        )?;
     }
     Ok(0)
 }

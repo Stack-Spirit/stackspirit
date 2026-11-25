@@ -623,10 +623,14 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
         // Each path is one argv element; no shell sees it, so spaces and metacharacters
         // cannot change the command that runs on the home.
         project_commands.push(transit(vec!["test".to_owned(), "-d".to_owned(), repo.to_owned()]));
+        // Either project config marks a checkout.
         project_commands.push(transit(vec![
             "test".to_owned(),
             "-f".to_owned(),
             format!("{repo}/vowp.toml"),
+            "-o".to_owned(),
+            "-f".to_owned(),
+            format!("{repo}/stackspirit.toml"),
         ]));
         project_commands.push(transit(vec![
             vowp_bin.clone(),
@@ -636,7 +640,7 @@ pub fn build_plan(answers: &SetupAnswers, probe: &Probe, approved: bool) -> Resu
             "add".to_owned(),
             repo.to_owned(),
         ]));
-        project_files.push(format!("{repo}/vowp.toml"));
+        project_files.push(format!("{repo}/stackspirit.toml or {repo}/vowp.toml"));
         project_files.push(format!("{vowp_home}/projects/<name>/project.db"));
     }
     phases.push(SetupPhase {

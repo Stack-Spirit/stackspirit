@@ -1434,16 +1434,27 @@ impl Executor {
             let repo = repository.trim_end_matches('/');
             let directory = self.remote(vec!["test".to_owned(), "-d".to_owned(), repo.to_owned()], None)?;
             let manifest = self.remote(
-                vec!["test".to_owned(), "-f".to_owned(), format!("{repo}/vowp.toml")],
+                vec![
+                    "test".to_owned(),
+                    "-f".to_owned(),
+                    format!("{repo}/vowp.toml"),
+                    "-o".to_owned(),
+                    "-f".to_owned(),
+                    format!("{repo}/stackspirit.toml"),
+                ],
                 None,
             )?;
             if !directory.success() || !manifest.success() {
-                self.check("projects", "fail", format!("{repo} is not a checkout with vowp.toml"));
+                self.check(
+                    "projects",
+                    "fail",
+                    format!("{repo} is not a checkout with stackspirit.toml or vowp.toml"),
+                );
                 return Ok(Some(SetupHandoff {
                     phase: "projects".to_owned(),
                     kind: "owner-answer".to_owned(),
                     prompt: format!(
-                        "No vowp.toml in {repo}; run `vowp init` there (it is offered, never forced) or choose another repository, then re-run setup."
+                        "No stackspirit.toml or vowp.toml in {repo}; run `vowp init` there (it is offered, never forced) or choose another repository, then re-run setup."
                     ),
                 }));
             }

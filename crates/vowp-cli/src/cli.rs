@@ -71,7 +71,7 @@ pub struct Cli {
 #[command(
     name = "vowp",
     version,
-    about = "StackSpirit Engine (formerly VOWP): local-first supervisor for AI coding agents",
+    about = "VOWP: local-first supervisor for AI coding agents",
     disable_help_subcommand = true
 )]
 struct ParsedCli {
@@ -108,6 +108,25 @@ impl FromArgMatches for Cli {
     }
 }
 
+/// True when this process was started as the `stackspirit` binary (set while parsing).
+static STACKSPIRIT_BRAND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Returns the product name for the invoked binary: `stackspirit` or the legacy `vowp`.
+pub fn binary_brand() -> &'static str {
+    if STACKSPIRIT_BRAND.load(std::sync::atomic::Ordering::Relaxed) {
+        "stackspirit"
+    } else {
+        "vowp"
+    }
+}
+
+/// Returns true when argv[0]'s file stem is `stackspirit`.
+fn invoked_as_stackspirit(args: &[OsString]) -> bool {
+    args.first()
+        .and_then(|arg| std::path::Path::new(arg).file_stem())
+        .is_some_and(|stem| stem == "stackspirit")
+}
+
 impl Parser for Cli {
     /// Parses a command line, filling an agent chat's positional id from `--session`.
     ///
@@ -124,7 +143,16 @@ impl Parser for Cli {
         record_agent_chat(false);
         inject_agent_chat_id(&mut args);
         rewrite_move_home(&mut args);
-        ParsedCli::try_parse_from(args).map(|mut parsed| {
+        let stackspirit = invoked_as_stackspirit(&args);
+        STACKSPIRIT_BRAND.store(stackspirit, std::sync::atomic::Ordering::Relaxed);
+        let mut command = ParsedCli::command();
+        if stackspirit {
+            command = command
+                .name("stackspirit")
+                .about("StackSpirit Engine (formerly VOWP): local-first supervisor for AI coding agents");
+        }
+        let matches = command.try_get_matches_from(args)?;
+        ParsedCli::from_arg_matches(&matches).map(|mut parsed| {
             // `orchestrator new --node <name>` and `orchestrator move --node <name>`
             // name the node that runs the orchestrator, not an SSH redirect. Move the
             // global value into the subcommand before `remote::maybe_run` sees it; every
