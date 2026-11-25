@@ -13,8 +13,9 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use vowp_store::{NodePaths, StateKind};
 
+use crate::cli::Global;
 use crate::output::print_json;
-use crate::{CliError, Ctx, IoStreams};
+use crate::{CliError, IoStreams};
 
 /// Arguments for `vowp home`.
 #[derive(Debug, Clone, Args)]
@@ -95,9 +96,9 @@ pub struct HomeMigrateReport {
 }
 
 /// Runs `vowp home` with a built context.
-pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &HomeArgs) -> Result<i32, CliError> {
+pub fn run(global: &Global, io: &mut dyn IoStreams, args: &HomeArgs) -> Result<i32, CliError> {
     let HomeCommand::Migrate(args) = &args.command;
-    migrate(ctx.json(), io, args, None)
+    migrate(global.json, io, args, None, global.home.as_deref())
 }
 
 /// Runs `home migrate` against an explicit `$HOME` (tests) or the process environment.
@@ -106,6 +107,7 @@ pub fn migrate(
     io: &mut dyn IoStreams,
     args: &HomeMigrateArgs,
     home_override: Option<&Path>,
+    home_flag: Option<&Path>,
 ) -> Result<i32, CliError> {
     let home = match home_override {
         Some(home) => home.to_path_buf(),
@@ -125,9 +127,9 @@ pub fn migrate(
         new_tmux_socket: None,
     };
     if args.move_ {
-        move_state(&home, args, &mut report)?;
+        move_state(&home, home_flag, args, &mut report)?;
     } else {
-        link_state(&home, args, &mut report)?;
+        link_state(&home, home_flag, args, &mut report)?;
     }
     if json {
         print_json(io, &report)?;
@@ -138,7 +140,12 @@ pub fn migrate(
 }
 
 /// Plans and (with `--yes`) creates the compatibility symlinks.
-fn link_state(home: &Path, args: &HomeMigrateArgs, report: &mut HomeMigrateReport) -> Result<(), CliError> {
+fn link_state(
+    home: &Path,
+    home_flag: Option<&Path>,
+    args: &HomeMigrateArgs,
+    report: &mut HomeMigrateReport,
+) -> Result<(), CliError> {
     if !args.dry_run && !args.yes {
         return Err(CliError::Guard(
             "home migrate --link changes the filesystem; run with --dry-run to see the plan, or --yes to apply"
@@ -146,7 +153,36 @@ fn link_state(home: &Path, args: &HomeMigrateArgs, report: &mut HomeMigrateRepor
         ));
     }
     for kind in [StateKind::Home, StateKind::Agent, StateKind::Control] {
-        report.links.push(plan_link(home, kind)?);
+        // `--home DIR` selects the home: bridge the directory that holds it, when it is named like one.
+        let base = match (kind, home_flag) {
+            (StateKind::Home, Some(flag)) => {
+                let named = flag.file_name().is_some_and(|name| {
+                    name == std::ffi::OsStr::new(kind.new_dir_name())
+                        || name == std::ffi::OsStr::new(kind.legacy_dir_name())
+                });
+                let parent = flag.parent().filter(|parent| !parent.as_os_str().is_empty());
+                match (named, parent) {
+                    (true, Some(parent)) => parent.to_path_buf(),
+                    _ => {
+                        report.links.push(LinkStep {
+                            kind: "home".to_owned(),
+                            link: flag.display().to_string(),
+                            target: flag.display().to_string(),
+                            action: "skip".to_owned(),
+                            note: format!(
+                                "--home {} is not named {} or {}; no bridge applies",
+                                flag.display(),
+                                kind.new_dir_name(),
+                                kind.legacy_dir_name()
+                            ),
+                        });
+                        continue;
+                    }
+                }
+            }
+            _ => home.to_path_buf(),
+        };
+        report.links.push(plan_link(&base, kind)?);
     }
     if args.dry_run {
         return Ok(());
@@ -177,7 +213,9 @@ fn plan_link(home: &Path, kind: StateKind) -> Result<LinkStep, CliError> {
         note: note.to_owned(),
     };
     let real = |path: &Path| path.join(kind.marker()).is_file();
-    let (new_real, old_real) = (real(&new), real(&old));
+    // Same rule as the resolver: an agent or control directory exists before its marker does.
+    let partial_legacy = kind != StateKind::Home && old.is_dir() && !exists_any(&new);
+    let (new_real, old_real) = (real(&new), real(&old) || partial_legacy);
     match (new_real, old_real) {
         (true, true) => {
             let same = matches!((std::fs::canonicalize(&new), std::fs::canonicalize(&old)), (Ok(a), Ok(b)) if a == b);
@@ -245,7 +283,12 @@ fn parse_kind(text: &str) -> Result<StateKind, CliError> {
 }
 
 /// Plans and (with `--yes`) performs the offline move.
-fn move_state(home: &Path, args: &HomeMigrateArgs, report: &mut HomeMigrateReport) -> Result<(), CliError> {
+fn move_state(
+    home: &Path,
+    home_flag: Option<&Path>,
+    args: &HomeMigrateArgs,
+    report: &mut HomeMigrateReport,
+) -> Result<(), CliError> {
     if !args.dry_run && !args.yes {
         return Err(CliError::Guard(
             "home migrate --move changes the filesystem; run with --dry-run to see the plan, or --yes to apply"
@@ -257,10 +300,12 @@ fn move_state(home: &Path, args: &HomeMigrateArgs, report: &mut HomeMigrateRepor
         .to
         .clone()
         .ok_or_else(|| CliError::Invalid("--move needs --to DIR".to_owned()))?;
-    let resolved = crate::ctx::resolve_state(kind, None)?;
-    // An explicit environment path is used as given; a fresh machine has nothing to move.
+    let flag = if kind == StateKind::Home { home_flag } else { None };
+    let resolved = crate::ctx::resolve_state(kind, flag)?;
+    // An explicit path is used as given; a fresh machine has nothing to move.
     let source_spelling = resolved.path.clone();
-    if !source_spelling.join(kind.marker()).is_file() {
+    let partial = resolved.source == vowp_store::StateSource::ExistingLegacy && source_spelling.is_dir();
+    if !source_spelling.join(kind.marker()).is_file() && !(kind != StateKind::Home && partial) {
         return Err(CliError::NotFound(format!(
             "{} has no {}; nothing to move",
             source_spelling.display(),
@@ -287,7 +332,7 @@ fn move_state(home: &Path, args: &HomeMigrateArgs, report: &mut HomeMigrateRepor
         ));
     }
 
-    refuse_if_live(kind, &real_source)?;
+    refuse_if_live(kind, home, &real_source)?;
 
     report.from = Some(real_source.display().to_string());
     report.to = Some(real_dest.display().to_string());
@@ -303,9 +348,16 @@ fn move_state(home: &Path, args: &HomeMigrateArgs, report: &mut HomeMigrateRepor
     }
 
     // Every spelling under $HOME that currently resolves to the source must keep working.
-    let spellings: Vec<PathBuf> = [kind.new_dir_name(), kind.legacy_dir_name()]
+    let mut candidates: Vec<PathBuf> = [kind.new_dir_name(), kind.legacy_dir_name()]
         .into_iter()
         .map(|name| home.join(name))
+        .collect();
+    if let Some(flag) = flag {
+        candidates.push(flag.to_path_buf());
+    }
+    candidates.dedup();
+    let spellings: Vec<PathBuf> = candidates
+        .into_iter()
         .filter(|path| std::fs::canonicalize(path).is_ok_and(|real| real == real_source))
         .collect();
 
@@ -318,7 +370,7 @@ fn move_state(home: &Path, args: &HomeMigrateArgs, report: &mut HomeMigrateRepor
         return Err(error);
     }
     // Re-check immediately before the swap: a supervisor may have started during the copy.
-    if let Err(error) = refuse_if_live(kind, &real_source) {
+    if let Err(error) = refuse_if_live(kind, home, &real_source) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
     }
@@ -353,13 +405,24 @@ fn backup_path(dir: &Path) -> PathBuf {
 }
 
 /// Refuses while anything is using the state directory.
-fn refuse_if_live(kind: StateKind, root: &Path) -> Result<(), CliError> {
+fn refuse_if_live(kind: StateKind, home: &Path, root: &Path) -> Result<(), CliError> {
     match kind {
         StateKind::Home => {
             if let Some(pid) = lock_pid(&NodePaths::new(root).supervisor_lock_path()) {
                 return Err(CliError::Conflict(format!(
                     "supervisor.lock names live process {pid}; run `vowp down` first"
                 )));
+            }
+            // The agent on this machine shares the account; moving the home under it is refused too.
+            let mut agent_dirs: Vec<PathBuf> = [StateKind::Agent.new_dir_name(), StateKind::Agent.legacy_dir_name()]
+                .into_iter()
+                .map(|name| home.join(name))
+                .collect();
+            if let Ok(resolved) = crate::ctx::resolve_state(StateKind::Agent, None) {
+                agent_dirs.push(resolved.path);
+            }
+            for dir in agent_dirs {
+                refuse_if_agent_live(&dir)?;
             }
             let orchestrators = root.join("orchestrators");
             if let Ok(entries) = std::fs::read_dir(&orchestrators) {
@@ -374,16 +437,20 @@ fn refuse_if_live(kind: StateKind, root: &Path) -> Result<(), CliError> {
                 }
             }
         }
-        StateKind::Agent => {
-            let socket = root.join(vowp_agent::socket::AGENT_SOCKET_FILE);
-            if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
-                return Err(CliError::Conflict(format!(
-                    "agent socket {} is live; stop `vowp agent run` first",
-                    socket.display()
-                )));
-            }
-        }
+        StateKind::Agent => refuse_if_agent_live(root)?,
         StateKind::Control => {}
+    }
+    Ok(())
+}
+
+/// Refuses when the agent socket under `dir` accepts a connection.
+fn refuse_if_agent_live(dir: &Path) -> Result<(), CliError> {
+    let socket = dir.join(vowp_agent::socket::AGENT_SOCKET_FILE);
+    if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+        return Err(CliError::Conflict(format!(
+            "agent socket {} is live; stop `vowp agent run` first",
+            socket.display()
+        )));
     }
     Ok(())
 }
@@ -423,13 +490,17 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), CliError> {
 
 /// Opens the copy read-only and runs the database checks `doctor` runs.
 fn verify_copy(kind: StateKind, copy: &Path) -> Result<(), CliError> {
-    if !copy.join(kind.marker()).is_file() {
+    if kind == StateKind::Home && !copy.join(kind.marker()).is_file() {
         return Err(CliError::Invalid(format!("copy is missing {}", kind.marker())));
     }
     match kind {
         StateKind::Home => crate::cmd::doctor::verify_home_read_only(&NodePaths::new(copy))
             .map_err(|detail| CliError::Invalid(format!("copy failed verification: {detail}"))),
         StateKind::Agent | StateKind::Control => {
+            // A partial agent or control directory has no marker yet; there is nothing to parse.
+            if !copy.join(kind.marker()).is_file() {
+                return Ok(());
+            }
             let text = std::fs::read_to_string(copy.join(kind.marker()))?;
             serde_json::from_str::<serde_json::Value>(&text)
                 .map(|_| ())

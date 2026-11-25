@@ -156,6 +156,10 @@ name = "session"
 path = "crates/vowp-cli/tests/session.rs"
 
 [[test]]
+name = "setup"
+path = "crates/vowp-cli/tests/setup.rs"
+
+[[test]]
 name = "setup_verify"
 path = "crates/vowp-cli/tests/setup_verify.rs"
 

@@ -66,14 +66,31 @@ fn doctor_check(home: &Path, env: &[(&str, &str)], name: &str) -> Option<serde_j
         .cloned()
 }
 
-fn entries(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .expect("read dir")
-        .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
-        .filter(|name| name != ".tmux-private")
-        .collect();
-    names.sort();
-    names
+/// Recursive snapshot (kind, size, mtime, link target) of everything under `dir` except the
+/// private tmux directory, so a dry run that creates or touches any nested file is caught.
+fn snapshot(dir: &Path) -> std::collections::BTreeMap<String, String> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, String>) {
+        for entry in std::fs::read_dir(dir).expect("read dir") {
+            let entry = entry.expect("entry");
+            let path = entry.path();
+            if path.file_name().is_some_and(|name| name == ".tmux-private") {
+                continue;
+            }
+            let meta = std::fs::symlink_metadata(&path).expect("metadata");
+            let mtime = meta.modified().expect("mtime");
+            let link = std::fs::read_link(&path)
+                .map(|t| t.display().to_string())
+                .unwrap_or_default();
+            let key = path.strip_prefix(root).expect("prefix").display().to_string();
+            out.insert(key, format!("{:?}|{}|{mtime:?}|{link}", meta.file_type(), meta.len()));
+            if meta.is_dir() {
+                walk(root, &path, out);
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
 }
 
 #[test]
@@ -203,7 +220,9 @@ fn link_dry_run_writes_nothing() {
     make_home(&dir.path().join(".vowp"));
     std::fs::create_dir_all(dir.path().join(".vowp-agent")).expect("agent");
     std::fs::write(dir.path().join(".vowp-agent/agent.json"), "{}").expect("agent.json");
-    let before = entries(dir.path());
+    std::fs::create_dir_all(dir.path().join(".vowp/projects/proj")).expect("project dir");
+    Store::open(&NodePaths::new(dir.path().join(".vowp"))).expect("reopen");
+    let before = snapshot(dir.path());
     let output = run(dir.path(), &[], &["home", "migrate", "--link", "--dry-run"]);
     assert!(output.status.success(), "{}", text(&output.stderr));
     let out = text(&output.stdout);
@@ -212,7 +231,11 @@ fn link_dry_run_writes_nothing() {
         "{out}"
     );
     assert!(out.contains("nothing was written"), "{out}");
-    assert_eq!(entries(dir.path()), before, "dry run must not write");
+    assert_eq!(
+        snapshot(dir.path()),
+        before,
+        "dry run must not write anywhere under the home"
+    );
 }
 
 #[test]
@@ -360,7 +383,7 @@ fn move_refuses_while_an_orchestrator_host_is_running() {
 fn move_dry_run_writes_nothing_and_prints_socket_names() {
     let dir = tempfile::tempdir().expect("tempdir");
     make_home(&dir.path().join(".vowp"));
-    let before = entries(dir.path());
+    let before = snapshot(dir.path());
     let target = dir.path().join(".stackspirit");
     let output = run(
         dir.path(),
@@ -380,7 +403,102 @@ fn move_dry_run_writes_nothing_and_prints_socket_names() {
         out.contains("VOWP_TMUX_SOCKET=vowp-") && out.contains("STACKSPIRIT_TMUX_SOCKET=vowp-"),
         "{out}"
     );
-    assert_eq!(entries(dir.path()), before);
+    assert_eq!(
+        snapshot(dir.path()),
+        before,
+        "dry run must not write anywhere under the home"
+    );
+}
+
+#[test]
+fn move_honours_the_global_home_flag_over_dollar_home() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let selected = dir.path().join("selected");
+    make_home(&selected);
+    let elsewhere = dir.path().join("elsewhere-home");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    let target = dir.path().join("moved");
+    let output = run(
+        &elsewhere,
+        &[],
+        &[
+            "--home",
+            selected.to_str().expect("utf8"),
+            "home",
+            "migrate",
+            "--move",
+            "--to",
+            target.to_str().expect("utf8"),
+            "--dry-run",
+        ],
+    );
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let canonical = std::fs::canonicalize(&selected).expect("canonical");
+    assert!(
+        text(&output.stdout).contains(&canonical.display().to_string()),
+        "{}",
+        text(&output.stdout)
+    );
+}
+
+#[test]
+fn home_move_refuses_while_the_agent_socket_is_live() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".vowp"));
+    std::fs::create_dir_all(dir.path().join(".vowp-agent")).expect("agent dir");
+    let _listener = std::os::unix::net::UnixListener::bind(
+        dir.path()
+            .join(".vowp-agent")
+            .join(vowp_agent::socket::AGENT_SOCKET_FILE),
+    )
+    .expect("bind agent socket");
+    let target = dir.path().join(".stackspirit");
+    let output = run(
+        dir.path(),
+        &[],
+        &[
+            "home",
+            "migrate",
+            "--move",
+            "--to",
+            target.to_str().expect("utf8"),
+            "--dry-run",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(4), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stderr).contains("agent socket"),
+        "{}",
+        text(&output.stderr)
+    );
+}
+
+#[test]
+fn partial_legacy_agent_dir_is_present_for_link_move_and_doctor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".vowp-agent")).expect("agent dir");
+    std::fs::write(dir.path().join(".vowp-agent/node.key"), "k").expect("node.key");
+    let link = run(dir.path(), &[], &["home", "migrate", "--link", "--dry-run"]);
+    assert!(link.status.success(), "{}", text(&link.stderr));
+    assert!(text(&link.stdout).contains("would link"), "{}", text(&link.stdout));
+    let target = dir.path().join("agent-moved");
+    let moved = run(
+        dir.path(),
+        &[],
+        &[
+            "home",
+            "migrate",
+            "--move",
+            "--kind",
+            "agent",
+            "--to",
+            target.to_str().expect("utf8"),
+            "--dry-run",
+        ],
+    );
+    assert!(moved.status.success(), "{}", text(&moved.stderr));
+    let check = doctor_check(dir.path(), &[], "agent-state").expect("agent-state check");
+    assert_eq!(check["status"], "warn", "{check}");
 }
 
 #[test]

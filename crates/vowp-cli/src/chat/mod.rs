@@ -614,6 +614,7 @@ fn spawn_exec(ctx: &Ctx, grant: &Path, spool: &Path) -> Result<std::process::Out
         Some(path) => PathBuf::from(path),
         None => std::env::current_exe()?,
     };
+    let local_surface = ctx.paths().root().join("spool").join(".local-surface");
     Command::new(binary)
         .arg("--home")
         .arg(ctx.paths().root())
@@ -627,10 +628,8 @@ fn spawn_exec(ctx: &Ctx, grant: &Path, spool: &Path) -> Result<std::process::Out
         .arg(spool)
         // The executor is this surface's machine even when this account also has a control
         // machine configured; the child must ingest into the same home, not dial itself.
-        .env(
-            "VOWP_CONTROL_HOME",
-            ctx.paths().root().join("spool").join(".local-surface"),
-        )
+        .env("STACKSPIRIT_CONTROL_HOME", &local_surface)
+        .env("VOWP_CONTROL_HOME", &local_surface)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

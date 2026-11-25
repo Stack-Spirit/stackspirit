@@ -229,14 +229,17 @@ fn check_state_dirs(checks: &mut Checks) {
     ] {
         match vowp_store::resolve_state_from_env(kind, None) {
             Ok(resolved) => {
-                if !resolved.path.join(file).is_file() {
+                let config = resolved.path.join(file);
+                let present = config.is_file()
+                    || (resolved.source == vowp_store::StateSource::ExistingLegacy && resolved.path.is_dir());
+                if !present {
                     continue;
                 }
-                let detail = format!(
-                    "selected {}; config {}",
-                    resolved.path.display(),
-                    resolved.path.join(file).display()
-                );
+                let detail = if config.is_file() {
+                    format!("selected {}; config {}", resolved.path.display(), config.display())
+                } else {
+                    format!("selected {}; no {file} yet", resolved.path.display())
+                };
                 if resolved.legacy {
                     checks.push(
                         name,
