@@ -572,8 +572,8 @@ launchd, systemd, network or home directory is touched.
 `relay_run_reconnects_in_the_background_and_stops_on_sigterm` are in `tests/relay.rs`. They use a
 fake loopback API, a temporary home and the real binaries (SIGTERM for `run`); no network, real
 tmux or home directory is touched. The package root is the workspace root, so Cargo does not
-auto-discover `crates/vowp-cli/tests/`; `cmd/relay.rs` includes the file as a library test module
-and `cargo test -p vowp-cli --lib relay` runs it.
+auto-discover `crates/vowp-cli/tests/`; the root manifest registers the file as a `[[test]]`
+target named `relay`, and `cargo test -p vowp-cli --test relay` runs it.
 
 ## 6. Out of scope
 Shell completions (v0.2), TUI board beyond redraw loop, windows (OS) support.

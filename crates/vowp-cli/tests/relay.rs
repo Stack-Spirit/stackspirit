@@ -1,9 +1,9 @@
 //! `stackspirit relay enroll|status|run|rotate-key` against a fake loopback API.
 //! Spec: `docs/design/relay-and-packaging.md` §6.2. Hermetic: temporary home, loopback only.
 //!
-//! This file is compiled as a `vowp-cli` library test module through `src/cmd/relay.rs`: the
-//! package root is the workspace root, so Cargo does not auto-discover `crates/vowp-cli/tests/`.
-//! It still works as an integration target if the root manifest ever declares one.
+//! The package root is the workspace root, so Cargo does not auto-discover
+//! `crates/vowp-cli/tests/`; the root manifest registers this file as the `relay` `[[test]]`
+//! target. Run it with `cargo test -p vowp-cli --test relay`.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -131,9 +131,8 @@ impl TestEnv {
 
 /// Returns the `vowp` or `stackspirit` binary Cargo built for this package.
 ///
-/// Integration targets get `CARGO_BIN_EXE_<name>`. This file is also a library test module,
-/// where Cargo does not set it, so the target directory is checked next and the binaries are
-/// built once when neither exists.
+/// Integration targets get `CARGO_BIN_EXE_<name>`; when it is unset, the target directory is
+/// checked next and the binaries are built once when neither exists.
 fn binary(name: &str) -> PathBuf {
     if let Some(path) = std::env::var_os(format!("CARGO_BIN_EXE_{name}")).map(PathBuf::from)
         && path.is_file()
