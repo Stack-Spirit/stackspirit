@@ -33,8 +33,10 @@ fn fake_path() -> &'static Path {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
         // Liveness probes shell out to `kill -0`; the wrapper keeps `PATH` free of real harnesses.
+        // Use the POSIX `/bin/sh` builtin `kill` so it works on both Linux (`/usr/bin/kill`)
+        // and macOS (`/bin/kill`).
         let kill = dir.path().join("kill");
-        std::fs::write(&kill, "#!/bin/sh\nexec /usr/bin/kill \"$@\"\n").expect("kill wrapper");
+        std::fs::write(&kill, "#!/bin/sh\nkill \"$@\"\n").expect("kill wrapper");
         std::fs::set_permissions(&kill, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         dir
     })
