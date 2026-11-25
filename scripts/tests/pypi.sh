@@ -1,12 +1,36 @@
 #!/usr/bin/env bash
 # Hermetic proof of the stackspirit PyPI wheels (design §4.6): fake binaries, temp venv, no network.
-# Needs python3 with `build` and pip. `uv` is optional locally; set REQUIRE_UV=1 (CI) to fail without it.
+# Runs under a temporary HOME. Needs python3 with `build` and pip importable. `uv` is optional locally; set REQUIRE_UV=1 (CI) to fail without it.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 export PYTHONDONTWRITEBYTECODE=1
+
+# Locate the python tooling (`build`, `pip` and their dependencies) while the caller's environment is
+# still intact, then run everything under a temporary HOME. Only the importable code directories are
+# added to PYTHONPATH (read-only use); caches, config and tool state all go under the temp home.
+tool_path="$(python3 -P - <<'PYX' || true
+import importlib.util, os
+dirs = []
+for mod in ("build", "pip", "pyproject_hooks", "packaging"):
+    spec = importlib.util.find_spec(mod)
+    if spec and spec.origin:
+        d = os.path.dirname(os.path.dirname(spec.origin))
+        if d not in dirs:
+            dirs.append(d)
+print(os.pathsep.join(dirs))
+PYX
+)"
+export HOME="$work/home"
+mkdir -p "$HOME/.cache" "$HOME/.config" "$HOME/.local/share"
+export XDG_CACHE_HOME="$HOME/.cache" XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share"
+export PIP_CACHE_DIR="$HOME/.cache/pip" UV_CACHE_DIR="$HOME/.cache/uv"
+export PYTHONUSERBASE="$HOME/.local"
+[ -z "$tool_path" ] || export PYTHONPATH="$tool_path"
+python3 -c 'import build, pip' 2>/dev/null \
+  || { echo "FAIL: python3 needs the 'build' and 'pip' modules importable from the caller's environment" >&2; exit 1; }
 unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL UV_INDEX_URL VIRTUAL_ENV
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -31,7 +55,7 @@ build() { bash "$root/scripts/release/build-pypi-wheels.sh" --version "$version"
 build "$work/out1" || fail "build failed"
 build "$work/out2" || fail "second build failed"
 
-export PIP_CONFIG_FILE=/dev/null  # no user pip config; the real HOME stays so user-site pip/build resolve
+export PIP_CONFIG_FILE=/dev/null  # no user pip config
 
 # 1. Exactly four wheels with the exact names, and no sdist.
 actual="$(cd "$work/out1" && ls | sort)"
