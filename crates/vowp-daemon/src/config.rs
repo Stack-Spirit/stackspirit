@@ -101,7 +101,13 @@ impl Options {
     pub fn paths(&self) -> Result<NodePaths, DaemonError> {
         match &self.home {
             Some(home) => Ok(NodePaths::new(home)),
-            None => NodePaths::from_env().map_err(DaemonError::from_store),
+            None => vowp_store::resolve_state_from_env(vowp_store::StateKind::Home, None)
+                .map(|resolved| NodePaths::new(resolved.path))
+                .map_err(|error| match error {
+                    vowp_store::ResolveError::NoHome(_) => DaemonError::from_store(vowp_store::StoreError::NoHome),
+                    // A conflict names both candidate homes and the `--home` hint.
+                    other => DaemonError::Config(other.to_string()),
+                }),
         }
     }
 }

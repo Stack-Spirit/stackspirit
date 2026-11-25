@@ -9,6 +9,38 @@ use vowp_store::{NodePaths, Store};
 
 const BIN: &str = env!("CARGO_BIN_EXE_stackspirit");
 
+/// Fake tools doctor invokes; every one answers `--version` and nothing touches a real harness.
+const FAKE_TOOLS: &[(&str, &str)] = &[
+    ("git", "#!/bin/sh\necho 'git version 9.9.9'\nexit 0\n"),
+    ("tmux", "#!/bin/sh\necho 'tmux 9.9'\nexit 0\n"),
+    (
+        "df",
+        "#!/bin/sh\necho 'Filesystem 1024-blocks Used Available Capacity Mounted on'\necho '/dev/fake 9999999 1 8000000 1% /'\nexit 0\n",
+    ),
+    ("claude", "#!/bin/sh\necho '2.1.0 (Claude Code)'\nexit 0\n"),
+    ("opencode", "#!/bin/sh\necho 'opencode 2.0.0'\nexit 0\n"),
+];
+
+/// Returns a process-wide directory of fake tools used as the only `PATH` entry.
+fn fake_path() -> &'static Path {
+    use std::os::unix::fs::PermissionsExt;
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("fake bin");
+        for (name, body) in FAKE_TOOLS {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).expect("fake script");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        // Liveness probes shell out to `kill -0`; the wrapper keeps `PATH` free of real harnesses.
+        let kill = dir.path().join("kill");
+        std::fs::write(&kill, "#!/bin/sh\nexec /usr/bin/kill \"$@\"\n").expect("kill wrapper");
+        std::fs::set_permissions(&kill, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        dir
+    })
+    .path()
+}
+
 /// Runs `stackspirit` with `HOME=home`, no home variables and a private tmux directory.
 fn run(home: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
     let tmux = home.join(".tmux-private");
@@ -26,6 +58,7 @@ fn run(home: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .env("HOME", home)
+        .env("PATH", fake_path())
         .env("TMUX_TMPDIR", &tmux);
     for (key, value) in env {
         command.env(key, value);
@@ -597,4 +630,116 @@ fn exported_child_environments_carry_both_names_with_one_value() {
         let expected = format!("{0}|{0}", target.display());
         assert_eq!(text(&output.stdout), expected, "{new_name}/{old_name}");
     }
+}
+
+#[test]
+fn control_status_reports_a_two_control_directory_conflict() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".stackspirit"));
+    for name in [".vowp-control", ".stackspirit-control"] {
+        let control = dir.path().join(name);
+        std::fs::create_dir_all(&control).expect("control dir");
+        std::fs::write(control.join("control.json"), "{}").expect("control.json");
+    }
+    let output = run(dir.path(), &[], &["control", "status"]);
+    assert!(!output.status.success());
+    let err = text(&output.stderr);
+    assert!(
+        err.contains(".vowp-control")
+            && err.contains(".stackspirit-control")
+            && err.contains("STACKSPIRIT_CONTROL_HOME"),
+        "{err}"
+    );
+    let doctor = run(dir.path(), &[], &["--json", "doctor"]);
+    assert!(!doctor.status.success(), "doctor must not pass with a control conflict");
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).expect("doctor json");
+    assert_eq!(report["error"]["kind"], "conflict", "{report}");
+    assert!(
+        report["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains(".stackspirit-control"),
+        "{report}"
+    );
+}
+
+#[test]
+fn doctor_and_link_report_a_broken_new_name_symlink() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".vowp"));
+    std::os::unix::fs::symlink("/nonexistent-stackspirit-target", dir.path().join(".stackspirit")).expect("symlink");
+    let check = doctor_check(dir.path(), &[], "state-link").expect("state-link check");
+    assert_eq!(check["status"], "warn", "{check}");
+    let detail = check["detail"].as_str().expect("detail");
+    assert!(
+        detail.contains(".stackspirit") && detail.contains("broken symlink"),
+        "{detail}"
+    );
+    let output = run(dir.path(), &[], &["home", "migrate", "--link", "--yes"]);
+    assert!(!output.status.success());
+    assert!(
+        text(&output.stderr).contains("broken symlink"),
+        "{}",
+        text(&output.stderr)
+    );
+}
+
+#[test]
+fn link_honours_the_home_environment_variables() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let selected = root.path().join("h2").join(".vowp");
+    make_home(&selected);
+    for var in ["STACKSPIRIT_HOME", "VOWP_HOME"] {
+        let output = run(
+            &home,
+            &[(var, selected.to_str().expect("utf8"))],
+            &["--json", "home", "migrate", "--link", "--dry-run"],
+        );
+        assert!(output.status.success(), "{var}: {}", text(&output.stderr));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+        let step = report["links"]
+            .as_array()
+            .expect("links")
+            .iter()
+            .find(|step| step["kind"] == "home")
+            .expect("home step");
+        assert_eq!(step["action"], "create", "{var}: {step}");
+        assert!(
+            step["link"].as_str().expect("link").ends_with("h2/.stackspirit"),
+            "{var}: {step}"
+        );
+    }
+    assert!(
+        !root.path().join("h2").join(".stackspirit").exists(),
+        "dry run writes nothing"
+    );
+}
+
+#[test]
+fn daemon_reports_a_home_conflict_with_both_paths_and_the_hint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_home(&dir.path().join(".vowp"));
+    make_home(&dir.path().join(".stackspirit"));
+    let daemon = Path::new(BIN).with_file_name("vowp-daemon");
+    if !daemon.is_file() {
+        // `cargo test -p vowp-cli` alone does not build the daemon binary; the workspace run does.
+        eprintln!("skipping: {} is not built", daemon.display());
+        return;
+    }
+    let output = Command::new(&daemon)
+        .current_dir(dir.path())
+        .env_remove("VOWP_HOME")
+        .env_remove("STACKSPIRIT_HOME")
+        .env("HOME", dir.path())
+        .env("PATH", fake_path())
+        .output()
+        .expect("run vowp-daemon");
+    assert!(!output.status.success());
+    let err = text(&output.stderr);
+    assert!(
+        err.contains(".vowp") && err.contains(".stackspirit") && err.contains("--home"),
+        "{err}"
+    );
 }

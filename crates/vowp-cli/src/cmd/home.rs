@@ -153,25 +153,35 @@ fn link_state(
         ));
     }
     for kind in [StateKind::Home, StateKind::Agent, StateKind::Control] {
-        // `--home DIR` selects the home: bridge the directory that holds it, when it is named like one.
-        let base = match (kind, home_flag) {
-            (StateKind::Home, Some(flag)) => {
-                let named = flag.file_name().is_some_and(|name| {
+        // An explicit selection (`--home DIR` for the home, or `STACKSPIRIT_*`/`VOWP_*`) names one
+        // directory: bridge the directory that holds it, when it is named like one.
+        let flag = if kind == StateKind::Home { home_flag } else { None };
+        let resolved =
+            vowp_store::resolve_state(kind, flag, |name| std::env::var_os(name), Some(home)).map_err(|error| {
+                match error {
+                    vowp_store::ResolveError::Conflict { .. } => CliError::Conflict(error.to_string()),
+                    other => CliError::NotFound(other.to_string()),
+                }
+            })?;
+        let base = match &resolved.source {
+            vowp_store::StateSource::Flag | vowp_store::StateSource::Env(_) => {
+                let path = &resolved.path;
+                let named = path.file_name().is_some_and(|name| {
                     name == std::ffi::OsStr::new(kind.new_dir_name())
                         || name == std::ffi::OsStr::new(kind.legacy_dir_name())
                 });
-                let parent = flag.parent().filter(|parent| !parent.as_os_str().is_empty());
+                let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
                 match (named, parent) {
                     (true, Some(parent)) => parent.to_path_buf(),
                     _ => {
                         report.links.push(LinkStep {
-                            kind: "home".to_owned(),
-                            link: flag.display().to_string(),
-                            target: flag.display().to_string(),
+                            kind: kind_name(kind).to_owned(),
+                            link: path.display().to_string(),
+                            target: path.display().to_string(),
                             action: "skip".to_owned(),
                             note: format!(
-                                "--home {} is not named {} or {}; no bridge applies",
-                                flag.display(),
+                                "{} is not named {} or {}; no bridge applies",
+                                path.display(),
                                 kind.new_dir_name(),
                                 kind.legacy_dir_name()
                             ),
@@ -237,27 +247,36 @@ fn plan_link(home: &Path, kind: StateKind) -> Result<LinkStep, CliError> {
         }
         (false, true) => {
             if exists_any(&new) {
-                Err(CliError::Conflict(format!(
-                    "{} already exists but is not a {} directory; refusing to replace it",
-                    new.display(),
-                    kind_name(kind)
-                )))
+                Err(CliError::Conflict(blocked_message(&new, kind)))
             } else {
                 Ok(step(&new, Path::new(kind.legacy_dir_name()), "create", ""))
             }
         }
         (true, false) => {
             if exists_any(&old) {
-                Err(CliError::Conflict(format!(
-                    "{} already exists but is not a {} directory; refusing to replace it",
-                    old.display(),
-                    kind_name(kind)
-                )))
+                Err(CliError::Conflict(blocked_message(&old, kind)))
             } else {
                 Ok(step(&old, Path::new(kind.new_dir_name()), "create", ""))
             }
         }
         (false, false) => Ok(step(&new, &old, "skip", "not present on this machine")),
+    }
+}
+
+/// Explains why `path` blocks a bridge, naming a broken symlink and its target.
+fn blocked_message(path: &Path, kind: StateKind) -> String {
+    match std::fs::read_link(path) {
+        Ok(target) if !path.exists() => format!(
+            "{} is a broken symlink to {}; remove it or point it at a real {} directory",
+            path.display(),
+            target.display(),
+            kind_name(kind)
+        ),
+        _ => format!(
+            "{} already exists but is not a {} directory; refusing to replace it",
+            path.display(),
+            kind_name(kind)
+        ),
     }
 }
 

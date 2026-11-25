@@ -341,8 +341,10 @@ fn build_home_deps(paths: &NodePaths, config: VowpConfig, adapters: Arc<AdapterR
 
 /// Returns the control home, when one is configured.
 fn read_control_home() -> Result<Option<ControlHome>, CliError> {
-    let Ok(resolved) = vowp_store::resolve_state_from_env(vowp_store::StateKind::Control, None) else {
-        return Ok(None);
+    let resolved = match vowp_store::resolve_state_from_env(vowp_store::StateKind::Control, None) {
+        Ok(resolved) => resolved,
+        Err(error @ vowp_store::ResolveError::Conflict { .. }) => return Err(CliError::Conflict(error.to_string())),
+        Err(_) => return Ok(None),
     };
     let root = resolved.path;
     let config_path = root.join("control.json");

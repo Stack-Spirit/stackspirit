@@ -223,6 +223,7 @@ fn check_home_selection(resolved: &vowp_store::ResolvedState, checks: &mut Check
 
 /// Reports the agent and control state directories when this machine has them.
 fn check_state_dirs(checks: &mut Checks) {
+    check_broken_links(checks);
     for (kind, name, file) in [
         (vowp_store::StateKind::Agent, "agent-state", "agent.json"),
         (vowp_store::StateKind::Control, "control-state", "control.json"),
@@ -250,7 +251,43 @@ fn check_state_dirs(checks: &mut Checks) {
                     checks.push(name, CheckStatus::Ok, detail);
                 }
             }
-            Err(error) => checks.push(name, CheckStatus::Warn, error.to_string()),
+            Err(error) => {
+                let status = match error {
+                    vowp_store::ResolveError::Conflict { .. } => CheckStatus::Fail,
+                    _ => CheckStatus::Warn,
+                };
+                checks.push(name, status, error.to_string());
+            }
+        }
+    }
+}
+
+/// Warns about a dangling symlink at any `~/.stackspirit*` or `~/.vowp*` state name.
+fn check_broken_links(checks: &mut Checks) {
+    let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let home = PathBuf::from(home);
+    for kind in [
+        vowp_store::StateKind::Home,
+        vowp_store::StateKind::Agent,
+        vowp_store::StateKind::Control,
+    ] {
+        for name in [kind.new_dir_name(), kind.legacy_dir_name()] {
+            let path = home.join(name);
+            if let Ok(target) = std::fs::read_link(&path)
+                && !path.exists()
+            {
+                checks.push(
+                    "state-link",
+                    CheckStatus::Warn,
+                    format!(
+                        "{} is a broken symlink to {}; remove it or point it at a real directory",
+                        path.display(),
+                        target.display()
+                    ),
+                );
+            }
         }
     }
 }
