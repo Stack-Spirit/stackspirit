@@ -149,7 +149,7 @@ has already moved or L6's no-healthy-rung fallback has already parked it. That i
 undone on the next tick, and why the fallback opens exactly one notice instead of a second provider-wide
 park. Harvest does not choose a new action; it only gates this backstop on the recorded policy.
 
-The limit row is written for both policies, so `vowp status`, the ledger and `vowp cost` show why the
+The limit row is written for both policies, so `vowp status` and the ledger show why the
 rung changed. `vowp inbox answer <id> resolved` removes a parked provider's limit row and returns its
 jobs to `ready`; with `next` the affected session has already moved and the sticky `credits` or `auth`
 row remains until the owner answers the notice.
