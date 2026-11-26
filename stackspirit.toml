@@ -1,0 +1,66 @@
+schedules = []
+
+[node]
+name = "local"
+max_workers = 8
+max_verifiers = 4
+tick_secs = 60
+cwd_allow = []
+tz_offset_minutes = 60
+
+[project]
+name = "stackspirit"
+remote = "origin"
+default_branch = "main"
+check_cmds = []
+lock_files = ["Cargo.lock", "package-lock.json"]
+always_allowed = ["Cargo.lock", "package-lock.json"]
+push = false
+
+[profiles.keeper]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
+on_quota = "next_then_probe_back"
+
+[profiles.planner]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
+on_quota = "next_then_probe_back"
+[profiles.verifier]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
+on_quota = "next_then_probe_back"
+
+[profiles.worker]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
+on_quota = "next_then_probe_back"
+
+[providers.deepseek]
+max_concurrent = 8
+
+[harnesses]
+
+[env]
+
+[gates]
+rust-check = [
+  { cmd = { run = "node scripts/fetch-engine.mjs", expect_exit = 0 } },
+  { cmd = { run = "scripts/cargo-gate.sh fmt --all -- --check", expect_exit = 0 } },
+  { cmd = { run = "scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings", expect_exit = 0 } },
+]
+rust-core-check = [
+  { cmd = { run = "node scripts/fetch-engine.mjs", expect_exit = 0 } },
+  { cmd = { run = "scripts/cargo-gate.sh fmt --all -- --check", expect_exit = 0 } },
+  { cmd = { run = "scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings", expect_exit = 0 } },
+  { cmd = { run = "scripts/cargo-gate.sh test -p spirit-core", expect_exit = 0 } },
+]
+
+[loops]
+
+[capsule]
+min_interval_secs = 120
+max_input_chars = 200000
+tail_turns = 2
+
+[merge]
+rebase = true
+check_cmds = []
+timeout_secs = 2700
+secret_scan = true
