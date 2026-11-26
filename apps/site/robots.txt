@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /scripts/
+Disallow: /tools/
+Disallow: /README.md
+
+Sitemap: https://stackspirit.io/sitemap.xml

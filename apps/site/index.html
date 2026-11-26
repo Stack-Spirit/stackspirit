@@ -1,0 +1,1486 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>StackSpirit — An always-on machine as a home for your AI coding agents</title>
+    <meta
+      name="description"
+      content="StackSpirit is free, MIT-licensed software that turns any always-on machine into a home for Claude Code, Codex, OpenCode, Antigravity, T3 Code and any MCP or CLI harness. Bring your own server or choose a managed Always-On Home."
+    />
+    <link rel="canonical" href="https://stackspirit.io/" />
+    <meta name="theme-color" content="#fbfcf8" />
+    <meta name="color-scheme" content="light" />
+    <meta name="robots" content="index, follow" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="StackSpirit" />
+    <meta
+      property="og:title"
+      content="StackSpirit — An always-on machine as a home for your AI coding agents"
+    />
+    <meta
+      property="og:description"
+      content="Free, MIT-licensed software for an always-on home for your AI coding agents. Bring your own machine or choose a managed Always-On Home."
+    />
+    <meta property="og:url" content="https://stackspirit.io/" />
+    <meta property="og:image" content="https://stackspirit.io/assets/og-image.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="StackSpirit — an always-on home for your AI coding agents"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="StackSpirit — An always-on machine as a home for your AI coding agents"
+    />
+    <meta
+      name="twitter:description"
+      content="Free, MIT-licensed software for an always-on home for your AI coding agents. Bring your own machine or choose a managed Always-On Home."
+    />
+    <meta name="twitter:image" content="https://stackspirit.io/assets/og-image.png" />
+
+    <link rel="icon" href="/assets/icon-32.svg" type="image/svg+xml" />
+    <link rel="icon" href="/assets/icon-32.png" sizes="32x32" type="image/png" />
+    <link rel="icon" href="/assets/icon-16.png" sizes="16x16" type="image/png" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.mjs"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="container header-inner">
+        <a class="brand" href="/" aria-label="StackSpirit home">
+          <img
+            class="brand__mark"
+            src="/assets/stackspirit-mark-128.png"
+            alt=""
+            width="34"
+            height="34"
+          />
+          <span class="brand__name">StackSpirit</span>
+        </a>
+
+        <nav class="site-nav" aria-label="Primary">
+          <a href="#why">Why</a>
+          <a href="#quickstart">Quickstart</a>
+          <a href="#harnesses">Harnesses</a>
+          <a href="#homes">Homes</a>
+          <a href="#faq">FAQ</a>
+        </nav>
+
+        <div class="header-actions">
+          <a
+            class="btn btn--ghost header-actions__github"
+            href="https://github.com/Stack-Spirit/stackspirit"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <svg
+              class="icon"
+              viewBox="0 0 24 24"
+              width="18"
+              height="18"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path
+                fill="currentColor"
+                d="M12 2C6.48 2 2 6.58 2 12.26c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49v-1.7c-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.9 1.57 2.36 1.12 2.94.86.09-.67.35-1.12.63-1.38-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05A9.3 9.3 0 0 1 12 6.8c.85 0 1.71.12 2.51.35 1.9-1.33 2.74-1.05 2.74-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.35 4.8-4.58 5.05.36.32.68.94.68 1.9v2.81c0 .27.18.6.69.49A10.26 10.26 0 0 0 22 12.26C22 6.58 17.52 2 12 2Z"
+              />
+            </svg>
+            <span>GitHub</span>
+          </a>
+          <a class="btn btn--primary" href="https://app.stackspirit.io">Open Web App</a>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero__glow" aria-hidden="true"></div>
+        <div class="container hero__grid">
+          <div class="hero__copy">
+            <p class="eyebrow">
+              <span class="eyebrow__dot" aria-hidden="true"></span>
+              Free &amp; MIT open source · optional turnkey homes
+            </p>
+            <h1 id="hero-title">An always-on machine as a home for your AI coding agents</h1>
+            <p class="lede">
+              StackSpirit keeps work moving after your laptop closes. Run the free software on
+              your own VPS, spare laptop or home server — or choose a managed Always-On Home
+              and skip the setup.
+            </p>
+            <div class="hero__actions">
+              <a class="btn btn--primary btn--lg" href="https://app.stackspirit.io">
+                Open Web App
+              </a>
+              <a
+                class="btn btn--outline btn--lg"
+                href="https://github.com/Stack-Spirit/stackspirit"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <svg
+                  class="icon"
+                  viewBox="0 0 24 24"
+                  width="18"
+                  height="18"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path
+                    fill="currentColor"
+                    d="M12 2C6.48 2 2 6.58 2 12.26c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49v-1.7c-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.9 1.57 2.36 1.12 2.94.86.09-.67.35-1.12.63-1.38-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05A9.3 9.3 0 0 1 12 6.8c.85 0 1.71.12 2.51.35 1.9-1.33 2.74-1.05 2.74-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.35 4.8-4.58 5.05.36.32.68.94.68 1.9v2.81c0 .27.18.6.69.49A10.26 10.26 0 0 0 22 12.26C22 6.58 17.52 2 12 2Z"
+                  />
+                </svg>
+                Star on GitHub
+              </a>
+            </div>
+            <ul class="hero__points" role="list">
+              <li>Free forever</li>
+              <li>Account-free local mode</li>
+              <li>Any harness, one Home</li>
+            </ul>
+          </div>
+
+          <figure class="hero__visual">
+            <div class="home-card" aria-hidden="true">
+              <div class="home-card__top">
+                <span class="status-pill"><span class="status-dot"></span>Home · online</span>
+                <span class="home-card__muted">always-on</span>
+              </div>
+              <div class="home-card__title">
+                <img
+                  src="/assets/stackspirit-mark-128.png"
+                  alt=""
+                  width="30"
+                  height="30"
+                />
+                <span>StackSpirit Home</span>
+              </div>
+              <ul class="home-card__lanes" role="list">
+                <li>
+                  <span class="lane lane--run"></span>
+                  <span class="lane__name">Claude Code</span>
+                  <span class="lane__state">running</span>
+                </li>
+                <li>
+                  <span class="lane lane--queue"></span>
+                  <span class="lane__name">Codex</span>
+                  <span class="lane__state">queued</span>
+                </li>
+                <li>
+                  <span class="lane lane--run"></span>
+                  <span class="lane__name">OpenCode</span>
+                  <span class="lane__state">running</span>
+                </li>
+                <li>
+                  <span class="lane lane--idle"></span>
+                  <span class="lane__name">MCP client</span>
+                  <span class="lane__state">connected</span>
+                </li>
+              </ul>
+              <div class="home-card__meter">
+                <span><strong>8</strong> GB RAM</span>
+                <span><strong>4</strong> vCPU</span>
+                <span><strong>100</strong> GB SSD</span>
+              </div>
+              <div class="home-card__foot">
+                <span class="status-dot"></span>
+                Jobs continue while you&rsquo;re away
+              </div>
+            </div>
+            <figcaption>
+              Illustration: one Home, many harnesses. Your laptop can stay closed.
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="trust" aria-label="StackSpirit at a glance">
+        <div class="container trust__inner">
+          <p class="trust__item">
+            <svg class="icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="m5 12 4 4L19 6"
+              />
+            </svg>
+            Free &amp; MIT licensed
+          </p>
+          <p class="trust__item">
+            <svg class="icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="m5 12 4 4L19 6"
+              />
+            </svg>
+            No account needed locally
+          </p>
+          <p class="trust__item">
+            <svg class="icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="m5 12 4 4L19 6"
+              />
+            </svg>
+            Any VPS, laptop or home server
+          </p>
+          <p class="trust__item">
+            <svg class="icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="m5 12 4 4L19 6"
+              />
+            </svg>
+            Works with any harness
+          </p>
+        </div>
+      </section>
+
+      <section class="section" id="why" aria-labelledby="why-title">
+        <div class="container">
+          <header class="section__head">
+            <p class="kicker">Why StackSpirit</p>
+            <h2 id="why-title">Your laptop is a great editor. Not an always-on server.</h2>
+            <p class="section__lede">
+              AI agents need a machine that stays awake, keeps state between sessions, and is
+              reachable from every surface you already use. StackSpirit is that machine — and
+              the control plane around it.
+            </p>
+          </header>
+
+          <div class="feature-grid">
+            <article class="feature">
+              <span class="feature__icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
+                  <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8" />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    d="M12 7v5l3 2"
+                  />
+                </svg>
+              </span>
+              <h3>Work keeps running</h3>
+              <p>
+                Long jobs, verifier/fix loops and schedules live on the Home, not on your
+                battery. Close the lid and the work continues.
+              </p>
+            </article>
+
+            <article class="feature">
+              <span class="feature__icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linejoin="round"
+                    d="m12 3 9 5-9 5-9-5 9-5Z"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linejoin="round"
+                    d="m3 12 9 5 9-5"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linejoin="round"
+                    d="m3 16 9 5 9-5"
+                  />
+                </svg>
+              </span>
+              <h3>One home, every harness</h3>
+              <p>
+                Claude Code, Codex, OpenCode, Antigravity, T3 Code or your own MCP client.
+                StackSpirit sits underneath; it does not replace your harness.
+              </p>
+            </article>
+
+            <article class="feature">
+              <span class="feature__icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
+                  <rect
+                    x="3"
+                    y="4"
+                    width="13"
+                    height="10"
+                    rx="2"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    d="M7 18h5"
+                  />
+                  <rect
+                    x="16"
+                    y="9"
+                    width="5"
+                    height="11"
+                    rx="1.6"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                  />
+                </svg>
+              </span>
+              <h3>Reach it from anywhere</h3>
+              <p>
+                Reach the same Home from the desktop app, the mobile-first Web App, the
+                <code>stackspirit</code> CLI, or MCP.
+              </p>
+            </article>
+
+            <article class="feature">
+              <span class="feature__icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
+                  <rect
+                    x="4"
+                    y="10"
+                    width="16"
+                    height="11"
+                    rx="2"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    d="M8 10V7a4 4 0 0 1 8 0"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    d="M12 15v2"
+                  />
+                </svg>
+              </span>
+              <h3>Free software, open source</h3>
+              <p>
+                MIT licensed and free forever. Bring your own VPS, spare laptop or home server
+                and pay nothing for the software.
+              </p>
+            </article>
+
+            <article class="feature">
+              <span class="feature__icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
+                  <ellipse
+                    cx="12"
+                    cy="6"
+                    rx="8"
+                    ry="3"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"
+                  />
+                </svg>
+              </span>
+              <h3>State that survives</h3>
+              <p>
+                Projects, sessions and job history stay on the Home. A new device picks up the
+                same work instead of starting over.
+              </p>
+            </article>
+
+            <article class="feature">
+              <span class="feature__icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linejoin="round"
+                    d="M12 3 4 6v6c0 4.5 3.2 7.5 8 9 4.8-1.5 8-4.5 8-9V6l-8-3Z"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    d="m9 12 2 2 4-4"
+                  />
+                </svg>
+              </span>
+              <h3>Guardrails built in</h3>
+              <p>
+                Capacity limits, job graphs and verifier/fix loops keep long-running work from
+                running away — even overnight.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--tint" id="quickstart" aria-labelledby="quickstart-title">
+        <div class="container">
+          <header class="section__head">
+            <p class="kicker">Quickstart</p>
+            <h2 id="quickstart-title">From zero to a Home in minutes.</h2>
+            <p class="section__lede">
+              The software is free and needs no account. Install it on the machine that will
+              stay on, then connect from the desktop, Web App, CLI or any MCP client.
+            </p>
+          </header>
+
+          <div class="quickstart">
+            <div class="install-card">
+              <div class="tablist" role="tablist" aria-label="Install StackSpirit">
+                <button
+                  class="tab"
+                  id="tab-npm"
+                  type="button"
+                  role="tab"
+                  aria-selected="true"
+                  aria-controls="panel-npm"
+                  tabindex="0"
+                >
+                  npm
+                </button>
+                <button
+                  class="tab"
+                  id="tab-uvx"
+                  type="button"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="panel-uvx"
+                  tabindex="-1"
+                >
+                  PyPI
+                </button>
+                <button
+                  class="tab"
+                  id="tab-mcp"
+                  type="button"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="panel-mcp"
+                  tabindex="-1"
+                >
+                  MCP
+                </button>
+                <button
+                  class="tab"
+                  id="tab-desktop"
+                  type="button"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="panel-desktop"
+                  tabindex="-1"
+                >
+                  Desktop
+                </button>
+              </div>
+
+              <div class="tab-panels">
+                <div
+                  class="tab-panel"
+                  id="panel-npm"
+                  role="tabpanel"
+                  aria-labelledby="tab-npm"
+                  tabindex="0"
+                >
+                  <p class="tab-panel__lead">
+                    Run the npm launcher with Node.js 22 or newer. It fetches the native
+                    binary for your platform.
+                  </p>
+                  <div class="command-row">
+                    <code class="command"
+                      ><span class="command__prompt" aria-hidden="true">$</span> npx -y
+                      stackspirit</code
+                    >
+                    <button
+                      class="copy-button"
+                      type="button"
+                      data-copy="npx -y stackspirit"
+                      aria-label="Copy command: npx -y stackspirit"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <p class="tab-panel__note">
+                    On the Home, <code>stackspirit doctor</code> checks the node, database and
+                    harnesses before you start.
+                  </p>
+                </div>
+
+                <div
+                  class="tab-panel"
+                  id="panel-uvx"
+                  role="tabpanel"
+                  aria-labelledby="tab-uvx"
+                  tabindex="0"
+                  hidden
+                >
+                  <p class="tab-panel__lead">
+                    Prefer Python? The PyPI launcher installs the same native StackSpirit
+                    binary with <code>uv</code>.
+                  </p>
+                  <div class="command-row">
+                    <code class="command"
+                      ><span class="command__prompt" aria-hidden="true">$</span> uvx
+                      stackspirit</code
+                    >
+                    <button
+                      class="copy-button"
+                      type="button"
+                      data-copy="uvx stackspirit"
+                      aria-label="Copy command: uvx stackspirit"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <p class="tab-panel__note">
+                    The CLI is the same binary as the npm package, so flags and fixtures match
+                    across both launchers.
+                  </p>
+                </div>
+
+                <div
+                  class="tab-panel"
+                  id="panel-mcp"
+                  role="tabpanel"
+                  aria-labelledby="tab-mcp"
+                  tabindex="0"
+                  hidden
+                >
+                  <p class="tab-panel__lead">
+                    Expose the Home as a stdio MCP server. Add it to Claude Code, Codex,
+                    OpenCode or any MCP client.
+                  </p>
+                  <div class="command-row">
+                    <code class="command"
+                      ><span class="command__prompt" aria-hidden="true">$</span> npx -y
+                      stackspirit mcp</code
+                    >
+                    <button
+                      class="copy-button"
+                      type="button"
+                      data-copy="npx -y stackspirit mcp"
+                      aria-label="Copy command: npx -y stackspirit mcp"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <p class="tab-panel__note">
+                    MCP tools read and write the same Home, so your harness sees the real job
+                    graph and session log.
+                  </p>
+                </div>
+
+                <div
+                  class="tab-panel"
+                  id="panel-desktop"
+                  role="tabpanel"
+                  aria-labelledby="tab-desktop"
+                  tabindex="0"
+                  hidden
+                >
+                  <p class="tab-panel__lead">
+                    A native Tauri app for macOS, Windows and Linux, with a bundled agent
+                    engine so you can start without installing a harness.
+                  </p>
+                  <a
+                    class="btn btn--dark desktop-download"
+                    href="https://github.com/Stack-Spirit/stackspirit/releases"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Download the desktop app
+                  </a>
+                  <p class="tab-panel__note">
+                    Add a server once, then connect over SSH. Local and SSH mode need no
+                    StackSpirit account.
+                  </p>
+                </div>
+              </div>
+
+              <noscript>
+                <p class="tab-panel__note">
+                  JavaScript is off, so the tabs stay on npm. You can also run
+                  <code>uvx stackspirit</code> or <code>npx -y stackspirit mcp</code>. The
+                  desktop app is on GitHub Releases.
+                </p>
+              </noscript>
+
+              <p class="visually-hidden" id="copy-status" role="status" aria-live="polite"></p>
+            </div>
+
+            <ol class="steps" role="list">
+              <li class="step">
+                <span class="step__num" aria-hidden="true">1</span>
+                <div>
+                  <h3>Install the free software</h3>
+                  <p>
+                    Use npm or uv on the always-on machine. No StackSpirit account, no license
+                    key, no trial timer.
+                  </p>
+                </div>
+              </li>
+              <li class="step">
+                <span class="step__num" aria-hidden="true">2</span>
+                <div>
+                  <h3>Start the Home</h3>
+                  <p>
+                    Run <code>stackspirit up</code> to start the supervisor, or open the
+                    desktop app and add the server over SSH.
+                  </p>
+                </div>
+              </li>
+              <li class="step">
+                <span class="step__num" aria-hidden="true">3</span>
+                <div>
+                  <h3>Connect a harness</h3>
+                  <p>
+                    Point Claude Code, Codex, OpenCode or any MCP client at the Home. The
+                    software stays out of your harness&rsquo;s way.
+                  </p>
+                </div>
+              </li>
+            </ol>
+          </div>
+
+          <div class="quickstart__actions">
+            <a class="btn btn--primary" href="https://app.stackspirit.io">Open Web App</a>
+            <a
+              class="btn btn--outline"
+              href="https://github.com/Stack-Spirit/stackspirit"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              View on GitHub
+            </a>
+            <a
+              class="text-link"
+              href="https://github.com/Stack-Spirit/stackspirit#quick-start"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Read the quickstart
+              <svg class="icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M5 12h14m-5-5 5 5-5 5"
+                />
+              </svg>
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="surfaces" aria-labelledby="surfaces-title">
+        <div class="container">
+          <header class="section__head">
+            <p class="kicker">Surfaces</p>
+            <h2 id="surfaces-title">The same Home from every screen.</h2>
+            <p class="section__lede">
+              Start on the desktop, check in from your phone, script it from the CLI, or let
+              your harness call it over MCP. The Home stays the source of truth.
+            </p>
+          </header>
+
+          <div class="surface-grid">
+            <article class="surface">
+              <span class="surface__icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
+                  <rect
+                    x="3"
+                    y="4"
+                    width="18"
+                    height="12"
+                    rx="2"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    d="M9 20h6m-3-4v4"
+                  />
+                </svg>
+              </span>
+              <h3>Desktop app</h3>
+              <p>
+                A Tauri cockpit for macOS, Windows and Linux. Add a server once, then watch
+                workers, jobs and sessions.
+              </p>
+              <a
+                class="text-link"
+                href="https://github.com/Stack-Spirit/stackspirit/releases"
+                target="_blank"
+                rel="noopener noreferrer"
+                >Get the desktop app</a
+              >
+            </article>
+
+            <article class="surface">
+              <span class="surface__icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
+                  <rect
+                    x="7"
+                    y="2.5"
+                    width="10"
+                    height="19"
+                    rx="2.5"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    d="M11 18.5h2"
+                  />
+                </svg>
+              </span>
+              <h3>Web App</h3>
+              <p>
+                A mobile-first cockpit for the browser. Check fleet, jobs and sessions from a
+                phone or another computer.
+              </p>
+              <a class="text-link" href="https://app.stackspirit.io">Open Web App</a>
+            </article>
+
+            <article class="surface">
+              <span class="surface__icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
+                  <rect
+                    x="3"
+                    y="4"
+                    width="18"
+                    height="16"
+                    rx="2"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    d="m7 9 3 3-3 3m6 0h4"
+                  />
+                </svg>
+              </span>
+              <h3>CLI</h3>
+              <p>
+                <code>stackspirit</code> is the terminal-first surface for scripts, servers
+                and repeatable workflows.
+              </p>
+              <a
+                class="text-link"
+                href="https://github.com/Stack-Spirit/stackspirit#quick-start"
+                target="_blank"
+                rel="noopener noreferrer"
+                >CLI quickstart</a
+              >
+            </article>
+
+            <article class="surface">
+              <span class="surface__icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
+                  <circle
+                    cx="6"
+                    cy="6"
+                    r="2.5"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                  />
+                  <circle
+                    cx="18"
+                    cy="6"
+                    r="2.5"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                  />
+                  <circle
+                    cx="12"
+                    cy="18"
+                    r="2.5"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                  />
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    d="M7.5 8.2 10.5 15m6-6.8L13.5 15M8.5 6h7"
+                  />
+                </svg>
+              </span>
+              <h3>MCP</h3>
+              <p>
+                <code>stackspirit mcp</code> gives any MCP client typed tools for the same
+                Home, with no bespoke integration.
+              </p>
+              <a
+                class="text-link"
+                href="https://github.com/Stack-Spirit/stackspirit#quick-start"
+                target="_blank"
+                rel="noopener noreferrer"
+                >MCP setup</a
+              >
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--tint" id="harnesses" aria-labelledby="harnesses-title">
+        <div class="container">
+          <header class="section__head">
+            <p class="kicker">Harness compatibility</p>
+            <h2 id="harnesses-title">Bring the harness you already trust.</h2>
+            <p class="section__lede">
+              StackSpirit does not compete with your agent. It gives every harness the same
+              always-on Home, durable workspace and shared state — so you can switch tools
+              without moving machines.
+            </p>
+          </header>
+
+          <ul class="harness-grid" role="list">
+            <li class="harness">
+              <span class="harness__mark" aria-hidden="true">CC</span>
+              <div>
+                <h3>Claude Code</h3>
+                <p>Keep Claude Code work on a persistent Home instead of a closed laptop.</p>
+              </div>
+            </li>
+            <li class="harness">
+              <span class="harness__mark" aria-hidden="true">CX</span>
+              <div>
+                <h3>Codex</h3>
+                <p>Queue Codex work that keeps moving after you step away.</p>
+              </div>
+            </li>
+            <li class="harness">
+              <span class="harness__mark" aria-hidden="true">OC</span>
+              <div>
+                <h3>OpenCode</h3>
+                <p>Run the open-source agent directly, or use the bundled agent engine.</p>
+              </div>
+            </li>
+            <li class="harness">
+              <span class="harness__mark" aria-hidden="true">AG</span>
+              <div>
+                <h3>Antigravity</h3>
+                <p>Give an agent-first IDE a Home that is always reachable over SSH.</p>
+              </div>
+            </li>
+            <li class="harness">
+              <span class="harness__mark" aria-hidden="true">T3</span>
+              <div>
+                <h3>T3 Code</h3>
+                <p>Keep T3 Code sessions and capacity on the machine that never sleeps.</p>
+              </div>
+            </li>
+            <li class="harness harness--any">
+              <span class="harness__mark" aria-hidden="true">+</span>
+              <div>
+                <h3>Any MCP or CLI harness</h3>
+                <p>If it speaks MCP or runs in a terminal, it can use a StackSpirit Home.</p>
+              </div>
+            </li>
+          </ul>
+
+          <p class="fineprint">
+            Harness names and marks belong to their respective owners. StackSpirit is an
+            independent project and is not affiliated with or endorsed by them.
+          </p>
+        </div>
+      </section>
+
+      <section class="section section--homes" id="homes" aria-labelledby="homes-title">
+        <div class="container">
+          <header class="section__head section__head--split">
+            <div>
+              <p class="kicker">Managed Always-On Homes</p>
+              <h2 id="homes-title">A turnkey home, if you&rsquo;d rather not run the machine.</h2>
+              <p class="section__lede">
+                Dedicated Contabo VPS machines, provisioned and connected for you. The
+                StackSpirit software stays free; the price is Contabo&rsquo;s regular monthly
+                rate plus 20%.
+              </p>
+            </div>
+            <ul class="badge-stack" aria-label="Plan facts">
+              <li class="badge">No free trial</li>
+              <li class="badge badge--soft">Monthly · EUR</li>
+              <li class="badge badge--soft">Cancel anytime</li>
+            </ul>
+          </header>
+
+          <div class="pricing" id="pricing" data-source="fallback">
+            <p class="visually-hidden" id="plans-status" role="status">
+              Standard published prices.
+            </p>
+
+            <ul class="plan-grid" id="plans-list" aria-label="Managed Always-On Home plans">
+              <li class="plan-card" data-plan="home-8">
+                <div class="plan-card__head">
+                  <h3>Home 8</h3>
+                  <p class="plan-card__price">€6.60<span>/mo</span></p>
+                </div>
+                <p class="plan-card__spec">4 vCPU · 8 GB RAM · 100 GB SSD</p>
+                <p class="plan-card__provider">Cloud VPS 4</p>
+                <p class="plan-card__setup">+ €7.80 one-time setup</p>
+                <a
+                  class="plan-card__cta"
+                  href="https://app.stackspirit.io/cloud"
+                  aria-label="View Home 8 in the Web App"
+                  >View Home 8</a
+                >
+              </li>
+              <li class="plan-card" data-plan="home-12">
+                <div class="plan-card__head">
+                  <h3>Home 12</h3>
+                  <p class="plan-card__price">€9<span>/mo</span></p>
+                </div>
+                <p class="plan-card__spec">6 vCPU · 12 GB RAM · 200 GB SSD</p>
+                <p class="plan-card__provider">Cloud VPS 6</p>
+                <p class="plan-card__setup plan-card__setup--none">No setup fee</p>
+                <a
+                  class="plan-card__cta"
+                  href="https://app.stackspirit.io/cloud"
+                  aria-label="View Home 12 in the Web App"
+                  >View Home 12</a
+                >
+              </li>
+              <li class="plan-card" data-plan="home-24">
+                <div class="plan-card__head">
+                  <h3>Home 24</h3>
+                  <p class="plan-card__price">€17<span>/mo</span></p>
+                </div>
+                <p class="plan-card__spec">8 vCPU · 24 GB RAM · 300 GB SSD</p>
+                <p class="plan-card__provider">Cloud VPS 8</p>
+                <p class="plan-card__setup plan-card__setup--none">No setup fee</p>
+                <a
+                  class="plan-card__cta"
+                  href="https://app.stackspirit.io/cloud"
+                  aria-label="View Home 24 in the Web App"
+                  >View Home 24</a
+                >
+              </li>
+              <li class="plan-card" data-plan="home-48">
+                <div class="plan-card__head">
+                  <h3>Home 48</h3>
+                  <p class="plan-card__price">€30<span>/mo</span></p>
+                </div>
+                <p class="plan-card__spec">12 vCPU · 48 GB RAM · 400 GB SSD</p>
+                <p class="plan-card__provider">Cloud VPS 12</p>
+                <p class="plan-card__setup plan-card__setup--none">No setup fee</p>
+                <a
+                  class="plan-card__cta"
+                  href="https://app.stackspirit.io/cloud"
+                  aria-label="View Home 48 in the Web App"
+                  >View Home 48</a
+                >
+              </li>
+              <li class="plan-card" data-plan="home-64">
+                <div class="plan-card__head">
+                  <h3>Home 64</h3>
+                  <p class="plan-card__price">€44<span>/mo</span></p>
+                </div>
+                <p class="plan-card__spec">16 vCPU · 64 GB RAM · 500 GB SSD</p>
+                <p class="plan-card__provider">Cloud VPS 16</p>
+                <p class="plan-card__setup plan-card__setup--none">No setup fee</p>
+                <a
+                  class="plan-card__cta"
+                  href="https://app.stackspirit.io/cloud"
+                  aria-label="View Home 64 in the Web App"
+                  >View Home 64</a
+                >
+              </li>
+            </ul>
+
+            <p class="pricing__note">
+              Prices are shown in euro and exclude VAT. Each Home is a dedicated machine;
+              provisioning starts after checkout with a verified payment method.
+            </p>
+
+            <p class="pricing__source" id="plans-source" hidden></p>
+          </div>
+
+          <div class="backup-card">
+            <div class="backup-card__copy">
+              <div class="backup-card__title">
+                <h3>Off-Site Encrypted R2 Backups</h3>
+                <span class="badge badge--warn" id="backup-recommended">Recommended</span>
+              </div>
+              <p id="backups-help">
+                Off by default. Encrypts your <code>~/.stackspirit</code> data, sessions and
+                configs to Cloudflare R2, off the machine provider.
+                <span id="backups-price">€3.50/mo if enabled.</span>
+              </p>
+            </div>
+            <label class="switch" for="backups">
+              <span class="switch__label">Enable backups</span>
+              <input
+                class="switch__input"
+                type="checkbox"
+                id="backups"
+                role="switch"
+                aria-describedby="backups-help"
+                aria-label="Enable off-site encrypted R2 backups"
+              />
+              <span class="switch__track" aria-hidden="true"
+                ><span class="switch__thumb"></span
+              ></span>
+            </label>
+          </div>
+          <p class="backup-status" id="backups-status" role="status"></p>
+
+          <div class="homes__actions">
+            <a class="btn btn--primary btn--lg" href="https://app.stackspirit.io/cloud"
+              >See Always-On Homes in the Web App</a
+            >
+            <a class="btn btn--outline" href="mailto:contact@stackspirit.io">Ask a question</a>
+          </div>
+
+          <p class="fineprint">
+            Prices include the +20% StackSpirit markup over Contabo&rsquo;s regular monthly
+            rate and exclude VAT. There is no free trial: every Home is dedicated and
+            provisioned with a verified payment method. Backups are an optional add-on, off by
+            default. Underlying provider specs are shown for transparency.
+          </p>
+        </div>
+      </section>
+
+      <section class="section" id="security" aria-labelledby="security-title">
+        <div class="container">
+          <header class="section__head">
+            <p class="kicker">Security</p>
+            <h2 id="security-title">Your machine. Your keys. Your call.</h2>
+            <p class="section__lede">
+              StackSpirit is built around an account-free local mode. Your connection details
+              stay on your device, and the cloud is optional.
+            </p>
+          </header>
+
+          <div class="security-grid">
+            <article class="security-card">
+              <h3>Account-free by default</h3>
+              <p>
+                Connect a machine over SSH without creating an account. A free StackSpirit
+                account is only needed for the Web App from another device or a managed Home.
+              </p>
+            </article>
+            <article class="security-card">
+              <h3>SSH with pinned host keys</h3>
+              <p>
+                The desktop app verifies the server fingerprint before installing its own key.
+                StackSpirit never stores raw SSH private keys in the cloud.
+              </p>
+            </article>
+            <article class="security-card">
+              <h3>Secrets stay by name</h3>
+              <p>
+                Provider keys live in your OS keychain or in the secret vault on the Home.
+                The AI sees secret names and metadata, never the values.
+              </p>
+            </article>
+          </div>
+          <p class="fineprint">
+            Read the full model in
+            <a
+              href="https://github.com/Stack-Spirit/stackspirit/blob/main/SECURITY.md"
+              target="_blank"
+              rel="noopener noreferrer"
+              >SECURITY.md</a
+            >. This site loads no third-party trackers and no analytics.
+          </p>
+        </div>
+      </section>
+
+      <section class="section section--tint" id="faq" aria-labelledby="faq-title">
+        <div class="container container--narrow">
+          <header class="section__head">
+            <p class="kicker">FAQ</p>
+            <h2 id="faq-title">Questions, answered plainly.</h2>
+          </header>
+
+          <div class="faq">
+            <details class="faq__item">
+              <summary>
+                <span>Is StackSpirit really free?</span>
+                <svg class="faq__plus" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    d="M12 5v14M5 12h14"
+                  />
+                </svg>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  Yes. The software is MIT-licensed and free forever. You can connect your own
+                  VPS, spare laptop or home server at no software cost. Managed Always-On Homes
+                  are optional paid hardware, not a software license.
+                </p>
+              </div>
+            </details>
+
+            <details class="faq__item">
+              <summary>
+                <span>Do I need a StackSpirit account?</span>
+                <svg class="faq__plus" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    d="M12 5v14M5 12h14"
+                  />
+                </svg>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  No for local and SSH mode. An optional free account is only needed when you
+                  want to reach a Home from the Web App on another device, use cross-device
+                  sign-in, or run a managed Always-On Home.
+                </p>
+              </div>
+            </details>
+
+            <details class="faq__item">
+              <summary>
+                <span>What counts as an always-on machine?</span>
+                <svg class="faq__plus" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    d="M12 5v14M5 12h14"
+                  />
+                </svg>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  Any Linux machine you can reach over SSH: a VPS, a spare laptop, a home
+                  server or a small Mini PC. The Home runs the supervisor and keeps the
+                  session log; the desktop app is the cockpit.
+                </p>
+              </div>
+            </details>
+
+            <details class="faq__item">
+              <summary>
+                <span>Which harnesses work with StackSpirit?</span>
+                <svg class="faq__plus" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    d="M12 5v14M5 12h14"
+                  />
+                </svg>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  Claude Code, Codex, OpenCode, Antigravity, T3 Code and any MCP or CLI
+                  harness. StackSpirit sits underneath the harness instead of replacing it, so
+                  you can switch tools without moving machines.
+                </p>
+              </div>
+            </details>
+
+            <details class="faq__item">
+              <summary>
+                <span>Are managed Homes shared with other customers?</span>
+                <svg class="faq__plus" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    d="M12 5v14M5 12h14"
+                  />
+                </svg>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  No. Each Home is a dedicated Contabo VPS with its own credentials and
+                  firewall. The price is Contabo&rsquo;s regular monthly rate plus a
+                  transparent 20% StackSpirit markup.
+                </p>
+              </div>
+            </details>
+
+            <details class="faq__item">
+              <summary>
+                <span>Are backups included with a managed Home?</span>
+                <svg class="faq__plus" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    d="M12 5v14M5 12h14"
+                  />
+                </svg>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  No. Off-site encrypted backups to Cloudflare R2 are an optional add-on and
+                  off by default. When enabled, they cover your
+                  <code>~/.stackspirit</code> data, sessions and configs, off the machine
+                  provider. You can turn them on at checkout.
+                </p>
+              </div>
+            </details>
+
+            <details class="faq__item">
+              <summary>
+                <span>Is there a free trial for managed Homes?</span>
+                <svg class="faq__plus" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    d="M12 5v14M5 12h14"
+                  />
+                </svg>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  No. Managed Homes are provisioned on demand and require a verified payment
+                  method up front. The free path is to run StackSpirit on hardware you already
+                  own.
+                </p>
+              </div>
+            </details>
+
+            <details class="faq__item">
+              <summary>
+                <span>Where do my keys and data live?</span>
+                <svg class="faq__plus" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    d="M12 5v14M5 12h14"
+                  />
+                </svg>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  On your machine. The StackSpirit database, session logs and project state
+                  stay on the Home you control. Provider secrets stay in your OS keychain or
+                  the secret vault on the Home, and the AI only sees names and metadata.
+                </p>
+              </div>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--cta" aria-labelledby="cta-title">
+        <div class="container cta">
+          <img
+            class="cta__mark"
+            src="/assets/stackspirit-mark-128.png"
+            alt=""
+            width="64"
+            height="64"
+            loading="lazy"
+          />
+          <h2 id="cta-title">Give your agents a home that stays on.</h2>
+          <p>
+            Start free on hardware you already own, or let us run a managed Always-On Home.
+          </p>
+          <div class="cta__actions">
+            <a class="btn btn--sprout btn--lg" href="https://app.stackspirit.io">Open Web App</a>
+            <a
+              class="btn btn--outline-light btn--lg"
+              href="https://github.com/Stack-Spirit/stackspirit"
+              target="_blank"
+              rel="noopener noreferrer"
+              >Star on GitHub</a
+            >
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container footer-grid">
+        <div class="footer-brand">
+          <a class="brand" href="/" aria-label="StackSpirit home">
+            <img
+              class="brand__mark"
+              src="/assets/stackspirit-mark-128.png"
+              alt=""
+              width="34"
+              height="34"
+              loading="lazy"
+            />
+            <span class="brand__name">StackSpirit</span>
+          </a>
+          <p>
+            Free, MIT-licensed software for an always-on home for your AI coding agents.
+            Optional managed Homes for teams that would rather not run the machine.
+          </p>
+          <p class="footer-privacy">
+            No trackers. No analytics. No newsletter pop-up.
+          </p>
+        </div>
+
+        <nav class="footer-col" aria-label="Product">
+          <h2 class="footer-col__title">Product</h2>
+          <ul role="list">
+            <li><a href="#why">Why StackSpirit</a></li>
+            <li><a href="#quickstart">Quickstart</a></li>
+            <li><a href="#surfaces">Surfaces</a></li>
+            <li><a href="#harnesses">Harnesses</a></li>
+            <li><a href="#homes">Always-On Homes</a></li>
+          </ul>
+        </nav>
+
+        <nav class="footer-col" aria-label="Surfaces">
+          <h2 class="footer-col__title">Surfaces</h2>
+          <ul role="list">
+            <li><a href="https://app.stackspirit.io">Web App</a></li>
+            <li>
+              <a
+                href="https://github.com/Stack-Spirit/stackspirit/releases"
+                target="_blank"
+                rel="noopener noreferrer"
+                >Desktop app</a
+              >
+            </li>
+            <li>
+              <a
+                href="https://github.com/Stack-Spirit/stackspirit#quick-start"
+                target="_blank"
+                rel="noopener noreferrer"
+                >CLI quickstart</a
+              >
+            </li>
+            <li>
+              <a
+                href="https://github.com/Stack-Spirit/stackspirit#quick-start"
+                target="_blank"
+                rel="noopener noreferrer"
+                >MCP setup</a
+              >
+            </li>
+          </ul>
+        </nav>
+
+        <nav class="footer-col" aria-label="Open source">
+          <h2 class="footer-col__title">Open source</h2>
+          <ul role="list">
+            <li>
+              <a
+                href="https://github.com/Stack-Spirit/stackspirit"
+                target="_blank"
+                rel="noopener noreferrer"
+                >GitHub</a
+              >
+            </li>
+            <li>
+              <a
+                href="https://github.com/Stack-Spirit/stackspirit/blob/main/LICENSE"
+                target="_blank"
+                rel="noopener noreferrer"
+                >MIT License</a
+              >
+            </li>
+            <li>
+              <a
+                href="https://github.com/Stack-Spirit/stackspirit/blob/main/SECURITY.md"
+                target="_blank"
+                rel="noopener noreferrer"
+                >Security</a
+              >
+            </li>
+            <li><a href="mailto:contact@stackspirit.io">Contact</a></li>
+          </ul>
+        </nav>
+      </div>
+
+      <div class="container footer-bottom">
+        <p>© <span id="year">2026</span> StackSpirit. Free software under the MIT License.</p>
+        <p>
+          <a href="mailto:contact@stackspirit.io">contact@stackspirit.io</a>
+          <span aria-hidden="true">·</span>
+          <a href="https://github.com/Stack-Spirit/stackspirit" target="_blank" rel="noopener noreferrer"
+            >github.com/Stack-Spirit</a
+          >
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>
