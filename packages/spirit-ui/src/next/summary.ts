@@ -1,5 +1,12 @@
 import { harnessLabel, executorProviderLabel } from "../domain/executor";
-import type { FleetView, MergeView, InboxItemView, JobCardView, JobLanes } from "../bridge/wire";
+import type {
+  FleetView,
+  MergeView,
+  InboxItemView,
+  JobCardView,
+  JobLanes,
+  WorkerCardView,
+} from "../bridge/wire";
 
 /** What the sidebar tree and the server page show for one project. */
 export interface ProjectSummary {
@@ -34,6 +41,10 @@ export const ACTIVE_LANES: ReadonlyArray<LaneKey> = ["running", "ready", "review
 export interface ProjectJob {
   lane: LaneKey;
   job: JobCardView;
+  /** Set on the promoted Review/Fix card: the calm `Build ✓ → Review` stage trail. */
+  stageTrail?: string;
+  /** The finished parent job this promoted active stage replaced in Active views. */
+  promotedFrom?: string;
 }
 
 export function openInbox(fleet: FleetView | null, project?: string | null): InboxItemView[] {
@@ -70,14 +81,187 @@ export function isRetiredChild(job: JobCardView, fleet: FleetView): boolean {
   return parent !== undefined && /^(replanned|done)$/.test(parent.state);
 }
 
-/** Every job of a project (or of all projects when `project` is null), tagged with its lane. */
-export function projectJobs(fleet: FleetView | null, project: string | null): ProjectJob[] {
+/** Every active job of a project, before any stage promotion. */
+function rawProjectJobs(fleet: FleetView | null, project: string | null): ProjectJob[] {
   if (!fleet) return [];
   return LANE_INFO.filter(({ key }) => ACTIVE_LANES.includes(key)).flatMap(({ key }) =>
     laneJobs(fleet.lanes, key)
       .filter((job) => project === null || job.project === project)
       .filter((job) => key !== "parked_blocked" || !isRetiredChild(job, fleet))
       .map((job) => ({ lane: key, job })),
+  );
+}
+
+/** A `*-verify-N` / `*-fix-N` child split into its parent and loop position. */
+export interface StageChild {
+  parentId: string;
+  stage: "review" | "fix";
+  round: number;
+}
+
+const STAGE_CHILD = /^(.+)-(verify|fix)-(\d+)(?:-g\d+)?(?:-r1)?$/;
+
+/** Parses a Review/Fix child id, including VOWP's `-gN` generation and `-r1` retry suffixes. */
+export function parseStageChild(jobId: string): StageChild | null {
+  const match = STAGE_CHILD.exec(jobId);
+  if (!match) return null;
+  const round = Number.parseInt(match[3] ?? "", 10);
+  if (!Number.isSafeInteger(round) || round < 0) return null;
+  return {
+    parentId: match[1] ?? "",
+    stage: match[2] === "fix" ? "fix" : "review",
+    round,
+  };
+}
+
+function isExecutingStage(item: ProjectJob): boolean {
+  return item.lane === "running" || item.lane === "review_fix";
+}
+
+interface StagePromotion {
+  parent: ProjectJob;
+  child: ProjectJob;
+  stage: StageChild;
+}
+
+function isLaterStage(candidate: StageChild, current: StageChild): boolean {
+  if (candidate.round !== current.round) return candidate.round > current.round;
+  return candidate.stage === "fix" && current.stage === "review";
+}
+
+/** One active Review/Fix child per finished parent, choosing the latest loop round. */
+function stagePromotions(jobs: ProjectJob[]): Map<string, StagePromotion> {
+  const byId = new Map<string, ProjectJob>();
+  for (const item of jobs) if (!byId.has(item.job.job_id)) byId.set(item.job.job_id, item);
+  const promotions = new Map<string, StagePromotion>();
+  for (const child of jobs) {
+    if (!isExecutingStage(child)) continue;
+    const stage = parseStageChild(child.job.job_id);
+    if (!stage) continue;
+    const parent = byId.get(stage.parentId);
+    if (!parent || !isExecutingStage(parent)) continue;
+    const current = promotions.get(stage.parentId);
+    if (!current || isLaterStage(stage, current.stage)) {
+      promotions.set(stage.parentId, { parent, child, stage });
+    }
+  }
+  return promotions;
+}
+
+/** `Build ✓ → Review` / `Build ✓ → Review ✗ → Fix 1` for a promoted active stage. */
+export function stageTrailLabel(parent: JobCardView, stage: StageChild): string {
+  const parts = [`${KIND_LABEL[dagKind(parent.kind)]} ✓`];
+  if (stage.stage === "fix") {
+    for (let round = 0; round < stage.round; round += 1) {
+      parts.push("Review ✗");
+      if (round < stage.round - 1) parts.push(`Fix ${round + 1} ✓`);
+    }
+    parts.push(`Fix ${stage.round}`);
+  } else {
+    for (let round = 0; round < stage.round; round += 1) {
+      parts.push("Review ✗", `Fix ${round + 1} ✓`);
+    }
+    parts.push("Review");
+  }
+  return parts.join(" → ");
+}
+
+/**
+ * Promotes a finished parent's active Review/Fix child into the parent's place:
+ * the parent leaves the Active graph, the child inherits the parent's upstream needs,
+ * and downstream jobs that needed the parent now follow the active stage.
+ */
+export function promoteActiveStages(jobs: ProjectJob[]): ProjectJob[] {
+  const promotions = stagePromotions(jobs);
+  if (promotions.size === 0) return jobs;
+  const byChild = new Map<string, StagePromotion>();
+  for (const promotion of promotions.values()) byChild.set(promotion.child.job.job_id, promotion);
+
+  const resolveNeed = (need: string, selfId: string): string[] => {
+    const promotion = promotions.get(need);
+    if (!promotion) return need === selfId ? [] : [need];
+    if (promotion.child.job.job_id === selfId) {
+      return (promotion.parent.job.needs ?? []).flatMap((upstream) =>
+        resolveNeed(upstream, selfId),
+      );
+    }
+    return [promotion.child.job.job_id];
+  };
+
+  const rewrite = (item: ProjectJob, promotion?: StagePromotion): ProjectJob => {
+    const ownNeeds = item.job.needs ?? [];
+    const parentId = promotion?.parent.job.job_id;
+    const source = promotion
+      ? [...(promotion.parent.job.needs ?? []), ...ownNeeds.filter((need) => need !== parentId)]
+      : ownNeeds;
+    const needs: string[] = [];
+    for (const need of source) {
+      for (const resolved of resolveNeed(need, item.job.job_id)) {
+        if (!needs.includes(resolved)) needs.push(resolved);
+      }
+    }
+    const changed = needs.length !== ownNeeds.length || needs.some((need, index) => need !== ownNeeds[index]);
+    const next: ProjectJob = {
+      lane: item.lane,
+      job: changed ? { ...item.job, needs } : item.job,
+    };
+    if (promotion) {
+      next.stageTrail = stageTrailLabel(promotion.parent.job, promotion.stage);
+      next.promotedFrom = promotion.parent.job.job_id;
+    } else if (item.stageTrail) {
+      next.stageTrail = item.stageTrail;
+      next.promotedFrom = item.promotedFrom;
+    }
+    return next;
+  };
+
+  const out: ProjectJob[] = [];
+  const inserted = new Set<string>();
+  for (const item of jobs) {
+    const id = item.job.job_id;
+    const promotion = promotions.get(id);
+    if (promotion) {
+      if (!inserted.has(promotion.child.job.job_id)) {
+        out.push(rewrite(promotion.child, promotion));
+        inserted.add(promotion.child.job.job_id);
+      }
+      continue;
+    }
+    // A promoted child is placed at its parent's slot, never where it happened to sort.
+    if (byChild.has(id)) continue;
+    out.push(rewrite(item));
+    inserted.add(id);
+  }
+  for (const promotion of promotions.values()) {
+    if (inserted.has(promotion.child.job.job_id)) continue;
+    out.push(rewrite(promotion.child, promotion));
+    inserted.add(promotion.child.job.job_id);
+  }
+  return out;
+}
+
+/** Every job of a project (or of all projects when `project` is null), tagged with its lane. */
+export function projectJobs(fleet: FleetView | null, project: string | null): ProjectJob[] {
+  return promoteActiveStages(rawProjectJobs(fleet, project));
+}
+
+/** Given workers exclude a parent that is only waiting for its active Review/Fix child. */
+export function activeRunningWorkers(
+  fleet: FleetView | null,
+  project: string | null = null,
+): WorkerCardView[] {
+  if (!fleet) return [];
+  const names = project ? [project] : fleet.projects.map((item) => item.name);
+  const hidden = new Set<string>();
+  for (const name of names) {
+    for (const parentId of stagePromotions(rawProjectJobs(fleet, name)).keys()) {
+      hidden.add(`${name}\u0000${parentId}`);
+    }
+  }
+  return fleet.running.filter(
+    (worker) =>
+      (project === null || worker.project === project) &&
+      !hidden.has(`${worker.project}\u0000${worker.job_id}`),
   );
 }
 
@@ -90,7 +274,10 @@ export function historyJobs(fleet: FleetView | null, project: string | null): Jo
 }
 
 export function findJob(fleet: FleetView | null, project: string, jobId: string): ProjectJob | null {
-  return projectJobs(fleet, project).find((item) => item.job.job_id === jobId) ?? null;
+  const active = projectJobs(fleet, project).find((item) => item.job.job_id === jobId);
+  if (active) return active;
+  // A finished parent leaves Active views but stays inspectable when it is selected.
+  return rawProjectJobs(fleet, project).find((item) => item.job.job_id === jobId) ?? null;
 }
 
 /** A job reads as failed when VOWP put it in the attention lane with a failure state. */
@@ -134,10 +321,11 @@ export function projectSummaries(fleet: FleetView | null): ProjectSummary[] {
   if (!fleet) return [];
   const count = (list: Array<{ project: string }>, name: string) =>
     list.filter((item) => item.project === name).length;
+  const running = activeRunningWorkers(fleet);
   return fleet.projects.map((project) => ({
     name: project.name,
     state: project.state,
-    running: count(fleet.running, project.name),
+    running: count(running, project.name),
     ready: count(fleet.lanes.ready, project.name),
     review:
       (project.jobs_by_state.gating ?? 0) +
@@ -185,6 +373,8 @@ export interface DagNode {
   /** Provider · harness · model, when an executor is known. */
   model: string | null;
   wait: string | null;
+  /** Compact Build ✓ → Review trail when this node is a promoted active stage. */
+  stageTrail: string | null;
   col: number;
   row: number;
   x: number;
@@ -257,9 +447,13 @@ export function layoutDag(
   jobs: ProjectJob[],
   compact: boolean,
 ): DagLayout {
-  const size = compact ? SIZES.compact : SIZES.full;
+  const stagedJobs = promoteActiveStages(jobs);
+  // A compact card with a stage trail needs one extra line; every node in the graph
+  // shares the height so the columns stay aligned.
+  const stageHeight = stagedJobs.some((item) => item.stageTrail) ? 14 : 0;
+  const size = compact ? { ...SIZES.compact, h: SIZES.compact.h + stageHeight } : SIZES.full;
   const byId = new Map<string, ProjectJob>();
-  for (const item of jobs) if (!byId.has(item.job.job_id)) byId.set(item.job.job_id, item);
+  for (const item of stagedJobs) if (!byId.has(item.job.job_id)) byId.set(item.job.job_id, item);
   const upstream = (id: string): string[] =>
     (byId.get(id)?.job.needs ?? []).filter((need, i, all) => need !== id && byId.has(need) && all.indexOf(need) === i);
 
@@ -315,6 +509,7 @@ export function layoutDag(
       sub: rootSub,
       model: null,
       wait: null,
+      stageTrail: null,
       col: 0,
       row: 0,
       x: colX(0),
@@ -343,6 +538,7 @@ export function layoutDag(
             (state === "attention" ? (item.job.reason ?? "needs attention") : `${item.job.kind} · ${item.job.role}`),
       model,
       wait,
+      stageTrail: item.stageTrail ?? null,
       col,
       row,
       x: colX(col),

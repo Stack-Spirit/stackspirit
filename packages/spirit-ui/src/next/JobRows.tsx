@@ -94,8 +94,17 @@ export function JobRows({ jobs, selectedId, onSelect, showProject }: JobRowsProp
                   <span className="nx-row__text">
                     <span className="nx-row__title">{jobName(job)}</span>
                     <span className="nx-row__sub">{summary}</span>
-                    {phase || model || planned ? (
+                    {item.stageTrail || phase || model || planned ? (
                       <span className="nx-row__badges" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {item.stageTrail ? (
+                          <span
+                            className="nx-chip nx-chip--muted nx-chip--stage"
+                            data-testid="job-stage-trail"
+                            title={item.promotedFrom ? `Replaces finished ${item.promotedFrom}` : undefined}
+                          >
+                            {item.stageTrail}
+                          </span>
+                        ) : null}
                         {phase ? (
                           <span className="nx-chip nx-chip--muted" data-testid="job-phase">
                             {phase}

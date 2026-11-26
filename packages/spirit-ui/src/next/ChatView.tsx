@@ -32,7 +32,7 @@ import {
 import { EmptyHero } from "./EmptyHero";
 import { PageHeader } from "./PageHeader";
 import { TurnLoader } from "./SpiritLoader";
-import { openInbox, projectSummaries } from "./summary";
+import { activeRunningWorkers, openInbox, projectSummaries } from "./summary";
 
 export interface ChatViewProps {
   session: SessionId;
@@ -1275,7 +1275,7 @@ function heroCopy(
   }
   if (session === "global") {
     const projects = fleet?.projects.length ?? 0;
-    const running = fleet?.running.length ?? 0;
+    const running = activeRunningWorkers(fleet).length;
     const inbox = openInbox(fleet).length;
     return {
       lede: `${running} worker${running === 1 ? "" : "s"} running across ${projects} project${

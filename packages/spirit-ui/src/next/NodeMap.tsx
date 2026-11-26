@@ -151,11 +151,22 @@ function DagNodeButton({
       data-node-id={node.id}
       data-kind={node.kind}
       data-state={node.state}
+      data-stage-trail={node.stageTrail ?? undefined}
       aria-pressed={selected}
       aria-label={
-        node.kind === "root" ? node.label : `${node.label}, ${kind}, ${state}${node.wait ? `, waiting: ${node.wait}` : ""}`
+        node.kind === "root"
+          ? node.label
+          : `${node.label}, ${kind}, ${state}${node.stageTrail ? `, stage: ${node.stageTrail}` : ""}${
+              node.wait ? `, waiting: ${node.wait}` : ""
+            }`
       }
-      title={compact ? `${node.label} · ${node.title} · ${kind} · ${state}` : undefined}
+      title={
+        compact
+          ? `${node.label} · ${node.title} · ${kind} · ${state}${
+              node.stageTrail ? ` · ${node.stageTrail}` : ""
+            }`
+          : undefined
+      }
       onClick={onClick}
     >
       <span className="nx-dag-node__dot" aria-hidden="true" />
@@ -175,11 +186,18 @@ function DagNodeButton({
             </>
           )}
         </span>
-        {compact ? null : (
-          <>
-            {node.kind === "root" ? null : <span className="nx-dag-node__title">{node.title}</span>}
-            <span className="nx-dag-node__sub">{node.sub}</span>
-          </>
+        {compact || node.kind === "root" ? null : (
+          <span className="nx-dag-node__title">{node.title}</span>
+        )}
+        {node.stageTrail ? (
+          <span
+            className={`nx-dag-node__trail${compact ? " nx-dag-node__trail--compact" : ""}`}
+            data-testid="dag-stage-trail"
+          >
+            {node.stageTrail}
+          </span>
+        ) : compact ? null : (
+          <span className="nx-dag-node__sub">{node.sub}</span>
         )}
       </span>
     </button>
@@ -413,6 +431,12 @@ export function Whiteboard({
                   <dd>{STATE_LABEL[selected.state]}</dd>
                 </>
               )}
+              {selected.stageTrail ? (
+                <>
+                  <dt>Stage</dt>
+                  <dd data-testid="whiteboard-stage-trail">{selected.stageTrail}</dd>
+                </>
+              ) : null}
               {selected.model ? (
                 <>
                   <dt>Model</dt>

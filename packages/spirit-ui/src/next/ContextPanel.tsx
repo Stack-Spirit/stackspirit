@@ -7,7 +7,7 @@ import { formatAge } from "../domain/format";
 import { useFleet, useFleetStore, useMutationsAllowed } from "../state/fleetStore";
 import { Meter, Slots, useServerHealth } from "./health";
 import { useShellUi, type PanelContent } from "./shellUi";
-import { findJob, jobName, jobTone, LANE_INFO, openInbox } from "./summary";
+import { activeRunningWorkers, findJob, jobName, jobTone, LANE_INFO, openInbox } from "./summary";
 
 export interface ContextPanelProps {
   /** The project in view, or null for the global orchestrator and server pages. */
@@ -79,7 +79,7 @@ export function ContextPanel(props: ContextPanelProps) {
 function Overview({ project, onOpenServer, onOpenWorkers, onOpenInbox }: ContextPanelProps) {
   const fleet = useFleet();
   const openPanel = useShellUi((state) => state.openPanel);
-  const running = (fleet?.running ?? []).filter((worker) => project === null || worker.project === project);
+  const running = activeRunningWorkers(fleet, project);
   return (
     <>
       <section className="nx-panel__section" aria-label="Running now">
@@ -215,6 +215,7 @@ function JobDetail({
   onOpenWorkerSession,
 }: { content: Extract<PanelContent, { kind: "job" }> } & ContextPanelProps) {
   const fleet = useFleet();
+  const openPanel = useShellUi((state) => state.openPanel);
   const item = findJob(fleet, content.project, content.jobId);
   const worker = fleet?.running.find((entry) => entry.project === content.project && entry.job_id === content.jobId);
   if (!item) {
@@ -246,6 +247,29 @@ function JobDetail({
         </dd>
         <dt>State</dt>
         <dd>{job.state}</dd>
+        {item.stageTrail ? (
+          <>
+            <dt>Stage trail</dt>
+            <dd data-testid="job-detail-stage-trail">{item.stageTrail}</dd>
+          </>
+        ) : null}
+        {item.promotedFrom ? (
+          <>
+            <dt>Replaces</dt>
+            <dd>
+              <button
+                type="button"
+                className="nx-link"
+                data-testid="job-detail-promoted-from"
+                onClick={() =>
+                  openPanel({ kind: "job", project: job.project, jobId: item.promotedFrom ?? "" })
+                }
+              >
+                {item.promotedFrom} (finished)
+              </button>
+            </dd>
+          </>
+        ) : null}
         <dt>Age</dt>
         <dd>{formatAge(job.age_secs)}</dd>
         {job.executor ? (

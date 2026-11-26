@@ -131,8 +131,8 @@ describe("DagMap", () => {
         {...props}
         jobs={[
           running("ss-1"),
-          running("ss-1-verify-0", { kind: "verify" }),
-          queued("ss-1-fix-1", ["ss-1-verify-0"], { kind: "fix" }),
+          running("ss-3-verify-0", { kind: "verify" }),
+          queued("ss-3-fix-1", ["ss-3-verify-0"], { kind: "fix" }),
           queued("ss-2", [], { kind: "build" }),
         ]}
         onSelectJob={vi.fn()}
@@ -141,12 +141,12 @@ describe("DagMap", () => {
     const node = (id: string) => document.querySelector<HTMLElement>(`[data-node-id="${id}"]`) as HTMLElement;
     expect(within(node("ss-1")).getByText("Build")).toBeTruthy();
     expect(within(node("ss-1")).getByText("Active")).toBeTruthy();
-    expect(within(node("ss-1-verify-0")).getByText("Review")).toBeTruthy();
-    expect(within(node("ss-1-verify-0")).getByText("Active")).toBeTruthy();
-    expect(within(node("ss-1-fix-1")).getByText("Fix")).toBeTruthy();
-    expect(within(node("ss-1-fix-1")).getByText("Queued")).toBeTruthy();
-    expect(node("ss-1-fix-1").dataset.state).toBe("queued");
-    expect(node("ss-1-verify-0").dataset.kind).toBe("review");
+    expect(within(node("ss-3-verify-0")).getByText("Review")).toBeTruthy();
+    expect(within(node("ss-3-verify-0")).getByText("Active")).toBeTruthy();
+    expect(within(node("ss-3-fix-1")).getByText("Fix")).toBeTruthy();
+    expect(within(node("ss-3-fix-1")).getByText("Queued")).toBeTruthy();
+    expect(node("ss-3-fix-1").dataset.state).toBe("queued");
+    expect(node("ss-3-verify-0").dataset.kind).toBe("review");
   });
 
   it("selects a job on click", () => {

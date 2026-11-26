@@ -1,6 +1,6 @@
 import { formatGiB } from "../domain/format";
 import { useCapacity, useFleet } from "../state/fleetStore";
-import { meterTone, usedRatio } from "./summary";
+import { activeRunningWorkers, meterTone, usedRatio } from "./summary";
 
 /** The server numbers the sidebar card, details panel and server page share. */
 export interface ServerHealth {
@@ -65,7 +65,7 @@ export function useServerHealth(): ServerHealth {
   const fleet = useFleet();
   const capacity = useCapacity() ?? fleet?.capacity ?? null;
   const sample = capacity?.host ?? null;
-  const running = fleet?.running.length ?? 0;
+  const running = activeRunningWorkers(fleet).length;
   const target = capacity?.target.target_workers ?? null;
   // `capacity.disk` is zero-filled when there is no host sample, so the sample is the
   // only honest source here; a missing sample gives "unknown", never "0 B free".
