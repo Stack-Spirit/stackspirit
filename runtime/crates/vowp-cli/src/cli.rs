@@ -1904,8 +1904,16 @@ pub struct ReindexArgs {
 }
 
 /// Arguments for `vowp backup`.
+///
+/// The historical local forms (`--to`, `--offsite`, `--encrypt`, `--restore`) keep their
+/// exact meaning. The optional subcommands add client-side encrypted off-site R2 backups;
+/// they are handled by the StackSpirit front-end before the local maintenance dispatcher.
 #[derive(Debug, Clone, Default, Args)]
+#[command(after_help = "Encrypted off-site R2 backups: `stackspirit backup push|list|restore`.")]
 pub struct BackupArgs {
+    /// Manage encrypted off-site R2 backups.
+    #[command(subcommand)]
+    pub remote: Option<Box<RemoteBackupCommand>>,
     /// Destination file/directory or offsite target; a `.db` path is a global-only copy.
     #[arg(long, value_name = "PATH|TARGET")]
     pub to: Option<PathBuf>,
@@ -1924,6 +1932,68 @@ pub struct BackupArgs {
     /// Overwrite an existing restore target.
     #[arg(long)]
     pub force: bool,
+}
+
+/// The `stackspirit backup push|list|restore` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum RemoteBackupCommand {
+    /// Archive the home, encrypt it client-side and upload the ciphertext to R2.
+    Push(RemoteBackupPushArgs),
+    /// List the encrypted backups stored in the account's R2 bucket.
+    List(RemoteBackupListArgs),
+    /// Download, decrypt, verify and restore one encrypted backup.
+    Restore(RemoteBackupRestoreArgs),
+}
+
+/// Arguments for `stackspirit backup push`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct RemoteBackupPushArgs {
+    /// Public `age` recipient (`age1...`); the private identity must stay offline.
+    #[arg(long, value_name = "RECIPIENT")]
+    pub recipient: Option<String>,
+    /// Enrolled machine id or name; defaults to `relay.json` in the home.
+    #[arg(long, value_name = "ID|NAME")]
+    pub machine: Option<String>,
+    /// API base URL; defaults to the signed-in session's URL.
+    #[arg(long, value_name = "URL")]
+    pub api_url: Option<String>,
+}
+
+/// Arguments for `stackspirit backup list`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct RemoteBackupListArgs {
+    /// Enrolled machine id or name; defaults to `relay.json` in the home.
+    #[arg(long, value_name = "ID|NAME")]
+    pub machine: Option<String>,
+    /// Maximum rows to show.
+    #[arg(long, value_name = "N")]
+    pub limit: Option<u32>,
+    /// API base URL; defaults to the signed-in session's URL.
+    #[arg(long, value_name = "URL")]
+    pub api_url: Option<String>,
+}
+
+/// Arguments for `stackspirit backup restore`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct RemoteBackupRestoreArgs {
+    /// Backup id/object name; without one the newest backup is used.
+    #[arg(long, alias = "name", value_name = "ID|NAME")]
+    pub id: Option<String>,
+    /// Enrolled machine id or name; defaults to `relay.json` in the home.
+    #[arg(long, value_name = "ID|NAME")]
+    pub machine: Option<String>,
+    /// Private `age` identity file (mode 0600); `AGE_IDENTITY` is the fallback.
+    #[arg(long, value_name = "FILE")]
+    pub identity: Option<PathBuf>,
+    /// Fresh home directory to restore into.
+    #[arg(long, value_name = "DIR")]
+    pub to_home: Option<PathBuf>,
+    /// Overwrite an existing restore target.
+    #[arg(long)]
+    pub force: bool,
+    /// API base URL; defaults to the signed-in session's URL.
+    #[arg(long, value_name = "URL")]
+    pub api_url: Option<String>,
 }
 
 /// Arguments for `vowp schema`.

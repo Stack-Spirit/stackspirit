@@ -55,13 +55,16 @@ include = [
 name = "vowp_cli"
 path = "crates/vowp-cli/src/lib.rs"
 
+# Both brand binaries share the StackSpirit front-end. It handles the encrypted
+# off-site `backup push|list|restore` commands and delegates every other command to
+# the unchanged library entrypoint, so the two command trees stay identical.
 [[bin]]
 name = "vowp"
-path = "crates/vowp-cli/src/main.rs"
+path = "crates/vowp-cli/src/cmd/backup.rs"
 
 [[bin]]
 name = "stackspirit"
-path = "crates/vowp-cli/src/stackspirit.rs"
+path = "crates/vowp-cli/src/cmd/backup.rs"
 
 [[test]]
 name = "agent"
@@ -70,6 +73,10 @@ path = "crates/vowp-cli/tests/agent.rs"
 [[test]]
 name = "asif"
 path = "crates/vowp-cli/tests/asif.rs"
+
+[[test]]
+name = "backup_r2"
+path = "crates/vowp-cli/tests/backup_r2.rs"
 
 [[test]]
 name = "board"
@@ -206,12 +213,14 @@ name = "version"
 path = "scripts/release/version-test.rs"
 
 [dependencies]
+age = "0.12.1"
 anyhow = "1.0.104"
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 rustls = "0.23.46"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11.0"
 signal-hook = "0.4.6"
 thiserror = "2.0.21"
 time = "0.3.45"
