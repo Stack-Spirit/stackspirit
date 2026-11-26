@@ -1,0 +1,10 @@
+[build-system]
+requires = []
+build-backend = "backend"
+backend-path = ["."]
+
+[project]
+name = "stackspirit"
+version = "0.6.0"
+requires-python = ">=3.9"
+license = "MIT"

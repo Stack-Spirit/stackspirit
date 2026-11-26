@@ -1,0 +1,17 @@
+{
+  "name": "@stackspirit/linux-arm64",
+  "version": "0.6.0",
+  "description": "StackSpirit prebuilt binaries for linux/arm64 (glibc)",
+  "license": "MIT",
+  "homepage": "https://stackspirit.io",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Stack-Spirit/stackspirit.git",
+    "directory": "packaging/npm/platforms/linux-arm64"
+  },
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "libc": ["glibc"],
+  "files": ["bin/", "LICENSE"],
+  "publishConfig": { "access": "public" }
+}

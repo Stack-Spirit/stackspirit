@@ -1,0 +1,18 @@
+#!/bin/sh
+# scripts/dogfood/fake-harness/claude — a version-only stand-in for Claude Code.
+#
+# `vowp doctor` probes every built-in harness even when the project uses only the
+# generic `cli` adapter. This script answers that probe with a version and refuses
+# every other invocation, so the dogfood run never starts the real `claude` binary.
+
+set -eu
+
+case "${1:-}" in
+    --version)
+        printf '%s\n' "2.0.0 (fake dogfood claude-code)"
+        exit 0
+        ;;
+esac
+
+printf '%s\n' "fake claude: the dogfood run only supports --version" >&2
+exit 1

@@ -1,0 +1,64 @@
+schedules = []
+
+[node]
+name = "local"
+max_workers = 4
+max_verifiers = 2
+tick_secs = 60
+cwd_allow = []
+tz_offset_minutes = 60
+
+[project]
+name = "vowp"
+remote = "local"
+default_branch = "main"
+check_cmds = []
+lock_files = ["Cargo.lock"]
+always_allowed = ["Cargo.lock"]
+push = false
+
+[profiles.keeper]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
+on_quota = "next_then_probe_back"
+
+[profiles.planner]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
+on_quota = "next_then_probe_back"
+
+[profiles.verifier]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
+on_quota = "next_then_probe_back"
+
+[profiles.worker]
+ladder = [
+    "claude-code:claude-sonnet-5-5@medium",
+    "opencode:deepseek/deepseek-flash#max",
+]
+on_quota = "next_then_probe_back"
+
+[providers]
+
+[providers.deepseek]
+max_concurrent = 8
+
+[harnesses]
+
+[harnesses.opencode]
+binary = "opencode"  # name on PATH, or an absolute path on this machine
+
+[env]
+
+[gates]
+
+[loops]
+
+[capsule]
+min_interval_secs = 120
+max_input_chars = 200000
+tail_turns = 2
+
+[merge]
+rebase = true
+check_cmds = []
+timeout_secs = 2700
+secret_scan = true

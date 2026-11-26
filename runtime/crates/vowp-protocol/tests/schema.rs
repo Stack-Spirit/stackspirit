@@ -1,0 +1,523 @@
+//! JSON Schema export and validation of the `types.md` examples.
+//! Spec: `docs/design/types.md` §14–15 and `docs/design/crates/vowp-protocol.md` §6.
+//!
+//! The examples are read from `docs/design/types.md` itself, which is the canonical source
+//! for the fixture files listed in the crate spec. The structural checker verifies the
+//! required properties and, for `deny_unknown_fields` types (whose schema says
+//! `additionalProperties: false`), that no unknown top-level key is present.
+
+use std::collections::BTreeMap;
+
+use pretty_assertions::assert_eq;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+
+use vowp_protocol::api::{JobAction, JobActionResponse};
+use vowp_protocol::capsule::Capsule;
+use vowp_protocol::cost::Cost;
+use vowp_protocol::event::EventEnvelope;
+use vowp_protocol::executor::Profile;
+use vowp_protocol::gate::GateResult;
+use vowp_protocol::ids::JobId;
+use vowp_protocol::inbox::InboxItem;
+use vowp_protocol::job::{Edge, Job};
+use vowp_protocol::limit::Limit;
+use vowp_protocol::loops::{Loop, Schedule};
+use vowp_protocol::release::Release;
+use vowp_protocol::run::{Run, Worker};
+use vowp_protocol::schema::{all_schemas, schema_for_name};
+use vowp_protocol::session::{Session, Switch};
+
+/// The type names rule 12 of the crate spec requires, plus the v0.2 documents.
+const LISTED_TYPES: &[&str] = &[
+    "EventEnvelope",
+    "Capsule",
+    "CapsuleDraft",
+    "Job",
+    "NewJob",
+    "JobPatch",
+    "Gate",
+    "Evidence",
+    "GateResult",
+    "ReportFrontMatter",
+    "BriefFrontMatter",
+    "VowpConfig",
+    "Schedule",
+    "Release",
+    "InboxItem",
+    "Run",
+    "Worker",
+    "Session",
+    "Limit",
+    "Cost",
+    "Switch",
+    "Loop",
+    "Node",
+    "Project",
+    "Profile",
+    "Edge",
+    "LedgerEntry",
+    "HostSample",
+    "RunUsage",
+    "UsageEstimate",
+    "WaitReason",
+    "BrakeState",
+    "CapacityTarget",
+    "CapacityAdvice",
+    "CapacityReport",
+    "ClusterCapacity",
+    "RunningCapacity",
+    "WaitingJob",
+    "CapacitySnapshot",
+    "CapacityHistory",
+    "Surface",
+    "Lease",
+    "SurfaceRef",
+    "SessionOwner",
+    "OwnershipMode",
+    "OwnershipState",
+    "SurfaceActivity",
+    "LeaseStatus",
+    "TakeoverReport",
+    "RemoteEvent",
+    "RemoteLine",
+    "IngestAck",
+    "TurnGrant",
+    "OrchestratorCard",
+    "OrchestratorNodeState",
+    "OrchestratorCommand",
+    "OrchestratorResult",
+    "OrchestratorError",
+    "OrchestratorLocation",
+    "OrchestratorAuth",
+    "OrchestratorEndpoint",
+    "EndpointAccess",
+    "OrchestratorAttach",
+    "JoinInstructions",
+    "Snapshot",
+    "SupervisorSnapshot",
+    "ProjectEntry",
+    "ProjectSnapshot",
+    "RunningJobCard",
+    "BlockedJobCard",
+    "QueueJobCard",
+    "MergeCard",
+    "GateFailureCard",
+    "InboxSummary",
+    "SessionSurfaceCard",
+    "CatalogEntry",
+    "GcReport",
+    "GcClassReport",
+    "BackupReport",
+    "BackupFile",
+    "SecretInfo",
+    "SecretRequest",
+    "FleetStatus",
+    "FleetQueueRow",
+    "Tunnel",
+    "MigrationReport",
+    "MigrationCount",
+    // v0.3 loopback HTTP API documents.
+    "Health",
+    "Board",
+    "BoardRun",
+    "BoardLimit",
+    "Page",
+    "JobPage",
+    "RunPage",
+    "GateResultPage",
+    "JobAction",
+    "JobActionResponse",
+    "SessionPage",
+    "NodePage",
+    "SessionDetail",
+    "EventPage",
+    "InboxAnswerRequest",
+    "SessionSwitchRequest",
+    "InboxPage",
+    "CostReport",
+    "CostRow",
+    "CostTotal",
+    "ApiError",
+    "ApiErrorBody",
+    // v0.4 local-node agent protocol documents.
+    "PathRef",
+    "AgentRole",
+    "AgentCapabilities",
+    "AgentCapacity",
+    "AgentPathMap",
+    "NodeCard",
+    "NodeKind",
+    "NodeStatus",
+    "NodePresence",
+    "SurfaceInfo",
+    "SurfaceScope",
+    "SurfaceState",
+    "LeaseMode",
+    "AgentFrame",
+    "TurnSummary",
+    // v0.4 local app-surface frames.
+    "SurfaceAttach",
+    "SurfaceDetach",
+    "SurfaceEvent",
+    "SurfaceTurn",
+    "SurfaceTurnState",
+    "ToolCall",
+    "ToolError",
+    "ToolResult",
+    // v0.4 offload wire documents.
+    "Placement",
+    "NodeFallback",
+    "WaitingReason",
+    "AssignmentPayload",
+    "RunRejectReason",
+    "RemoteRunState",
+    "RunResume",
+    "SurfaceResume",
+    "RunResumeResult",
+    "SurfaceResumeResult",
+    // v0.4 ASIF report documents.
+    "AsifCounts",
+    "AsifLoss",
+    "AsifReport",
+    "AsifImportResponse",
+    "RelayFrame",
+    "RemoteFrame",
+    "Scope",
+    "ClientKind",
+    "MachineState",
+    "MachineCapabilities",
+    "Jwk",
+    "ExecChannel",
+    "RelayConfig",
+];
+
+/// Decodes one JSON value into a concrete type.
+type Decoder = fn(&Value) -> Result<(), String>;
+
+/// One example fixture: its name, schema name, decoder and parsed JSON.
+type Case = (&'static str, &'static str, Decoder, Value);
+
+/// Decodes a JSON value into `T`.
+fn decodes<T: DeserializeOwned>(value: &Value) -> Result<(), String> {
+    serde_json::from_value::<T>(value.clone())
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
+/// Returns the text from `heading` to `next` (exclusive).
+fn section<'a>(doc: &'a str, heading: &str, next: &str) -> &'a str {
+    let start = doc
+        .find(heading)
+        .unwrap_or_else(|| panic!("types.md is missing heading {heading:?}"));
+    let rest = &doc[start + heading.len()..];
+    let end = rest
+        .find(next)
+        .unwrap_or_else(|| panic!("types.md is missing {next:?} after {heading:?}"));
+    &rest[..end]
+}
+
+/// Returns the text from `heading` to the end of the document.
+fn section_to_end<'a>(doc: &'a str, heading: &str) -> &'a str {
+    let start = doc
+        .find(heading)
+        .unwrap_or_else(|| panic!("types.md is missing heading {heading:?}"));
+    &doc[start + heading.len()..]
+}
+
+/// Returns every fenced ```json block in `section`, in order.
+fn json_blocks(section: &str) -> Vec<&str> {
+    let mut blocks = Vec::new();
+    let mut rest = section;
+    while let Some((_, after)) = rest.split_once("```json\n") {
+        let (block, tail) = after
+            .split_once("\n```")
+            .unwrap_or_else(|| panic!("unterminated json block in types.md"));
+        blocks.push(block);
+        rest = tail;
+    }
+    blocks
+}
+
+/// Parses every JSON value in `text`, including several concatenated values.
+fn json_values(text: &str) -> Vec<Value> {
+    serde_json::Deserializer::from_str(text)
+        .into_iter::<Value>()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|err| panic!("types.md example is not JSON: {err}\n{text}"))
+}
+
+/// Parses the first json block of `section`.
+fn first_values(section: &str) -> Vec<Value> {
+    let blocks = json_blocks(section);
+    assert_eq!(blocks.len(), 1, "expected exactly one json block");
+    json_values(blocks[0])
+}
+
+#[test]
+fn schema_export_covers_listed_types() {
+    let schemas = all_schemas();
+    assert_eq!(
+        schemas.len(),
+        LISTED_TYPES.len(),
+        "all_schemas must export exactly the listed types"
+    );
+    for name in LISTED_TYPES {
+        let schema = schemas
+            .get(name)
+            .unwrap_or_else(|| panic!("all_schemas is missing {name}"));
+        let object = schema
+            .as_object()
+            .unwrap_or_else(|| panic!("{name} schema must be a JSON object"));
+        assert!(
+            object.contains_key("$schema") || object.contains_key("type") || object.contains_key("definitions"),
+            "{name} schema must look like a schema: {schema}"
+        );
+    }
+
+    assert_eq!(all_schemas(), all_schemas(), "schema export must be deterministic");
+
+    let cost = schema_for_name("Cost").expect("Cost is exported");
+    assert_eq!(cost["title"], "Cost");
+    assert!(schema_for_name("NotAType").is_none());
+}
+
+#[test]
+fn job_action_response_has_a_schema_and_stable_action_names() {
+    for (action, name) in [
+        (JobAction::Retry, "retry"),
+        (JobAction::Park, "park"),
+        (JobAction::Cancel, "cancel"),
+        (JobAction::Nudge, "nudge"),
+        (JobAction::Restart, "restart"),
+        (JobAction::Replan, "replan"),
+        (JobAction::Fail, "fail"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(action).expect("action JSON"),
+            Value::String(name.to_owned()),
+            "the wire name of {action:?}"
+        );
+    }
+
+    let schema = schema_for_name("JobActionResponse").expect("JobActionResponse is exported");
+    assert_eq!(schema["title"], "JobActionResponse");
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .expect("required is an array")
+        .iter()
+        .map(|name| name.as_str().expect("required names are strings"))
+        .collect();
+    for field in ["job", "action", "request"] {
+        assert!(required.contains(&field), "the schema must require {field}: {schema}");
+    }
+
+    let response = JobActionResponse {
+        job: JobId::parse("job-a").expect("job id"),
+        action: JobAction::Park,
+        request: "01J00000000000000000000000".to_owned(),
+    };
+    let value = serde_json::to_value(&response).expect("response JSON");
+    check_structure("JobActionResponse", &schema, &value);
+    let decoded: JobActionResponse = serde_json::from_value(value.clone()).expect("round-trip");
+    assert_eq!(decoded, response);
+}
+
+#[test]
+fn capacity_history_json_matches_the_exported_schema() {
+    use vowp_protocol::capacity::{CapacityHistory, CapacityMemory, CapacityPoint, HistorySource};
+    use vowp_protocol::time::Timestamp;
+
+    let history = CapacityHistory {
+        generated_at: Timestamp::parse("2026-11-10T12:10:00Z").expect("generated_at"),
+        since: Timestamp::parse("2026-11-10T12:00:00Z").expect("since"),
+        until: Timestamp::parse("2026-11-10T12:10:00Z").expect("until"),
+        bucket_secs: 300,
+        retention_secs: 30 * 24 * 60 * 60,
+        points: vec![CapacityPoint {
+            at: Timestamp::parse("2026-11-10T12:05:00Z").expect("bucket"),
+            samples: 5,
+            mem_available: CapacityMemory {
+                min: 1000,
+                avg: 2000,
+                max: 3000,
+            },
+            load1_avg: 0.5,
+            disk_free_home_min: 42_000_000_000,
+            source: HistorySource::Proc,
+        }],
+    };
+    let value = serde_json::to_value(&history).expect("history JSON");
+    let schema = schema_for_name("CapacityHistory").expect("CapacityHistory is exported");
+    check_structure("capacity_history.json", &schema, &value);
+
+    assert_eq!(value["bucket_secs"], 300);
+    assert_eq!(value["points"][0]["mem_available"]["avg"], 2000);
+    assert_eq!(value["points"][0]["source"], "proc");
+    let decoded: CapacityHistory = serde_json::from_value(value).expect("round-trip");
+    assert_eq!(decoded, history);
+
+    let empty = CapacityHistory {
+        points: Vec::new(),
+        ..history
+    };
+    let value = serde_json::to_value(&empty).expect("empty history JSON");
+    check_structure("capacity_history_empty.json", &schema, &value);
+    assert_eq!(value["points"], serde_json::json!([]));
+}
+
+#[test]
+fn types_md_examples_validate() {
+    let types_md = include_str!("../../../docs/design/types.md");
+
+    let cost_and_limit = first_values(section(types_md, "## 4. Cost and limits", "## 5. Events"));
+    assert_eq!(cost_and_limit.len(), 2, "cost and limit examples");
+    let events = first_values(section(types_md, "### 5.3 Example log lines", "## 6. Capsule"));
+    assert_eq!(events.len(), 3, "three event log lines");
+    let capsule = first_values(section(types_md, "## 6. Capsule", "## 7. Jobs"));
+    assert_eq!(capsule.len(), 1, "one capsule example");
+    let job = first_values(section(types_md, "## 7. Jobs, edges, states", "## 8. Gates"));
+    assert_eq!(job.len(), 1, "one job example");
+
+    let more = json_blocks(section_to_end(types_md, "## 15. More JSON examples (fixtures)"));
+    assert_eq!(more.len(), 10, "ten json blocks in §15");
+    let mut more_values = Vec::new();
+    for block in more {
+        more_values.extend(json_values(block));
+    }
+    assert_eq!(more_values.len(), 11, "profile, edge and nine single examples");
+    let names = [
+        "profile.json",
+        "edge.json",
+        "run.json",
+        "session.json",
+        "inbox_item.json",
+        "loop.json",
+        "release.json",
+        "schedule.json",
+        "gate_result.json",
+        "worker.json",
+        "switch.json",
+    ];
+
+    let mut cases: Vec<Case> = vec![
+        ("cost.json", "Cost", decodes::<Cost>, cost_and_limit[0].clone()),
+        ("limit.json", "Limit", decodes::<Limit>, cost_and_limit[1].clone()),
+        ("capsule.json", "Capsule", decodes::<Capsule>, capsule[0].clone()),
+        ("job.json", "Job", decodes::<Job>, job[0].clone()),
+    ];
+    for value in events {
+        // The three lines share one fixture name; the decoder names the line on failure.
+        cases.push(("events.jsonl", "EventEnvelope", decodes::<EventEnvelope>, value));
+    }
+    let decoders: [Decoder; 11] = [
+        decodes::<Profile>,
+        decodes::<Edge>,
+        decodes::<Run>,
+        decodes::<Session>,
+        decodes::<InboxItem>,
+        decodes::<Loop>,
+        decodes::<Release>,
+        decodes::<Schedule>,
+        decodes::<GateResult>,
+        decodes::<Worker>,
+        decodes::<Switch>,
+    ];
+    for ((name, value), decode) in names.into_iter().zip(more_values).zip(decoders) {
+        let schema_name = match name {
+            "profile.json" => "Profile",
+            "edge.json" => "Edge",
+            "run.json" => "Run",
+            "session.json" => "Session",
+            "inbox_item.json" => "InboxItem",
+            "loop.json" => "Loop",
+            "release.json" => "Release",
+            "schedule.json" => "Schedule",
+            "gate_result.json" => "GateResult",
+            "worker.json" => "Worker",
+            "switch.json" => "Switch",
+            other => panic!("unexpected fixture {other}"),
+        };
+        cases.push((name, schema_name, decode, value));
+    }
+
+    assert_eq!(cases.len(), 18, "all named example fixtures are covered");
+
+    let schemas: BTreeMap<&str, Value> = all_schemas();
+    for (fixture, schema_name, decode, value) in cases {
+        decode(&value).unwrap_or_else(|err| panic!("{fixture} does not decode into {schema_name}: {err}"));
+        let schema = schemas
+            .get(schema_name)
+            .unwrap_or_else(|| panic!("{schema_name} is not exported"));
+        check_structure(fixture, schema, &value);
+    }
+}
+
+/// Checks required properties and unknown top-level keys against one schema.
+fn check_structure(fixture: &str, schema: &Value, value: &Value) {
+    let schema_object = schema.as_object().expect("schema is an object");
+    let properties = schema_object
+        .get("properties")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("{fixture}: schema has no properties"));
+    let value_object = value.as_object().expect("fixture is a JSON object");
+
+    if let Some(required) = schema_object.get("required").and_then(Value::as_array) {
+        for name in required {
+            let name = name.as_str().expect("required entries are strings");
+            assert!(
+                value_object.contains_key(name),
+                "{fixture}: required property {name:?} is missing"
+            );
+        }
+    }
+
+    if schema_object.get("additionalProperties") == Some(&Value::Bool(false)) {
+        for key in value_object.keys() {
+            assert!(
+                properties.contains_key(key),
+                "{fixture}: unknown property {key:?} is not in the schema"
+            );
+        }
+    }
+}
+
+#[test]
+fn schema_export_covers_lease_session_owner_and_session_card() {
+    for name in [
+        "Lease",
+        "LeaseStatus",
+        "SessionOwner",
+        "OwnershipMode",
+        "OwnershipState",
+        "SurfaceActivity",
+        "SessionSurfaceCard",
+    ] {
+        assert!(schema_for_name(name).is_some(), "{name} must be exported");
+    }
+    let owner = schema_for_name("SessionOwner").expect("SessionOwner is exported");
+    assert!(
+        owner.to_string().contains("desktop_ui"),
+        "SessionOwner.kind must list desktop_ui"
+    );
+    for name in owner["properties"].as_object().expect("properties").keys() {
+        assert!(
+            !name.contains("token") && !name.contains("password") && !name.contains("hash"),
+            "SessionOwner must carry no secret field, found {name}"
+        );
+    }
+    let required = owner["required"].as_array().expect("required list");
+    assert!(
+        !required
+            .iter()
+            .any(|name| name == "mode" || name == "epoch" || name == "activity"),
+        "owner additions are optional on the wire: {required:?}"
+    );
+    let card = schema_for_name("SessionSurfaceCard").expect("card is exported");
+    assert!(card["properties"].get("owner").is_some(), "card has an owner property");
+    let lease = schema_for_name("Lease").expect("Lease is exported");
+    assert!(
+        lease["properties"].get("owner_epoch").is_none() && lease["properties"].get("mode").is_none(),
+        "Lease stays unchanged"
+    );
+}

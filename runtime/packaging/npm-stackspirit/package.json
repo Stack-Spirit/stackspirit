@@ -1,0 +1,49 @@
+{
+  "name": "stackspirit",
+  "version": "0.5.1-dev",
+  "private": true,
+  "description": "StackSpirit: local-first supervisor for AI coding agents (private build; also installs the legacy vowp commands)",
+  "keywords": [
+    "ai",
+    "agents",
+    "agent-orchestration",
+    "supervisor",
+    "cli",
+    "tmux"
+  ],
+  "homepage": "https://github.com/Stack-Spirit/stackspirit-engine#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Stack-Spirit/stackspirit-engine.git"
+  },
+  "license": "MIT",
+  "author": "Syver-August Meyer",
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "bin": {
+    "stackspirit": "bin/stackspirit.js",
+    "vowp": "bin/vowp.js",
+    "stackspirit-daemon": "bin/stackspirit-daemon.js",
+    "vowp-daemon": "bin/vowp-daemon.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "scripts/postinstall.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "test": "node --test test/*.test.js"
+  }
+}

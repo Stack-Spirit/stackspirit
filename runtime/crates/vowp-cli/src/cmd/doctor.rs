@@ -1,0 +1,865 @@
+//! `vowp doctor`: one screen of health checks.
+//!
+//! Spec: `docs/design/cli.md` §2. Checks are `ok|warn|fail`; the command exits 0 only when no
+//! check failed. Secret values are never read or printed: provider checks report environment
+//! variable **names** only and never touch the network. A provider whose every profile rung is
+//! `claude-code` is harness-owned and needs no `*_API_KEY`.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde::Serialize;
+use vowp_core::schedules::ScheduleSpec;
+use vowp_core::{AdapterRegistry, CommandRunner, CommandSpec, SystemRunner};
+use vowp_protocol::{Executor, HarnessKind, ScheduleSpecKind, VowpConfig};
+use vowp_store::Store;
+
+use crate::cli::{DoctorArgs, Global};
+use crate::ctx;
+use crate::{CliError, IoStreams};
+
+/// One check's status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CheckStatus {
+    Ok,
+    Warn,
+    Fail,
+}
+
+impl CheckStatus {
+    /// Returns the lowercase status word.
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warn => "warn",
+            Self::Fail => "fail",
+        }
+    }
+}
+
+/// One health check.
+#[derive(Debug, Serialize)]
+struct Check {
+    name: String,
+    status: CheckStatus,
+    detail: String,
+}
+
+/// The JSON document `vowp doctor --json` prints.
+#[derive(Debug, Serialize)]
+struct DoctorReport {
+    ok: bool,
+    checks: Vec<Check>,
+}
+
+/// Accumulates checks.
+#[derive(Default)]
+struct Checks {
+    items: Vec<Check>,
+}
+
+impl Checks {
+    /// Records one check.
+    fn push(&mut self, name: &str, status: CheckStatus, detail: impl Into<String>) {
+        self.items.push(Check {
+            name: name.to_owned(),
+            status,
+            detail: detail.into(),
+        });
+    }
+
+    /// Returns true when no check failed.
+    fn healthy(&self) -> bool {
+        !self.items.iter().any(|check| check.status == CheckStatus::Fail)
+    }
+}
+
+/// Runs `vowp doctor`.
+pub fn run(global: &Global, io: &mut dyn IoStreams, _args: &DoctorArgs) -> Result<i32, CliError> {
+    let mut checks = Checks::default();
+    let resolved = match ctx::resolve_state(vowp_store::StateKind::Home, global.home.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(CliError::Conflict(detail)) => {
+            // A conflict is reported, not raised: doctor is the tool the owner runs to see it.
+            checks.push("home", CheckStatus::Fail, detail);
+            check_state_dirs(&mut checks);
+            return print_report(global, io, checks);
+        }
+        Err(error) => return Err(error),
+    };
+    let paths = vowp_store::NodePaths::new(&resolved.path);
+    let root = paths.root();
+    let runner: Arc<dyn CommandRunner> = Arc::new(SystemRunner);
+
+    check_home_selection(&resolved, &mut checks);
+    check_state_dirs(&mut checks);
+
+    check_home(root, &mut checks);
+    check_db(&paths, &mut checks);
+    check_schema(&paths, &mut checks);
+    check_projects(&paths, &mut checks);
+    check_snapshot(&paths, &mut checks);
+    check_version(
+        runner.as_ref(),
+        "git",
+        &["git", "--version"],
+        CheckStatus::Fail,
+        &mut checks,
+    );
+    check_version(runner.as_ref(), "tmux", &["tmux", "-V"], CheckStatus::Warn, &mut checks);
+
+    let project_root = resolve_project(global, &paths);
+    let config = check_config(project_root.as_deref(), &paths, &mut checks);
+    check_schedules(config.as_ref(), &mut checks);
+
+    let registry_config = config.clone().unwrap_or_else(VowpConfig::with_defaults_for_tests);
+    let registry = AdapterRegistry::from_config(&registry_config);
+    let registry = match registry {
+        Ok(registry) => Some(registry),
+        Err(error) => {
+            checks.push("harnesses", CheckStatus::Fail, error.to_string());
+            None
+        }
+    };
+
+    if let Some(registry) = &registry {
+        check_harness(registry, HarnessKind::ClaudeCode, "claude-code", &mut checks);
+        check_harness(registry, HarnessKind::Opencode, "opencode", &mut checks);
+        if config_uses_harness(config.as_ref(), HarnessKind::Acp) {
+            check_harness(registry, HarnessKind::Acp, "acp", &mut checks);
+        }
+    } else {
+        checks.push("harness:claude-code", CheckStatus::Fail, "adapter registry unavailable");
+        checks.push("harness:opencode", CheckStatus::Fail, "adapter registry unavailable");
+        if config_uses_harness(config.as_ref(), HarnessKind::Acp) {
+            checks.push("harness:acp", CheckStatus::Fail, "adapter registry unavailable");
+        }
+    }
+
+    check_profiles(registry.as_ref(), config.as_ref(), &mut checks);
+    check_providers(config.as_ref(), &mut checks);
+    check_systemd(&mut checks);
+    check_watchdog(&mut checks);
+    check_supervisor(&paths, &mut checks);
+    check_disk(runner.as_ref(), root, &mut checks);
+
+    print_report(global, io, checks)
+}
+
+/// Prints the checks and returns the exit code (1 when any check failed).
+fn print_report(global: &Global, io: &mut dyn IoStreams, checks: Checks) -> Result<i32, CliError> {
+    let ok = checks.healthy();
+    if global.json {
+        let report = DoctorReport {
+            ok,
+            checks: checks.items,
+        };
+        crate::output::print_json(io, &report)?;
+    } else {
+        for check in &checks.items {
+            writeln!(
+                io.out(),
+                "{:<4} {:<20} {}",
+                check.status.as_str(),
+                check.name,
+                check.detail
+            )?;
+        }
+        writeln!(io.out(), "{}", if ok { "doctor: ok" } else { "doctor: failures found" })?;
+    }
+    Ok(if ok { 0 } else { 1 })
+}
+
+/// Opens a node home read-only and runs the integrity and schema checks.
+///
+/// Used by `home migrate --move` to verify a copy; never writes.
+pub(crate) fn verify_home_read_only(paths: &vowp_store::NodePaths) -> Result<(), String> {
+    let store = Store::open_read_only(paths, None).map_err(|error| error.to_string())?;
+    store.integrity_check().map_err(|error| error.to_string())?;
+    store.global_schema_version().map_err(|error| error.to_string())?;
+    let mut checks = Checks::default();
+    check_schema(paths, &mut checks);
+    match checks.items.iter().find(|check| check.status == CheckStatus::Fail) {
+        Some(check) => Err(check.detail.clone()),
+        None => Ok(()),
+    }
+}
+
+/// Reports which home was selected, why, and the node config file.
+///
+/// A legacy name is a warning with the migration hint, never a failure.
+fn check_home_selection(resolved: &vowp_store::ResolvedState, checks: &mut Checks) {
+    use vowp_store::StateSource;
+    let source = match &resolved.source {
+        StateSource::Flag => "--home".to_owned(),
+        StateSource::Env(name) => format!("${name}"),
+        StateSource::Existing => "~/.stackspirit".to_owned(),
+        StateSource::ExistingLegacy => "~/.vowp".to_owned(),
+        StateSource::Fresh => "default for a fresh machine".to_owned(),
+    };
+    let config = resolved.path.join("config.toml");
+    let config_text = if config.is_file() {
+        format!("config {}", config.display())
+    } else {
+        "no config.toml".to_owned()
+    };
+    let detail = format!("selected {} ({source}); {config_text}", resolved.path.display());
+    if resolved.legacy {
+        checks.push(
+            "home-path",
+            CheckStatus::Warn,
+            format!("{detail}; legacy name in use, see `stackspirit home migrate --link --dry-run`"),
+        );
+    } else {
+        checks.push("home-path", CheckStatus::Ok, detail);
+    }
+    if let Some(warning) = &resolved.warning {
+        checks.push("home-env", CheckStatus::Warn, warning.clone());
+    }
+}
+
+/// Reports the agent and control state directories when this machine has them.
+fn check_state_dirs(checks: &mut Checks) {
+    check_broken_links(checks);
+    for (kind, name, file) in [
+        (vowp_store::StateKind::Agent, "agent-state", "agent.json"),
+        (vowp_store::StateKind::Control, "control-state", "control.json"),
+    ] {
+        match vowp_store::resolve_state_from_env(kind, None) {
+            Ok(resolved) => {
+                let config = resolved.path.join(file);
+                let present = config.is_file()
+                    || (resolved.source == vowp_store::StateSource::ExistingLegacy && resolved.path.is_dir());
+                if !present {
+                    continue;
+                }
+                let detail = if config.is_file() {
+                    format!("selected {}; config {}", resolved.path.display(), config.display())
+                } else {
+                    format!("selected {}; no {file} yet", resolved.path.display())
+                };
+                if resolved.legacy {
+                    checks.push(
+                        name,
+                        CheckStatus::Warn,
+                        format!("{detail}; legacy name in use, see `stackspirit home migrate --link --dry-run`"),
+                    );
+                } else {
+                    checks.push(name, CheckStatus::Ok, detail);
+                }
+            }
+            Err(error) => {
+                let status = match error {
+                    vowp_store::ResolveError::Conflict { .. } => CheckStatus::Fail,
+                    _ => CheckStatus::Warn,
+                };
+                checks.push(name, status, error.to_string());
+            }
+        }
+    }
+}
+
+/// Warns about a dangling symlink at any `~/.stackspirit*` or `~/.vowp*` state name.
+fn check_broken_links(checks: &mut Checks) {
+    let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let home = PathBuf::from(home);
+    for kind in [
+        vowp_store::StateKind::Home,
+        vowp_store::StateKind::Agent,
+        vowp_store::StateKind::Control,
+    ] {
+        for name in [kind.new_dir_name(), kind.legacy_dir_name()] {
+            let path = home.join(name);
+            if let Ok(target) = std::fs::read_link(&path)
+                && !path.exists()
+            {
+                checks.push(
+                    "state-link",
+                    CheckStatus::Warn,
+                    format!(
+                        "{} is a broken symlink to {}; remove it or point it at a real directory",
+                        path.display(),
+                        target.display()
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// Checks that the node home exists and accepts a write.
+fn check_home(root: &Path, checks: &mut Checks) {
+    if !root.is_dir() {
+        checks.push(
+            "home",
+            CheckStatus::Warn,
+            format!("{} is not initialised; run `vowp init`", root.display()),
+        );
+        return;
+    }
+    let probe = root.join(format!(".doctor-probe-{}", std::process::id()));
+    match std::fs::write(&probe, b"probe") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            checks.push("home", CheckStatus::Ok, format!("{} is writable", root.display()));
+        }
+        Err(error) => checks.push("home", CheckStatus::Fail, format!("{}: {error}", root.display())),
+    }
+}
+
+/// Opens the database, runs the integrity checks and reports the schema version.
+fn check_db(paths: &vowp_store::NodePaths, checks: &mut Checks) {
+    if !paths.db_path().is_file() {
+        checks.push(
+            "db",
+            CheckStatus::Warn,
+            format!("{} is missing; run `vowp init`", paths.db_path().display()),
+        );
+        return;
+    }
+    match Store::open(paths) {
+        Ok(store) => match store.integrity_check().and_then(|()| store.schema_version()) {
+            Ok(version) => checks.push(
+                "db",
+                CheckStatus::Ok,
+                format!("{} opens, integrity ok, schema {version}", paths.db_path().display()),
+            ),
+            Err(error) => checks.push("db", CheckStatus::Fail, error.to_string()),
+        },
+        Err(error) => checks.push("db", CheckStatus::Fail, error.to_string()),
+    }
+}
+
+/// Reports the global schema version and every registered project database's version.
+fn check_schema(paths: &vowp_store::NodePaths, checks: &mut Checks) {
+    if !paths.db_path().is_file() {
+        checks.push("schema", CheckStatus::Warn, "no database; run `vowp init`");
+        return;
+    }
+    let store = match Store::open_read_only(paths, None) {
+        Ok(store) => store,
+        Err(error) => {
+            checks.push("schema", CheckStatus::Fail, error.to_string());
+            return;
+        }
+    };
+    let global = match store.global_schema_version() {
+        Ok(version) => version,
+        Err(error) => {
+            checks.push("schema", CheckStatus::Fail, error.to_string());
+            return;
+        }
+    };
+    let projects = match store.list_projects() {
+        Ok(projects) => projects,
+        Err(error) => {
+            checks.push("schema", CheckStatus::Fail, error.to_string());
+            return;
+        }
+    };
+    let mut problems = Vec::new();
+    let mut count = 0_u32;
+    for project in projects
+        .iter()
+        .filter(|project| project.name.as_str() != vowp_store::RESERVED_NODE_PROJECT)
+    {
+        count += 1;
+        let path = paths.project_db_path(&project.name);
+        if !path.is_file() {
+            problems.push(format!("{}: missing project database", project.name));
+            continue;
+        }
+        match Store::open_read_only(paths, Some(&project.name))
+            .and_then(|project_store| project_store.project_schema_version())
+        {
+            Ok(version) if version == vowp_store::PROJECT_SCHEMA_VERSION => {}
+            Ok(version) => problems.push(format!("{}: project schema {version}", project.name)),
+            Err(error) => problems.push(format!("{}: {error}", project.name)),
+        }
+    }
+    if problems.is_empty() {
+        checks.push(
+            "schema",
+            CheckStatus::Ok,
+            format!(
+                "global {global}, {count} project database(s) at version {}",
+                vowp_store::PROJECT_SCHEMA_VERSION
+            ),
+        );
+    } else {
+        checks.push("schema", CheckStatus::Fail, problems.join("; "));
+    }
+}
+
+/// Reports whether every registered project has an openable database.
+fn check_projects(paths: &vowp_store::NodePaths, checks: &mut Checks) {
+    if !paths.db_path().is_file() {
+        checks.push("projects", CheckStatus::Warn, "no database; run `vowp init`");
+        return;
+    }
+    let store = match Store::open_read_only(paths, None) {
+        Ok(store) => store,
+        Err(error) => {
+            checks.push("projects", CheckStatus::Fail, error.to_string());
+            return;
+        }
+    };
+    let projects = match store.list_projects() {
+        Ok(projects) => projects,
+        Err(error) => {
+            checks.push("projects", CheckStatus::Fail, error.to_string());
+            return;
+        }
+    };
+    let real: Vec<_> = projects
+        .iter()
+        .filter(|project| project.name.as_str() != vowp_store::RESERVED_NODE_PROJECT)
+        .collect();
+    if real.is_empty() {
+        checks.push("projects", CheckStatus::Warn, "no projects registered");
+        return;
+    }
+    let mut problems = Vec::new();
+    for project in &real {
+        if !paths.project_db_path(&project.name).is_file() {
+            problems.push(format!("{}: missing project database", project.name));
+            continue;
+        }
+        if let Err(error) = Store::open_read_only(paths, Some(&project.name)) {
+            problems.push(format!("{}: {error}", project.name));
+        }
+    }
+    if problems.is_empty() {
+        checks.push(
+            "projects",
+            CheckStatus::Ok,
+            format!("{} project database(s) open", real.len()),
+        );
+    } else {
+        checks.push("projects", CheckStatus::Fail, problems.join("; "));
+    }
+}
+
+/// Reports whether the derived snapshot exists and parses, and whether `tmp/` is writable.
+///
+/// The snapshot writer stages `tmp/snapshot.json.tmp`, fsyncs it and renames it into place;
+/// a writable home root is not enough when `tmp/` is missing or read-only.
+fn check_snapshot(paths: &vowp_store::NodePaths, checks: &mut Checks) {
+    let tmp = paths.tmp_dir();
+    match probe_directory(&tmp) {
+        Ok(()) => {}
+        Err(detail) => {
+            checks.push("snapshot", CheckStatus::Fail, format!("{}: {detail}", tmp.display()));
+            return;
+        }
+    }
+    if !paths.root().join("snapshot.json").is_file() {
+        checks.push(
+            "snapshot",
+            CheckStatus::Warn,
+            "not written yet; the supervisor writes it every tick",
+        );
+        return;
+    }
+    match vowp_core::fleet::read_snapshot(paths) {
+        Ok(snapshot) => checks.push(
+            "snapshot",
+            CheckStatus::Ok,
+            format!(
+                "{} (schema {}, version {}, {} project(s))",
+                snapshot.generated_at.as_rfc3339(),
+                snapshot.schema,
+                snapshot.version,
+                snapshot.projects.len()
+            ),
+        ),
+        Err(error) => checks.push("snapshot", CheckStatus::Fail, error.to_string()),
+    }
+}
+
+/// Writes and removes one probe file in `dir`, reporting why it cannot.
+fn probe_directory(dir: &Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err("missing or not a directory; run `vowp init`".to_owned());
+    }
+    let probe = dir.join(format!(".doctor-tmp-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"probe").map_err(|error| format!("not writable: {error}"))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+/// Runs a `--version` style command and records its first line.
+fn check_version(runner: &dyn CommandRunner, name: &str, argv: &[&str], missing: CheckStatus, checks: &mut Checks) {
+    let spec = CommandSpec {
+        shell: None,
+        argv: argv.iter().map(|value| (*value).to_owned()).collect(),
+        cwd: None,
+        env: Vec::new(),
+        timeout: Duration::from_secs(10),
+    };
+    match runner.run(&spec) {
+        Ok(output) if output.exit_code == Some(0) => {
+            let text = output.text();
+            let line = text.lines().next().unwrap_or("").trim();
+            checks.push(name, CheckStatus::Ok, if line.is_empty() { "installed" } else { line });
+        }
+        Ok(output) => {
+            let detail = format!("`{}` exited with {:?}", argv.join(" "), output.exit_code);
+            checks.push(name, missing, detail);
+        }
+        Err(error) => checks.push(name, missing, format!("{} not found: {error}", argv[0])),
+    }
+}
+
+/// Resolves the project root for the config check.
+fn resolve_project(global: &Global, paths: &vowp_store::NodePaths) -> Option<PathBuf> {
+    if let Some(value) = &global.project {
+        let candidate = PathBuf::from(value);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if !paths.db_path().is_file() {
+            return None;
+        }
+        let name = vowp_protocol::ProjectName::parse(value).ok()?;
+        let store = Store::open(paths).ok()?;
+        let project = store.project(&name).ok()??;
+        return Some(PathBuf::from(project.path));
+    }
+    let cwd = std::env::current_dir().ok()?;
+    if let Some(root) = ctx::find_project_root(&cwd) {
+        return Some(root);
+    }
+    if !paths.db_path().is_file() {
+        return None;
+    }
+    let store = Store::open(paths).ok()?;
+    let projects = store.list_projects().ok()?;
+    match projects.as_slice() {
+        [project] => Some(PathBuf::from(&project.path)),
+        _ => None,
+    }
+}
+
+/// Parses and validates `vowp.toml` when one exists.
+fn check_config(project_root: Option<&Path>, paths: &vowp_store::NodePaths, checks: &mut Checks) -> Option<VowpConfig> {
+    let Some(root) = project_root else {
+        checks.push("config", CheckStatus::Warn, "no vowp.toml found");
+        return None;
+    };
+    let config_path = vowp_protocol::brand::project_config_path(root);
+    match ctx::load_project_config(&config_path, paths) {
+        Ok(config) => {
+            checks.push(
+                "config",
+                CheckStatus::Ok,
+                format!("{} parses and validates", config_path.display()),
+            );
+            Some(config)
+        }
+        Err(error) => {
+            checks.push("config", CheckStatus::Fail, error.to_string());
+            None
+        }
+    }
+}
+
+/// Parses every configured schedule with the real cron/interval parser.
+///
+/// `VowpConfig::validate` only checks the structure (five cron fields, interval shape, timezone
+/// shape); this catches expressions such as `61 9 * * *` that it lets through.
+fn check_schedules(config: Option<&VowpConfig>, checks: &mut Checks) {
+    let Some(config) = config else {
+        checks.push("schedules", CheckStatus::Warn, "no config to check");
+        return;
+    };
+    if config.schedules.is_empty() {
+        checks.push("schedules", CheckStatus::Ok, "no schedules configured");
+        return;
+    }
+    let mut problems = Vec::new();
+    for schedule in &config.schedules {
+        let tz = schedule.tz.as_deref().unwrap_or("UTC");
+        let parsed = match (&schedule.cron, &schedule.every) {
+            (Some(cron), None) => ScheduleSpec::parse(ScheduleSpecKind::Cron, cron, tz),
+            (None, Some(every)) => ScheduleSpec::parse(ScheduleSpecKind::Interval, every, tz),
+            _ => {
+                problems.push(format!("{}: exactly one of cron and every is required", schedule.name));
+                continue;
+            }
+        };
+        if let Err(error) = parsed {
+            problems.push(format!("{}: {error}", schedule.name));
+        }
+    }
+    if problems.is_empty() {
+        let count = config.schedules.len();
+        let noun = if count == 1 { "schedule" } else { "schedules" };
+        checks.push("schedules", CheckStatus::Ok, format!("{count} {noun} parse"));
+    } else {
+        checks.push("schedules", CheckStatus::Fail, problems.join("; "));
+    }
+}
+
+/// Returns true when `[harnesses.<name>]` exists or a profile rung uses the harness.
+///
+/// `claude-code` and `opencode` are always probed; optional harnesses such as `acp` are
+/// probed only when the project configures them, so a missing optional server is not a
+/// doctor failure for projects that do not use it.
+fn config_uses_harness(config: Option<&VowpConfig>, harness: HarnessKind) -> bool {
+    config.is_some_and(|config| {
+        config.harnesses.contains_key(harness.as_str())
+            || config
+                .profiles
+                .values()
+                .any(|profile| profile.ladder.iter().any(|executor| executor.harness == harness))
+    })
+}
+
+/// Probes one harness binary through its adapter.
+fn check_harness(registry: &AdapterRegistry, harness: HarnessKind, name: &str, checks: &mut Checks) {
+    let executor = Executor {
+        harness,
+        model: "probe".to_owned(),
+        effort: None,
+        variant: None,
+    };
+    let Some(adapter) = registry.get(&executor) else {
+        checks.push(
+            &format!("harness:{name}"),
+            CheckStatus::Fail,
+            "no adapter is registered for this harness",
+        );
+        return;
+    };
+    let probe = adapter.probe();
+    let detail = match &probe.version {
+        Some(version) => format!("{version} ({})", probe.detail),
+        None => probe.detail.clone(),
+    };
+    checks.push(
+        &format!("harness:{name}"),
+        if probe.ok { CheckStatus::Ok } else { CheckStatus::Fail },
+        detail,
+    );
+}
+
+/// Checks that every profile rung resolves to an installed harness.
+fn check_profiles(registry: Option<&AdapterRegistry>, config: Option<&VowpConfig>, checks: &mut Checks) {
+    let Some(config) = config else {
+        checks.push("profiles", CheckStatus::Warn, "no config to check");
+        return;
+    };
+    let Some(registry) = registry else {
+        checks.push("profiles", CheckStatus::Fail, "adapter registry unavailable");
+        return;
+    };
+    let mut problems = Vec::new();
+    let mut rungs = 0_u32;
+    for role in ["planner", "keeper", "worker", "verifier"] {
+        let Some(profile) = config.profiles.get(role) else {
+            problems.push(format!("missing profile {role}"));
+            continue;
+        };
+        for executor in &profile.ladder {
+            rungs += 1;
+            match registry.get(executor) {
+                Some(adapter) if adapter.probe().ok => {}
+                Some(_) => problems.push(format!("{executor}: harness not runnable")),
+                None => problems.push(format!("{executor}: no adapter")),
+            }
+        }
+    }
+    if problems.is_empty() {
+        checks.push(
+            "profiles",
+            CheckStatus::Ok,
+            format!("{rungs} rungs resolve to installed harnesses"),
+        );
+    } else {
+        checks.push("profiles", CheckStatus::Fail, problems.join("; "));
+    }
+}
+
+/// Reports provider environment-variable names only, never their values.
+///
+/// A provider is harness-owned when it has at least one profile rung and every rung that uses
+/// it runs on `claude-code`, whose login needs no `*_API_KEY`. Providers listed in
+/// `[providers]` with no rung stay key-driven. The check is `ok` when every provider is either
+/// present or harness-owned.
+fn check_providers(config: Option<&VowpConfig>, checks: &mut Checks) {
+    let Some(config) = config else {
+        checks.push("providers", CheckStatus::Warn, "no config to check");
+        return;
+    };
+    let providers = provider_harnesses(config);
+    if providers.is_empty() {
+        checks.push("providers", CheckStatus::Warn, "no providers configured");
+        return;
+    }
+    let mut parts = Vec::new();
+    let mut all_present = true;
+    for (provider, harnesses) in providers {
+        let harness_owned =
+            !harnesses.is_empty() && harnesses.iter().all(|harness| *harness == HarnessKind::ClaudeCode);
+        if harness_owned {
+            parts.push(format!(
+                "{provider}: {} uses its own login",
+                HarnessKind::ClaudeCode.as_str()
+            ));
+            continue;
+        }
+        let variable = format!("{}_API_KEY", provider_env_prefix(&provider));
+        let present = std::env::var_os(&variable).is_some();
+        all_present &= present;
+        parts.push(format!("{variable}: {}", if present { "present" } else { "absent" }));
+    }
+    checks.push(
+        "providers",
+        if all_present {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warn
+        },
+        parts.join(", "),
+    );
+}
+
+/// Maps every configured provider to the harness kinds of the profile rungs that use it.
+///
+/// `[providers]` keys with no rung get an empty set, so they stay key-driven.
+fn provider_harnesses(config: &VowpConfig) -> BTreeMap<String, BTreeSet<HarnessKind>> {
+    let mut providers: BTreeMap<String, BTreeSet<HarnessKind>> = config
+        .providers
+        .keys()
+        .map(|name| (name.clone(), BTreeSet::new()))
+        .collect();
+    for profile in config.profiles.values() {
+        for executor in &profile.ladder {
+            providers
+                .entry(executor.provider())
+                .or_default()
+                .insert(executor.harness);
+        }
+    }
+    providers
+}
+
+/// Converts a provider key into an environment-variable prefix.
+fn provider_env_prefix(provider: &str) -> String {
+    let mut prefix = String::new();
+    for character in provider.chars() {
+        if character.is_ascii_alphanumeric() {
+            prefix.push(character.to_ascii_uppercase());
+        } else {
+            prefix.push('_');
+        }
+    }
+    prefix
+}
+
+/// Checks for the systemd user unit installed by the ops scripts.
+///
+/// The home unit is selected by existence: an existing `vowp.service` is reported as is (it
+/// keeps working), a `stackspirit.service` is reported when that is the one present, and both
+/// existing together is a warning because a host must have exactly one supervisor unit.
+fn check_systemd(checks: &mut Checks) {
+    match home_dir() {
+        Some(home) => {
+            let directory = home.join(".config/systemd/user");
+            let legacy = directory.join("vowp.service");
+            let current = directory.join("stackspirit.service");
+            let (status, detail) = match (legacy.is_file(), current.is_file()) {
+                (true, true) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "both {} and {} exist; keep exactly one (stop and disable the other)",
+                        legacy.display(),
+                        current.display()
+                    ),
+                ),
+                (true, false) => (CheckStatus::Ok, format!("{}", legacy.display())),
+                (false, true) => (CheckStatus::Ok, format!("{}", current.display())),
+                (false, false) => (CheckStatus::Warn, format!("{}", current.display())),
+            };
+            checks.push("systemd", status, detail);
+        }
+        None => checks.push("systemd", CheckStatus::Warn, "HOME is not set"),
+    }
+}
+
+/// Checks for the cron watchdog script installed by the ops scripts.
+fn check_watchdog(checks: &mut Checks) {
+    match home_dir() {
+        Some(home) => {
+            let script = home.join(".local/bin/vowp-watchdog.sh");
+            checks.push(
+                "watchdog",
+                if script.is_file() {
+                    CheckStatus::Ok
+                } else {
+                    CheckStatus::Warn
+                },
+                format!("{}", script.display()),
+            );
+        }
+        None => checks.push("watchdog", CheckStatus::Warn, "HOME is not set"),
+    }
+}
+
+/// Reports whether a supervisor holds the node lock.
+fn check_supervisor(paths: &vowp_store::NodePaths, checks: &mut Checks) {
+    match ctx::supervisor_pid(paths) {
+        Some(pid) => checks.push("supervisor", CheckStatus::Ok, format!("running (pid {pid})")),
+        None => checks.push("supervisor", CheckStatus::Warn, "not running"),
+    }
+}
+
+/// Reports free disk space on the home filesystem; fails below 1 GB.
+fn check_disk(runner: &dyn CommandRunner, root: &Path, checks: &mut Checks) {
+    let path = if root.exists() {
+        root.to_path_buf()
+    } else {
+        root.parent().unwrap_or_else(|| Path::new("/")).to_path_buf()
+    };
+    let spec = CommandSpec {
+        shell: None,
+        argv: vec!["df".to_owned(), "-Pk".to_owned(), path.display().to_string()],
+        cwd: None,
+        env: Vec::new(),
+        timeout: Duration::from_secs(10),
+    };
+    match runner.run(&spec) {
+        Ok(output) if output.exit_code == Some(0) => {
+            let text = output.text();
+            let last = text.lines().rfind(|line| !line.trim().is_empty());
+            let available_kb = last
+                .and_then(|line| line.split_whitespace().nth(3))
+                .and_then(|value| value.parse::<u64>().ok());
+            match available_kb {
+                Some(kb) if kb >= 1_048_576 => {
+                    checks.push("disk", CheckStatus::Ok, format!("{} GB available", kb / 1_048_576))
+                }
+                Some(kb) => checks.push(
+                    "disk",
+                    CheckStatus::Fail,
+                    format!("{} MB available; at least 1 GB is required", kb / 1024),
+                ),
+                None => checks.push("disk", CheckStatus::Warn, "could not parse df output"),
+            }
+        }
+        _ => checks.push("disk", CheckStatus::Warn, "df is not available"),
+    }
+}
+
+/// Returns `$HOME` when it is set.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}

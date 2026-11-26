@@ -1,0 +1,77 @@
+# scripts/audit/allowlist.txt
+#
+# Each non-comment line is: rule|path|matched-value|reason
+#   rule          one of ipv4, home_path, email, token, private_host, ssh_host,
+#                 ssh_target, secret_path, large_blob
+#   path          a repo-relative file path, or * for a value that is safe anywhere
+#   matched-value the exact text the scanner matched (never a secret)
+#   reason        why this finding is safe; must not be empty
+#
+# The scanner rejects a malformed entry or an empty reason. Keep entries
+# narrow: an exact path is better than *. Never add a real secret, a real
+# account name, a private hostname or a real e-mail address here.
+#
+# Loopback is an IPv4 address but names the local machine, not a private host.
+ipv4|*|127.0.0.1|Loopback address, public by definition and used in the security docs.
+# 0.0.0.0 is the wildcard bind address, not a host or an owner address.
+ipv4|*|0.0.0.0|Wildcard bind address in a test fixture and the v0.2 design example.
+# RFC 5737 TEST-NET-1 is reserved for documentation and cannot name a real host.
+ipv4|crates/vowp-cli/src/cmd/up.rs|192.0.2.1|RFC 5737 TEST-NET-1 address in a negative web-window test.
+ipv4|crates/vowp-agent/tests/transport.rs|192.0.2.10|RFC 5737 TEST-NET-1 address in a non-loopback bind refusal test.
+ipv4|crates/vowp-protocol/tests/config.rs|192.0.2.10|RFC 5737 TEST-NET-1 address in a non-loopback listen validation test.
+
+# Conventional placeholder homes used by tests and documentation. These are
+# not accounts on any machine.
+home_path|*|/home/user|Conventional placeholder path, not a real account.
+home_path|*|/Users/me|Conventional placeholder path, not a real account.
+home_path|*|/home/you|Conventional placeholder path in install documentation.
+home_path|*|/home/vowp|The dedicated home service account used by setup and the docs.
+home_path|*|/home/vowp-vault|The dedicated vault helper account used by vault mode.
+home_path|*|/home/fake|Placeholder for a fake test user, not a real account.
+
+# Reserved example domains from RFC 2606 / RFC 6761, used only by tests,
+# examples and fake harnesses. They cannot receive mail.
+email|*|git@github.com|Git SSH user@host in a remote URL, not a personal e-mail address.
+email|*|test@example.com|Reserved example domain in tests.
+email|*|test@example.invalid|Reserved .invalid example domain in tests.
+email|*|git@example.com|Placeholder SSH remote URL in a test fixture.
+email|*|hello@example.invalid|Reserved .invalid example domain in an example.
+email|*|fake@example.invalid|Reserved .invalid example domain in a fake harness.
+email|*|fresh@example.invalid|Reserved .invalid example domain in a fresh-user test.
+email|*|dogfood@example.invalid|Reserved .invalid example domain in the dogfood harness.
+email|*|setup@example.invalid|Reserved .invalid example domain in the setup tests.
+email|*|vowp@example.invalid|Reserved .invalid example domain in a CLI test fixture.
+email|*|vowp@home.example|The reserved .example TLD in the v0.2 design example.
+
+# `ssh_target` fields in tests and design examples. These values use reserved
+# example domains; a concrete owner-user@node target is deliberately not listed.
+ssh_target|*|ssh_target": "fake.example"|Reserved .example placeholder in test fixtures.
+ssh_target|*|ssh_target": "vowp@example.invalid"|Reserved .invalid placeholder in a CLI test.
+ssh_target|*|ssh_target": "vowp@home.example"|The reserved .example TLD in the v0.2 design example.
+# Rust control-config fixtures write the field as `ssh_target: "..."`, without the
+# JSON key quotes, so the exact matched text needs its own narrow entries.
+ssh_target|crates/vowp-cli/tests/agent.rs|ssh_target: "fake.example"|Reserved .example placeholder in a control-config fixture.
+ssh_target|scripts/audit/allowlist.txt|ssh_target: "fake.example"|Text of an allowlist entry, not a real SSH target.
+
+# False positives from the hostname rule: Rust method names and a test path
+# that end in `.local`, not DNS names.
+private_host|crates/vowp-cli/tests/init.rs|store.local|Rust method `store.local_node()`, not a hostname.
+private_host|crates/vowp-store/tests/migrate.rs|store.local|Rust method `store.local_node()`, not a hostname.
+private_host|crates/vowp-core/tests/gates_secret.rs|env.local|Filename `.env.local` in a secret-path test, not a hostname.
+
+# The allowlist file itself contains the two values above as data. These entries
+# keep the scanner quiet about its own control file; they match only that path.
+private_host|scripts/audit/allowlist.txt|store.local|Text of an allowlist entry, not a hostname.
+private_host|scripts/audit/allowlist.txt|env.local|Text of an allowlist entry, not a hostname.
+ipv4|scripts/audit/allowlist.txt|192.0.2.1|Text of an allowlist entry; TEST-NET-1 is documentation-only.
+ipv4|scripts/audit/allowlist.txt|192.0.2.10|Text of an allowlist entry; TEST-NET-1 is documentation-only.
+
+# The only token-shaped finding in the old history is a fake PEM header in a
+# historical test fixture. History is not published, so it stays informational
+# and is deliberately not allowlisted; the current tree has no such string.
+
+# The explainer video is deliberately checked in for the README and the
+# documentation. It is part of the public tree, not an accidental large file;
+# the entry names its exact path and leaves the 1 MiB default threshold alone.
+large_blob|docs/media/vowp-explainer.mp4|docs/media/vowp-explainer.mp4|Intentional checked-in explainer video that belongs to the documentation and public tree, not an accidental large file.
+large_blob|docs/media/vowp-harness-switch.mp4|docs/media/vowp-harness-switch.mp4|Intentional checked-in harness-switch explainer clip used by the documentation and the X post, not an accidental large file.

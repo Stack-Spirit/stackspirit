@@ -1,0 +1,19 @@
+#!/bin/sh
+# scripts/dogfood/fake-harness/opencode — a version-only stand-in for opencode.
+#
+# `vowp doctor` probes every built-in harness even when the project uses only the
+# generic `cli` adapter. This script answers that probe with a version and refuses
+# every other invocation, so the dogfood run never starts the real `opencode`
+# binary or spends a model token.
+
+set -eu
+
+case "${1:-}" in
+    --version)
+        printf '%s\n' "0.15.0 (fake dogfood opencode)"
+        exit 0
+        ;;
+esac
+
+printf '%s\n' "fake opencode: the dogfood run only supports --version" >&2
+exit 1

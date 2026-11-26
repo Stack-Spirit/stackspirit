@@ -1,0 +1,28 @@
+# Private StackSpirit PyPI variant. The distribution name is `stackspirit`
+# (never `stackspirit-engine`). Nothing here is published: the classifier
+# below makes PyPI refuse an upload, and the owner publishes, if ever, by hand.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stackspirit"
+version = "0.5.1.dev0"
+description = "StackSpirit: local-first supervisor for AI coding agents (private build)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Syver-August Meyer" }]
+classifiers = ["Private :: Do Not Upload"]
+
+[project.scripts]
+stackspirit = "stackspirit.launcher:main_stackspirit"
+vowp = "stackspirit.launcher:main_vowp"
+stackspirit-daemon = "stackspirit.launcher:main_stackspirit_daemon"
+vowp-daemon = "stackspirit.launcher:main_vowp_daemon"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+stackspirit = ["bin/*"]

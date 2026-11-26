@@ -1,0 +1,605 @@
+{
+  "bench": {
+    "delay": {
+      "cold": {
+        "count": 4,
+        "max_ms": 1033.447,
+        "mean_ms": 947.688,
+        "min_ms": 879.223,
+        "p50_ms": 915.062,
+        "p90_ms": 1033.447,
+        "p95_ms": 1033.447,
+        "p99_ms": 1033.447
+      },
+      "cold_failures": 0,
+      "mux": {
+        "count": 4,
+        "max_ms": 251.659,
+        "mean_ms": 245.788,
+        "min_ms": 242.545,
+        "p50_ms": 243.089,
+        "p90_ms": 251.659,
+        "p95_ms": 251.659,
+        "p99_ms": 251.659
+      },
+      "mux_failures": 0
+    },
+    "loopback": {
+      "cold": {
+        "count": 8,
+        "max_ms": 360.811,
+        "mean_ms": 296.833,
+        "min_ms": 241.958,
+        "p50_ms": 294.019,
+        "p90_ms": 360.811,
+        "p95_ms": 360.811,
+        "p99_ms": 360.811
+      },
+      "cold_failures": 0,
+      "mux": {
+        "count": 8,
+        "max_ms": 50.393,
+        "mean_ms": 26.258,
+        "min_ms": 13.8,
+        "p50_ms": 17.462,
+        "p90_ms": 50.393,
+        "p95_ms": 50.393,
+        "p99_ms": 50.393
+      },
+      "mux_failures": 0
+    }
+  },
+  "delay_ms": 40.0,
+  "generated_at": "2026-11-10T12:17:23.280Z",
+  "lease": {
+    "exit": 75,
+    "master_alive_after": true,
+    "name": "lease-revoke",
+    "notice_latency_ms": 99.647,
+    "stderr": "",
+    "stdout": "client: status=revoked events=30 acks=4 reconnects=0 resent=0 duplicate_acks=0 duration_ms=890.823\nclient: lease revoked: taken over by phone (by phone at 2026-11-10T12:17:42.080Z); this surface is read-only",
+    "summary": {
+      "ack_rtt": {
+        "count": 4,
+        "max_ms": 200.34,
+        "mean_ms": 200.271,
+        "min_ms": 200.197,
+        "p50_ms": 200.272,
+        "p90_ms": 200.34,
+        "p95_ms": 200.34,
+        "p99_ms": 200.34
+      },
+      "acks": 4,
+      "connect": {
+        "count": 1,
+        "max_ms": 89.04,
+        "mean_ms": 89.04,
+        "min_ms": 89.04,
+        "p50_ms": 89.04,
+        "p90_ms": 89.04,
+        "p95_ms": 89.04,
+        "p99_ms": 89.04
+      },
+      "connect_attempts": 1,
+      "done": null,
+      "duplicate_acks": 0,
+      "duration_ms": 890.823,
+      "error": null,
+      "events": 30,
+      "finished_at": "2026-11-10T12:17:42Z",
+      "forced_cuts": 0,
+      "notice": {
+        "at": "2026-11-10T12:17:42.080Z",
+        "by": "phone",
+        "last_seq": 4,
+        "reason": "taken over by phone",
+        "session": "ses-live",
+        "type": "lease.revoked"
+      },
+      "notice_latency_ms": null,
+      "notice_received_at": 1794313062.1798315,
+      "reconnect": {
+        "count": 0
+      },
+      "reconnects": 0,
+      "resent": 0,
+      "sends": 4,
+      "session": "ses-live",
+      "started_at": "2026-11-10T12:17:41Z",
+      "status": "revoked",
+      "transport": "real-ssh",
+      "window": 1
+    },
+    "takeover_written_at": 1794313062.080185,
+    "verify": {
+      "errors": [
+        "home has 4 records, spool has 30 events"
+      ],
+      "events": 30,
+      "home_records": 4,
+      "last_seq": 4,
+      "ok": false
+    }
+  },
+  "platform": {
+    "machine": "x86_64",
+    "python": "3.12.3",
+    "release": "6.8.0-147-generic",
+    "ssh": "OpenSSH_9.6p1 Ubuntu-3ubuntu13.20, OpenSSL 3.0.13 30 Jan 2024",
+    "system": "Linux"
+  },
+  "streams": {
+    "delay-cold-w1": {
+      "exit": 0,
+      "name": "delay-cold-w1",
+      "stderr": "",
+      "stdout": "client: status=ok events=16 acks=16 reconnects=0 resent=0 duplicate_acks=0 duration_ms=2611.026",
+      "summary": {
+        "ack_rtt": {
+          "count": 16,
+          "max_ms": 175.677,
+          "mean_ms": 94.039,
+          "min_ms": 81.477,
+          "p50_ms": 85.415,
+          "p90_ms": 109.49,
+          "p95_ms": 175.677,
+          "p99_ms": 175.677
+        },
+        "acks": 16,
+        "connect": {
+          "count": 1,
+          "max_ms": 950.792,
+          "mean_ms": 950.792,
+          "min_ms": 950.792,
+          "p50_ms": 950.792,
+          "p90_ms": 950.792,
+          "p95_ms": 950.792,
+          "p99_ms": 950.792
+        },
+        "connect_attempts": 1,
+        "done": {
+          "duplicates": 0,
+          "events": 16,
+          "last_client_seq": 16,
+          "last_seq": 16,
+          "session": "ses-live",
+          "type": "done"
+        },
+        "duplicate_acks": 0,
+        "duration_ms": 2611.026,
+        "error": null,
+        "events": 16,
+        "finished_at": "2026-11-10T12:17:36Z",
+        "forced_cuts": 0,
+        "notice": null,
+        "notice_latency_ms": null,
+        "notice_received_at": null,
+        "reconnect": {
+          "count": 0
+        },
+        "reconnects": 0,
+        "resent": 0,
+        "sends": 16,
+        "session": "ses-live",
+        "started_at": "2026-11-10T12:17:33Z",
+        "status": "ok",
+        "transport": "real-ssh",
+        "window": 1
+      },
+      "verify": {
+        "errors": [],
+        "events": 16,
+        "home_records": 16,
+        "last_seq": 16,
+        "ok": true
+      }
+    },
+    "delay-cold-w64": {
+      "exit": 0,
+      "name": "delay-cold-w64",
+      "stderr": "",
+      "stdout": "client: status=ok events=120 acks=120 reconnects=0 resent=0 duplicate_acks=0 duration_ms=1781.682",
+      "summary": {
+        "ack_rtt": {
+          "count": 120,
+          "max_ms": 184.661,
+          "mean_ms": 166.577,
+          "min_ms": 93.041,
+          "p50_ms": 176.312,
+          "p90_ms": 184.358,
+          "p95_ms": 184.57,
+          "p99_ms": 184.633
+        },
+        "acks": 120,
+        "connect": {
+          "count": 1,
+          "max_ms": 1277.993,
+          "mean_ms": 1277.993,
+          "min_ms": 1277.993,
+          "p50_ms": 1277.993,
+          "p90_ms": 1277.993,
+          "p95_ms": 1277.993,
+          "p99_ms": 1277.993
+        },
+        "connect_attempts": 1,
+        "done": {
+          "duplicates": 0,
+          "events": 120,
+          "last_client_seq": 120,
+          "last_seq": 120,
+          "session": "ses-live",
+          "type": "done"
+        },
+        "duplicate_acks": 0,
+        "duration_ms": 1781.682,
+        "error": null,
+        "events": 120,
+        "finished_at": "2026-11-10T12:17:38Z",
+        "forced_cuts": 0,
+        "notice": null,
+        "notice_latency_ms": null,
+        "notice_received_at": null,
+        "reconnect": {
+          "count": 0
+        },
+        "reconnects": 0,
+        "resent": 0,
+        "sends": 120,
+        "session": "ses-live",
+        "started_at": "2026-11-10T12:17:36Z",
+        "status": "ok",
+        "transport": "real-ssh",
+        "window": 64
+      },
+      "verify": {
+        "errors": [],
+        "events": 120,
+        "home_records": 120,
+        "last_seq": 120,
+        "ok": true
+      }
+    },
+    "delay-mux-w64": {
+      "exit": 0,
+      "master_alive_after": true,
+      "name": "delay-mux-w64",
+      "stderr": "",
+      "stdout": "client: status=ok events=120 acks=120 reconnects=0 resent=0 duplicate_acks=0 duration_ms=824.868",
+      "summary": {
+        "ack_rtt": {
+          "count": 120,
+          "max_ms": 163.738,
+          "mean_ms": 135.889,
+          "min_ms": 86.251,
+          "p50_ms": 132.458,
+          "p90_ms": 161.025,
+          "p95_ms": 161.812,
+          "p99_ms": 163.733
+        },
+        "acks": 120,
+        "connect": {
+          "count": 1,
+          "max_ms": 308.609,
+          "mean_ms": 308.609,
+          "min_ms": 308.609,
+          "p50_ms": 308.609,
+          "p90_ms": 308.609,
+          "p95_ms": 308.609,
+          "p99_ms": 308.609
+        },
+        "connect_attempts": 1,
+        "done": {
+          "duplicates": 0,
+          "events": 120,
+          "last_client_seq": 120,
+          "last_seq": 120,
+          "session": "ses-live",
+          "type": "done"
+        },
+        "duplicate_acks": 0,
+        "duration_ms": 824.868,
+        "error": null,
+        "events": 120,
+        "finished_at": "2026-11-10T12:17:39Z",
+        "forced_cuts": 0,
+        "notice": null,
+        "notice_latency_ms": null,
+        "notice_received_at": null,
+        "reconnect": {
+          "count": 0
+        },
+        "reconnects": 0,
+        "resent": 0,
+        "sends": 120,
+        "session": "ses-live",
+        "started_at": "2026-11-10T12:17:38Z",
+        "status": "ok",
+        "transport": "real-ssh",
+        "window": 64
+      },
+      "verify": {
+        "errors": [],
+        "events": 120,
+        "home_records": 120,
+        "last_seq": 120,
+        "ok": true
+      }
+    },
+    "loopback-cold-w64": {
+      "exit": 0,
+      "name": "loopback-cold-w64",
+      "stderr": "",
+      "stdout": "client: status=ok events=400 acks=400 reconnects=0 resent=0 duplicate_acks=0 duration_ms=731.176",
+      "summary": {
+        "ack_rtt": {
+          "count": 400,
+          "max_ms": 70.645,
+          "mean_ms": 23.914,
+          "min_ms": 4.553,
+          "p50_ms": 15.471,
+          "p90_ms": 55.848,
+          "p95_ms": 61.932,
+          "p99_ms": 68.296
+        },
+        "acks": 400,
+        "connect": {
+          "count": 1,
+          "max_ms": 561.546,
+          "mean_ms": 561.546,
+          "min_ms": 561.546,
+          "p50_ms": 561.546,
+          "p90_ms": 561.546,
+          "p95_ms": 561.546,
+          "p99_ms": 561.546
+        },
+        "connect_attempts": 1,
+        "done": {
+          "duplicates": 0,
+          "events": 400,
+          "last_client_seq": 400,
+          "last_seq": 400,
+          "session": "ses-live",
+          "type": "done"
+        },
+        "duplicate_acks": 0,
+        "duration_ms": 731.176,
+        "error": null,
+        "events": 400,
+        "finished_at": "2026-11-10T12:17:27Z",
+        "forced_cuts": 0,
+        "notice": null,
+        "notice_latency_ms": null,
+        "notice_received_at": null,
+        "reconnect": {
+          "count": 0
+        },
+        "reconnects": 0,
+        "resent": 0,
+        "sends": 400,
+        "session": "ses-live",
+        "started_at": "2026-11-10T12:17:26Z",
+        "status": "ok",
+        "transport": "real-ssh",
+        "window": 64
+      },
+      "verify": {
+        "errors": [],
+        "events": 400,
+        "home_records": 400,
+        "last_seq": 400,
+        "ok": true
+      }
+    },
+    "loopback-mux-w64": {
+      "exit": 0,
+      "master_alive_after": true,
+      "name": "loopback-mux-w64",
+      "stderr": "",
+      "stdout": "client: status=ok events=400 acks=400 reconnects=0 resent=0 duplicate_acks=0 duration_ms=275.428",
+      "summary": {
+        "ack_rtt": {
+          "count": 400,
+          "max_ms": 35.371,
+          "mean_ms": 15.674,
+          "min_ms": 3.978,
+          "p50_ms": 13.558,
+          "p90_ms": 30.731,
+          "p95_ms": 31.303,
+          "p99_ms": 34.847
+        },
+        "acks": 400,
+        "connect": {
+          "count": 1,
+          "max_ms": 130.371,
+          "mean_ms": 130.371,
+          "min_ms": 130.371,
+          "p50_ms": 130.371,
+          "p90_ms": 130.371,
+          "p95_ms": 130.371,
+          "p99_ms": 130.371
+        },
+        "connect_attempts": 1,
+        "done": {
+          "duplicates": 0,
+          "events": 400,
+          "last_client_seq": 400,
+          "last_seq": 400,
+          "session": "ses-live",
+          "type": "done"
+        },
+        "duplicate_acks": 0,
+        "duration_ms": 275.428,
+        "error": null,
+        "events": 400,
+        "finished_at": "2026-11-10T12:17:27Z",
+        "forced_cuts": 0,
+        "notice": null,
+        "notice_latency_ms": null,
+        "notice_received_at": null,
+        "reconnect": {
+          "count": 0
+        },
+        "reconnects": 0,
+        "resent": 0,
+        "sends": 400,
+        "session": "ses-live",
+        "started_at": "2026-11-10T12:17:27Z",
+        "status": "ok",
+        "transport": "real-ssh",
+        "window": 64
+      },
+      "verify": {
+        "errors": [],
+        "events": 400,
+        "home_records": 400,
+        "last_seq": 400,
+        "ok": true
+      }
+    },
+    "reconnect-cold": {
+      "exit": 0,
+      "name": "reconnect-cold",
+      "stderr": "",
+      "stdout": "client: status=ok events=300 acks=300 reconnects=1 resent=8 duplicate_acks=8 duration_ms=1156.919",
+      "summary": {
+        "ack_rtt": {
+          "count": 300,
+          "max_ms": 46.001,
+          "mean_ms": 6.816,
+          "min_ms": 0.227,
+          "p50_ms": 3.755,
+          "p90_ms": 12.21,
+          "p95_ms": 17.665,
+          "p99_ms": 46.0
+        },
+        "acks": 300,
+        "connect": {
+          "count": 2,
+          "max_ms": 409.158,
+          "mean_ms": 384.729,
+          "min_ms": 360.3,
+          "p50_ms": 360.3,
+          "p90_ms": 409.158,
+          "p95_ms": 409.158,
+          "p99_ms": 409.158
+        },
+        "connect_attempts": 2,
+        "done": {
+          "duplicates": 8,
+          "events": 300,
+          "last_client_seq": 300,
+          "last_seq": 300,
+          "session": "ses-live",
+          "type": "done"
+        },
+        "duplicate_acks": 8,
+        "duration_ms": 1156.919,
+        "error": null,
+        "events": 300,
+        "finished_at": "2026-11-10T12:17:40Z",
+        "forced_cuts": 1,
+        "notice": null,
+        "notice_latency_ms": null,
+        "notice_received_at": null,
+        "reconnect": {
+          "count": 1,
+          "max_ms": 409.158,
+          "mean_ms": 409.158,
+          "min_ms": 409.158,
+          "p50_ms": 409.158,
+          "p90_ms": 409.158,
+          "p95_ms": 409.158,
+          "p99_ms": 409.158
+        },
+        "reconnects": 1,
+        "resent": 8,
+        "sends": 308,
+        "session": "ses-live",
+        "started_at": "2026-11-10T12:17:39Z",
+        "status": "ok",
+        "transport": "real-ssh",
+        "window": 8
+      },
+      "verify": {
+        "errors": [],
+        "events": 300,
+        "home_records": 300,
+        "last_seq": 300,
+        "ok": true
+      }
+    },
+    "reconnect-mux": {
+      "exit": 0,
+      "master_alive_after": true,
+      "name": "reconnect-mux",
+      "stderr": "",
+      "stdout": "client: status=ok events=300 acks=300 reconnects=1 resent=8 duplicate_acks=8 duration_ms=454.654",
+      "summary": {
+        "ack_rtt": {
+          "count": 300,
+          "max_ms": 4.422,
+          "mean_ms": 2.09,
+          "min_ms": 0.38,
+          "p50_ms": 2.041,
+          "p90_ms": 2.958,
+          "p95_ms": 3.421,
+          "p99_ms": 4.164
+        },
+        "acks": 300,
+        "connect": {
+          "count": 2,
+          "max_ms": 158.755,
+          "mean_ms": 124.866,
+          "min_ms": 90.977,
+          "p50_ms": 90.977,
+          "p90_ms": 158.755,
+          "p95_ms": 158.755,
+          "p99_ms": 158.755
+        },
+        "connect_attempts": 2,
+        "done": {
+          "duplicates": 8,
+          "events": 300,
+          "last_client_seq": 300,
+          "last_seq": 300,
+          "session": "ses-live",
+          "type": "done"
+        },
+        "duplicate_acks": 8,
+        "duration_ms": 454.654,
+        "error": null,
+        "events": 300,
+        "finished_at": "2026-11-10T12:17:41Z",
+        "forced_cuts": 1,
+        "notice": null,
+        "notice_latency_ms": null,
+        "notice_received_at": null,
+        "reconnect": {
+          "count": 1,
+          "max_ms": 90.977,
+          "mean_ms": 90.977,
+          "min_ms": 90.977,
+          "p50_ms": 90.977,
+          "p90_ms": 90.977,
+          "p95_ms": 90.977,
+          "p99_ms": 90.977
+        },
+        "reconnects": 1,
+        "resent": 8,
+        "sends": 308,
+        "session": "ses-live",
+        "started_at": "2026-11-10T12:17:40Z",
+        "status": "ok",
+        "transport": "real-ssh",
+        "window": 8
+      },
+      "verify": {
+        "errors": [],
+        "events": 300,
+        "home_records": 300,
+        "last_seq": 300,
+        "ok": true
+      }
+    }
+  }
+}

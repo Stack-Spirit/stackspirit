@@ -1,0 +1,14 @@
+#!/bin/sh
+# Fresh-user test fixture: a fake opencode CLI.
+#
+# The fresh-user container has no signed-in harness and cannot make a model
+# call. `vowp doctor` probes `opencode --version`, so this stub answers exactly
+# that and refuses everything else. It never fakes a model turn.
+case "${1:-}" in
+    --version)
+        printf '%s\n' '1.99.0'
+        exit 0
+        ;;
+esac
+printf '%s\n' 'fresh-user fixture: fake opencode only implements --version' >&2
+exit 1

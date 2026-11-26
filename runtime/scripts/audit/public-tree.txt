@@ -1,0 +1,101 @@
+# Public-tree manifest for the VOWP repository.
+#
+# scripts/audit/public-tree-check.sh enforces this file and
+# scripts/audit/squash-for-public.sh uses it to build public-main. It stays in
+# the private tree; it is itself pruned from the public branch.
+#
+# Each non-comment line is one entry:
+#   allow <path>    a top-level file or directory permitted in public-main
+#   prune <path>    an internal path excluded from public-main; a trailing
+#                   slash covers the directory and everything below it
+#   require <path>  a product path that must exist in public-main; a trailing
+#                   slash means a non-empty directory
+#
+# Keep the list aligned with the owner's public-tree decision. Add a reason to
+# the commit message when a path moves between sections.
+
+# --- top-level allow-list ---------------------------------------------------
+
+allow .editorconfig
+allow .github
+allow .gitignore
+allow CHANGELOG.md
+allow CODE_OF_CONDUCT.md
+allow CONTRIBUTING.md
+allow Cargo.lock
+allow Cargo.toml
+allow LICENSE
+allow README.md
+allow SECURITY.md
+allow SUPPORT.md
+allow THIRD-PARTY-LICENSES.md
+allow crates
+allow docs
+allow examples
+allow framework
+allow packaging
+allow rust-toolchain.toml
+allow rustfmt.toml
+allow scripts
+
+# --- internal build and operations material --------------------------------
+
+prune AGENTS.md
+prune vowp.toml
+prune docs/dogfood/
+prune docs/fresh-user/
+prune docs/maintainers/
+prune docs/design/v0.5/
+prune docs/release/0.1.0-rc.1.md
+prune scripts/acceptance/
+prune scripts/audit/
+prune scripts/dogfood/
+prune scripts/fresh-user/
+prune scripts/spikes/
+prune site/
+
+# --- required product paths -------------------------------------------------
+
+require .editorconfig
+require .github/
+require .github/workflows/ci.yml
+require .github/workflows/release.yml
+require .gitignore
+require CHANGELOG.md
+require CODE_OF_CONDUCT.md
+require CONTRIBUTING.md
+require Cargo.lock
+require Cargo.toml
+require LICENSE
+require README.md
+require SECURITY.md
+require SUPPORT.md
+require THIRD-PARTY-LICENSES.md
+require crates/
+require docs/concepts/
+require docs/design/
+require docs/design/job-map.md
+require docs/design/v0.2/
+require docs/guides/
+require docs/guides/phone.md
+require docs/guides/quickstart.md
+require docs/reference/
+require docs/release/0.1.0.md
+require docs/roadmap.md
+require docs/security.md
+require docs/setup/
+require docs/tests/
+require docs/troubleshooting.md
+require examples/
+require framework/
+require packaging/
+require rust-toolchain.toml
+require rustfmt.toml
+require scripts/README.md
+require scripts/install.sh
+require scripts/release/
+require scripts/tests/
+require scripts/uninstall.sh
+require scripts/vowp-watchdog.cron
+require scripts/vowp-watchdog.sh
+require scripts/vowp.service
