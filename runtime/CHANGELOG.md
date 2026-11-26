@@ -12,7 +12,7 @@ features deliberately left out of v0.4 are in [`docs/roadmap.md`](docs/roadmap.m
 
 ## [Unreleased]
 
-The six v0.5 slices are implemented and gated in the tree. The workspace version is now `0.5.1-dev`;
+The six v0.5 slices are implemented and gated in the tree. The workspace version is now `0.6.0`;
 `0.5.0` is the private snapshot tag (`snapshot/0.5.0-private`), not a release. No release date has
 been cut and the latest public release remains 0.4.0 (2026-11-18).
 
@@ -30,8 +30,8 @@ been cut and the latest public release remains 0.4.0 (2026-11-18).
 - `docs/reference/generate.py` and `docs/tests/check-commands.sh` accept `stackspirit` and
   `vowp` command examples.
 
-- The workspace, crate, packaging and version-test strings now report `0.5.1-dev`, so
-  `vowp --version` prints `vowp 0.5.1-dev` instead of `vowp 0.4.0`.
+- The workspace, crate, packaging and version-test strings now report `0.6.0`, so
+  `vowp --version` prints `vowp 0.6.0` instead of `vowp 0.4.0`.
 
 ### Added
 

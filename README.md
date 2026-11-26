@@ -195,10 +195,10 @@ secret-free by default. See [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md)
 capability-probe evidence, the local disposable CLI round trip, the D5 report status, and the
 owner-run live smoke that is still pending.
 
-## Cross-Project Relationship with VOWP (`/home/dev/vowp`)
+## Cross-Project Relationship with VOWP (`/home/user/vowp`)
 
 StackSpirit is a separate repository and VOWP project (`stackspirit`), but relies on VOWP wire
-contracts and milestones in `/home/dev/vowp`:
+contracts and milestones in `/home/user/vowp`:
 
 - **Available now (Phases D0–D5):** Outbound SSH connection, VOWP snapshot & capacity/storage
   telemetry (`vowp fleet status --json`, `vowp capacity report --json`), visual worker/job lanes,

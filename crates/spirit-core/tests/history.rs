@@ -107,9 +107,9 @@ fn history_keeps_only_terminal_jobs_newest_first() {
 /// History tab must not list. `id`, `worktree`, `brief` and `report` are the exact
 /// keys the live CLI emits.
 const REAL_JOB_LS: &str = r#"[
- {"id":"ss-1","project":"stackspirit","title":"docs: update SECURITY.md","kind":"docs","role":"worker","profile":"worker","state":"done","priority":111,"needs":[],"owns":["SECURITY.md"],"reads":[],"brief":".vowp/jobs/ss-1/brief.md","report":".vowp/jobs/ss-1/report.md","gates":[{"report":{"fields":["status"]}}],"loop":{"until":"gates","max_attempts":2,"on_exhausted":"escalate"},"branch":"job/ss-1","worktree":"/home/dev/stackspirit-wt/ss-1","attempts":0,"continues":0,"hang_restarts":0,"parked_reason":null,"note":"","created_by":"cli","last_progress_at":null,"state_changed_at":"2026-11-22T17:48:51.396Z","created_at":"2026-11-22T17:42:18.718Z","updated_at":"2026-11-22T17:48:51.396Z"},
+ {"id":"ss-1","project":"stackspirit","title":"docs: update SECURITY.md","kind":"docs","role":"worker","profile":"worker","state":"done","priority":111,"needs":[],"owns":["SECURITY.md"],"reads":[],"brief":".vowp/jobs/ss-1/brief.md","report":".vowp/jobs/ss-1/report.md","gates":[{"report":{"fields":["status"]}}],"loop":{"until":"gates","max_attempts":2,"on_exhausted":"escalate"},"branch":"job/ss-1","worktree":"/home/user/stackspirit-wt/ss-1","attempts":0,"continues":0,"hang_restarts":0,"parked_reason":null,"note":"","created_by":"cli","last_progress_at":null,"state_changed_at":"2026-11-22T17:48:51.396Z","created_at":"2026-11-22T17:42:18.718Z","updated_at":"2026-11-22T17:48:51.396Z"},
  {"id":"ss-2","project":"stackspirit","title":"history: fix the buttons","kind":"build","role":"worker","profile":"worker","state":"failed","priority":96,"needs":["ss-1"],"owns":[],"reads":[],"brief":".vowp/jobs/ss-2/brief.md","report":".vowp/jobs/ss-2/report.md","gates":[],"loop":{"until":"gates","max_attempts":2,"on_exhausted":"escalate"},"branch":null,"worktree":null,"attempts":1,"continues":1,"hang_restarts":0,"parked_reason":null,"note":"retry","created_by":"planner","last_progress_at":null,"state_changed_at":"2026-11-26T14:00:00.000Z","created_at":"2026-11-26T13:00:00.000Z","updated_at":"2026-11-26T14:00:00.000Z"},
- {"id":"ss-3","project":"stackspirit","title":"live worker","kind":"build","role":"worker","profile":"worker","state":"running","priority":50,"needs":[],"owns":[],"reads":[],"brief":".vowp/jobs/ss-3/brief.md","report":".vowp/jobs/ss-3/report.md","gates":[],"loop":{"until":"gates","max_attempts":2,"on_exhausted":"escalate"},"branch":"job/ss-3","worktree":"/home/dev/stackspirit-wt/ss-3","attempts":0,"continues":0,"hang_restarts":0,"parked_reason":null,"note":"","created_by":"planner","last_progress_at":null,"state_changed_at":"2026-11-24T10:00:00.000Z","created_at":"2026-11-23T10:00:00.000Z","updated_at":"2026-11-24T10:00:00.000Z"},
+ {"id":"ss-3","project":"stackspirit","title":"live worker","kind":"build","role":"worker","profile":"worker","state":"running","priority":50,"needs":[],"owns":[],"reads":[],"brief":".vowp/jobs/ss-3/brief.md","report":".vowp/jobs/ss-3/report.md","gates":[],"loop":{"until":"gates","max_attempts":2,"on_exhausted":"escalate"},"branch":"job/ss-3","worktree":"/home/user/stackspirit-wt/ss-3","attempts":0,"continues":0,"hang_restarts":0,"parked_reason":null,"note":"","created_by":"planner","last_progress_at":null,"state_changed_at":"2026-11-24T10:00:00.000Z","created_at":"2026-11-23T10:00:00.000Z","updated_at":"2026-11-24T10:00:00.000Z"},
  {"id":"ss-4","project":"stackspirit","title":"queued work","kind":"fix","role":"worker","profile":"worker","state":"ready","priority":50,"needs":[],"owns":[],"reads":[],"brief":".vowp/jobs/ss-4/brief.md","report":".vowp/jobs/ss-4/report.md","gates":[],"loop":{"until":"gates","max_attempts":2,"on_exhausted":"escalate"},"branch":null,"worktree":null,"attempts":0,"continues":0,"hang_restarts":0,"parked_reason":null,"note":"","created_by":"planner","last_progress_at":null,"state_changed_at":"2026-11-24T09:00:00.000Z","created_at":"2026-11-24T09:00:00.000Z","updated_at":"2026-11-24T09:00:00.000Z"},
  {"job_id":"ss-5","project":"stackspirit","title":"old export row","kind":"build","role":"worker","state":"cancelled","state_changed_at":"2026-11-25T09:00:00.000Z"},
  {"id":"ss-6","project":"stackspirit","title":"replanned row","kind":"build","role":"worker","state":"replanned","updated_at":"2026-11-21T09:00:00.000Z"}
@@ -129,7 +129,7 @@ fn real_job_ls_output_parses_and_drops_live_rows_and_paths() {
         Some("2026-11-25T09:00:00.000Z")
     );
     let json = serde_json::to_string(&jobs).unwrap();
-    assert!(!json.contains("/home/dev"), "no home-side paths: {json}");
+    assert!(!json.contains("/home/user"), "no home-side paths: {json}");
     assert!(!json.contains(".vowp/jobs"), "no brief paths: {json}");
     assert!(!json.contains("worktree"), "no worktree fields: {json}");
 }
@@ -158,12 +158,12 @@ const REAL_GC_JSON: &str = r#"{
  "generated_at":"2026-11-26T14:14:56.675Z",
  "dry_run":true,
  "classes":[
-  {"class":"truth","files":3109,"bytes":536339055,"eligible_files":0,"eligible_bytes":0,"sample_paths":["/home/dev/.stackspirit/archive/projects/demo/project.db"]},
-  {"class":"secrets","files":1,"bytes":35,"eligible_files":0,"eligible_bytes":0,"sample_paths":["/home/dev/.stackspirit/secrets/EXAMPLE_KEY"]},
+  {"class":"truth","files":3109,"bytes":536339055,"eligible_files":0,"eligible_bytes":0,"sample_paths":["/home/user/.stackspirit/archive/projects/demo/project.db"]},
+  {"class":"secrets","files":1,"bytes":35,"eligible_files":0,"eligible_bytes":0,"sample_paths":["/home/user/.stackspirit/secrets/EXAMPLE_KEY"]},
   {"class":"open_work","files":1847,"bytes":1007701306,"eligible_files":0,"eligible_bytes":0,"sample_paths":[]},
   {"class":"closed_session","files":502,"bytes":51116199,"eligible_files":0,"eligible_bytes":0,"sample_paths":[]},
-  {"class":"run_output","files":1080,"bytes":69679917,"eligible_files":2,"eligible_bytes":4207,"sample_paths":["/home/dev/.stackspirit/runs/a.jsonl"]},
-  {"class":"worktree","files":14,"bytes":15355494642,"eligible_files":1,"eligible_bytes":187,"sample_paths":["/home/dev/stackspirit-wt/ss-108"]},
+  {"class":"run_output","files":1080,"bytes":69679917,"eligible_files":2,"eligible_bytes":4207,"sample_paths":["/home/user/.stackspirit/runs/a.jsonl"]},
+  {"class":"worktree","files":14,"bytes":15355494642,"eligible_files":1,"eligible_bytes":187,"sample_paths":["/home/user/stackspirit-wt/ss-108"]},
   {"class":"sample","files":86,"bytes":0,"eligible_files":86,"eligible_bytes":0,"sample_paths":["host_samples/125262"]}],
  "refused":[],
  "deleted_files":0,"freed_bytes":0,"compacted_sessions":0,"closed_windows":0,
@@ -180,7 +180,7 @@ fn real_gc_output_keeps_zero_byte_classes_and_scrubs_paths() {
     assert_eq!(report.eligible_bytes, 4394);
     assert!(report.dry_run);
     let json = serde_json::to_string(&report).unwrap();
-    assert!(!json.contains("/home/dev"), "no home-side paths: {json}");
+    assert!(!json.contains("/home/user"), "no home-side paths: {json}");
 }
 
 #[tokio::test]

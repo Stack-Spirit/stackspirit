@@ -9,19 +9,21 @@
 
 ## Verdict
 
-**Not ready to flip the repository public yet.** The scan still finds **no secret, no public IP
-address, no tracked `.env` or credential file, and no personal e-mail address**. It now finds
-**20 non-placeholder `/home/<user>` paths**, down from 49 at the start of this job:
+**The working-tree scan is clean and the release version is aligned.** The scan finds **no secret,
+no public IP address, no tracked `.env` or credential file, no personal e-mail address, and no
+non-placeholder `/home/<user>` path**. All **49** findings at the start of this job were replaced
+with `/home/user`:
 
-- this job replaced **29** internal home paths with `/home/user` in `docs/` and
-  `runtime/docs/maintainers/` (the files it owns);
-- **20** findings remain in `AGENTS.md`, `README.md`, `crates/spirit-core/src/` and
-  `crates/spirit-core/tests/history.rs`, which are outside this job's `owns` list. They need one
-  follow-up scrub job, or an ownership change, before the tree is public.
+- **29** in the `docs/` and `runtime/docs/maintainers/` files this job already owned;
+- **20** in `AGENTS.md`, `README.md`, `crates/spirit-core/src/` and
+  `crates/spirit-core/tests/history.rs`, added to this job's `owns` by the owner.
 
 The release version is now aligned at **`0.6.0`** across `runtime/Cargo.toml`, every inter-crate
-dependency, `runtime/Cargo.lock`, the version test and the npm/PyPI packaging manifests.
-`check-release.sh --version 0.6.0 --tag v0.6.0 --publish` passes.
+dependency, `runtime/Cargo.lock`, the version test, `runtime/CHANGELOG.md` and the npm/PyPI
+packaging manifests. `check-release.sh --version 0.6.0 --tag v0.6.0 --publish` passes.
+
+The remaining launch pre-flight items are the history-aware secret scan, the GitHub repository and
+registry settings, and the dry release build; they are not working-tree findings.
 
 | Area | Result |
 |---|---|
@@ -29,16 +31,16 @@ dependency, `runtime/Cargo.lock`, the version test and the npm/PyPI packaging ma
 | Globally routable IPv4 addresses | **0** |
 | Tracked `.env`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, `*.pem`, SSH private-key names | **0** |
 | Personal e-mail addresses outside the reserved example domains | **0** |
-| Non-placeholder `/home/<user>` or `/Users/<user>` paths | **20 blocked** (6 in `AGENTS.md`, 2 in `README.md`, 4 in `crates/spirit-core/src/`, 8 in `crates/spirit-core/tests/history.rs`) |
-| Home paths scrubbed by this job | **29** (21 in `docs/`, 8 in `runtime/docs/maintainers/`) |
-| Placeholder/service/home-fixture paths recognised by the scan | 456 home paths, 820 reserved/private IPs and 135 reserved e-mails allowed |
-| Working-tree scan exit status | **1** (the 20 remaining home paths; the command is shown below) |
+| Non-placeholder `/home/<user>` or `/Users/<user>` paths | **0 blocked** (49 replaced with `/home/user` by this job) |
+| Home paths scrubbed by this job | **49** (29 in `docs/` and `runtime/docs/`, 20 in `AGENTS.md`, `README.md` and `crates/spirit-core/`) |
+| Placeholder/service/home-fixture paths recognised by the scan | 483 home paths, 820 reserved/private IPs and 135 reserved e-mails allowed |
+| Working-tree scan exit status | **0 (PASS)**; the command and output are shown below |
 | Release workflow YAML | **Valid**; the 76 structural, mutation and version-checker checks recorded by the ss-135 audit pass |
 | Git history | **Not scanned by this script**; a history-aware scan is a required pre-flight item |
 | First release version state | **Aligned at `0.6.0`**: workspace, inter-crate dependencies, lockfile, version test and npm/PyPI packaging agree; `check-release.sh` passes |
 
-The path blocker and the history/publication checks are independent. Fixing the last 20 paths does
-not prove the git history is clean, and the history scan does not replace the path scrub.
+The working-tree scan and the history/publication checks are independent. A clean scan does not
+prove the git history is clean, and the history scan does not replace the path scrub.
 
 ## How to reproduce the scan
 
@@ -74,40 +76,18 @@ $ bash scripts/check-public-readiness.sh
 public-readiness: repository <git top level>
 public-readiness: scope: tracked working tree at HEAD
 public-readiness: scanned 1604 of 1650 tracked text files
-public-readiness: allowed placeholders: 456 home path(s), 820 reserved/private IP(s), 135 reserved e-mail(s)
-public-readiness: personal /home or /Users path: 20 blocked
-public-readiness: findings (values masked):
-  AGENTS.md:7: home_path: /hom***
-  AGENTS.md:11: home_path: /hom***
-  AGENTS.md:12: home_path: /hom***
-  AGENTS.md:12: home_path: /hom***
-  AGENTS.md:13: home_path: /hom***
-  AGENTS.md:14: home_path: /hom***
-  README.md:198: home_path: /hom***
-  README.md:201: home_path: /hom***
-  crates/spirit-core/src/lib.rs:5: home_path: /hom***
-  crates/spirit-core/src/vowp/client.rs:2633: home_path: /hom***
-  crates/spirit-core/src/vowp/client.rs:2657: home_path: /hom***
-  crates/spirit-core/src/wire/mod.rs:3: home_path: /hom***
-  crates/spirit-core/tests/history.rs:110: home_path: /hom***
-  crates/spirit-core/tests/history.rs:112: home_path: /hom***
-  crates/spirit-core/tests/history.rs:132: home_path: /hom***
-  crates/spirit-core/tests/history.rs:161: home_path: /hom***
-  crates/spirit-core/tests/history.rs:162: home_path: /hom***
-  crates/spirit-core/tests/history.rs:165: home_path: /hom***
-  crates/spirit-core/tests/history.rs:166: home_path: /hom***
-  crates/spirit-core/tests/history.rs:183: home_path: /hom***
-public-readiness: FAIL: 20 blocked finding(s)
+public-readiness: allowed placeholders: 483 home path(s), 820 reserved/private IP(s), 135 reserved e-mail(s)
+public-readiness: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found
 ```
 
 ## Home-path scrub status
 
-Every blocked value is the same internal development account: the masked value is `/hom***`.
-No password, key, token, host, or IP is involved. The original ss-135 audit found 41 findings;
+Every blocked value was the same internal development account: the masked value was `/hom***`.
+No password, key, token, host, or IP was involved. The original ss-135 audit found 41 findings;
 the history work merged after that audit added 8 more in `crates/spirit-core/tests/history.rs`,
-so this job started from **49**. It scrubbed **29** and leaves **20**.
+so this job started from **49**. All **49** now use the `/home/user` placeholder.
 
-### Scrubbed by this job (29)
+### Documentation (29)
 
 | File | Findings | Replacement |
 |---|---:|---|
@@ -118,19 +98,17 @@ so this job started from **49**. It scrubbed **29** and leaves **20**.
 | `runtime/docs/maintainers/v0.2-acceptance/fresh-setup.md` | 7 | `/home/user` |
 | `runtime/docs/maintainers/v0.2-acceptance/public-tree-audit.md` | 1 | `/home/user` |
 
-### Remaining after this job (20)
+### Root docs, comments and fixtures (20)
 
-| File | Findings | What is left |
+| File | Findings | Replacement |
 |---|---:|---|
-| `AGENTS.md` | 6 | The companion VOWP checkout path in the worker instructions. |
-| `README.md` | 2 | The same private cross-project checkout. |
-| `crates/spirit-core/src/lib.rs`, `vowp/client.rs`, `wire/mod.rs` | 4 | Code comments and one unit-test input. |
-| `crates/spirit-core/tests/history.rs` | 8 | History fixture worktree, archive and sample paths. |
+| `AGENTS.md` | 6 | `/home/user` |
+| `README.md` | 2 | `/home/user` |
+| `crates/spirit-core/src/lib.rs`, `vowp/client.rs`, `wire/mod.rs` | 4 | `/home/user` |
+| `crates/spirit-core/tests/history.rs` | 8 | `/home/user` |
 
-These paths are in files outside this job's `owns` list, so this job did not edit them. The follow-up
-worker should replace every remaining value with `/home/user` (the same substitution this job used)
-and re-run the scan until it prints `PASS` and exits `0`. Do not copy a real path into this document,
-a commit message, or a release note.
+No real home path remains in the tracked tree. Keep using the `/home/user` placeholder in new docs,
+test fixtures and commit messages rather than copying a path from a developer machine.
 
 ## Release workflow
 
@@ -196,22 +174,22 @@ test version_flag_prints_package_version ... ok
 test result: ok. 1 passed; 0 failed
 ```
 
-Remaining release-note work, outside this job's `owns`: `runtime/CHANGELOG.md` still describes
-`0.5.1-dev` and names `0.4.0` as the latest public release. The release workflow uses
-`runtime/docs/release/<version>.md` and falls back to `runtime/CHANGELOG.md`; add
-`runtime/docs/release/0.6.0.md` or refresh the changelog before publishing the draft.
+`runtime/CHANGELOG.md` now reports the `0.6.0` workspace version, so the release workflow's
+`runtime/docs/release/<version>.md` → `runtime/CHANGELOG.md` fallback is current. A versioned
+`runtime/docs/release/0.6.0.md` note remains optional; the changelog is the fallback the workflow
+uses when that file is absent.
 
 ## Owner pre-flight checklist
 
-Complete these in order. The remaining path scrub and the history scan block the visibility
-change; the release-note and dry-build items block the first release.
+Complete these in order. The history scan and the repository settings block the visibility
+change; the dry-build items block the first release.
 
 ### 1. Remove private data from the tree
 
 - [x] Scrub `docs/` and `runtime/docs/maintainers/` (29 paths replaced with `/home/user`).
-- [ ] Scrub the 20 paths in `AGENTS.md`, `README.md`, `crates/spirit-core/src/` and
-      `crates/spirit-core/tests/history.rs` with a follow-up job that owns those files. Re-run
-      `bash scripts/check-public-readiness.sh` and require `PASS` and exit `0`.
+- [x] Scrub the 20 paths in `AGENTS.md`, `README.md`, `crates/spirit-core/src/` and
+      `crates/spirit-core/tests/history.rs` with `/home/user`; `bash scripts/check-public-readiness.sh`
+      now prints `PASS` and exits `0`.
 - [ ] Decide whether `runtime/docs/maintainers/` ships at all. It no longer contains private home
       paths, but it still holds old acceptance transcripts and internal runbooks.
 - [ ] Run a history-aware secret scan over every commit that will be public. This script only
@@ -249,8 +227,8 @@ change; the release-note and dry-build items block the first release.
       version test at `0.6.0`; the npm/PyPI manifests already said `0.6.0`.
 - [x] Run `bash runtime/scripts/release/check-release.sh --version 0.6.0 --tag v0.6.0 --publish`
       and get `check-release: ok (0.6.0)`.
-- [ ] Add `runtime/docs/release/0.6.0.md` or refresh `runtime/CHANGELOG.md` for the release
-      workflow's notes step.
+- [x] Refresh `runtime/CHANGELOG.md` for `0.6.0`; the release workflow's changelog fallback is
+      current. A separate `runtime/docs/release/0.6.0.md` note is optional.
 - [ ] Run the release workflow as a dry build:
       `gh workflow run release.yml --ref main -f version=0.6.0`; inspect the archives,
       npm tarballs, wheels, `SHA256SUMS` and both `--version` outputs. A dry build must not
@@ -275,9 +253,9 @@ change; the release-note and dry-build items block the first release.
 - It does not prove the repository history is clean.
 - It does not inspect GitHub issues, pull requests, wikis, releases or package-registry
   metadata.
-- It does not run the desktop, Web, Rust, runtime, npm or Playwright test suites; this job's
-  evidence is the public-readiness scan, the version test, `check-release.sh` and the
-  root TypeScript typecheck/lint/unit suite.
+- It does not run the Playwright end-to-end suites or the full runtime workspace; this job's
+  evidence is the public-readiness scan, the `spirit-core` tests, the version test,
+  `check-release.sh` and the root TypeScript typecheck/lint/unit suite.
 - It does not publish, tag, push, sign, notarize, or change repository visibility.
 - A clean scan is necessary but not sufficient for a public launch; the manual review and the
   owner settings above remain required.

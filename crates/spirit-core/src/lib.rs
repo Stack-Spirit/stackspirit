@@ -2,7 +2,7 @@
 //! deterministic views, the local engine boundary, and honest capability gates.
 //!
 //! The crate is headless: it has no Tauri, React, or platform-GUI dependency and never
-//! reads `/home/dev/vowp` at runtime. All I/O goes through injected traits so tests stay
+//! reads `/home/user/vowp` at runtime. All I/O goes through injected traits so tests stay
 //! hermetic.
 
 #![forbid(unsafe_code)]

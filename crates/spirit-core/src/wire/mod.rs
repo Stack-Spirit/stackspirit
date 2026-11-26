@@ -1,6 +1,6 @@
 //! Local, dependency-free mirror of the VOWP JSON documents.
 //!
-//! The module performs no I/O and does not import `/home/dev/vowp`. Unknown object
+//! The module performs no I/O and does not import `/home/user/vowp`. Unknown object
 //! fields are ignored; unknown enum values are preserved as `Unknown`. Every parse
 //! returns a [`Parsed`] value with a [`WireWarning`] list that the UI may show in its
 //! raw-document drawer.

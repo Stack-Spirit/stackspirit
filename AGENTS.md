@@ -4,14 +4,14 @@
    desktop application (`apps/spirit-desktop`) before standalone Web or CLI surfaces. Keep all UI
    calls behind the `SpiritBridge` interface so Web can reuse the UI later, and keep all host/SSH/
    VOWP logic in `crates/spirit-core` so the CLI can reuse it later.
-2. **Cross-Project VOWP Reliance:** `/home/dev/vowp` is the companion VOWP framework repository.
+2. **Cross-Project VOWP Reliance:** `/home/user/vowp` is the companion VOWP framework repository.
    - The design source of truth is [`docs/HANDOFF-DESKTOP-UI.md`](docs/HANDOFF-DESKTOP-UI.md) for the
      desktop UI and brand, and [`design/brand/README.md`](design/brand/README.md) for the logo,
      palette and icon builders. There is no older design note to consult.
-   - You may read `/home/dev/vowp/docs/design/v0.4/local-orchestrator.md`,
-     `/home/dev/vowp/docs/design/v0.4/asif-integration.md`, `/home/dev/vowp/docs/design/cli.md`, and
-     `/home/dev/vowp/crates/vowp-protocol/src/` (read-only) to match exact VOWP JSON types.
-   - Never edit `/home/dev/vowp` from a `stackspirit` job.
+   - You may read `/home/user/vowp/docs/design/v0.4/local-orchestrator.md`,
+     `/home/user/vowp/docs/design/v0.4/asif-integration.md`, `/home/user/vowp/docs/design/cli.md`, and
+     `/home/user/vowp/crates/vowp-protocol/src/` (read-only) to match exact VOWP JSON types.
+   - Never edit `/home/user/vowp` from a `stackspirit` job.
    - VOWP 0.4.0 shipped the Phase 3 local-orchestrator surface and the ASIF 0.4 interchange, so
      those VOWP-side gates are open. Keep the explicit `LocalOrchestratorGate` and `AsifGate` in
      code and UI until the StackSpirit wiring in `docs/HANDOFF-DESKTOP-UI.md` §5 lands; do not

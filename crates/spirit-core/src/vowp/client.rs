@@ -2630,7 +2630,7 @@ mod tests {
 
     #[tokio::test]
     async fn answer_inbox_without_project_passes_the_node_project() {
-        let (fake, client) = client(Some("/home/dev"));
+        let (fake, client) = client(Some("/home/user"));
         client.answer_inbox(None, ITEM_ID, "keep").await.unwrap();
         let calls = fake.calls();
         let command = calls[0].args.last().cloned().unwrap();
@@ -2654,7 +2654,7 @@ mod tests {
 
     #[tokio::test]
     async fn dismiss_inbox_without_project_passes_the_node_project() {
-        let (fake, client) = client(Some("/home/dev"));
+        let (fake, client) = client(Some("/home/user"));
         client.dismiss_inbox(None, ITEM_ID).await.unwrap();
         let command = fake.calls()[0].args.last().cloned().unwrap();
         assert!(
