@@ -562,11 +562,21 @@ fn write_endpoint_vowp(dir: &Path, document: &Value) {
     );
 }
 
+/// Inherited `PATH` directories minus any that hold a host `stackspirit` or `vowp`, so a host
+/// install cannot shadow the fake binary under test (system tool directories are kept).
+fn host_path_without_engines() -> Vec<std::path::PathBuf> {
+    std::env::var_os("PATH")
+        .map(|existing| {
+            std::env::split_paths(&existing)
+                .filter(|dir| !dir.join("stackspirit").exists() && !dir.join("vowp").exists())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn path_with(dir: &Path) -> std::ffi::OsString {
     let mut paths = vec![dir.to_path_buf()];
-    if let Some(existing) = std::env::var_os("PATH") {
-        paths.extend(std::env::split_paths(&existing));
-    }
+    paths.extend(host_path_without_engines());
     std::env::join_paths(paths).expect("join fake PATH")
 }
 

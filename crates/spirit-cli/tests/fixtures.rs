@@ -152,7 +152,8 @@ async fn fixture_gate_ready_scenario_is_reported_honestly() {
         gates.local_orchestrator,
         LocalOrchestratorGate::Ready { .. }
     ));
-    assert!(!gates.features.local_orchestrator_actions);
+    assert!(gates.features.local_orchestrator_actions);
+    assert!(!gates.features.asif_actions);
 }
 
 #[tokio::test]

@@ -2189,7 +2189,10 @@ async fn provisioning_upgrades_a_stuck_fallback_session_to_the_resolved_vowp_end
     .unwrap();
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut paths = vec![vowp_dir.path().to_path_buf()];
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    paths.extend(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .filter(|dir| !dir.join("stackspirit").exists() && !dir.join("vowp").exists()),
+    );
     let resolver = Arc::new(SwitchableResolver {
         live: AtomicBool::new(false),
         inner: spirit_core::engine::chat::VowpEndpointResolver::with_path_env(

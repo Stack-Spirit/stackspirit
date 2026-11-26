@@ -481,12 +481,18 @@ async fn d6_local_agent_pair_sends_the_code_on_stdin_and_drops_the_token_path() 
     let paired = agent.pair(&request).await.unwrap();
     assert_eq!(paired.surface_id, SURFACE_ID);
     let call = runner.last_call().expect("call");
-    assert_eq!(call.program, "vowp");
+    assert_eq!(
+        call.program,
+        spirit_core::ssh::command::local_engine_binary()
+    );
     assert_eq!(call.args[0], "--json");
     assert_eq!(call.args[1], "agent");
     assert_eq!(call.args[2], "pair");
     assert!(
-        !call.args.iter().any(|arg| arg == "vowp"),
+        !call
+            .args
+            .iter()
+            .any(|arg| arg == spirit_core::ssh::command::local_engine_binary()),
         "the program must not be repeated as an argument"
     );
     assert!(call.args.iter().any(|arg| arg == "--code-file"));
@@ -528,7 +534,10 @@ async fn d6_local_agent_path_add_and_remove_use_vowp_as_the_program() {
 
     let calls = runner.calls();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].program, "vowp");
+    assert_eq!(
+        calls[0].program,
+        spirit_core::ssh::command::local_engine_binary()
+    );
     assert_eq!(
         calls[0].args,
         [
@@ -546,7 +555,10 @@ async fn d6_local_agent_path_add_and_remove_use_vowp_as_the_program() {
         .map(str::to_owned)
         .to_vec()
     );
-    assert_eq!(calls[1].program, "vowp");
+    assert_eq!(
+        calls[1].program,
+        spirit_core::ssh::command::local_engine_binary()
+    );
     assert_eq!(
         calls[1].args,
         ["--json", "agent", "paths", "rm", "vowp"]
@@ -579,22 +591,29 @@ async fn d6_local_agent_paths_and_status_are_safe_views() {
 
     let calls = runner.calls();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].program, "vowp");
+    assert_eq!(
+        calls[0].program,
+        spirit_core::ssh::command::local_engine_binary()
+    );
     assert_eq!(
         calls[0].args,
         ["--json", "agent", "paths", "ls"]
             .map(str::to_owned)
             .to_vec()
     );
-    assert_eq!(calls[1].program, "vowp");
+    assert_eq!(
+        calls[1].program,
+        spirit_core::ssh::command::local_engine_binary()
+    );
     assert_eq!(
         calls[1].args,
         ["--json", "agent", "status"].map(str::to_owned).to_vec()
     );
     assert!(
-        !calls
+        !calls.iter().any(|call| call
+            .args
             .iter()
-            .any(|call| call.args.iter().any(|arg| arg == "vowp")),
+            .any(|arg| arg == spirit_core::ssh::command::local_engine_binary())),
         "the program must not be repeated as an argument"
     );
 }
