@@ -130,3 +130,52 @@ fn init_with_stackspirit_toml_updates_it_and_project_is_discovered() {
     );
     assert!(project.join("stackspirit.toml").is_file());
 }
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn home_not_initialised_error_names_the_invoked_binary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("missing-home");
+    let missing_arg = missing.to_string_lossy().into_owned();
+    let cases = [
+        (env!("CARGO_BIN_EXE_stackspirit"), "stackspirit", "vowp"),
+        (env!("CARGO_BIN_EXE_vowp"), "vowp", "stackspirit"),
+    ];
+    for (bin, brand, other) in cases {
+        let out = run(bin, &[], &["--home", &missing_arg, "node", "enroll", "mac"], dir.path());
+        assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+        let text = stderr(&out);
+        let expected = format!("{brand} home is not initialised; run `{brand} init`");
+        assert!(text.contains(&expected), "{bin}: {text}");
+        let foreign = format!("`{other} init`");
+        assert!(!text.contains(&foreign), "{bin} leaked {other}: {text}");
+    }
+}
+
+#[test]
+fn node_enroll_command_names_the_invoked_binary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cases = [
+        (env!("CARGO_BIN_EXE_stackspirit"), "stackspirit"),
+        (env!("CARGO_BIN_EXE_vowp"), "vowp"),
+    ];
+    for (bin, brand) in cases {
+        let repo = git_repo(dir.path(), &format!("repo-{brand}"));
+        let home = dir.path().join(format!("home-{brand}"));
+        std::fs::create_dir_all(&home).expect("mkdir");
+        let env = [("VOWP_HOME", home.as_path())];
+        let init = run(bin, &env, &["init", "--name", "demo"], &repo);
+        assert!(init.status.success(), "{}", stderr(&init));
+        let out = run(bin, &env, &["--json", "node", "enroll", "mac"], &repo);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let value: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("enroll json");
+        let command = value["command"].as_str().expect("command");
+        assert!(
+            command.starts_with(&format!("{brand} agent enroll --target")),
+            "{bin}: {command}"
+        );
+    }
+}

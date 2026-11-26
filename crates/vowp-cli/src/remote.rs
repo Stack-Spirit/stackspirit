@@ -169,9 +169,10 @@ fn resolve_target(global: &Global, control: Option<&ControlHome>, name: &NodeNam
 
     let paths = crate::ctx::node_paths(global)?;
     if !paths.db_path().is_file() {
-        return Err(CliError::NotFound(
-            "vowp home is not initialised; run `vowp init`".to_owned(),
-        ));
+        return Err(CliError::NotFound(format!(
+            "{b} home is not initialised; run `{b} init`",
+            b = crate::cli::binary_brand()
+        )));
     }
     let store = Store::open(&paths)?;
     let node = store

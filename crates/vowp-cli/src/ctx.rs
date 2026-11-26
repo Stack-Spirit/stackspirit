@@ -110,9 +110,10 @@ impl Ctx {
             }
             NodeRole::Uninitialised => {
                 if global.home.is_some() {
-                    return Err(CliError::NotFound(
-                        "vowp home is not initialised; run `vowp init`".to_owned(),
-                    ));
+                    return Err(CliError::NotFound(format!(
+                        "{b} home is not initialised; run `{b} init`",
+                        b = crate::cli::binary_brand()
+                    )));
                 }
                 let config = placeholder_config("home")?;
                 let project = ProjectName::parse("_node")?;
@@ -272,7 +273,10 @@ pub(crate) fn uninitialised_message() -> String {
     {
         return error.to_string();
     }
-    "vowp home is not initialised; run `vowp setup` or `vowp init`".to_owned()
+    format!(
+        "{b} home is not initialised; run `{b} setup` or `{b} init`",
+        b = crate::cli::binary_brand()
+    )
 }
 
 /// Returns the node home from `--home`, `$STACKSPIRIT_HOME`, `$VOWP_HOME`, or the real one of
@@ -321,9 +325,10 @@ pub fn require_initialised_home(paths: &NodePaths) -> Result<(), CliError> {
     if paths.db_path().is_file() {
         return Ok(());
     }
-    Err(CliError::NotFound(
-        "vowp home is not initialised; run `vowp init`".to_owned(),
-    ))
+    Err(CliError::NotFound(format!(
+        "{b} home is not initialised; run `{b} init`",
+        b = crate::cli::binary_brand()
+    )))
 }
 
 /// Resolves the checkout a node-scoped command should register, if any.

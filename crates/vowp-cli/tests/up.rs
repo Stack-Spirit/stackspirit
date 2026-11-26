@@ -3079,12 +3079,12 @@ fn detached_up_passes_the_project_context_to_its_child() {
     );
 }
 
-#[test]
-fn detached_up_surfaces_the_web_window_and_down_stops_the_daemon() {
+/// Runs the detached-`up` window scenario through `bin` and expects the tunnel hint to name `brand`.
+fn detached_up_surfaces_the_web_window(bin: &str, brand: &str) {
     let env = common::TestEnv::new();
     let fake = FakeDaemon::new();
     let cwd = tempfile::tempdir().expect("cwd");
-    let mut up = Command::new(env!("CARGO_BIN_EXE_vowp"));
+    let mut up = Command::new(bin);
     up.arg("--home")
         .arg(env.home_path())
         .arg("--project")
@@ -3116,7 +3116,9 @@ fn detached_up_surfaces_the_web_window_and_down_stops_the_daemon() {
         "the detached caller prints the address published by its foreground child: {stdout}"
     );
     assert!(
-        stdout.contains("remote window: vowp tunnel open window --remote-port 54321"),
+        stdout.contains(&format!(
+            "remote window: {brand} tunnel open window --remote-port 54321"
+        )),
         "the detached caller prints the tunnel hint with the actual port: {stdout}"
     );
     assert!(
@@ -3169,6 +3171,16 @@ fn detached_up_surfaces_the_web_window_and_down_stops_the_daemon() {
         !env.home_path().join("web-window").exists(),
         "the address file is removed when the detached supervisor stops"
     );
+}
+
+#[test]
+fn detached_up_surfaces_the_web_window_and_down_stops_the_daemon() {
+    detached_up_surfaces_the_web_window(env!("CARGO_BIN_EXE_vowp"), "vowp");
+}
+
+#[test]
+fn detached_up_under_the_stackspirit_binary_prints_stackspirit_in_the_tunnel_hint() {
+    detached_up_surfaces_the_web_window(env!("CARGO_BIN_EXE_stackspirit"), "stackspirit");
 }
 
 #[test]

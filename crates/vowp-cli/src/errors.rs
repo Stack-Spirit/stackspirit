@@ -74,17 +74,17 @@ impl CliError {
         }
         let text = self.to_string();
         if text.contains("job ") {
-            Some("vowp job ls".to_owned())
+            Some(format!("{} job ls", crate::cli::binary_brand()))
         } else if text.contains("session") {
-            Some("vowp session ls".to_owned())
+            Some(format!("{} session ls", crate::cli::binary_brand()))
         } else if text.contains("node ") {
-            Some("vowp node ls".to_owned())
+            Some(format!("{} node ls", crate::cli::binary_brand()))
         } else if text.contains("inbox") {
-            Some("vowp inbox ls".to_owned())
+            Some(format!("{} inbox ls", crate::cli::binary_brand()))
         } else if text.contains("project") {
-            Some("vowp init".to_owned())
+            Some(format!("{} init", crate::cli::binary_brand()))
         } else if text.contains("loop") {
-            Some("vowp loops".to_owned())
+            Some(format!("{} loops", crate::cli::binary_brand()))
         } else {
             None
         }

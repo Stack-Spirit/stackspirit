@@ -178,7 +178,10 @@ fn enroll_node(ctx: &Ctx, io: &mut dyn IoStreams, args: &NodeEnrollArgs) -> Resu
     } else {
         enroll::create_pending(&store, &name, &args.label, now)?
     };
-    let command = "vowp agent enroll --target <home-ssh-target> --code-file -".to_owned();
+    let command = format!(
+        "{} agent enroll --target <home-ssh-target> --code-file -",
+        crate::cli::binary_brand()
+    );
     if ctx.json() {
         print_json(
             io,
@@ -322,9 +325,10 @@ fn require_home(ctx: &Ctx) -> Result<(), CliError> {
         NodeRole::Control => Err(CliError::Guard(
             "this command needs the home store; run it on the home machine".to_owned(),
         )),
-        NodeRole::Uninitialised => Err(CliError::NotFound(
-            "vowp home is not initialised; run `vowp setup` or `vowp init`".to_owned(),
-        )),
+        NodeRole::Uninitialised => Err(CliError::NotFound(format!(
+            "{b} home is not initialised; run `{b} setup` or `{b} init`",
+            b = crate::cli::binary_brand()
+        ))),
     }
 }
 
@@ -357,9 +361,10 @@ struct NodeShowOutput {
 fn require_registry(ctx: &Ctx) -> Result<(), CliError> {
     match ctx.role() {
         NodeRole::Home | NodeRole::Control => Ok(()),
-        NodeRole::Uninitialised => Err(CliError::NotFound(
-            "vowp home is not initialised; run `vowp init` or `vowp control init`".to_owned(),
-        )),
+        NodeRole::Uninitialised => Err(CliError::NotFound(format!(
+            "{b} home is not initialised; run `{b} init` or `{b} control init`",
+            b = crate::cli::binary_brand()
+        ))),
     }
 }
 

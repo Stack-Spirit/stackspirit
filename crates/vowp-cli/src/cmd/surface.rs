@@ -238,8 +238,9 @@ fn warn_expiring_surface_tokens(
         .unwrap_or_else(|| "-".to_owned());
     writeln!(
         io.err(),
-        "warning: {} surface token(s) expire within 7 days (earliest {expiry}); rotate with `vowp surface rotate <id>`",
-        expiring.len()
+        "warning: {} surface token(s) expire within 7 days (earliest {expiry}); rotate with `{} surface rotate <id>`",
+        expiring.len(),
+        crate::cli::binary_brand()
     )?;
     Ok(())
 }
@@ -320,9 +321,10 @@ fn rotate(ctx: &Ctx, io: &mut dyn IoStreams, args: &SurfaceRotateArgs, node: Opt
     {
         return Err(CliError::Remote(format!(
             "rotation_pending: the rotation was queued for node {} but its frame was not drained within {}; \
-             run `vowp surface ls` to see the delivery deadline",
+             run `{} surface ls` to see the delivery deadline",
             rotated.node,
-            format_duration(wait)
+            format_duration(wait),
+            crate::cli::binary_brand()
         )));
     }
     let offline = node_is_offline(&store, &rotated.node, now)?;
@@ -412,7 +414,10 @@ fn node_is_offline(store: &Store, node: &NodeName, now: Timestamp) -> Result<boo
 
 /// Returns the exact Mac command for one pending surface. The code is never part of it.
 fn agent_pair_command(surface: &SurfaceId, session: &SessionId, app: Option<&str>) -> String {
-    let mut command = format!("vowp agent pair --code-file - --surface {surface} --session {session}");
+    let mut command = format!(
+        "{} agent pair --code-file - --surface {surface} --session {session}",
+        crate::cli::binary_brand()
+    );
     if let Some(app) = app {
         command.push_str(&format!(" --app {app}"));
     }
@@ -445,9 +450,10 @@ fn require_home(ctx: &Ctx) -> Result<(), CliError> {
         NodeRole::Control => Err(CliError::Guard(
             "surface commands need the home store; run them on the home machine".to_owned(),
         )),
-        NodeRole::Uninitialised => Err(CliError::NotFound(
-            "vowp home is not initialised; run `vowp setup` or `vowp init`".to_owned(),
-        )),
+        NodeRole::Uninitialised => Err(CliError::NotFound(format!(
+            "{b} home is not initialised; run `{b} setup` or `{b} init`",
+            b = crate::cli::binary_brand()
+        ))),
     }
 }
 

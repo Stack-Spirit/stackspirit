@@ -179,7 +179,11 @@ fn web_window_port(address: &str) -> Option<u16> {
 fn print_web_window(io: &mut dyn IoStreams, address: &str) -> Result<(), CliError> {
     writeln!(io.out(), "web window: {address}")?;
     if let Some(port) = web_window_port(address) {
-        writeln!(io.out(), "remote window: vowp tunnel open window --remote-port {port}")?;
+        writeln!(
+            io.out(),
+            "remote window: {} tunnel open window --remote-port {port}",
+            crate::cli::binary_brand()
+        )?;
         writeln!(
             io.out(),
             "  local URL: http://127.0.0.1:<local-port>/ (the command prints the chosen port)"
