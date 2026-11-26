@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod cloud;
 pub mod cluster;
 pub mod connection;
 pub mod engine;
@@ -22,6 +23,12 @@ pub mod view;
 pub mod vowp;
 pub mod wire;
 
+pub use cloud::{
+    CLOUD_SESSION_FILE, CloudAccount, CloudClient, CloudError, CloudErrorCode, CloudMachine,
+    CloudMethod, CloudRequest, CloudResponse, CloudSession, CloudSessionStore, CloudTransport,
+    DEFAULT_API_BASE_URL, JsonCloudSessionStore, ManagedPlanCatalog, RelayTicket,
+    RelayTicketRequest,
+};
 pub use cluster::{
     BackupPolicy, CLUSTER_BACKUP_SCHEDULE, ClusterAgentState, ClusterCapacityTotals, ClusterConfig,
     ClusterFormRequest, ClusterFormed, ClusterHealth, ClusterHostHealth, ClusterHostRole,
