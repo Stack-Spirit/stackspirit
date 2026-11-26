@@ -21,9 +21,12 @@ pub enum CliError {
     /// A guard rejected the action.
     #[error("{0}")]
     Guard(String),
-    /// A provider limit or authentication problem blocked the action.
+    /// A provider limit blocked the action.
     #[error("{0}")]
     Limited(String),
+    /// Cloud authentication is missing, expired or was refused.
+    #[error("{0}")]
+    Auth(String),
     /// A remote node operation failed.
     #[error("remote: {0}")]
     Remote(String),
@@ -53,6 +56,7 @@ impl CliError {
             Self::Conflict(_) => ErrorKind::Conflict,
             Self::Guard(_) => ErrorKind::Guard,
             Self::Limited(_) => ErrorKind::Limit,
+            Self::Auth(_) => ErrorKind::Auth,
             Self::Remote(_) => ErrorKind::Remote,
             Self::NotImplemented(_) => ErrorKind::Internal,
             Self::Core(error) => error.kind(),

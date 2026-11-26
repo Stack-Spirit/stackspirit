@@ -20,7 +20,7 @@ use vowp_agent::{Connector, ConnectorOptions};
 use vowp_protocol::{NodeFile, RelayConfig};
 
 use crate::output;
-use crate::{CliError, Ctx, IoStreams};
+use crate::{CliError, Ctx, Global, IoStreams};
 
 /// Environment variable that can carry the enrollment token instead of a file or stdin.
 pub const ENROLL_TOKEN_ENV: &str = "STACKSPIRIT_ENROLL_TOKEN";
@@ -44,6 +44,20 @@ pub enum RelayCommand {
     Run,
     /// Replace relay.key with a new key registered through a signed request.
     RotateKey,
+    /// Hidden: the OpenSSH ProxyCommand bridge to one machine over the relay.
+    #[command(hide = true)]
+    Proxy(RelayProxyArgs),
+}
+
+/// Arguments for the hidden `stackspirit relay proxy`.
+#[derive(Debug, Clone, Args)]
+pub struct RelayProxyArgs {
+    /// Machine id or name.
+    #[arg(long, value_name = "ID|NAME")]
+    pub machine: String,
+    /// Serve the raw tunnel on stdin/stdout (the only mode in this build).
+    #[arg(long)]
+    pub stdio: bool,
 }
 
 /// Arguments for `stackspirit relay enroll`.
@@ -78,7 +92,26 @@ pub fn run(ctx: &Ctx, io: &mut dyn IoStreams, args: &RelayArgs) -> Result<i32, C
         RelayCommand::Status => status_command(ctx, io, &home),
         RelayCommand::Run => run_command(&home),
         RelayCommand::RotateKey => rotate_command(ctx, io, &home),
+        RelayCommand::Proxy(args) => proxy_command(&home, args),
     }
+}
+
+/// Runs the hidden `relay proxy` without a project context.
+///
+/// The command is normally intercepted before [`crate::Ctx::build`] so it works from any
+/// directory; [`run`] keeps the same path for an initialised home.
+pub fn run_proxy(global: &Global, args: &RelayProxyArgs) -> Result<i32, CliError> {
+    let home = crate::ctx::node_paths(global)?.root().to_path_buf();
+    proxy_command(&home, args)
+}
+
+fn proxy_command(home: &Path, args: &RelayProxyArgs) -> Result<i32, CliError> {
+    if !args.stdio {
+        return Err(CliError::Invalid(
+            "relay proxy needs --stdio; it is only used as an OpenSSH ProxyCommand".to_owned(),
+        ));
+    }
+    crate::cloud::relay::proxy(home, &args.machine)
 }
 
 /// Reads `<home>/config.toml` (absent means defaults) and returns the parsed `[relay]` table.

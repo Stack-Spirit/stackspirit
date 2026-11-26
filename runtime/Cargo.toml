@@ -80,6 +80,10 @@ name = "chat"
 path = "crates/vowp-cli/tests/chat.rs"
 
 [[test]]
+name = "cloud_cli"
+path = "crates/vowp-cli/tests/cloud_cli.rs"
+
+[[test]]
 name = "control"
 path = "scripts/release/cargo-tests/control.rs"
 
@@ -203,6 +207,7 @@ path = "scripts/release/version-test.rs"
 
 [dependencies]
 anyhow = "1.0.104"
+base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -210,6 +215,8 @@ signal-hook = "0.4.6"
 thiserror = "2.0.21"
 time = "0.3.45"
 toml = "1.2.1"
+tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+ureq = { version = "3.5.2", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 vowp-adapters = { version = "0.6.0", path = "crates/vowp-adapters" }
 vowp-agent = { version = "0.6.0", path = "crates/vowp-agent" }
 vowp-core = { version = "0.6.0", path = "crates/vowp-core" }

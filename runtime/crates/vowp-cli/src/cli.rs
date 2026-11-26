@@ -54,6 +54,11 @@ pub const V0_2_COMMANDS: &[&str] = &[
     "surface",
     "offload",
     "relay",
+    "login",
+    "logout",
+    "whoami",
+    "machines",
+    "ssh",
     "__exec",
     "__vault-exec",
     "__vault-admin",
@@ -404,6 +409,16 @@ pub enum Command {
     },
     /// Enroll, inspect or run the StackSpirit relay connector.
     Relay(RelayArgs),
+    /// Sign in to the StackSpirit cloud with a device code or a token on stdin.
+    Login(LoginArgs),
+    /// Remove the stored StackSpirit cloud session.
+    Logout(LogoutArgs),
+    /// Show the signed-in StackSpirit cloud account.
+    Whoami(WhoamiArgs),
+    /// List machines registered with the StackSpirit cloud.
+    Machines(MachinesArgs),
+    /// Open an SSH session to a machine over the StackSpirit relay.
+    Ssh(SshArgs),
     /// Print the binary version.
     Version,
     /// Hidden: what the tmux windows run.
@@ -418,6 +433,59 @@ pub enum Command {
     /// Hidden: vault write helper.
     #[command(name = "__vault-admin", hide = true)]
     VaultAdmin(VaultAdminArgs),
+}
+
+/// Arguments for `stackspirit login`.
+#[derive(Debug, Clone, Args)]
+pub struct LoginArgs {
+    /// API base URL; defaults to `https://api.stackspirit.io`.
+    #[arg(
+        long,
+        alias = "api",
+        value_name = "URL",
+        default_value = crate::cloud::DEFAULT_API_URL
+    )]
+    pub api_url: String,
+    /// Read a pre-issued access token from stdin instead of starting a device login.
+    #[arg(long)]
+    pub token_stdin: bool,
+}
+
+/// Arguments for `stackspirit logout`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct LogoutArgs {}
+
+/// Arguments for `stackspirit whoami`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct WhoamiArgs {}
+
+/// Arguments for `stackspirit machines`.
+#[derive(Debug, Clone, Args)]
+pub struct MachinesArgs {
+    /// The machines subcommand.
+    #[command(subcommand)]
+    pub command: MachinesCommand,
+}
+
+/// The `stackspirit machines` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum MachinesCommand {
+    /// List the account's machines and their presence.
+    Ls(MachinesLsArgs),
+}
+
+/// Arguments for `stackspirit machines ls`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct MachinesLsArgs {}
+
+/// Arguments for `stackspirit ssh`.
+#[derive(Debug, Clone, Args)]
+pub struct SshArgs {
+    /// Machine id or name.
+    pub machine: String,
+    /// Extra arguments passed to the system `ssh` client after the destination.
+    #[arg(last = true, value_name = "SSH-ARGS")]
+    pub ssh_args: Vec<String>,
 }
 
 /// Arguments for `vowp init`.

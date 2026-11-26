@@ -13,6 +13,7 @@ use clap::Parser;
 pub mod agent_exec;
 pub mod chat;
 pub mod cli;
+mod cloud;
 pub mod cmd;
 pub mod ctx;
 pub mod errors;
@@ -217,6 +218,22 @@ fn execute(cli: Cli, original_args: &[String], io: &mut dyn IoStreams) -> Result
         && args.agent_socket.is_some()
     {
         return cmd::mcp::run_proxy(io, args);
+    }
+    // Cloud commands read `<home>/cloud-session.json` directly and need no project, database
+    // or node redirect. `relay proxy` is the ProxyCommand child of `ssh`, so it must also run
+    // before the generic redirect and `Ctx::build`.
+    match &command {
+        Command::Login(args) => return cmd::login::run_login(&global, io, args),
+        Command::Logout(args) => return cmd::login::run_logout(&global, io, args),
+        Command::Whoami(args) => return cmd::login::run_whoami(&global, io, args),
+        Command::Machines(args) => return cmd::machines::run(&global, io, args),
+        Command::Ssh(args) => return cmd::ssh::run(&global, io, args),
+        _ => {}
+    }
+    if let Command::Relay(args) = &command
+        && let cmd::relay::RelayCommand::Proxy(proxy) = &args.command
+    {
+        return cmd::relay::run_proxy(&global, proxy);
     }
     // `surface` is home-only and its `--node` flag names the node the surface runs on, not an
     // SSH redirect. Handle it before the generic `--node` routing.

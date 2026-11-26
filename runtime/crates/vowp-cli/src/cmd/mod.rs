@@ -22,7 +22,9 @@ pub mod inbox;
 pub mod init;
 pub mod job;
 pub mod lease;
+pub mod login;
 pub mod loops;
+pub mod machines;
 pub mod maint;
 pub mod mcp;
 pub mod migrate;
@@ -39,6 +41,7 @@ pub mod secret;
 pub mod session;
 pub mod session_asif;
 pub mod setup;
+pub mod ssh;
 pub mod status;
 pub mod surface;
 pub mod tunnel;
@@ -103,6 +106,9 @@ pub fn dispatch(ctx: &Ctx, io: &mut dyn IoStreams, command: Command) -> Result<i
         )),
         Command::Mcp(args) => mcp::run(ctx, io, &args),
         Command::Relay(args) => relay::run(ctx, io, &args),
+        Command::Login(_) | Command::Whoami(_) | Command::Machines(_) | Command::Ssh(_) | Command::Logout(_) => Err(
+            CliError::Invalid("cloud commands run without a project context".to_owned()),
+        ),
         Command::Agent { .. } => Err(CliError::Invalid(
             "agent commands run without a project context".to_owned(),
         )),
