@@ -7,6 +7,7 @@ import { DagMap } from "../../next/NodeMap";
 import {
   activeRunningWorkers,
   layoutDag,
+  parseStageChild,
   projectJobs,
   projectSummaries,
 } from "../../next/summary";
@@ -195,6 +196,55 @@ describe("active stage promotion", () => {
     expect(screen.getByTestId("job-stage-trail")).toHaveTextContent(
       "Build ✓ → Review ✗ → Fix 1",
     );
+  });
+
+  it("promotes a retried Fix child while the original waits in Fixing", () => {
+    const view = fleet(
+      {
+        running: [
+          card({ job_id: "ss-131", state: "fixing", kind: "build" }),
+          card({ job_id: "ss-131-fix-1-r2", state: "active", kind: "fix", needs: ["ss-131"] }),
+        ],
+        ready: [card({ job_id: "ss-132", state: "pending", needs: ["ss-131"] })],
+      },
+      [worker("ss-131"), worker("ss-131-fix-1-r2", { kind: "fix" })],
+      { running: 2, fixing: 1, ready: 1 },
+    );
+
+    expect(parseStageChild("ss-131-fix-1-r2")).toEqual({
+      parentId: "ss-131",
+      stage: "fix",
+      round: 1,
+    });
+
+    const jobs = projectJobs(view, "demo");
+    expect(jobs.map((item) => item.job.job_id)).toEqual(["ss-131-fix-1-r2", "ss-132"]);
+    expect(jobs[0]!.stageTrail).toBe("Build ✓ → Review ✗ → Fix 1");
+    expect(jobs[0]!.promotedFrom).toBe("ss-131");
+    expect(jobs[0]!.job.needs).toEqual([]);
+    expect(jobs[1]!.job.needs).toEqual(["ss-131-fix-1-r2"]);
+
+    expect(activeRunningWorkers(view, "demo").map((item) => item.job_id)).toEqual([
+      "ss-131-fix-1-r2",
+    ]);
+    expect(projectSummaries(view)[0]?.running).toBe(1);
+
+    const layout = layoutDag("demo", "active", jobs, false);
+    expect(layout.nodes.map((node) => node.id)).not.toContain("ss-131");
+    expect(layout.nodes.find((node) => node.id === "ss-131-fix-1-r2")).toMatchObject({
+      kind: "fix",
+      col: 1,
+      stageTrail: "Build ✓ → Review ✗ → Fix 1",
+    });
+    expect(layout.nodes.find((node) => node.id === "ss-132")).toMatchObject({
+      col: 2,
+      kind: "build",
+    });
+    const edges = layout.edges.map((edge) => edge.id);
+    expect(edges).toContain("orchestrator->ss-131-fix-1-r2");
+    expect(edges).toContain("ss-131-fix-1-r2->ss-132");
+    expect(edges).not.toContain("ss-131->ss-132");
+    expect(edges).not.toContain("orchestrator->ss-131");
   });
 
   it("does not promote a Review that is still queued behind the running Build", () => {

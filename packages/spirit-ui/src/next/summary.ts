@@ -99,9 +99,9 @@ export interface StageChild {
   round: number;
 }
 
-const STAGE_CHILD = /^(.+)-(verify|fix)-(\d+)(?:-g\d+)?(?:-r1)?$/;
+const STAGE_CHILD = /^(.+)-(verify|fix)-(\d+)(?:-g\d+)?(?:-r\d+)?$/;
 
-/** Parses a Review/Fix child id, including VOWP's `-gN` generation and `-r1` retry suffixes. */
+/** Parses a Review/Fix child id, including VOWP's `-gN` generation and `-rN` retry suffixes. */
 export function parseStageChild(jobId: string): StageChild | null {
   const match = STAGE_CHILD.exec(jobId);
   if (!match) return null;
