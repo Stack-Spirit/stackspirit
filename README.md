@@ -1,24 +1,35 @@
 # StackSpirit
 
-**StackSpirit** is the desktop-first visual control plane for **VOWP** — add a VPS once, click
-**Connect** or **Disconnect**, and see and control your entire agent fleet: worker slots, job
-graphs, VPS disk/storage limits, recommended worker capacity, active harnesses/providers, and
-sessions.
+**StackSpirit** is the free, MIT-licensed home for your AI coding agents: an always-on machine
+(a VPS, spare laptop or home server) plus the tools to run and watch it. Work keeps running
+after your laptop closes, and you can drive it from the desktop app, a mobile-first web app, the
+`stackspirit` CLI, or any harness over MCP. See [`docs/STRATEGY.md`](docs/STRATEGY.md) for the
+vision, brand rules and roadmap.
 
-Under the hood, StackSpirit bundles and supervises `opencode` as the **StackSpirit Engine**, so
-users can run immediately with included models or their own provider API keys (in the local OS
-keychain, or optionally in VOWP's vault on the connected server) without needing to install or
-configure a separate harness—while still supporting existing `opencode` or `claude-code`
-installations for power users.
+This repository is one open-source monorepo:
+
+| Surface | Path | What it is |
+|---|---|---|
+| Desktop | `apps/spirit-desktop` | Tauri 2 + React/TypeScript cockpit: add a VPS once, **Connect**, and see workers, job graphs, capacity and sessions. |
+| Web (mobile-first PWA) | `apps/spirit-web` | Read-only Web cockpit over the daemon HTTP/SSE API, reusing the shared UI. |
+| Shared UI | `packages/spirit-ui` | `@stackspirit/ui`: design system, views, store, `SpiritBridge` contract and `MockBridge`. |
+| Desktop core | `crates/spirit-core`, `crates/spirit-cli` | Rust host/SSH/VOWP logic used by the desktop, and the thin `spirit` CLI over it. |
+| Core runtime | `runtime/` | The Rust CLI, daemon, MCP server and relay, plus npm/PyPI/Homebrew packaging. |
+
+The desktop also bundles and supervises `opencode` as the **StackSpirit Engine**, so users can
+run immediately with included models or their own provider API keys (local OS keychain, or the
+VOWP vault on the connected server) while existing `opencode` or `claude-code` installs stay
+supported.
 
 ## Surface Order
 
-1. **Desktop App First (`apps/spirit-desktop` + `crates/spirit-core`)**: Tauri 2 (Rust backend) +
-   React/TypeScript visual cockpit.
-2. **Web App Second (`apps/spirit-web`)**: A read-only Web cockpit over the VOWP daemon HTTP/SSE
-   API. It reuses `@stackspirit/ui` and shows unavailable capacity, host, and engine data
-   explicitly instead of inventing it.
-3. **CLI Third (`crates/spirit-cli`)**: Thin Rust `spirit` CLI over `crates/spirit-core`.
+1. **Desktop first (`apps/spirit-desktop` + `crates/spirit-core`)**.
+2. **Web second (`apps/spirit-web`)**: read-only, reuses `@stackspirit/ui`, and shows unavailable
+   capacity, host and engine data explicitly instead of inventing it.
+3. **CLI third (`crates/spirit-cli`)**: thin Rust `spirit` CLI over `crates/spirit-core`.
+
+The runtime under `runtime/` is a separate Cargo workspace with its own toolchain, tests and
+release flow; see [`runtime/README.md`](runtime/README.md).
 
 ## Quick start
 
@@ -53,6 +64,7 @@ The Web shell is read-only and has no browser token. Set `VITE_SPIRIT_MOCK=1` fo
 | `packages/spirit-ui` | `@stackspirit/ui`: the reusable React cockpit (design-system primitives, views, store), the `SpiritBridge` contract, and `MockBridge`. It is exported from TypeScript source, so Vite and Vitest consume it without a separate build step. |
 | `apps/spirit-web` | `@stackspirit/web`: read-only Web cockpit over the VOWP daemon HTTP/SSE API. It reuses `@stackspirit/ui`, sends no browser token, and shows unavailable daemon data explicitly. |
 | `crates/spirit-cli` | `spirit` CLI over `spirit-core`: host profiles, fleet, capacity, gates, engine status, JSON output, and fixture mode. |
+| `runtime/` | Separate Cargo workspace: `stackspirit`/`vowp` CLI, daemon, MCP server, relay, and the npm, PyPI and Homebrew packaging. Build and test it with `cd runtime && cargo test --workspace`. |
 
 The root `npm` workspaces cover `apps/*` and `packages/*`. `npm test` runs the shared UI suite
 and then the desktop and Web suites; `npm run test:e2e` runs the desktop and Web Playwright flows.
@@ -130,7 +142,13 @@ to install or configure `opencode` in the normal onboarding path.
 node scripts/fetch-engine.mjs --target aarch64-apple-darwin
 bash scripts/verify-engine-checksum.sh
 bash scripts/verify-engine-checksum.sh --self-test
+(cd runtime && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace)
 ```
+
+CI (`.github/workflows/ci.yml`) runs the Node UI gates, the root Rust workspace, the `runtime/`
+Rust workspace on Linux and macOS, and the runtime npm/PyPI launcher tests. Project gates for the
+supervisor live in `stackspirit.toml` (`rust-core-check`, `runtime-check`); `vowp.toml` stays for
+backwards compatibility until cutover.
 
 `--all` fetches every pinned target; `--force` replaces an existing binary. The fetch host needs
 `tar` for `.tar.gz` assets and `unzip` for `.zip` assets. CI should run the fetch and checksum
@@ -222,3 +240,5 @@ check` compiles and tests the Tauri host in the pinned container without host pa
 
 See [`SECURITY.md`](SECURITY.md) for the security model and supported versions, and
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the bundled engine license.
+
+StackSpirit is released under the [MIT License](LICENSE).
