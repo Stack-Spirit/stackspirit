@@ -4,7 +4,7 @@ Status: planning baseline for `ss-0-plan`, 2026-11-14.
 Audience: the `ss-1-core`, `ss-2-desktop-shell`, `ss-3-fleet-canvas`, and
 `ss-4-engine-onboarding` workers, and the human owner.
 Companion document: [`VOWP-CONTRACT.md`](VOWP-CONTRACT.md) pins the exact JSON read from
-`/home/dev/vowp` and the cross-project dependency gates.
+`/home/user/vowp` and the cross-project dependency gates.
 
 This document freezes the build order, module boundaries, data flow, UI specification,
 and test strategy for the Desktop MVP. It writes no application code. It deliberately
@@ -33,7 +33,7 @@ Five principles decide the architecture:
    in `crates/spirit-core`. The Tauri host is a thin adapter; the UI never shells out.
 4. **VOWP is the source of truth.** StackSpirit reads VOWP's own JSON and calls VOWP's
    own commands. It never opens a VOWP database, never writes a VOWP file, never
-   reimplements dispatch, capacity, or merge logic, and never edits `/home/dev/vowp`.
+   reimplements dispatch, capacity, or merge logic, and never edits `/home/user/vowp`.
 5. **Honest gates.** Local-orchestrator execution (Phase D6) and live `.asif.zip`
    export/import (Phase D5) are gated on VOWP milestones. The app probes, displays, and
    disables those features with a reason. It does not fake completion, simulate a live
@@ -132,7 +132,7 @@ Trust boundaries:
 |---|---|---|
 | Desktop framework | Tauri 2 (Rust host + React 19/TypeScript/Vite) | Small binary, native process/keychain/SSH access, one IPC boundary. |
 | UI state | Zustand store fed by bridge snapshots/events | Small, testable, no server-state framework required. |
-| Core wire model | Local serde types in `spirit-core::wire`, not a dependency on the VOWP crate | StackSpirit builds without `/home/dev/vowp`; golden fixtures enforce parity. |
+| Core wire model | Local serde types in `spirit-core::wire`, not a dependency on the VOWP crate | StackSpirit builds without `/home/user/vowp`; golden fixtures enforce parity. |
 | VOWP transport | System `ssh` running `vowp ... --json` | Reuses the owner's existing key-only SSH setup; no new VOWP listener. |
 | SSH backend | `CommandRunner` trait with a system-OpenSSH implementation | Swappable; tests use a fake runner; a future `russh` backend can replace it. |
 | Active host | One connected host at a time in D1–D4 | Simple state machine; multi-host is a later, explicit feature. |
@@ -150,7 +150,7 @@ Trust boundaries:
    policy. It converts IPC payloads to core calls and emits core events.
 3. React components must not call `@tauri-apps/api` directly. Only `TauriBridge.ts` may
    import Tauri APIs.
-4. `spirit-core` must not depend on `/home/dev/vowp` as a path dependency. Fixtures and
+4. `spirit-core` must not depend on `/home/user/vowp` as a path dependency. Fixtures and
    docs copy the contract; the VOWP repository stays read-only.
 5. No UI code may infer capacity, gate, or job state. The core derives view models from
    VOWP JSON; the UI renders them.
@@ -290,7 +290,7 @@ stackspirit/
 
 `spirit-core::wire` is a **local, dependency-free mirror** of the VOWP documents in
 [`VOWP-CONTRACT.md`](VOWP-CONTRACT.md). It does not import `vowp-protocol`, does not
-read `/home/dev/vowp`, and is not generated at runtime. The parity tests in
+read `/home/user/vowp`, and is not generated at runtime. The parity tests in
 `crates/spirit-core/tests/contract.rs` parse golden fixtures copied from the contract and
 assert every field the UI relies on.
 
@@ -1780,11 +1780,11 @@ unchanged; the local chat landing does not reorder those steps.
 ### 9.2 Ownership boundaries
 
 Sequential jobs may extend a file created by an earlier job only where listed. A job
-must never touch `/home/dev/vowp`.
+must never touch `/home/user/vowp`.
 
 | Job | Owns | May read, must not edit |
 |---|---|---|
-| `ss-1-core` | root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `crates/spirit-core/**` | `/home/dev/vowp` docs/protocol; `docs/*` |
+| `ss-1-core` | root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `crates/spirit-core/**` | `/home/user/vowp` docs/protocol; `docs/*` |
 | `ss-2-desktop-shell` | root `Cargo.toml`/`Cargo.lock` (only to add the `src-tauri` member), root `package.json`, `package-lock.json`, `apps/spirit-desktop/**` including the shell, `views/*/Placeholder.tsx`, and the `src-tauri` command stubs | `crates/spirit-core/**` (consume, do not edit) |
 | `ss-3-fleet-canvas` | `apps/spirit-desktop/src/views/fleet/**`, `src/views/capacity/**`, `src/views/inbox/**`, `src/domain/**` (fleet/capacity/format/executor), small `src/app/TopBar.tsx`/`AppShell.tsx` wiring for the inbox, related tests; `crates/spirit-core/src/view/**` only if D1 leaves a stub | `crates/spirit-core/src/wire/**`; `src-tauri/**` |
 | `ss-4-engine-onboarding` | `apps/spirit-desktop/src/views/engine/**`, `src/domain/engine.ts`, `src-tauri/src/commands/engine.rs`, `src-tauri/src/commands/gates.rs`, `src-tauri/src/state.rs` wiring, `crates/spirit-core/src/engine/**`, engine packaging scripts/manifests, related tests | `crates/spirit-core/src/wire/**` |
@@ -2662,9 +2662,9 @@ A release candidate is done when:
 
 ## 14. References
 
-- `/home/dev/vowp/docs/design/v0.4/local-orchestrator.md` — Phase 3 local surfaces,
+- `/home/user/vowp/docs/design/v0.4/local-orchestrator.md` — Phase 3 local surfaces,
   offload, gates, and commands.
-- `/home/dev/vowp/docs/design/v0.4/asif-integration.md` — ASIF CLI/web contract and
+- `/home/user/vowp/docs/design/v0.4/asif-integration.md` — ASIF CLI/web contract and
   milestone split.
-- `/home/dev/vowp/crates/vowp-protocol/src/` — exact Rust wire types.
+- `/home/user/vowp/crates/vowp-protocol/src/` — exact Rust wire types.
 - [`VOWP-CONTRACT.md`](VOWP-CONTRACT.md) — the frozen read contract and gate probes.

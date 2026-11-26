@@ -1,7 +1,7 @@
 //! Integration test for the `vowp --version` output.
 //!
 //! It checks that `vowp --version` succeeds, prints `vowp <package version>`, and reports
-//! the expected package version `0.5.1-dev`.
+//! the expected package version `0.6.0`.
 
 use std::process::Command;
 
@@ -22,5 +22,5 @@ fn version_flag_prints_package_version() {
         String::from_utf8_lossy(&output.stdout).trim(),
         format!("vowp {}", env!("CARGO_PKG_VERSION"))
     );
-    assert_eq!(env!("CARGO_PKG_VERSION"), "0.5.1-dev");
+    assert_eq!(env!("CARGO_PKG_VERSION"), "0.6.0");
 }

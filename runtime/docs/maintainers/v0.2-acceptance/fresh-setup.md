@@ -478,7 +478,7 @@ changed:
   - ~/.vowp-control/setup.json
 handoff (user/login): Sign in to opencode on the home as vowp with its own login flow, then re-run setup.
 checks:
-  ok   preflight.ssh: Linux x86_64 as dev (home /home/dev)
+  ok   preflight.ssh: Linux x86_64 as dev (home /home/user)
   ok   preflight.tools: git, tmux and curl are present
   ok   preflight.disk: 15.9 GiB free on the home
   ok   user.mode: created the vowp user and copied the SSH key
@@ -505,11 +505,11 @@ This is the real-GCE reproduction of open item 1 at the tested build. The SSH se
 starts in the login user's 0750 home; the `sudo -u vowp` transition keeps that
 directory; `install.sh` computes its own directory with
 `SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)`, which is `cd .` when the
-script is piped to `sh`, and `vowp` cannot traverse `/home/dev`. The acceptance
+script is piped to `sh`, and `vowp` cannot traverse `/home/user`. The acceptance
 workaround was the same one used in test 1b:
 
 ```text
-$ sudo chmod 0755 /home/dev
+$ sudo chmod 0755 /home/user
 login_home_mode=755
 ```
 
@@ -535,7 +535,7 @@ changed:
   - vault
   - /home/vowp/projects/hello
 checks:
-  ok   preflight.ssh: Linux x86_64 as dev (home /home/dev)
+  ok   preflight.ssh: Linux x86_64 as dev (home /home/user)
   ok   preflight.tools: git, tmux and curl are present
   ok   preflight.disk: 15.9 GiB free on the home
   ok   user.mode: the vowp user already exists
@@ -618,7 +618,7 @@ as the release archive. From the unit's working directory (`/home/vowp/.vowp`) w
 both fake harnesses installed, `vowp doctor --json` exited **0** and reported every
 check `ok` except the expected warnings `providers: DEEPSEEK_API_KEY: absent` and
 `watchdog: ...vowp-watchdog.sh`; the supervisor check was
-`running (pid 7940)`. From the login user's cwd `/home/dev`, the same doctor command
+`running (pid 7940)`. From the login user's cwd `/home/user`, the same doctor command
 exited **1** because `harness:claude-code` is not installed and the config/schedules/
 profiles/providers checks cannot find a `vowp.toml`; the setup's own `home.doctor`
 check treats those as warnings. The final setup JSON run (after the fake `claude` was
@@ -719,7 +719,7 @@ gcloud compute disks list --filter='name=vowp-t1-fresh-1112'
   `vowp.toml` is found in the login user's current directory. On the real VM, the
   doctor run from the unit's working directory (`/home/vowp/.vowp`) with both fake
   harnesses installed exited **0** with only the provider-key and watchdog warnings;
-  the supervisor check was `running (pid 7940)`. The same doctor from `/home/dev`
+  the supervisor check was `running (pid 7940)`. The same doctor from `/home/user`
   exits **1** on `harness:claude-code` (not installed) and the missing-cwd config
   checks; the setup's `home.doctor` check reports those as warnings. None blocked
   setup.
@@ -908,7 +908,7 @@ sudo -u vowp -H bash /usr/local/share/vowp-acceptance/scripts/fixtures/project.s
   hello /home/vowp/projects/hello
 ```
 
-The second run reproduces `sh: 22: cd: can't cd to .`; `sudo chmod 0755 /home/dev`
+The second run reproduces `sh: 22: cd: can't cd to .`; `sudo chmod 0755 /home/user`
 and a third run complete. The idempotent re-run starts the systemd unit. For the
 recorded run the orchestrator deleted the VM and its boot disk after the report and
 verified both lists were empty:

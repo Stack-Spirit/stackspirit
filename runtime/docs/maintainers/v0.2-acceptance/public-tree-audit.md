@@ -45,7 +45,7 @@ check fails on 35 build-metadata findings plus one concrete SSH target in the pr
 - No push, tag, publish or visibility change was made. The private working tree, the real home, the
   default tmux server and the network were not touched by the audit.
 - The `commits` field lists the substantive commits before the report-only commit that contains
-  this file; the worker report at `/home/dev/vowp-night/jobs/v2-j1-public-tree-audit/report.md`
+  this file; the worker report at `/home/user/vowp-night/jobs/v2-j1-public-tree-audit/report.md`
   lists the full chain.
 
 ## Commands and results

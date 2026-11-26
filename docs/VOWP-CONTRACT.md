@@ -15,17 +15,17 @@ This document specifies:
    honestly.
 
 It is a **read contract**. StackSpirit does not open a VOWP database, does not write a
-VOWP file, and does not edit `/home/dev/vowp`. All mutations are VOWP CLI commands
+VOWP file, and does not edit `/home/user/vowp`. All mutations are VOWP CLI commands
 described in §9.
 
 Sources pinned for this document:
 
-- `/home/dev/vowp/docs/design/v0.4/local-orchestrator.md` (local surfaces, offload,
+- `/home/user/vowp/docs/design/v0.4/local-orchestrator.md` (local surfaces, offload,
   Phase 0–4, commands, credential model).
-- `/home/dev/vowp/docs/design/v0.4/asif-integration.md` (ASIF 0.4 draft, adapter
+- `/home/user/vowp/docs/design/v0.4/asif-integration.md` (ASIF 0.4 draft, adapter
   `vowp-asif` 0.1.1, pin `652d9e23ddbe5656b9ceea311df7e09e93c1cd2f`, milestone split).
-- `/home/dev/vowp/crates/vowp-protocol/src/` (Rust wire types).
-- `/home/dev/vowp/docs/design/cli.md` (CLI JSON wrappers and exit codes).
+- `/home/user/vowp/crates/vowp-protocol/src/` (Rust wire types).
+- `/home/user/vowp/docs/design/cli.md` (CLI JSON wrappers and exit codes).
 
 The VOWP repository is the source of truth. If this document and the VOWP source
 disagree, the VOWP source wins; that is a contract-test failure to fix, not a reason to
@@ -1981,7 +1981,7 @@ Change procedure:
 5. Run both the positive (`Ready`) and negative (`Waiting`/`Incompatible`) fixtures.
 6. Record the exact VOWP commit/version in the job report.
 
-No StackSpirit job may edit `/home/dev/vowp`. No StackSpirit test may depend on a live
+No StackSpirit job may edit `/home/user/vowp`. No StackSpirit test may depend on a live
 VOWP checkout, a real home, or the owner's SSH keys.
 
 ---
@@ -2198,8 +2198,8 @@ D5/D6 commands are listed in §11.2.2 and §11.3.2 and are not run while the gat
 ## 15. See also
 
 - [`PLAN.md`](PLAN.md) — build order, module layout, visual specification, test strategy.
-- `/home/dev/vowp/docs/design/v0.4/local-orchestrator.md` — Phase 0–4, agent protocol,
+- `/home/user/vowp/docs/design/v0.4/local-orchestrator.md` — Phase 0–4, agent protocol,
   leases, offload, commands.
-- `/home/dev/vowp/docs/design/v0.4/asif-integration.md` — ASIF contract, losses, limits,
+- `/home/user/vowp/docs/design/v0.4/asif-integration.md` — ASIF contract, losses, limits,
   milestone split.
-- `/home/dev/vowp/crates/vowp-protocol/src/` — exact Rust types.
+- `/home/user/vowp/crates/vowp-protocol/src/` — exact Rust types.

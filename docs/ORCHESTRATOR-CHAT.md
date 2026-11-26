@@ -47,7 +47,7 @@ questions; §11 references; §12 chat UX state after ss-116..ss-118.
 | Setup assistant on the bundled engine | Contract complete; the live probe pinned the v1 surface; core/view jobs can land; no VOWP dependency |
 | `global`/`project` on the home | **Gated** on VOWP `0.5` `orchestrator endpoint`; the app-owned forward (§3.3) is not approved |
 | `global`/`project` Local on the owner's Mac | **Live**, verified 2026-11-19: the installed VOWP returns a `global` endpoint document (loopback URL, Basic auth, `native_session_id: null`), and the ss-62 continuity rule attaches to the newest host session. |
-| `global`/`project` Local on this Linux host | **Still `chat_not_configured`** — not live. `/home/dev/.local/bin/vowp` is `0.4.0`; its `agent orchestrator` subcommand has no local orchestrator record on this host (`vowp agent orchestrator endpoint global --json` exits `3` with `not_found`), so there is no endpoint to attach to. The bundled engine is not silently used as a fallback. |
+| `global`/`project` Local on this Linux host | **Still `chat_not_configured`** — not live. `/home/user/.local/bin/vowp` is `0.4.0`; its `agent orchestrator` subcommand has no local orchestrator record on this host (`vowp agent orchestrator endpoint global --json` exits `3` with `not_found`), so there is no endpoint to attach to. The bundled engine is not silently used as a fallback. |
 | Local/Server switch | Out of scope; `vowp orchestrator move` (VOWP `0.5`, HANDOFF §5 step 6) |
 | Preview chat in `MockBridge` | Stays, explicitly `origin: "preview"` |
 

@@ -10,7 +10,7 @@ desktop UI, and the honest failure modes. The Tauri command adapter is
 `apps/spirit-desktop/src-tauri/src/commands/cluster.rs`; the UI is covered in §6.
 
 VOWP remains the source of truth. If this document and
-`/home/dev/vowp/docs/design/cli.md` or `crates/vowp-protocol/src/` disagree, the VOWP
+`/home/user/vowp/docs/design/cli.md` or `crates/vowp-protocol/src/` disagree, the VOWP
 source wins.
 
 ## 1. One Home, one lease
