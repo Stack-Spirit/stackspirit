@@ -42,6 +42,12 @@ pub async fn gates_get(state: State<'_, AppState>) -> CommandResult<GateSnapshot
 
 #[tauri::command]
 pub async fn probe_gates(state: State<'_, AppState>) -> CommandResult<GateSnapshot> {
+    run_gate_probe(state.inner()).await
+}
+
+/// Runs a fresh gate probe for the connected host. Shared by the `probe_gates` command and
+/// by local-orchestrator actions that find the gate still `Unknown`/`Probing`.
+pub(crate) async fn run_gate_probe(state: &AppState) -> CommandResult<GateSnapshot> {
     let manager = state.connection_manager().await;
     let connection = manager.status();
     if connection.state != "connected" {

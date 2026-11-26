@@ -26,9 +26,9 @@ use crate::vowp::{
     VowpClient,
 };
 use crate::wire::{
-    AgentPathAddRequest, AgentPathMap, AsifImportResponse, NodeCard, NodeName, OrchestratorCard,
-    OrchestratorNewRequest, ProjectName, SurfaceEntry, SurfacePairRequest, SurfaceRevokeResult,
-    SurfaceRotateRequest, SurfaceRotateResult, ensure_surface_id,
+    AgentPathAddRequest, AgentPathMap, AsifImportResponse, NodeCard, NodeName, OrchestratorApp,
+    OrchestratorCard, OrchestratorNewRequest, ProjectName, SurfaceEntry, SurfacePairRequest,
+    SurfaceRevokeResult, SurfaceRotateRequest, SurfaceRotateResult, ensure_surface_id,
 };
 
 /// A provider-key state returned to the UI. It never carries the key.
@@ -685,6 +685,19 @@ impl SpiritCore {
         Ok(OrchestratorView::from_card(&card))
     }
 
+    /// Resumes a home-hosted orchestrator (no node). The D6 local-agent guard does not
+    /// apply: the app host runs on the connected home, so no Mac agent gate is needed.
+    pub async fn orchestrator_resume_home(
+        &self,
+        client: &dyn VowpClient,
+        name: &str,
+    ) -> Result<OrchestratorView, SpiritError> {
+        validate_orchestrator_name(name)?;
+        self.require_connected_host()?;
+        let card = client.orchestrator_resume(name).await?;
+        Ok(OrchestratorView::from_card(&card))
+    }
+
     /// Adds a project (and optionally a home-hosted orchestrator) in one step.
     ///
     /// The D6 local-orchestrator guard does not apply: `project add` and
@@ -796,25 +809,29 @@ impl SpiritCore {
 
 /// Picks the orchestrator that serves `project` from the registered cards.
 ///
-/// Any card whose `project == <project>` (or that is named `<project>`) matches. Preference:
-/// (a) a running orchestrator for the project, (b) the canonical card named `<project>`,
-/// (c) any other stopped or failed project-bound card, such as an older `local-<project>`.
-/// `None` means no orchestrator exists, so the caller creates the canonical one.
+/// Any card whose `project == <project>` (or that is named `<project>`) matches. A real
+/// (non-`chat`) orchestrator, such as `opencode`, always outranks a `chat`-only stub like
+/// `local-chat`. Within the same app class the preference is (a) a running orchestrator,
+/// (b) the canonical card named `<project>`, (c) any other stopped or failed project-bound
+/// card, such as an older `local-<project>`. `None` means no orchestrator exists, so the
+/// caller creates the canonical one.
 #[must_use]
 pub fn select_project_orchestrator<'a>(
     cards: &'a [OrchestratorCard],
     project: &str,
 ) -> Option<&'a OrchestratorCard> {
-    let matches = |card: &&OrchestratorCard| {
-        card.name == project || card.project.as_ref().is_some_and(|p| p.as_str() == project)
-    };
-    let live = |card: &&OrchestratorCard| matches!(card.state.as_str(), "running" | "starting");
     cards
         .iter()
-        .filter(matches)
-        .find(live)
-        .or_else(|| cards.iter().find(|card| card.name == project))
-        .or_else(|| cards.iter().find(matches))
+        .filter(|card| {
+            card.name == project || card.project.as_ref().is_some_and(|p| p.as_str() == project)
+        })
+        .min_by_key(|card| {
+            (
+                card.app == OrchestratorApp::Chat,
+                !matches!(card.state.as_str(), "running" | "starting"),
+                card.name != project,
+            )
+        })
 }
 
 pub(crate) fn validate_orchestrator_name(name: &str) -> Result<(), SpiritError> {

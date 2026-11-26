@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 use spirit_core::engine::GateSnapshot;
 use spirit_core::engine::chat::KnownOrchestratorSession;
 use spirit_core::engine::gate::LocalOrchestratorGate;
+use spirit_core::engine::local::{
+    LocalOrchestratorAction, LocalOrchestratorGuard, LocalOrchestratorState,
+};
 use spirit_core::error::{SpiritError, SpiritErrorCode};
 use spirit_core::time::Timestamp;
 use spirit_core::view::{
@@ -273,6 +276,21 @@ async fn set_current_gates(state: &AppState) -> GateSnapshot {
     snapshot
 }
 
+/// Like [`set_current_gates`], but a gate that never completed a probe (`Unknown` or
+/// `Probing`) is probed on demand first, so a Create/Resume click never fails with
+/// "gate has not completed a probe". A failed probe leaves the honest default in place.
+async fn set_probed_gates(state: &AppState, action: LocalOrchestratorAction) -> GateSnapshot {
+    let gates = set_current_gates(state).await;
+    let guard = LocalOrchestratorGuard::from_snapshot(&gates, &LocalOrchestratorState::default());
+    if !guard.needs_probe(action) {
+        return gates;
+    }
+    if crate::commands::gates::run_gate_probe(state).await.is_err() {
+        return gates;
+    }
+    set_current_gates(state).await
+}
+
 /// Keeps a path-map read error short and free of local paths.
 fn safe_paths_error(message: &str) -> String {
     let redacted = spirit_core::error::redact(message);
@@ -474,7 +492,7 @@ pub async fn local_orchestrator_new(
     state: State<'_, AppState>,
     input: OrchestratorNewInput,
 ) -> CommandResult<OrchestratorView> {
-    let gates = set_current_gates(state.inner()).await;
+    let gates = set_probed_gates(state.inner(), LocalOrchestratorAction::OrchestratorNew).await;
     let client = state.client()?;
     let core = state.core().await;
     core.set_gates(gates);
@@ -516,8 +534,18 @@ pub async fn local_orchestrator_resume(
     project: Option<String>,
     node: Option<String>,
 ) -> CommandResult<OrchestratorView> {
-    let gates = set_current_gates(state.inner()).await;
     let client = state.client()?;
+    // A home-hosted orchestrator (no node) runs on the connected home: no Mac agent gate.
+    let home_hosted = client
+        .orchestrator_list()
+        .await?
+        .iter()
+        .any(|card| card.name == name && card.node.is_none());
+    if home_hosted {
+        let core = state.core().await;
+        return core.orchestrator_resume_home(client.as_ref(), &name).await;
+    }
+    let gates = set_probed_gates(state.inner(), LocalOrchestratorAction::OrchestratorResume).await;
     let core = state.core().await;
     core.set_gates(gates);
     core.orchestrator_resume(client.as_ref(), &name, project.as_deref(), node.as_deref())
@@ -549,7 +577,7 @@ pub(crate) async fn ensure_project_orchestrator(
     state: &AppState,
     project: &str,
 ) -> Result<Option<KnownOrchestratorSession>, SpiritError> {
-    let gates = current_local_gates(state).await;
+    let gates = set_probed_gates(state, LocalOrchestratorAction::OrchestratorNew).await;
     let LocalOrchestratorGate::Ready {
         node: Some(node), ..
     } = &gates.local_orchestrator

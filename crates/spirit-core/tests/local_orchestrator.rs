@@ -1287,3 +1287,68 @@ async fn project_resume_targets_the_existing_stopped_card_without_creating() {
     );
     assert!(client.orchestrator_new_calls().is_empty());
 }
+
+// --- ss-132: on-demand probe and opencode-over-chat precedence ----------------------------
+
+#[test]
+fn unknown_or_probing_gate_asks_for_an_on_demand_probe_not_a_refusal_source() {
+    for gate in [
+        LocalOrchestratorGate::Unknown,
+        LocalOrchestratorGate::Probing,
+    ] {
+        let snapshot = GateSnapshot {
+            local_orchestrator: gate,
+            ..GateSnapshot::default()
+        };
+        let guard =
+            LocalOrchestratorGuard::from_snapshot(&snapshot, &LocalOrchestratorState::default());
+        assert!(guard.needs_probe(LocalOrchestratorAction::OrchestratorResume));
+        assert!(guard.needs_probe(LocalOrchestratorAction::OrchestratorNew));
+        // Reads and cleanup never need a probe.
+        assert!(!guard.needs_probe(LocalOrchestratorAction::SurfaceList));
+    }
+    let snapshot = GateSnapshot {
+        local_orchestrator: LocalOrchestratorGate::Unreachable {
+            detail: "down".to_owned(),
+        },
+        ..GateSnapshot::default()
+    };
+    let guard =
+        LocalOrchestratorGuard::from_snapshot(&snapshot, &LocalOrchestratorState::default());
+    assert!(!guard.needs_probe(LocalOrchestratorAction::OrchestratorResume));
+}
+
+#[tokio::test]
+async fn home_hosted_resume_needs_no_local_agent_gate() {
+    let mut card = project_card("stackspirit", Some("stackspirit"), "stopped");
+    card.node = None;
+    let client = fresh_mock().with_orchestrators(vec![card]);
+    let core = connected_core(&client).await; // gate stays Unknown
+    core.orchestrator_resume_home(&client, "stackspirit")
+        .await
+        .unwrap();
+    assert_eq!(client.orchestrator_resume_calls(), vec!["stackspirit"]);
+}
+
+#[test]
+fn opencode_and_canonical_cards_outrank_chat_stubs() {
+    use spirit_core::service::select_project_orchestrator as select;
+    use spirit_core::wire::OrchestratorApp;
+
+    let mut chat = project_card("local-chat", Some("stackspirit"), "running");
+    chat.app = OrchestratorApp::Chat;
+    let mut local = project_card("local-stackspirit", Some("stackspirit"), "stopped");
+    local.app = OrchestratorApp::Opencode;
+    let mut canonical = project_card("stackspirit", Some("stackspirit"), "stopped");
+    canonical.app = OrchestratorApp::Opencode;
+
+    let cards = vec![chat.clone(), local.clone()];
+    assert_eq!(
+        select(&cards, "stackspirit").unwrap().name,
+        "local-stackspirit"
+    );
+    let cards = vec![chat.clone(), local, canonical];
+    assert_eq!(select(&cards, "stackspirit").unwrap().name, "stackspirit");
+    // A chat stub is still found when it is all there is.
+    assert_eq!(select(&[chat], "stackspirit").unwrap().name, "local-chat");
+}

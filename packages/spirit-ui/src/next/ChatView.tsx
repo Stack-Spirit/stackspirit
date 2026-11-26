@@ -107,6 +107,7 @@ function StartOrchestratorCard({
   const [existing, setExisting] = useState<OrchestratorView | null>(null);
   const [resuming, setResuming] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
+  const [homeBusy, setHomeBusy] = useState(false);
   const enrolled = agentStatus ? agentEnrolled : false;
 
   useEffect(() => {
@@ -164,6 +165,25 @@ function StartOrchestratorCard({
     }
   }
 
+  // The local agent is not running: offer to start/resume the orchestrator on the home.
+  const canUseHome =
+    enrolled === false && existing !== null && existing.node == null && state !== "running";
+
+  async function resumeOnHome() {
+    if (!existing || !orchestratorResume || busy || homeBusy) return;
+    setHomeBusy(true);
+    setResumeError(null);
+    try {
+      const card = await orchestratorResume(existing.name, existing.project, null);
+      setExisting(card);
+      onStart();
+    } catch (caught) {
+      setResumeError(toSpiritError(caught).message);
+    } finally {
+      setHomeBusy(false);
+    }
+  }
+
   const label = canResume
     ? `Resume ${project} orchestrator`
     : existing === null
@@ -204,6 +224,23 @@ function StartOrchestratorCard({
         >
           {busy ? (canResume ? "Resuming…" : "Starting…") : label}
         </button>
+        {enrolled === false ? (
+          <span data-testid="local-agent-not-running">
+            The local agent isn’t running on this Mac.
+            {canUseHome ? " Start this orchestrator on your connected home instead." : ""}
+          </span>
+        ) : null}
+        {canUseHome ? (
+          <button
+            type="button"
+            className="nx-btn nx-btn--sm"
+            onClick={() => void resumeOnHome()}
+            disabled={busy || homeBusy}
+            data-testid="start-orchestrator-home-button"
+          >
+            {homeBusy ? "Starting…" : `Resume ${project} on home`}
+          </button>
+        ) : null}
         {enrolled === false && onOpenEngineSettings ? (
           <button
             type="button"
@@ -313,8 +350,15 @@ export function resolveProjectOrchestrator(
   const matches = orchestrators.filter(
     (row) => row.name === project || row.project === project,
   );
-  const live = matches.find((row) => row.state === "running" || row.state === "starting");
-  return live ?? matches.find((row) => row.name === project) ?? matches[0] ?? null;
+  // Mirrors core: a real (non-chat) card outranks a chat stub, then live, then canonical.
+  const rank = (row: OrchestratorView) =>
+    (row.app === "chat" ? 4 : 0) +
+    (row.state === "running" || row.state === "starting" ? 0 : 2) +
+    (row.name === project ? 0 : 1);
+  return matches.reduce<OrchestratorView | null>(
+    (best, row) => (best === null || rank(row) < rank(best) ? row : best),
+    null,
+  );
 }
 
 /**

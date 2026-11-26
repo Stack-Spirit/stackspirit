@@ -282,6 +282,19 @@ impl LocalOrchestratorGuard {
         self
     }
 
+    /// True when the gate has not produced a probe result yet (`Unknown` or `Probing`).
+    ///
+    /// Callers with a probe runner must run a fresh probe on demand and rebuild the guard
+    /// instead of surfacing a refusal for a gate that simply was never probed.
+    #[must_use]
+    pub fn needs_probe(&self, action: LocalOrchestratorAction) -> bool {
+        action.requires_ready()
+            && matches!(
+                self.gate,
+                LocalOrchestratorGate::Unknown | LocalOrchestratorGate::Probing
+            )
+    }
+
     /// Re-checks the action and returns an exact refusal when a prerequisite is missing.
     ///
     /// Read-only and explicit cleanup actions return `Ok`; they exist to diagnose and

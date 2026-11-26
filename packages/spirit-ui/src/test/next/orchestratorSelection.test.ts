@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { OrchestratorView } from "../../bridge/wire";
-import { selectProjectOrchestrator } from "../../next/ChatView";
+import { resolveProjectOrchestrator, selectProjectOrchestrator } from "../../next/ChatView";
 
 function card(name: string, app: string, project: string | null): OrchestratorView {
   return {
@@ -38,5 +38,23 @@ describe("selectProjectOrchestrator", () => {
 
   it("selects the project-less card for global", () => {
     expect(selectProjectOrchestrator([opencode, global], null)).toBe(global);
+  });
+});
+
+describe("resolveProjectOrchestrator", () => {
+  it("prefers an opencode card over a chat stub, in either order", () => {
+    expect(resolveProjectOrchestrator([chat, opencode], "stackspirit")).toBe(opencode);
+    expect(resolveProjectOrchestrator([opencode, chat], "stackspirit")).toBe(opencode);
+  });
+
+  it("prefers the canonical <project> card over local-<project>", () => {
+    const canonical = card("stackspirit", "opencode", "stackspirit");
+    expect(resolveProjectOrchestrator([chat, opencode, canonical], "stackspirit")).toBe(
+      canonical,
+    );
+  });
+
+  it("still returns a chat stub when it is the only match", () => {
+    expect(resolveProjectOrchestrator([chat], "stackspirit")).toBe(chat);
   });
 });
