@@ -3694,6 +3694,8 @@ dependencies = [
  "base64 0.23.1",
  "clap",
  "ed25519-dalek",
+ "rcgen",
+ "rustls",
  "serde",
  "serde_json",
  "signal-hook",

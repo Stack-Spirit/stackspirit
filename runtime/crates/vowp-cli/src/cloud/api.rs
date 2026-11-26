@@ -4,6 +4,7 @@
 //! is sent only in the `Authorization: Bearer` header and is never placed in a URL, an error
 //! message or a log line.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -78,6 +79,17 @@ impl std::fmt::Debug for Api {
     }
 }
 
+/// The rustls provider for the HTTPS transport.
+///
+/// `ureq` is built with `rustls-no-provider`, so it has no compiled-in provider and would
+/// panic on the first HTTPS request. The workspace already builds rustls with `aws-lc-rs`
+/// (the relay client uses the same backend), so configure it explicitly.
+fn tls_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+}
+
 impl Api {
     /// Builds a client for `base`, normalising away trailing slashes.
     pub fn new(base: &str) -> Result<Self, CliError> {
@@ -93,6 +105,12 @@ impl Api {
             )));
         }
         let config = ureq::Agent::config_builder()
+            .tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .provider(ureq::tls::TlsProvider::Rustls)
+                    .unversioned_rustls_crypto_provider(tls_provider())
+                    .build(),
+            )
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(30)))
             .build();

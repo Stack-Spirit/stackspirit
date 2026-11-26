@@ -14,11 +14,14 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -482,6 +485,52 @@ fn build_ticket(state: &ApiState, client_key: &Jwk, own_url: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Loopback HTTPS API
+// ---------------------------------------------------------------------------------------------
+
+/// A local TLS listener with a self-signed certificate. The CLI rejects the certificate, but
+/// the connection and TLS handshake prove the production HTTPS client has a crypto provider.
+struct MockTlsApi {
+    url: String,
+    accepted: Arc<AtomicBool>,
+}
+
+impl MockTlsApi {
+    fn start() -> Self {
+        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).expect("self-signed cert");
+        let cert = certified.cert.der().clone();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()));
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let config = ServerConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .expect("TLS 1.3")
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .expect("server certificate");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind tls api");
+        let port = listener.local_addr().expect("addr").port();
+        let url = format!("https://127.0.0.1:{port}");
+        let accepted = Arc::new(AtomicBool::new(false));
+        let thread_accepted = Arc::clone(&accepted);
+        let _ = std::thread::spawn(move || {
+            let Ok((tcp, _)) = listener.accept() else {
+                return;
+            };
+            thread_accepted.store(true, Ordering::SeqCst);
+            let Ok(server) = ServerConnection::new(Arc::new(config)) else {
+                return;
+            };
+            let mut stream = StreamOwned::new(server, tcp);
+            // Drive the handshake. The client rejects the self-signed certificate, so the
+            // read ends in a TLS alert; the recorded connection is what this mock needs.
+            let mut byte = [0u8; 1];
+            let _ = stream.read(&mut byte);
+        });
+        Self { url, accepted }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Loopback WebSocket relay with a fake machine
 // ---------------------------------------------------------------------------------------------
 
@@ -859,6 +908,38 @@ fn login_token_stdin_validates_and_stores_the_token() {
         session_json(&env)["access_token"],
         ACCESS_TOKEN,
         "a rejected token must not replace the stored session"
+    );
+}
+
+#[test]
+fn login_over_https_uses_the_tls_provider_and_fails_without_panicking() {
+    let env = TestEnv::new();
+    let api = MockTlsApi::start();
+
+    // `login` and every other cloud command build their client through `Api::new`; an HTTPS
+    // URL must reach the TLS handshake even when the certificate is not trusted.
+    let (code, stdout, stderr) = env.run_with_stdin(
+        &["login", "--api-url", &api.url, "--token-stdin"],
+        &format!("{ACCESS_TOKEN}\n"),
+    );
+    assert_eq!(
+        code, 7,
+        "an HTTPS failure must be a normal remote error, not a panic: {stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("the StackSpirit API is unreachable"),
+        "missing the normal API error: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "the HTTPS client panicked: {stderr}");
+    assert!(
+        !stderr.contains("CryptoProvider"),
+        "the HTTPS client has no TLS provider: {stderr}"
+    );
+    assert!(!stdout.contains(ACCESS_TOKEN) && !stderr.contains(ACCESS_TOKEN));
+    assert!(!session_path(&env).exists(), "a failed login must not write a session");
+    assert!(
+        api.accepted.load(Ordering::SeqCst),
+        "the HTTPS client never opened a connection"
     );
 }
 
