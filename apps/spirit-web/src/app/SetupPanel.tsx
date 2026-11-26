@@ -80,6 +80,17 @@ export function SetupPanel({ error }: { error: SpiritErrorDto | null }) {
           The address is stored in session storage and removed from the address bar.
         </p>
       </Panel>
+
+      <Panel title="Or use a StackSpirit Account">
+        <p>
+          Signing in is optional. It lets this browser reach one of your enrolled Always-On
+          Homes through the encrypted StackSpirit relay instead of a local daemon. Local and
+          SSH server mode needs no account.
+        </p>
+        <a className="btn btn--secondary btn--sm" href="/cloud">
+          Always-On Homes
+        </a>
+      </Panel>
     </main>
   );
 }

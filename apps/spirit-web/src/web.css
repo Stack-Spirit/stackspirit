@@ -1018,3 +1018,54 @@
     max-width: 100%;
   }
 }
+
+/* ======================================================================
+   Optional Always-On Homes / Cloud Relay route
+   ====================================================================== */
+
+.web-cloud {
+  width: min(52rem, 100%);
+}
+
+.web-cloud .panel__body {
+  display: grid;
+  gap: 14px;
+}
+
+.web-cloud--live {
+  width: auto;
+  margin: 0;
+  padding: 0;
+}
+
+/* The live relay cockpit keeps the full Web layout; the transport pill floats
+   above the status strip so it never changes the existing page geometry. */
+.web-cloud__bar {
+  position: fixed;
+  right: 16px;
+  bottom: 40px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 12px;
+  border: 1px solid var(--nx-line-strong);
+  border-radius: 999px;
+  background: var(--nx-panel);
+  box-shadow: var(--nx-shadow);
+  color: var(--nx-muted);
+  font-size: 12px;
+}
+
+.web-cloud__bar > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+@media (max-width: 720px) {
+  .web-cloud__bar {
+    right: 12px;
+    bottom: 76px;
+  }
+}

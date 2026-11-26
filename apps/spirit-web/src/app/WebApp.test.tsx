@@ -42,6 +42,7 @@ describe("Web read-only shell", () => {
     expect(screen.getByTestId("lane-review_fix")).toBeInTheDocument();
     expect(screen.getByTestId("daemon-panel")).toBeInTheDocument();
     expect(screen.getAllByText("read-only").length).toBeGreaterThan(0);
+    expect(screen.getByTestId("nav-cloud")).toHaveTextContent("Always-On Homes");
   });
 
   it("shows the exact capacity unavailable copy and no zeroes, target, or retrying", async () => {
@@ -189,8 +190,9 @@ describe("Web read-only shell", () => {
     await renderApp();
     const nav = screen.getByRole("navigation", { name: "Primary views" });
     const buttons = within(nav).getAllByRole("button");
-    expect(buttons).toHaveLength(1);
+    expect(buttons).toHaveLength(2);
     expect(buttons[0]).toHaveTextContent("Fleet");
+    expect(buttons[1]).toHaveTextContent("Always-On Homes");
 
     window.history.pushState(null, "", "/hosts");
     window.dispatchEvent(new PopStateEvent("popstate"));

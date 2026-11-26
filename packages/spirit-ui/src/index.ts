@@ -6,6 +6,7 @@
  * imports a host runtime or a Node-only module.
  */
 export * from "./bridge";
+export * from "./cloud";
 export * from "./components";
 export * from "./domain/capacity";
 export * from "./domain/connection";
@@ -15,6 +16,8 @@ export * from "./domain/format";
 export * from "./domain/raw";
 export * from "./state/fleetStore";
 
+export { CloudAccountPanel } from "./next/CloudAccountPanel";
+export { ManagedHomesPanel } from "./next/ManagedHomesPanel";
 export { NextShell } from "./next/NextShell";
 
 export { CapacityRail } from "./views/capacity/CapacityRail";

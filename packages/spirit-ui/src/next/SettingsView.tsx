@@ -3,6 +3,8 @@ import { useState } from "react";
 import { EngineView } from "../views/engine/EngineView";
 import { HostManager } from "../views/hosts/HostManager";
 import { useConnection, useFleetStore } from "../state/fleetStore";
+import { CloudAccountPanel } from "./CloudAccountPanel";
+import { ManagedHomesPanel } from "./ManagedHomesPanel";
 import { PageHeader } from "./PageHeader";
 import { SettingsPage } from "./SettingsPage";
 import { SecretStore } from "./SecretStore";
@@ -58,6 +60,12 @@ export function SettingsView({
           <div className="nx-settings__card">
             <h2>Engine &amp; Models</h2>
             <SettingsPage />
+          </div>
+
+          <div className="nx-settings__card" data-testid="settings-cloud">
+            <h2>StackSpirit Cloud</h2>
+            <CloudAccountPanel />
+            <ManagedHomesPanel />
           </div>
 
           <ServerSecurityCard />

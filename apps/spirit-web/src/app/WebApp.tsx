@@ -213,6 +213,15 @@ export function WebApp({ bridge }: { bridge: SpiritBridge }) {
               <span aria-hidden="true">◈</span>
               Fleet
             </button>
+            <button
+              type="button"
+              className="view-nav__item"
+              data-testid="nav-cloud"
+              onClick={() => window.location.assign("/cloud")}
+            >
+              <span aria-hidden="true">☁</span>
+              Always-On Homes
+            </button>
           </nav>
           <p className="notice notice--warn web-rail-notice" data-testid="read-only-notice">
             {READ_ONLY_NOTICE}

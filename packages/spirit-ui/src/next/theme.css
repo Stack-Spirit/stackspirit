@@ -5999,3 +5999,391 @@ button.nx-composer__attach:disabled {
 .nx-change__msg--error {
   color: var(--nx-danger);
 }
+
+/* ======================================================================
+   Optional StackSpirit Account, Cloud Relay and Managed Homes
+   ----------------------------------------------------------------------
+   These panels are always opt-in. Local mode renders the same calm surface
+   and never turns the account into a gate.
+   ====================================================================== */
+
+.nx-chip--danger {
+  background: var(--nx-danger-soft);
+  color: var(--nx-danger);
+}
+
+.nx-cloud {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius-lg);
+  background: var(--nx-panel);
+}
+
+.nx-cloud--plans {
+  background: var(--nx-raised);
+}
+
+.nx-cloud__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.nx-cloud__title > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.nx-cloud__title h3,
+.nx-cloud__provisioning h4 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.nx-cloud__title p {
+  max-width: 62ch;
+  margin: 0;
+  color: var(--nx-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.nx-cloud__local,
+.nx-cloud__account {
+  display: grid;
+  gap: 12px;
+}
+
+.nx-cloud__device {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--nx-line-strong);
+  border-radius: var(--nx-radius);
+  background: var(--nx-raised);
+}
+
+.nx-cloud__device p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.nx-cloud__code {
+  width: fit-content;
+  padding: 6px 12px;
+  border-radius: var(--nx-radius-sm);
+  background: var(--nx-panel);
+  border: 1px dashed var(--nx-line-strong);
+  color: var(--nx-text);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+}
+
+.nx-cloud__meta {
+  color: var(--nx-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.nx-cloud__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.nx-cloud__machines {
+  display: grid;
+  gap: 8px;
+}
+
+.nx-cloud__machine-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nx-cloud__machine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius);
+  background: var(--nx-raised);
+}
+
+.nx-cloud__machine--selected {
+  border-color: color-mix(in srgb, var(--nx-green) 38%, var(--nx-line));
+  background: var(--nx-accent-soft);
+}
+
+.nx-cloud__machine-main {
+  display: flex;
+  flex: 1 1 240px;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 4px;
+  border: 0;
+  border-radius: var(--nx-radius-sm);
+  background: transparent;
+  color: var(--nx-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nx-cloud__machine-name {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nx-cloud__machine-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nx-cloud__presence {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--nx-muted);
+}
+
+.nx-cloud__presence--ok {
+  background: var(--nx-ok);
+}
+
+.nx-cloud__presence--warn {
+  background: var(--nx-warn);
+}
+
+.nx-cloud__presence--danger {
+  background: var(--nx-danger);
+}
+
+.nx-cloud__presence--muted {
+  background: var(--nx-faint);
+}
+
+.nx-cloud__relay {
+  margin: 0;
+  padding: 9px 11px;
+  border-left: 3px solid var(--nx-line-strong);
+  border-radius: 0 var(--nx-radius-sm) var(--nx-radius-sm) 0;
+  background: var(--nx-raised);
+  color: var(--nx-muted);
+  font-size: 12.5px;
+}
+
+.nx-cloud__relay--ok {
+  border-left-color: var(--nx-ok);
+  color: var(--nx-text);
+}
+
+.nx-cloud__notice {
+  margin: 0;
+  color: var(--nx-muted);
+  font-size: 13px;
+}
+
+.nx-cloud__error {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--nx-danger);
+  border-radius: 0 var(--nx-radius-sm) var(--nx-radius-sm) 0;
+  background: var(--nx-danger-soft);
+  color: var(--nx-danger);
+  font-size: 13px;
+}
+
+.nx-cloud__error p {
+  margin: 0;
+}
+
+.nx-cloud__error .nx-link {
+  justify-self: start;
+  color: var(--nx-danger);
+}
+
+.nx-cloud__empty {
+  margin: 0;
+  color: var(--nx-muted);
+  font-size: 13px;
+}
+
+.nx-cloud__plans {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nx-cloud__plan {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  padding: 13px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius);
+  background: var(--nx-panel);
+}
+
+.nx-cloud__plan-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.nx-cloud__plan-head strong {
+  font-size: 15px;
+}
+
+.nx-cloud__price {
+  color: var(--nx-accent);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.nx-cloud__setup {
+  color: var(--nx-warn);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.nx-cloud__setup--none {
+  color: var(--nx-faint);
+  font-weight: 400;
+}
+
+.nx-cloud__backup {
+  display: block;
+  padding: 12px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius);
+  background: var(--nx-panel);
+  cursor: pointer;
+}
+
+.nx-cloud__backup-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.nx-cloud__backup input[type="checkbox"] {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  accent-color: var(--nx-green-strong);
+}
+
+.nx-cloud__backup strong {
+  margin-right: 6px;
+  font-size: 14px;
+}
+
+.nx-cloud__backup small {
+  display: block;
+  margin-top: 2px;
+  color: var(--nx-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.nx-cloud__backup .nx-chip {
+  height: 20px;
+  padding: 0 7px;
+  font-size: 11px;
+}
+
+.nx-cloud__provisioning {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--nx-line);
+}
+
+.nx-cloud__provisioning-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nx-cloud__provisioning-body {
+  display: grid;
+  gap: 8px;
+}
+
+.nx-cloud__provisioning-body p {
+  margin: 0;
+}
+
+.nx-cloud__progress {
+  position: relative;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--nx-line);
+}
+
+.nx-cloud__progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--nx-green);
+  transition: width 200ms ease;
+}
+
+.nx-cloud__machine-main:focus-visible,
+.nx-cloud__backup input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nx-cloud__progress-fill {
+    transition: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .nx-cloud {
+    padding: 12px;
+  }
+
+  .nx-cloud__machine {
+    align-items: flex-start;
+  }
+
+  .nx-cloud__machine-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}

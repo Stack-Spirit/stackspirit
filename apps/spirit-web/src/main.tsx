@@ -11,6 +11,8 @@ import "../../../packages/spirit-ui/src/next/theme.css";
 import "../../../packages/spirit-ui/src/views/fleet/fleet.css";
 
 import { createBridge } from "./bridge/create";
+import { createWebCloudRuntime } from "./cloud/runtime";
+import { CloudApp } from "./app/CloudApp";
 import { DesktopOnlyBoot } from "./app/DesktopOnlyPage";
 import { SetupPanel } from "./app/SetupPanel";
 import { pathFor, WebApp } from "./app/WebApp";
@@ -51,8 +53,33 @@ function BootError({ error }: { error: SpiritErrorDto }) {
 }
 
 const initialPath = pathFor(window.location.pathname);
+const cloudPath =
+  window.location.pathname === "/cloud" ||
+  window.location.pathname === "/cloud/" ||
+  new URLSearchParams(window.location.search).get("cloud") === "1";
 
-if (initialPath !== "fleet") {
+if (cloudPath) {
+  // The optional Always-On Homes route. Construction makes no cloud request and
+  // opens no WebSocket; the page still offers the local daemon link.
+  try {
+    const runtime = createWebCloudRuntime();
+    root.render(<CloudApp runtime={runtime} />);
+  } catch (error) {
+    root.render(
+      <BootError
+        error={{
+          code: "cloud_unavailable",
+          message:
+            typeof error === "object" && error !== null && "message" in error
+              ? String((error as { message: unknown }).message)
+              : "The StackSpirit cloud client could not start.",
+          hint: "Local server mode is unaffected; open the root page to use it.",
+          retryable: false,
+        }}
+      />,
+    );
+  }
+} else if (initialPath !== "fleet") {
   // Direct desktop-only routes render without creating a bridge, so they make no request.
   root.render(<DesktopOnlyBoot surface={initialPath} />);
 } else {
