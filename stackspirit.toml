@@ -53,11 +53,12 @@ rust-check = [
   { cmd = { run = "scripts/cargo-gate.sh fmt --all -- --check", expect_exit = 0 } },
   { cmd = { run = "scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings", expect_exit = 0 } },
 ]
+# The spirit-core tests fake the VOWP binary, so the gate hides any real `vowp` on PATH.
 rust-core-check = [
   { cmd = { run = "node scripts/fetch-engine.mjs", expect_exit = 0 } },
   { cmd = { run = "scripts/cargo-gate.sh fmt --all -- --check", expect_exit = 0 } },
   { cmd = { run = "scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings", expect_exit = 0 } },
-  { cmd = { run = "scripts/cargo-gate.sh test -p spirit-core", expect_exit = 0 } },
+  { cmd = { run = "bash -c 'P=; IFS=:; for d in $PATH; do [ -e \"$d/vowp\" ] || P=\"$P:$d\"; done; PATH=\"${P#:}\" scripts/cargo-gate.sh test -p spirit-core'", expect_exit = 0 } },
 ]
 runtime-check = [
   { cmd = { run = "cd runtime && cargo fmt --all -- --check", expect_exit = 0 } },
