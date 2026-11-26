@@ -110,6 +110,8 @@ The middleware keeps the existing redirect contract:
 - `https://stackspirit-site.pages.dev/*` → `https://stackspirit.io/*` (301, path and query preserved)
 - Preview hosts such as `<hash>.stackspirit-site.pages.dev` are left alone so previews work.
 - `app.`, `api.`, `relay.` and `mcp.stackspirit.io` are not redirected.
+- Project and preview `*.pages.dev` hosts carry `X-Robots-Tag: noindex` so they never
+  compete with the canonical domain in search results.
 
 ## Assets and brand
 

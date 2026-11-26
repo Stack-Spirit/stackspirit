@@ -572,6 +572,9 @@ await check("_headers has a strict self-only CSP and no tracker host", async () 
   assertIncludes(headers, "Referrer-Policy: strict-origin-when-cross-origin");
   assertIncludes(headers, "Strict-Transport-Security:");
   assertIncludes(headers, "Cache-Control: public, max-age=86400, stale-while-revalidate=604800");
+  assertIncludes(headers, "https://:project.pages.dev/*");
+  assertIncludes(headers, "https://:version.:project.pages.dev/*");
+  assertIncludes(headers, "X-Robots-Tag: noindex");
   for (const tracker of ["google", "plausible", "posthog", "hotjar", "facebook"]) {
     assertNotIncludes(headers.toLowerCase(), tracker, "_headers tracker host");
   }

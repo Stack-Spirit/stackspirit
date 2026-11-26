@@ -34,3 +34,10 @@
 
 /404.html
   Cache-Control: public, max-age=300, must-revalidate
+
+# The project and preview hosts must never appear as competing search results.
+https://:project.pages.dev/*
+  X-Robots-Tag: noindex
+
+https://:version.:project.pages.dev/*
+  X-Robots-Tag: noindex
