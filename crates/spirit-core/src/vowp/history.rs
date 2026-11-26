@@ -1,9 +1,10 @@
 //! On-demand job history (`job ls --all`) and the safe history clean-up (`gc`).
 //!
 //! Both are explicit user actions and never run on connect or render. The views carry
-//! no home-side paths: GC sample paths and job worktree/brief paths are dropped at parse
-//! time. GC only ever reports and removes VOWP's own closed-session, run-output and
-//! worktree classes; production, truth, open work and secrets stay untouched.
+//! no home-side paths: GC sample paths, job worktree/brief paths and path tokens in GC
+//! errors are dropped at parse time. GC reports every class with eligible work (for
+//! example closed sessions, run outputs, worktrees, caches, host samples and job
+//! windows); production, truth, open work and secrets stay untouched.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -70,7 +71,7 @@ pub struct GcReportView {
     pub eligible_files: u64,
     /// Total bytes an apply would free now.
     pub eligible_bytes: u64,
-    /// Errors VOWP reported while applying.
+    /// Errors VOWP reported while applying, with home-side paths scrubbed.
     pub errors: Vec<String>,
 }
 
@@ -134,6 +135,26 @@ pub fn parse_history_jobs(
     Ok(jobs)
 }
 
+/// Replaces every absolute home-side path token (`/x/y`, `~/x`) in a GC error line.
+fn scrub_error_paths(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (token, tail) = rest.split_at(end);
+        let core = token.trim_matches(|c: char| "\"'`()[]{}<>,;:.".contains(c));
+        if core.starts_with('/') || core.starts_with("~/") || core == "~" {
+            out.push_str(&token.replacen(core, "[remote-path]", 1));
+        } else {
+            out.push_str(token);
+        }
+        let ws = tail.len() - tail.trim_start().len();
+        out.push_str(&tail[..ws]);
+        rest = &tail[ws..];
+    }
+    out
+}
+
 /// Parses `vowp gc --json` output into a path-free report.
 pub fn parse_gc_report(stdout: &[u8]) -> Result<GcReportView, SpiritError> {
     let value: Value =
@@ -184,7 +205,7 @@ pub fn parse_gc_report(stdout: &[u8]) -> Result<GcReportView, SpiritError> {
             .map(|rows| {
                 rows.iter()
                     .filter_map(Value::as_str)
-                    .map(|line| line.chars().take(300).collect())
+                    .map(|line| scrub_error_paths(line).chars().take(300).collect())
                     .collect()
             })
             .unwrap_or_default(),

@@ -25,6 +25,10 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
   const [mode, setMode] = useState<"map" | "board">("map");
   // Active work by default; history is one explicit click away.
   const [tab, setTab] = useState<"active" | "history" | "inbox">("active");
+  // Rows the on-demand history already returned; the older fleet snapshot must not repeat them.
+  const [loadedHistoryIds, setLoadedHistoryIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   // The board filters the shared store by project; clear that when leaving.
   useEffect(() => () => setProject(null), [setProject]);
   const jobs = projectJobs(fleet, project);
@@ -32,6 +36,7 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
   const selectedId = panel?.kind === "job" && panel.project === project ? panel.jobId : null;
 
   const history = historyJobs(fleet, project);
+  const pendingHistory = history.filter((job) => !loadedHistoryIds.has(job.job_id));
   const inboxCount = openInbox(fleet, project).length;
   const activeLanes = LANE_INFO.filter(
     (lane) =>
@@ -113,10 +118,16 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
                   {summary.lastMerge.commit.slice(0, 8)}
                 </p>
               ) : null}
-              <HistoryBrowser project={project} api={bridge?.history} />
-              {history.length === 0 ? null : (
-                <ul className="nx-rows__list">
-                  {history.map((job, index) => (
+              <HistoryBrowser
+                project={project}
+                api={bridge?.history}
+                onLoaded={(jobs) =>
+                  setLoadedHistoryIds(new Set(jobs.map((job) => job.job_id)))
+                }
+              />
+              {pendingHistory.length === 0 ? null : (
+                <ul className="nx-rows__list" data-testid="history-fleet-list">
+                  {pendingHistory.map((job, index) => (
                     <li key={`${job.job_id}:${index}`}>
                       <div className="nx-row">
                         <span className="nx-row__dot nx-tone--faint" aria-hidden="true" />

@@ -177,6 +177,33 @@ describe("History tab", () => {
     ).toHaveLength(1);
   });
 
+  it("does not repeat fleet history rows after loading", async () => {
+    const bridge = new MockBridge("busy");
+    const view = fleet();
+    view.lanes.done = [];
+    view.lanes.history = [
+      card({ job_id: "ss-9-history-view", state: "done", title: "History view" }),
+      card({ job_id: "ss-fleet-only", state: "cancelled", title: "Fleet only" }),
+    ];
+    useFleetStore.setState({ bridge, fleet: view });
+    const user = userEvent.setup();
+    render(<WorkersPage project="demo" onOpenSession={() => undefined} />);
+    await user.click(screen.getByRole("button", { name: /^History/ }));
+
+    const before = screen.getByTestId("history-fleet-list");
+    expect(within(before).getAllByRole("listitem")).toHaveLength(2);
+
+    await user.click(screen.getByRole("button", { name: "Load history" }));
+    const loaded = await screen.findByTestId("history-list");
+    expect(within(loaded).getAllByRole("listitem")).toHaveLength(4);
+
+    // ss-9-history-view came from both sources; only the on-demand row remains.
+    const after = screen.getByTestId("history-fleet-list");
+    expect(within(after).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(after).queryByText("History view")).toBeNull();
+    expect(within(after).getByText("Fleet only")).toBeTruthy();
+  });
+
   it("previews clean-up, deletes nothing until confirmed, then reports what was freed", async () => {
     const { bridge, user } = await open();
     await user.click(screen.getByRole("button", { name: "Clean up history" }));

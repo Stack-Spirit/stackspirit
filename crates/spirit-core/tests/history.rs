@@ -87,7 +87,8 @@ const GC_JSON: &str = r#"{"generated_at":"2026-11-26T00:00:00Z","dry_run":true,
   {"class":"cache","files":1,"bytes":4,"eligible_files":1,"eligible_bytes":4,"sample_paths":[]},
   {"class":"secrets","files":1,"bytes":10,"eligible_files":0,"eligible_bytes":0,"sample_paths":[]}],
  "refused":[{"class":"closed_session","session":"s1","path":"/home/owner/s1","reason":"lease"}],
- "deleted_files":0,"freed_bytes":0,"compacted_sessions":0,"closed_windows":0,"errors":[]}"#;
+ "deleted_files":0,"freed_bytes":0,"compacted_sessions":0,"closed_windows":0,
+ "errors":["/home/owner/session.jsonl: permission denied","plain failure"]}"#;
 
 #[test]
 fn history_keeps_only_terminal_jobs_newest_first() {
@@ -110,6 +111,10 @@ fn gc_report_is_path_free_and_counts_every_eligible_class() {
     assert_eq!(report.eligible_files, 6);
     assert_eq!(report.eligible_bytes, 5004);
     assert_eq!(report.refused, 1);
+    assert_eq!(
+        report.errors,
+        ["[remote-path]: permission denied", "plain failure"]
+    );
     let json = serde_json::to_string(&report).unwrap();
     assert!(!json.contains("/home/owner"), "no home-side paths: {json}");
 }

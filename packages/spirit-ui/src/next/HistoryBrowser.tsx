@@ -62,9 +62,11 @@ function message(error: unknown): string {
 export function HistoryBrowser({
   project,
   api,
+  onLoaded,
 }: {
   project: string;
   api: HistoryApi | undefined;
+  onLoaded?: (jobs: HistoryJobView[]) => void;
 }) {
   const [jobs, setJobs] = useState<HistoryJobView[] | null>(null);
   const [loading, setLoading] = useState(false);
@@ -91,7 +93,9 @@ export function HistoryBrowser({
     setLoading(true);
     setError(null);
     try {
-      setJobs(await api.load(project));
+      const next = await api.load(project);
+      setJobs(next);
+      onLoaded?.(next);
     } catch (caught) {
       setError(message(caught));
     } finally {
@@ -283,8 +287,8 @@ export function HistoryBrowser({
         {preview ? (
           <div data-testid="cleanup-preview">
             <p>
-              Closed sessions, run outputs and worktrees older than one day can
-              be removed.{" "}
+              Old closed sessions, run outputs, worktrees, caches, host samples and
+              job windows are listed below.{" "}
               <strong>
                 {preview.eligible_files}{" "}
                 {preview.eligible_files === 1 ? "file" : "files"} (

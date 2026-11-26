@@ -37,6 +37,8 @@ import type {
   ExternalHarnessKind,
   FleetView,
   GateSnapshot,
+  GcReportView,
+  HistoryJobView,
   HostDraft,
   HostKeyPin,
   HostKeyScan,
@@ -198,6 +200,15 @@ export class TauriBridge implements SpiritBridge {
   projects = {
     add: (input: ProjectAddInput): Promise<ProjectAddOutcome> =>
       call("project_add", { input }),
+  };
+
+  history = {
+    load: (project: string): Promise<HistoryJobView[]> =>
+      call("project_history", { project }),
+    gcPreview: (project: string): Promise<GcReportView> =>
+      call("project_gc_preview", { project }),
+    gcApply: (project: string): Promise<GcReportView> =>
+      call("project_gc_apply", { project, confirmed: true }),
   };
 
   cluster = {

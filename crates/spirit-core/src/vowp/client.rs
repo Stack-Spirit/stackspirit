@@ -103,7 +103,8 @@ pub trait VowpClient: Send + Sync {
         ))
     }
     /// Runs `vowp --project <p> --json gc --older-than 1d` (preview) or the same with
-    /// `--apply`. Only closed sessions, run output and worktrees can ever be eligible.
+    /// `--apply`. Every class VOWP marks eligible is reported, so the preview matches
+    /// what an apply removes.
     async fn project_gc(&self, _project: &str, _apply: bool) -> Result<GcReportView, SpiritError> {
         Err(SpiritError::new(
             SpiritErrorCode::Gate,
