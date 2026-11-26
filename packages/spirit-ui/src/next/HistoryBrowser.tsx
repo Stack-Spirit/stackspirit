@@ -93,8 +93,11 @@ export function HistoryBrowser({
   const [freed, setFreed] = useState<GcReportView | null>(null);
   const searchId = useId();
   // The desk keys the whole Workers page by project, so one instance only ever sees
-  // one project. The ticket still drops a slower answer from an earlier click.
-  const request = useRef(0);
+  // one project. Each action keeps its own ticket so a slower answer from an earlier
+  // click of the same action is dropped, while Load and Clean up never cancel each
+  // other's result or busy reset.
+  const loadRequest = useRef(0);
+  const previewRequest = useRef(0);
 
   if (!api) {
     return (
@@ -106,37 +109,37 @@ export function HistoryBrowser({
 
   async function load() {
     if (!api) return;
-    const ticket = ++request.current;
+    const ticket = ++loadRequest.current;
     setLoading(true);
     setError(null);
     try {
       const next = await api.load(project);
-      if (request.current !== ticket) return;
+      if (loadRequest.current !== ticket) return;
       setJobs(next);
       onLoaded?.(next);
     } catch (caught) {
-      if (request.current !== ticket) return;
+      if (loadRequest.current !== ticket) return;
       setError({ code: errorCode(caught), message: errorText(caught) });
     } finally {
-      if (request.current === ticket) setLoading(false);
+      if (loadRequest.current === ticket) setLoading(false);
     }
   }
 
   async function openCleanup() {
     if (!api) return;
-    const ticket = ++request.current;
+    const ticket = ++previewRequest.current;
     setPreviewing(true);
     setCleanError(null);
     setFreed(null);
     try {
       const next = await api.gcPreview(project);
-      if (request.current !== ticket) return;
+      if (previewRequest.current !== ticket) return;
       setPreview(next);
     } catch (caught) {
-      if (request.current !== ticket) return;
+      if (previewRequest.current !== ticket) return;
       setCleanError({ code: errorCode(caught), message: errorText(caught) });
     } finally {
-      if (request.current === ticket) setPreviewing(false);
+      if (previewRequest.current === ticket) setPreviewing(false);
     }
   }
 

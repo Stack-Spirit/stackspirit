@@ -328,6 +328,55 @@ describe("HistoryBrowser outcomes", () => {
     );
   });
 
+  it("finishes a pending load after Clean up is clicked", async () => {
+    let release!: (value: HistoryJobView[]) => void;
+    const load = vi.fn(
+      () =>
+        new Promise<HistoryJobView[]>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    render(<HistoryBrowser project="demo" api={historyApi({ load })} />);
+
+    await user.click(screen.getByRole("button", { name: "Load history" }));
+    await user.click(screen.getByRole("button", { name: "Clean up history" }));
+    release(rows);
+
+    // Clean up must not discard the load's rows or its busy reset.
+    expect(await screen.findByTestId("history-list")).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.queryByTestId("history-loading")).toBeNull(),
+    );
+    expect(screen.getByTestId("history-loaded").textContent).toContain(
+      "Loaded 2 historic jobs for demo",
+    );
+  });
+
+  it("opens a pending preview after Load is clicked", async () => {
+    let release!: (value: GcReportView) => void;
+    const gcPreview = vi.fn(
+      () =>
+        new Promise<GcReportView>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    render(<HistoryBrowser project="demo" api={historyApi({ gcPreview })} />);
+
+    await user.click(screen.getByRole("button", { name: "Clean up history" }));
+    await user.click(screen.getByRole("button", { name: "Load history" }));
+    release(preview);
+
+    // Load must not discard the preview or leave the Clean up button stuck.
+    expect(await screen.findByTestId("cleanup-preview")).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Clean up history" }),
+      ).toBeEnabled(),
+    );
+  });
+
   it("surfaces a load error with its hint and a retry that replaces it", async () => {
     const load = vi
       .fn<NonNullable<SpiritBridge["history"]>["load"]>()
