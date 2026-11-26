@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GcReportView, HistoryJobView } from "@stackspirit/ui";
@@ -79,5 +81,44 @@ describe("TauriBridge history", () => {
       "project_gc_preview",
       "project_gc_apply",
     ]);
+  });
+
+  it("propagates a typed backend error instead of swallowing the click", async () => {
+    const bridge = new TauriBridge();
+    invoke.mockRejectedValueOnce({
+      code: "vowp_command",
+      message: "stackspirit exited 2: unexpected argument '--all'",
+      hint: "Update the engine on the host, then retry.",
+      retryable: true,
+    });
+
+    await expect(bridge.history.load("demo")).rejects.toMatchObject({
+      code: "vowp_command",
+      message: "stackspirit exited 2: unexpected argument '--all'",
+      hint: "Update the engine on the host, then retry.",
+      retryable: true,
+    });
+  });
+
+  it("keeps every history command registered in the Tauri handler", () => {
+    // The renderer tests can only prove the names it sends; this reads the host's
+    // actual `generate_handler!` list so a command that is dropped or renamed in Rust
+    // fails here instead of turning the History tab into a silent no-op.
+    const lib = readFileSync(
+      new URL("../../src-tauri/src/lib.rs", import.meta.url),
+      "utf8",
+    );
+    const handler = lib.slice(lib.indexOf("tauri::generate_handler!["));
+    // The trailing comma matters: a renamed command such as `project_history_v2`
+    // must not satisfy a plain prefix check.
+    for (const command of [
+      "project_history",
+      "project_gc_preview",
+      "project_gc_apply",
+    ]) {
+      expect(handler).toMatch(
+        new RegExp(`commands::history::${command}\\s*,`),
+      );
+    }
   });
 });

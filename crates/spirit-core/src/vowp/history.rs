@@ -102,12 +102,24 @@ pub fn parse_history_jobs(
         .iter()
         .filter_map(|row| {
             let state = text(row, "state");
-            let job_id = text(row, "id");
+            // VOWP prints `id`; older exports used `job_id`. Accept both so a server
+            // one minor version behind still fills the History tab.
+            let job_id = match text(row, "id") {
+                id if id.is_empty() => text(row, "job_id"),
+                id => id,
+            };
             if job_id.is_empty() || !HISTORIC_STATES.contains(&state.as_str()) {
                 return None;
             }
             // A project-scoped listing only ever contains that project's jobs.
             let row_project = text(row, "project");
+            // `updated_at` is the normal column; fall back to the state change time so
+            // an older row still sorts sensibly instead of reading as unknown.
+            let updated_at = row
+                .get("updated_at")
+                .and_then(Value::as_str)
+                .or_else(|| row.get("state_changed_at").and_then(Value::as_str))
+                .map(str::to_owned);
             Some(HistoryJobView {
                 job_id,
                 project: if row_project.is_empty() {
@@ -119,10 +131,7 @@ pub fn parse_history_jobs(
                 kind: text(row, "kind"),
                 role: text(row, "role"),
                 state,
-                updated_at: row
-                    .get("updated_at")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                updated_at,
             })
         })
         .collect();

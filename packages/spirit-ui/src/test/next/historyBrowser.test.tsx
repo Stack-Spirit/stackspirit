@@ -1,10 +1,11 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MockBridge } from "../../bridge/MockBridge";
-import type { FleetView, JobCardView } from "../../bridge/wire";
-import { filterHistory } from "../../next/HistoryBrowser";
+import type { SpiritBridge } from "../../bridge/SpiritBridge";
+import type { FleetView, GcReportView, HistoryJobView, JobCardView } from "../../bridge/wire";
+import { HistoryBrowser, filterHistory } from "../../next/HistoryBrowser";
 import { projectJobs, projectSummaries } from "../../next/summary";
 import { WorkersPage } from "../../next/WorkersPage";
 import { resetFleetStore, useFleetStore } from "../../state/fleetStore";
@@ -232,5 +233,181 @@ describe("History tab", () => {
     await screen.findByTestId("cleanup-preview");
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(bridge.historyCalls.map((c) => c.call)).toEqual(["preview"]);
+  });
+});
+
+/**
+ * The desktop History tab regressed to a silent no-op once: a click reached the
+ * backend, the backend refused, and the page still looked unchanged. These tests pin
+ * the three visible outcomes (busy, result, typed error with a retry) so that cannot
+ * happen again without a red test.
+ */
+describe("HistoryBrowser outcomes", () => {
+  const rows: HistoryJobView[] = [
+    {
+      job_id: "ss-1",
+      project: "demo",
+      title: "Old build",
+      kind: "build",
+      role: "worker",
+      state: "done",
+      updated_at: "2026-11-26T10:00:00Z",
+    },
+    {
+      job_id: "ss-2",
+      project: "demo",
+      title: "Dropped",
+      kind: "build",
+      role: "worker",
+      state: "cancelled",
+      updated_at: "2026-11-25T10:00:00Z",
+    },
+  ];
+
+  const preview: GcReportView = {
+    dry_run: true,
+    classes: [
+      {
+        class: "run_output",
+        files: 2,
+        bytes: 2048,
+        eligible_files: 2,
+        eligible_bytes: 2000,
+      },
+    ],
+    refused: 0,
+    deleted_files: 0,
+    freed_bytes: 0,
+    compacted_sessions: 0,
+    eligible_files: 2,
+    eligible_bytes: 2000,
+    errors: [],
+  };
+
+  const applied: GcReportView = {
+    ...preview,
+    dry_run: false,
+    deleted_files: 2,
+    freed_bytes: 2000,
+    compacted_sessions: 1,
+  };
+
+  function historyApi(
+    overrides: Partial<NonNullable<SpiritBridge["history"]>> = {},
+  ): NonNullable<SpiritBridge["history"]> {
+    return {
+      load: vi.fn(async () => rows),
+      gcPreview: vi.fn(async () => preview),
+      gcApply: vi.fn(async () => applied),
+      ...overrides,
+    };
+  }
+
+  it("shows a busy line, then the real rows and their count", async () => {
+    let release!: (value: HistoryJobView[]) => void;
+    const load = vi.fn(
+      () =>
+        new Promise<HistoryJobView[]>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    render(<HistoryBrowser project="demo" api={historyApi({ load })} />);
+
+    await user.click(screen.getByRole("button", { name: "Load history" }));
+    expect(screen.getByTestId("history-loading").textContent).toContain(
+      "Loading history",
+    );
+    expect(screen.queryByTestId("history-list")).toBeNull();
+
+    release(rows);
+    const list = await screen.findByTestId("history-list");
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getByTestId("history-loaded").textContent).toContain(
+      "Loaded 2 historic jobs for demo",
+    );
+  });
+
+  it("surfaces a load error with its hint and a retry that replaces it", async () => {
+    const load = vi
+      .fn<NonNullable<SpiritBridge["history"]>["load"]>()
+      .mockRejectedValueOnce({
+        code: "vowp_command",
+        message: "stackspirit exited 2",
+        hint: "Install StackSpirit on the host, then retry.",
+        retryable: true,
+      })
+      .mockResolvedValueOnce(rows);
+    const user = userEvent.setup();
+    render(<HistoryBrowser project="demo" api={historyApi({ load })} />);
+
+    await user.click(screen.getByRole("button", { name: "Load history" }));
+    const alert = await screen.findByTestId("history-error");
+    expect(alert.getAttribute("data-code")).toBe("vowp_command");
+    expect(alert.textContent).toContain("Could not load history.");
+    expect(alert.textContent).toContain("stackspirit exited 2");
+    expect(alert.textContent).toContain("Install StackSpirit on the host, then retry.");
+
+    await user.click(within(alert).getByRole("button", { name: "Try again" }));
+    await screen.findByTestId("history-list");
+    expect(screen.queryByTestId("history-error")).toBeNull();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces a clean-up preview error instead of doing nothing", async () => {
+    const gcPreview = vi
+      .fn<NonNullable<SpiritBridge["history"]>["gcPreview"]>()
+      .mockRejectedValueOnce({
+        code: "remote_timeout",
+        message: "the host did not answer in time",
+        hint: null,
+        retryable: true,
+      });
+    const user = userEvent.setup();
+    render(<HistoryBrowser project="demo" api={historyApi({ gcPreview })} />);
+
+    await user.click(screen.getByRole("button", { name: "Clean up history" }));
+    const alert = await screen.findByTestId("cleanup-error");
+    expect(alert.getAttribute("data-code")).toBe("remote_timeout");
+    expect(alert.textContent).toContain("Could not check the clean-up.");
+    expect(alert.textContent).toContain("the host did not answer in time");
+    expect(screen.queryByTestId("cleanup-preview")).toBeNull();
+  });
+
+  it("keeps the preview open and surfaces an apply error", async () => {
+    const gcApply = vi
+      .fn<NonNullable<SpiritBridge["history"]>["gcApply"]>()
+      .mockRejectedValueOnce({
+        code: "vowp_command",
+        message: "stackspirit exited 1",
+        hint: null,
+        retryable: false,
+      });
+    const user = userEvent.setup();
+    render(<HistoryBrowser project="demo" api={historyApi({ gcApply })} />);
+
+    await user.click(screen.getByRole("button", { name: "Clean up history" }));
+    await screen.findByTestId("cleanup-preview");
+    await user.click(screen.getByTestId("cleanup-confirm"));
+
+    const alert = await screen.findByTestId("cleanup-error");
+    expect(alert.getAttribute("data-code")).toBe("vowp_command");
+    expect(alert.textContent).toContain("Could not clean up.");
+    expect(alert.textContent).toContain("stackspirit exited 1");
+    expect(screen.getByTestId("cleanup-preview")).toBeTruthy();
+    expect(screen.queryByTestId("cleanup-result")).toBeNull();
+  });
+
+  it("reports freed files and compacted sessions after a confirmed apply", async () => {
+    const user = userEvent.setup();
+    render(<HistoryBrowser project="demo" api={historyApi()} />);
+
+    await user.click(screen.getByRole("button", { name: "Clean up history" }));
+    await screen.findByTestId("cleanup-preview");
+    await user.click(screen.getByTestId("cleanup-confirm"));
+
+    const result = await screen.findByTestId("cleanup-result");
+    expect(result.textContent).toContain("Freed 2 files");
+    expect(result.textContent).toContain("compacted 1 session");
   });
 });

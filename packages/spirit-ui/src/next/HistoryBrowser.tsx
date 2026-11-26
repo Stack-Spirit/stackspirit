@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 
 import type { SpiritBridge } from "../bridge";
 import { toSpiritError } from "../bridge/errors";
@@ -48,16 +48,24 @@ export function filterHistory(
   });
 }
 
-function message(error: unknown): string {
+/** One error line with the typed code and the hint, when the backend supplied one. */
+function errorText(error: unknown): string {
   const normalized = toSpiritError(error);
-  return normalized.hint
-    ? `${normalized.message} ${normalized.hint}`
-    : normalized.message;
+  const hint = normalized.hint ? ` ${normalized.hint}` : "";
+  return `${normalized.message}${hint}`;
+}
+
+function errorCode(error: unknown): string {
+  return toSpiritError(error).code;
 }
 
 /**
  * On-demand history for one project: nothing is requested until the user clicks
  * **Load history**, and clean-up previews first and deletes only after confirmation.
+ *
+ * Every action has three visible outcomes: a busy line while the backend works, a
+ * populated result (even when it is empty), and a banner with the typed error and a
+ * retry when it fails. A click can never end as a silent no-op.
  */
 export function HistoryBrowser({
   project,
@@ -70,15 +78,23 @@ export function HistoryBrowser({
 }) {
   const [jobs, setJobs] = useState<HistoryJobView[] | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ code: string; message: string } | null>(
+    null,
+  );
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [preview, setPreview] = useState<GcReportView | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [cleanError, setCleanError] = useState<string | null>(null);
+  const [cleanError, setCleanError] = useState<{
+    code: string;
+    message: string;
+  } | null>(null);
   const [freed, setFreed] = useState<GcReportView | null>(null);
   const searchId = useId();
+  // The desk keys the whole Workers page by project, so one instance only ever sees
+  // one project. The ticket still drops a slower answer from an earlier click.
+  const request = useRef(0);
 
   if (!api) {
     return (
@@ -90,30 +106,37 @@ export function HistoryBrowser({
 
   async function load() {
     if (!api) return;
+    const ticket = ++request.current;
     setLoading(true);
     setError(null);
     try {
       const next = await api.load(project);
+      if (request.current !== ticket) return;
       setJobs(next);
       onLoaded?.(next);
     } catch (caught) {
-      setError(message(caught));
+      if (request.current !== ticket) return;
+      setError({ code: errorCode(caught), message: errorText(caught) });
     } finally {
-      setLoading(false);
+      if (request.current === ticket) setLoading(false);
     }
   }
 
   async function openCleanup() {
     if (!api) return;
+    const ticket = ++request.current;
     setPreviewing(true);
     setCleanError(null);
     setFreed(null);
     try {
-      setPreview(await api.gcPreview(project));
+      const next = await api.gcPreview(project);
+      if (request.current !== ticket) return;
+      setPreview(next);
     } catch (caught) {
-      setCleanError(message(caught));
+      if (request.current !== ticket) return;
+      setCleanError({ code: errorCode(caught), message: errorText(caught) });
     } finally {
-      setPreviewing(false);
+      if (request.current === ticket) setPreviewing(false);
     }
   }
 
@@ -125,7 +148,7 @@ export function HistoryBrowser({
       setFreed(await api.gcApply(project));
       setPreview(null);
     } catch (caught) {
-      setCleanError(message(caught));
+      setCleanError({ code: errorCode(caught), message: errorText(caught) });
     } finally {
       setApplying(false);
     }
@@ -136,6 +159,13 @@ export function HistoryBrowser({
     (jobs ?? []).filter(
       (job) => key === "all" || historyFilterOf(job.state) === key,
     ).length;
+  const busy = loading
+    ? "Loading history…"
+    : previewing
+      ? "Checking what clean-up would remove…"
+      : applying
+        ? "Cleaning up history…"
+        : null;
 
   return (
     <div className="nx-history" data-testid="history-browser">
@@ -145,6 +175,7 @@ export function HistoryBrowser({
           className="nx-btn nx-btn--sm"
           onClick={() => void load()}
           disabled={loading}
+          aria-busy={loading}
         >
           {loading ? "Loading…" : jobs ? "Reload history" : "Load history"}
         </button>
@@ -153,37 +184,102 @@ export function HistoryBrowser({
           className="nx-btn nx-btn--quiet nx-btn--sm"
           onClick={() => void openCleanup()}
           disabled={previewing}
+          aria-busy={previewing}
         >
           {previewing ? "Checking…" : "Clean up history"}
         </button>
       </div>
-      {error ? (
-        <p className="nx-rows__empty" role="alert" data-testid="history-error">
-          {error}
-        </p>
-      ) : null}
-      {cleanError && !preview ? (
-        <p className="nx-rows__empty" role="alert" data-testid="cleanup-error">
-          {cleanError}
-        </p>
-      ) : null}
-      {freed ? (
+
+      {busy ? (
         <p
-          className="nx-rows__empty"
+          className="nx-notice--status"
+          role="status"
+          aria-live="polite"
+          data-testid="history-loading"
+        >
+          {busy}
+        </p>
+      ) : null}
+
+      {error ? (
+        <div
+          className="nx-notice--error"
+          role="alert"
+          data-testid="history-error"
+          data-code={error.code}
+        >
+          <p>
+            <strong>Could not load history.</strong> {error.message}
+          </p>
+          <button
+            type="button"
+            className="nx-btn nx-btn--sm nx-btn--quiet"
+            onClick={() => void load()}
+            disabled={loading}
+          >
+            Try again
+          </button>
+        </div>
+      ) : null}
+
+      {cleanError && !preview ? (
+        <div
+          className="nx-notice--error"
+          role="alert"
+          data-testid="cleanup-error"
+          data-code={cleanError.code}
+        >
+          <p>
+            <strong>Could not check the clean-up.</strong> {cleanError.message}
+          </p>
+          <button
+            type="button"
+            className="nx-btn nx-btn--sm nx-btn--quiet"
+            onClick={() => void openCleanup()}
+            disabled={previewing}
+          >
+            Try again
+          </button>
+        </div>
+      ) : null}
+
+      {freed ? (
+        <div
+          className="nx-notice--status"
           role="status"
           data-testid="cleanup-result"
         >
-          Freed {freed.deleted_files}{" "}
-          {freed.deleted_files === 1 ? "file" : "files"} (
-          {formatBytes(freed.freed_bytes)}).
-          {freed.errors.length > 0
-            ? ` ${freed.errors.length} could not be removed.`
-            : ""}
-        </p>
+          <p>
+            Freed {freed.deleted_files}{" "}
+            {freed.deleted_files === 1 ? "file" : "files"} (
+            {formatBytes(freed.freed_bytes)}) and compacted{" "}
+            {freed.compacted_sessions}{" "}
+            {freed.compacted_sessions === 1 ? "session" : "sessions"}.
+            {freed.errors.length > 0
+              ? ` ${freed.errors.length} could not be removed.`
+              : ""}
+          </p>
+          {freed.errors.length > 0 ? (
+            <ul>
+              {freed.errors.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
       ) : null}
 
       {jobs ? (
         <section aria-label="Historic jobs">
+          <p
+            className="nx-notice--status"
+            role="status"
+            aria-live="polite"
+            data-testid="history-loaded"
+          >
+            Loaded {jobs.length} historic{" "}
+            {jobs.length === 1 ? "job" : "jobs"} for {project}.
+          </p>
           <div className="nx-rows__tools">
             <label htmlFor={searchId} className="nx-sr">
               Search history
@@ -313,9 +409,16 @@ export function HistoryBrowser({
             </p>
             {preview.eligible_files === 0 ? <p>Nothing to clean up.</p> : null}
             {cleanError ? (
-              <p role="alert" data-testid="cleanup-error">
-                {cleanError}
-              </p>
+              <div
+                className="nx-notice--error"
+                role="alert"
+                data-testid="cleanup-error"
+                data-code={cleanError.code}
+              >
+                <p>
+                  <strong>Could not clean up.</strong> {cleanError.message}
+                </p>
+              </div>
             ) : null}
           </div>
         ) : null}

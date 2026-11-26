@@ -8,6 +8,7 @@ pub mod engine;
 pub mod files;
 pub mod fleet;
 pub mod gates;
+pub mod history;
 pub mod hosts;
 pub mod local_orchestrator;
 pub mod onboarding;
