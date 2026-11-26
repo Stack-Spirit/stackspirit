@@ -22,14 +22,14 @@ ladder = ["opencode:deepseek/deepseek-flash#max"]
 on_quota = "next_then_probe_back"
 
 [profiles.planner]
-ladder = [\"opencode:deepseek/deepseek-flash#max\"]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
 on_quota = "next_then_probe_back"
 [profiles.verifier]
 ladder = ["opencode:deepseek/deepseek-flash#max"]
 on_quota = "next_then_probe_back"
 
 [profiles.worker]
-ladder = [\"opencode:deepseek/deepseek-flash#max\"]
+ladder = ["opencode:deepseek/deepseek-flash#max"]
 on_quota = "next_then_probe_back"
 
 [providers.deepseek]
