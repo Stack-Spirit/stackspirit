@@ -47,12 +47,36 @@ function laneJobs(lanes: JobLanes, key: LaneKey): JobCardView[] {
   return lanes[key];
 }
 
+const CHILD_JOB = /^(.+)-(?:fix|verify)-[^-].*$/;
+
+/**
+ * A retired failed/cancelled `*-fix-*` or `*-verify-*` child whose parent job is already
+ * `replanned` or `done`: it can no longer need a decision, so Needs attention hides it.
+ * Genuine failures (parent still live, or not a child job) stay visible.
+ */
+export function isRetiredChild(job: JobCardView, fleet: FleetView): boolean {
+  if (!/fail|cancel/i.test(job.state)) return false;
+  const parentId = CHILD_JOB.exec(job.job_id)?.[1];
+  if (!parentId) return false;
+  const cards = [
+    ...fleet.lanes.done,
+    ...(fleet.lanes.history ?? []),
+    ...fleet.lanes.running,
+    ...fleet.lanes.ready,
+    ...fleet.lanes.review_fix,
+    ...fleet.lanes.parked_blocked,
+  ];
+  const parent = cards.find((card) => card.job_id === parentId && card.project === job.project);
+  return parent !== undefined && /^(replanned|done)$/.test(parent.state);
+}
+
 /** Every job of a project (or of all projects when `project` is null), tagged with its lane. */
 export function projectJobs(fleet: FleetView | null, project: string | null): ProjectJob[] {
   if (!fleet) return [];
   return LANE_INFO.filter(({ key }) => ACTIVE_LANES.includes(key)).flatMap(({ key }) =>
     laneJobs(fleet.lanes, key)
       .filter((job) => project === null || job.project === project)
+      .filter((job) => key !== "parked_blocked" || !isRetiredChild(job, fleet))
       .map((job) => ({ lane: key, job })),
   );
 }
@@ -119,7 +143,9 @@ export function projectSummaries(fleet: FleetView | null): ProjectSummary[] {
       (project.jobs_by_state.gating ?? 0) +
       (project.jobs_by_state.reviewing ?? 0) +
       (project.jobs_by_state.fixing ?? 0),
-    blocked: count(fleet.lanes.parked_blocked, project.name),
+    blocked: fleet.lanes.parked_blocked.filter(
+      (job) => job.project === project.name && !isRetiredChild(job, fleet),
+    ).length,
     done: (project.jobs_by_state.done ?? 0) + (project.jobs_by_state.replanned ?? 0),
     cancelled: project.jobs_by_state.cancelled ?? 0,
     lastMerge: project.last_merge ?? null,

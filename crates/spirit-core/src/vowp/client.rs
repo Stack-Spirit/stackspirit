@@ -13,6 +13,10 @@ use crate::error::{SpiritError, SpiritErrorCode, code_for_exit};
 use crate::ssh::command::{CommandOutput, INITIAL_TIMEOUT, READ_TIMEOUT, WRITE_TIMEOUT};
 use crate::ssh::{CommandRunner, SshOptions, SshRemote, SshTarget};
 use crate::vowp::asif::{AsifExport, AsifExportOptions, AsifImportOptions, AsifPackage};
+use crate::vowp::history::{
+    GcReportView, HISTORY_GC_OLDER_THAN, HistoryJobView, parse_gc_report, parse_history_jobs,
+    validate_history_project,
+};
 use crate::vowp::local::SurfacePairing;
 use crate::vowp::project::{
     ProjectAddOutcome, ProjectAddRequest, ProjectSource, parse_project_bootstrap,
@@ -90,6 +94,21 @@ pub trait VowpClient: Send + Sync {
             "Changing a job's model is unavailable for this client",
         )
         .with_hint("Connect with a VOWP client that supports `job set-executor`."))
+    }
+    /// Runs `vowp --project <p> --json job ls --all` and keeps the historic jobs.
+    async fn project_history(&self, _project: &str) -> Result<Vec<HistoryJobView>, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "Loading job history is unavailable for this client",
+        ))
+    }
+    /// Runs `vowp --project <p> --json gc --older-than 1d` (preview) or the same with
+    /// `--apply`. Only closed sessions, run output and worktrees can ever be eligible.
+    async fn project_gc(&self, _project: &str, _apply: bool) -> Result<GcReportView, SpiritError> {
+        Err(SpiritError::new(
+            SpiritErrorCode::Gate,
+            "History clean-up is unavailable for this client",
+        ))
     }
     /// Runs `vowp [--project <p>] --json inbox answer <id> <answer>`.
     async fn answer_inbox(
@@ -854,6 +873,36 @@ impl VowpClient for SshVowpClient {
         Ok(())
     }
 
+    async fn project_history(&self, project: &str) -> Result<Vec<HistoryJobView>, SpiritError> {
+        validate_history_project(project)?;
+        let mut argv = self.base_argv();
+        argv.extend(["--project".to_owned(), project.to_owned()]);
+        push_json(&mut argv);
+        argv.extend(["job".to_owned(), "ls".to_owned(), "--all".to_owned()]);
+        let output = self.run(&argv, READ_TIMEOUT).await?;
+        let output = self.check_output(output)?;
+        parse_history_jobs(project, &output.stdout)
+    }
+
+    async fn project_gc(&self, project: &str, apply: bool) -> Result<GcReportView, SpiritError> {
+        validate_history_project(project)?;
+        let mut argv = self.base_argv();
+        argv.extend(["--project".to_owned(), project.to_owned()]);
+        push_json(&mut argv);
+        argv.extend([
+            "gc".to_owned(),
+            "--older-than".to_owned(),
+            HISTORY_GC_OLDER_THAN.to_owned(),
+        ]);
+        if apply {
+            argv.push("--apply".to_owned());
+        }
+        let timeout = if apply { WRITE_TIMEOUT } else { READ_TIMEOUT };
+        let output = self.run(&argv, timeout).await?;
+        let output = self.check_output(output)?;
+        parse_gc_report(&output.stdout)
+    }
+
     async fn answer_inbox(
         &self,
         project: Option<&str>,
@@ -1374,6 +1423,11 @@ struct MockState {
     orchestrator_resume_calls: Vec<String>,
     orchestrator_move_calls: Vec<(String, OrchestratorMoveTarget)>,
     project_add_calls: Vec<ProjectAddRequest>,
+    history_jobs: Vec<HistoryJobView>,
+    history_calls: Vec<String>,
+    gc_preview: Option<GcReportView>,
+    gc_applied: Option<GcReportView>,
+    gc_calls: Vec<(String, bool)>,
     node_cards: Vec<NodeCard>,
     secrets: SecretListView,
 }
@@ -1426,6 +1480,11 @@ impl MockVowpClient {
                 orchestrator_resume_calls: Vec::new(),
                 orchestrator_move_calls: Vec::new(),
                 project_add_calls: Vec::new(),
+                history_jobs: Vec::new(),
+                history_calls: Vec::new(),
+                gc_preview: None,
+                gc_applied: None,
+                gc_calls: Vec::new(),
                 node_cards: Vec::new(),
                 secrets: SecretListView {
                     secrets: Vec::new(),
@@ -1687,6 +1746,50 @@ impl MockVowpClient {
             .clone()
     }
 
+    /// Seeds the historic jobs `project_history` returns.
+    #[must_use]
+    pub fn with_history_jobs(self, jobs: Vec<HistoryJobView>) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .history_jobs = jobs;
+        self
+    }
+
+    /// Seeds the GC preview and the report an apply returns.
+    #[must_use]
+    pub fn with_gc(self, preview: GcReportView, applied: GcReportView) -> Self {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.gc_preview = Some(preview);
+            state.gc_applied = Some(applied);
+        }
+        self
+    }
+
+    /// Projects whose history was loaded.
+    #[must_use]
+    pub fn history_calls(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .history_calls
+            .clone()
+    }
+
+    /// Recorded `(project, apply)` GC calls.
+    #[must_use]
+    pub fn gc_calls(&self) -> Vec<(String, bool)> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .gc_calls
+            .clone()
+    }
+
     /// Makes `probe` fail.
     #[must_use]
     pub fn failing_probe(self, error: SpiritError) -> Self {
@@ -1849,6 +1952,31 @@ impl VowpClient for MockVowpClient {
             .executor_changes
             .push((project.to_owned(), job.to_owned(), executor));
         Ok(())
+    }
+
+    async fn project_history(&self, project: &str) -> Result<Vec<HistoryJobView>, SpiritError> {
+        validate_history_project(project)?;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.history_calls.push(project.to_owned());
+        Ok(state.history_jobs.clone())
+    }
+
+    async fn project_gc(&self, project: &str, apply: bool) -> Result<GcReportView, SpiritError> {
+        validate_history_project(project)?;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.gc_calls.push((project.to_owned(), apply));
+        let report = if apply {
+            state.gc_applied.clone()
+        } else {
+            state.gc_preview.clone()
+        };
+        report.ok_or_else(|| SpiritError::not_found("gc report"))
     }
 
     async fn answer_inbox(

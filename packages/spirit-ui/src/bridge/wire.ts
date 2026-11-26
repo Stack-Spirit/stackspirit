@@ -907,6 +907,42 @@ export interface ProjectAddInput {
 }
 
 /** The result of `project add`. The home-side path VOWP prints is never included. */
+/** One historic (terminal) job from `job ls --all`, loaded on demand for the History tab. */
+export interface HistoryJobView {
+  job_id: string;
+  project: string;
+  title: string;
+  kind: string;
+  role: string;
+  /** `done`, `failed`, `cancelled` or `replanned`. */
+  state: string;
+  updated_at: string | null;
+}
+
+/** Per-class totals of a history clean-up pass; never carries a path. */
+export interface GcClassView {
+  /** `closed_sessions`, `run_output` or `worktrees`. */
+  class: string;
+  files: number;
+  bytes: number;
+  eligible_files: number;
+  eligible_bytes: number;
+}
+
+/** A history clean-up preview (`dry_run`) or the outcome of an applied pass. */
+export interface GcReportView {
+  dry_run: boolean;
+  classes: GcClassView[];
+  /** Candidates protected because they belong to active work. */
+  refused: number;
+  deleted_files: number;
+  freed_bytes: number;
+  compacted_sessions: number;
+  eligible_files: number;
+  eligible_bytes: number;
+  errors: string[];
+}
+
 export interface ProjectAddOutcome {
   project: string;
   initialized: boolean;

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { useFleet, useFleetStore } from "../state/fleetStore";
 import { FleetCanvas } from "../views/fleet/FleetCanvas";
+import { HistoryBrowser } from "./HistoryBrowser";
 import { InboxView } from "./InboxView";
 import { JobRows } from "./JobRows";
 import { DagMap, Whiteboard } from "./NodeMap";
@@ -17,6 +18,7 @@ import { historyJobs, openInbox, jobName, LANE_INFO, projectJobs, projectSummari
 export function WorkersPage({ project, onOpenSession }: { project: string; onOpenSession: () => void }) {
   const fleet = useFleet();
   const setProject = useFleetStore((state) => state.setProject);
+  const bridge = useFleetStore((state) => state.bridge);
   const panel = useShellUi((state) => state.panel);
   const openPanel = useShellUi((state) => state.openPanel);
   const [whiteboard, setWhiteboard] = useState(false);
@@ -111,6 +113,7 @@ export function WorkersPage({ project, onOpenSession }: { project: string; onOpe
                   {summary.lastMerge.commit.slice(0, 8)}
                 </p>
               ) : null}
+              <HistoryBrowser project={project} api={bridge?.history} />
               {history.length === 0 ? null : (
                 <ul className="nx-rows__list">
                   {history.map((job, index) => (

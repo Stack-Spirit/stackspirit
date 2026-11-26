@@ -75,6 +75,8 @@ import type {
   OrchestratorNewInput,
   OrchestratorView,
   ProjectAddInput,
+  GcReportView,
+  HistoryJobView,
   ProjectAddOutcome,
   ProjectView,
   RawDocument,
@@ -2802,6 +2804,70 @@ export class MockBridge implements SpiritBridge {
   /** Test hook: recorded D6 calls in order. */
   recordedLocalCalls(): MockLocalCall[] {
     return clone(this.localCalls);
+  }
+
+  /** Recorded History-tab calls, for tests: `load`, `preview`, `apply` with their project. */
+  historyCalls: Array<{ call: "load" | "preview" | "apply"; project: string }> = [];
+  private gcApplied = false;
+
+  history = {
+    load: async (project: string): Promise<HistoryJobView[]> => {
+      this.historyCalls.push({ call: "load", project });
+      const iso = (offsetMs: number) => new Date(this.nowMs - offsetMs).toISOString();
+      const row = (
+        job_id: string,
+        title: string,
+        kind: string,
+        state: string,
+        offsetMs: number,
+      ): HistoryJobView => ({
+        job_id,
+        project,
+        title,
+        kind,
+        role: kind === "verify" ? "verifier" : "worker",
+        state,
+        updated_at: iso(offsetMs),
+      });
+      return [
+        row("ss-9-history-view", "History view", "build", "done", 3_600_000),
+        row("ss-9-history-view-fix-1", "Fix lint", "fix", "failed", 7_200_000),
+        row("ss-8-old-plan", "Old plan", "build", "replanned", 86_400_000),
+        row("ss-7-dropped", "Dropped idea", "build", "cancelled", 172_800_000),
+      ];
+    },
+    gcPreview: async (project: string): Promise<GcReportView> => {
+      this.historyCalls.push({ call: "preview", project });
+      return this.gcReport(true);
+    },
+    gcApply: async (project: string): Promise<GcReportView> => {
+      this.historyCalls.push({ call: "apply", project });
+      this.gcApplied = true;
+      return this.gcReport(false);
+    },
+  };
+
+  private gcReport(dryRun: boolean): GcReportView {
+    const empty = this.gcApplied && dryRun;
+    const classes = empty
+      ? []
+      : [
+          { class: "closed_sessions", files: 12, bytes: 4_194_304, eligible_files: 9, eligible_bytes: 3_145_728 },
+          { class: "run_output", files: 5, bytes: 2_097_152, eligible_files: 4, eligible_bytes: 1_048_576 },
+        ];
+    const files = classes.reduce((sum, item) => sum + item.eligible_files, 0);
+    const bytes = classes.reduce((sum, item) => sum + item.eligible_bytes, 0);
+    return {
+      dry_run: dryRun,
+      classes,
+      refused: empty ? 0 : 1,
+      deleted_files: dryRun ? 0 : files,
+      freed_bytes: dryRun ? 0 : bytes,
+      compacted_sessions: dryRun ? 0 : 9,
+      eligible_files: files,
+      eligible_bytes: bytes,
+      errors: [],
+    };
   }
 
   /** Recorded `projects.add` inputs, for tests. */

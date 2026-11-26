@@ -20,10 +20,11 @@ use crate::host::{HostId, HostKeyPin, HostProfile, HostProfilePatch, HostStore, 
 use crate::time::{Clock, SystemClock, Timestamp};
 use crate::view::local::{AgentPathView, LocalAgentView, LocalOrchestratorView, LocalSurfaceView};
 use crate::view::{FleetView, OrchestratorView};
+use crate::vowp::history::validate_history_project;
 use crate::vowp::{
-    AgentPairRequest, AgentPairing, AsifExport, AsifExportOptions, AsifImportOptions,
-    LocalAgentClient, OrchestratorMoveTarget, ProjectAddOutcome, ProjectAddRequest, SurfacePairing,
-    VowpClient,
+    AgentPairRequest, AgentPairing, AsifExport, AsifExportOptions, AsifImportOptions, GcReportView,
+    HistoryJobView, LocalAgentClient, OrchestratorMoveTarget, ProjectAddOutcome, ProjectAddRequest,
+    SurfacePairing, VowpClient,
 };
 use crate::wire::{
     AgentPathAddRequest, AgentPathMap, AsifImportResponse, NodeCard, NodeName, OrchestratorApp,
@@ -711,6 +712,38 @@ impl SpiritCore {
         request.validate()?;
         self.require_connected_host()?;
         client.project_add(request).await
+    }
+
+    /// Loads every historic job of a project. Explicit user action only.
+    pub async fn project_history(
+        &self,
+        client: &dyn VowpClient,
+        project: &str,
+    ) -> Result<Vec<HistoryJobView>, SpiritError> {
+        validate_history_project(project)?;
+        self.require_connected_host()?;
+        client.project_history(project).await
+    }
+
+    /// Previews (`apply == false`) or applies the 1-day history clean-up for a project.
+    /// An apply is only accepted when `confirmed` is true, so a caller cannot delete
+    /// without the user having seen the preview.
+    pub async fn project_gc(
+        &self,
+        client: &dyn VowpClient,
+        project: &str,
+        apply: bool,
+        confirmed: bool,
+    ) -> Result<GcReportView, SpiritError> {
+        validate_history_project(project)?;
+        if apply && !confirmed {
+            return Err(SpiritError::invalid_input(
+                "confirmation",
+                "clean-up needs an explicit confirmation",
+            ));
+        }
+        self.require_connected_host()?;
+        client.project_gc(project, apply).await
     }
 
     /// Builds the honest local surface cards: node, protocol, agent status, lease

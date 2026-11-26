@@ -54,6 +54,8 @@ import type {
   OrchestratorNewInput,
   OrchestratorView,
   ProjectAddInput,
+  GcReportView,
+  HistoryJobView,
   ProjectAddOutcome,
   RawDocument,
   RemoteDeleteInput,
@@ -255,6 +257,18 @@ export interface SpiritBridge {
    */
   projects?: {
     add(input: ProjectAddInput): Promise<ProjectAddOutcome>;
+  };
+
+  /**
+   * On-demand History tab calls. Never invoked on connect or render: `load` runs when the
+   * user clicks **Load history**; `gcPreview` lists what the 1-day clean-up would remove
+   * and deletes nothing; `gcApply` runs it only after the user confirmed the preview. The
+   * pass never touches active work or the job database. Absent on read-only bridges.
+   */
+  history?: {
+    load(project: string): Promise<HistoryJobView[]>;
+    gcPreview(project: string): Promise<GcReportView>;
+    gcApply(project: string): Promise<GcReportView>;
   };
 
   connection: {
