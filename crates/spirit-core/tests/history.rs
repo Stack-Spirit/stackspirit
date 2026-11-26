@@ -82,10 +82,11 @@ const JOBS: &str = r#"[
 const GC_JSON: &str = r#"{"generated_at":"2026-11-26T00:00:00Z","dry_run":true,
  "classes":[
   {"class":"production","files":9,"bytes":9000,"eligible_files":0,"eligible_bytes":0,"sample_paths":["/home/owner/x"]},
-  {"class":"closed_sessions","files":4,"bytes":4096,"eligible_files":3,"eligible_bytes":3000,"sample_paths":["/home/owner/s"]},
+  {"class":"closed_session","files":4,"bytes":4096,"eligible_files":3,"eligible_bytes":3000,"sample_paths":["/home/owner/s"]},
   {"class":"run_output","files":2,"bytes":2048,"eligible_files":2,"eligible_bytes":2000,"sample_paths":[]},
+  {"class":"cache","files":1,"bytes":4,"eligible_files":1,"eligible_bytes":4,"sample_paths":[]},
   {"class":"secrets","files":1,"bytes":10,"eligible_files":0,"eligible_bytes":0,"sample_paths":[]}],
- "refused":[{"class":"closed_sessions","session":"s1","path":"/home/owner/s1","reason":"lease"}],
+ "refused":[{"class":"closed_session","session":"s1","path":"/home/owner/s1","reason":"lease"}],
  "deleted_files":0,"freed_bytes":0,"compacted_sessions":0,"closed_windows":0,"errors":[]}"#;
 
 #[test]
@@ -101,13 +102,13 @@ fn history_keeps_only_terminal_jobs_newest_first() {
 }
 
 #[test]
-fn gc_report_is_path_free_and_limited_to_history_classes() {
+fn gc_report_is_path_free_and_counts_every_eligible_class() {
     let report = parse_gc_report(GC_JSON.as_bytes()).unwrap();
     assert!(report.dry_run);
     let classes: Vec<&str> = report.classes.iter().map(|c| c.class.as_str()).collect();
-    assert_eq!(classes, ["closed_sessions", "run_output"]);
-    assert_eq!(report.eligible_files, 5);
-    assert_eq!(report.eligible_bytes, 5000);
+    assert_eq!(classes, ["closed_session", "run_output", "cache"]);
+    assert_eq!(report.eligible_files, 6);
+    assert_eq!(report.eligible_bytes, 5004);
     assert_eq!(report.refused, 1);
     let json = serde_json::to_string(&report).unwrap();
     assert!(!json.contains("/home/owner"), "no home-side paths: {json}");

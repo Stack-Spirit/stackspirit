@@ -39,7 +39,7 @@ pub struct HistoryJobView {
 /// Per-class totals of one GC pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcClassView {
-    /// Lifecycle class (`closed_sessions`, `run_output`, `worktrees`, ...).
+    /// Lifecycle class (`closed_session`, `run_output`, `worktree`, `cache`, ...).
     pub class: String,
     /// Files in the class.
     pub files: u64,
@@ -73,9 +73,6 @@ pub struct GcReportView {
     /// Errors VOWP reported while applying.
     pub errors: Vec<String>,
 }
-
-/// Classes the History clean-up may report; everything else is dropped from the view.
-const GC_CLASSES: [&str; 3] = ["closed_sessions", "run_output", "worktrees"];
 
 /// Validates the project for a history call.
 pub fn validate_history_project(project: &str) -> Result<(), SpiritError> {
@@ -149,15 +146,19 @@ pub fn parse_gc_report(stdout: &[u8]) -> Result<GcReportView, SpiritError> {
             rows.iter()
                 .filter_map(|row| {
                     let class = row.get("class").and_then(Value::as_str)?;
-                    if !GC_CLASSES.contains(&class) {
+                    let eligible_files = number(row, "eligible_files");
+                    let eligible_bytes = number(row, "eligible_bytes");
+                    // `gc --apply` can delete any class, so every class with eligible
+                    // work is counted; classes with nothing to delete are not shown.
+                    if eligible_files == 0 && eligible_bytes == 0 {
                         return None;
                     }
                     Some(GcClassView {
                         class: class.to_owned(),
                         files: number(row, "files"),
                         bytes: number(row, "bytes"),
-                        eligible_files: number(row, "eligible_files"),
-                        eligible_bytes: number(row, "eligible_bytes"),
+                        eligible_files,
+                        eligible_bytes,
                     })
                 })
                 .collect()

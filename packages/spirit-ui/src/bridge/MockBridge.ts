@@ -2852,7 +2852,7 @@ export class MockBridge implements SpiritBridge {
     const classes = empty
       ? []
       : [
-          { class: "closed_sessions", files: 12, bytes: 4_194_304, eligible_files: 9, eligible_bytes: 3_145_728 },
+          { class: "closed_session", files: 12, bytes: 4_194_304, eligible_files: 9, eligible_bytes: 3_145_728 },
           { class: "run_output", files: 5, bytes: 2_097_152, eligible_files: 4, eligible_bytes: 1_048_576 },
         ];
     const files = classes.reduce((sum, item) => sum + item.eligible_files, 0);

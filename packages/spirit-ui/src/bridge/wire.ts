@@ -921,7 +921,7 @@ export interface HistoryJobView {
 
 /** Per-class totals of a history clean-up pass; never carries a path. */
 export interface GcClassView {
-  /** `closed_sessions`, `run_output` or `worktrees`. */
+  /** a VOWP lifecycle class such as `closed_session`, `run_output`, `worktree` or `cache`. */
   class: string;
   files: number;
   bytes: number;

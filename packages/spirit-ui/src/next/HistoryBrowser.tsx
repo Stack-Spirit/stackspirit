@@ -17,9 +17,12 @@ const FILTERS: ReadonlyArray<{ key: Filter; label: string }> = [
 ];
 
 const CLASS_LABEL: Record<string, string> = {
-  closed_sessions: "Closed sessions",
+  closed_session: "Closed sessions",
   run_output: "Run outputs",
-  worktrees: "Worktrees",
+  worktree: "Worktrees",
+  cache: "Caches",
+  sample: "Host samples",
+  job_window: "Job windows",
 };
 
 /** `done` and `replanned` both read as completed work; `failed` and `cancelled` stand alone. */
