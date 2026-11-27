@@ -5,11 +5,18 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   configureCloudRuntime,
   resetCloudAccount,
-  type CloudAccountApi,
+  type CloudAccount,
+  type CloudMachine,
   type CloudRelayConnector,
+  type DeviceAuthorization,
+  type DevicePollState,
+  type ManagedPlanCatalog,
+  type ProvisioningStatus,
   type RelayConnectionStatus,
   type RelayHttpResponse,
   type RelayScope,
+  type RelayTicket,
+  type RelayTicketRequest,
 } from "@stackspirit/ui";
 
 import {
@@ -22,22 +29,61 @@ import {
   JOBS,
   SESSIONS,
 } from "../test/fakes";
+import type { WebAuthClient } from "../auth/client";
 import { CloudApp } from "./CloudApp";
 import type { WebCloudRuntime } from "../cloud/runtime";
 import { RELAY_BRIDGE_ORIGIN } from "../bridge/relayBridge";
 
-const MACHINE = {
+const ACCOUNT: CloudAccount = {
+  id: "acct_1",
+  email: "owner@example.com",
+  name: "Owner",
+};
+
+const MACHINE: CloudMachine = {
   id: "mch_online",
   name: "contabo-1",
-  status: "online" as const,
+  status: "online",
   project: "vowp",
   last_seen_at: "2026-11-26T10:00:00.000Z",
   provisioning: null,
 };
 
-class FakeClient implements CloudAccountApi {
+class FakeClient implements WebAuthClient {
   hasSession = false;
-  async startDeviceSignIn() {
+
+  constructor(private readonly machines: CloudMachine[] = [MACHINE]) {}
+
+  oauthStartUrl(provider: "google" | "github"): string {
+    return `https://api.stackspirit.io/v1/auth/${provider}/start`;
+  }
+
+  async signUp(email: string): Promise<{
+    email: string;
+    verificationRequired: boolean;
+    signedIn: boolean;
+  }> {
+    this.hasSession = true;
+    return { email, verificationRequired: false, signedIn: true };
+  }
+
+  async verifyEmail(): Promise<{ signedIn: boolean }> {
+    this.hasSession = true;
+    return { signedIn: true };
+  }
+
+  async login(): Promise<void> {
+    this.hasSession = true;
+  }
+
+  async createEnrollmentToken(): Promise<{ token: string; expires_at: string }> {
+    return {
+      token: "enrollment-token-value",
+      expires_at: "2026-11-26T10:15:00.000Z",
+    };
+  }
+
+  async startDeviceSignIn(): Promise<DeviceAuthorization> {
     return {
       device_code: "device-1",
       user_code: "ABCD-EFGH",
@@ -48,17 +94,22 @@ class FakeClient implements CloudAccountApi {
       expires_at: "2026-11-26T10:10:00.000Z",
     };
   }
-  async pollDeviceSignIn() {
+
+  async pollDeviceSignIn(): Promise<DevicePollState> {
     this.hasSession = true;
-    return "authorized" as const;
+    return "authorized";
   }
-  async account() {
-    return { id: "acct_1", email: "owner@example.com", name: "Owner" };
+
+  async account(): Promise<CloudAccount> {
+    return ACCOUNT;
   }
-  async listMachines() {
-    return [MACHINE];
+
+  async listMachines(): Promise<CloudMachine[]> {
+    return this.machines;
   }
-  async mintRelayTicket(machineId: string) {
+
+  async mintRelayTicket(machineId: string, _request: RelayTicketRequest): Promise<RelayTicket> {
+    void _request;
     return {
       ticket: "ticket",
       expires_at: "2026-11-26T10:05:00.000Z",
@@ -72,7 +123,8 @@ class FakeClient implements CloudAccountApi {
       },
     };
   }
-  async getPlans() {
+
+  async getPlans(): Promise<ManagedPlanCatalog> {
     return {
       plans: [
         {
@@ -91,7 +143,8 @@ class FakeClient implements CloudAccountApi {
       backups: { monthly_eur: 3.5, recommended: true, provider: "cloudflare-r2" },
     };
   }
-  async getProvisioning() {
+
+  async getProvisioning(): Promise<ProvisioningStatus> {
     return {
       machine_id: MACHINE.id,
       phase: "provisioning" as const,
@@ -102,6 +155,7 @@ class FakeClient implements CloudAccountApi {
       home_url: null,
     };
   }
+
   clearSession(): void {
     this.hasSession = false;
   }
@@ -173,6 +227,19 @@ function ok(body: unknown): RelayHttpResponse {
   };
 }
 
+function makeRuntime(client: FakeClient, relay: FakeRelay): WebCloudRuntime {
+  return {
+    client,
+    auth: client,
+    relay,
+    dispose() {
+      relay.disconnect();
+      resetCloudAccount();
+      client.clearSession();
+    },
+  };
+}
+
 beforeEach(() => {
   resetCloudAccount();
   window.history.replaceState(null, "", "/cloud");
@@ -183,31 +250,85 @@ afterEach(() => {
 });
 
 describe("Web Always-On Homes route", () => {
-  it("stays optional and offers the local daemon path", async () => {
-    const client = new FakeClient();
-    const relay = new FakeRelay();
-    configureCloudRuntime({ client, relay });
-    render(<CloudApp runtime={makeRuntime(client, relay)} />);
-
-    expect(screen.getByTestId("cloud-app")).toBeInTheDocument();
-    expect(screen.getByTestId("cloud-local-default")).toHaveTextContent(/needs no account/i);
-    expect(screen.getByRole("link", { name: /Continue with a local daemon/i })).toHaveAttribute(
-      "href",
-      "/",
-    );
-    // Public plans are visible without signing in.
-    expect(await screen.findByTestId("managed-plans")).toHaveTextContent("Home 8");
-  });
-
-  it("signs in, connects an online Home and mounts the existing read-only cockpit", async () => {
+  it("puts Google, GitHub and email sign-in first and hides the local daemon detail", async () => {
     const client = new FakeClient();
     const relay = new FakeRelay();
     configureCloudRuntime({ client, relay });
     const user = userEvent.setup();
     render(<CloudApp runtime={makeRuntime(client, relay)} />);
 
-    await user.click(screen.getByTestId("cloud-sign-in"));
-    await user.click(await screen.findByTestId("cloud-poll"));
+    expect(screen.getByTestId("cloud-app")).toBeInTheDocument();
+    expect(screen.getByTestId("auth-google")).toHaveAttribute(
+      "href",
+      "https://api.stackspirit.io/v1/auth/google/start",
+    );
+    expect(screen.getByTestId("auth-github")).toHaveAttribute(
+      "href",
+      "https://api.stackspirit.io/v1/auth/github/start",
+    );
+    expect(screen.getByTestId("auth-mode-sign-up")).toBeInTheDocument();
+    expect(screen.queryByTestId("local-daemon-details")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("local-daemon-toggle"));
+    expect(screen.getByTestId("local-daemon-details")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Continue with a local daemon/i })).toHaveAttribute(
+      "href",
+      "/",
+    );
+
+    // Plans stay behind the explicit "See plans" disclosure until asked for.
+    expect(screen.queryByTestId("managed-plans")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("managed-homes-expand"));
+    expect(await screen.findByTestId("managed-plans")).toHaveTextContent("Home 8");
+  });
+
+  it("signs in with email and offers the two post-signup onboarding paths", async () => {
+    const client = new FakeClient([]);
+    const relay = new FakeRelay();
+    configureCloudRuntime({ client, relay });
+    const user = userEvent.setup();
+    render(<CloudApp runtime={makeRuntime(client, relay)} />);
+
+    await user.type(screen.getByLabelText("Email"), "owner@example.com");
+    await user.type(screen.getByLabelText("Password"), "correct-horse-battery");
+    await user.click(screen.getByTestId("auth-submit"));
+
+    const onboarding = await screen.findByTestId("web-onboarding");
+    expect(onboarding).toHaveTextContent(/Connect your existing Always-On Machine/i);
+    expect(onboarding).toHaveTextContent(/Need an Always-On Machine/i);
+
+    await user.type(screen.getByLabelText("Machine name"), "contabo-existing");
+    await user.click(screen.getByTestId("onboard-create-token"));
+    expect(await screen.findByTestId("web-enroll-token")).toHaveTextContent(
+      "enrollment-token-value",
+    );
+
+    await user.click(screen.getByTestId("onboard-open-plans"));
+    expect(await screen.findByTestId("managed-plans")).toHaveTextContent("Home 8");
+  });
+
+  it("accepts the #auth_token callback, stores the session and scrubs the URL", async () => {
+    const client = new FakeClient();
+    const relay = new FakeRelay();
+    configureCloudRuntime({ client, relay });
+    window.history.replaceState(null, "", "/cloud#auth_token=auth-token-value");
+    render(<CloudApp runtime={makeRuntime(client, relay)} />);
+
+    expect(await screen.findByTestId("cloud-account")).toHaveTextContent(
+      "owner@example.com",
+    );
+    expect(window.location.pathname).toBe("/cloud");
+    expect(window.location.hash).toBe("");
+  });
+
+  it("connects an online Home and mounts the existing read-only cockpit", async () => {
+    const client = new FakeClient();
+    const relay = new FakeRelay();
+    configureCloudRuntime({ client, relay });
+    window.history.replaceState(null, "", "/cloud#auth_token=auth-token-value");
+    const user = userEvent.setup();
+    render(<CloudApp runtime={makeRuntime(client, relay)} />);
+
     await screen.findByTestId("cloud-account");
     await user.click(screen.getByTestId("cloud-connect-mch_online"));
 
@@ -221,15 +342,3 @@ describe("Web Always-On Homes route", () => {
     });
   });
 });
-
-function makeRuntime(client: FakeClient, relay: FakeRelay): WebCloudRuntime {
-  return {
-    client,
-    relay,
-    dispose() {
-      relay.disconnect();
-      resetCloudAccount();
-      client.clearSession();
-    },
-  };
-}

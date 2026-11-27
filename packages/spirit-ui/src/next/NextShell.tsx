@@ -321,8 +321,6 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
           });
         }}
         onFormCluster={() => setClusterFormOpen(true)}
-        theme={theme}
-        onTheme={setTheme}
         resizeHandle={side.handleProps}
         resizing={side.dragging}
         onOpenRaw={() => setRawOpen(true)}

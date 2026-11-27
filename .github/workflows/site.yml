@@ -1,0 +1,28 @@
+name: Site
+
+on:
+  push:
+    paths:
+      - "apps/site/**"
+      - "design/brand/**"
+      - ".github/workflows/site.yml"
+  pull_request:
+    paths:
+      - "apps/site/**"
+      - "design/brand/**"
+      - ".github/workflows/site.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  layout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip playwright
+      - run: python -m playwright install --with-deps chromium
+      - run: python apps/site/scripts/verify-layout.py

@@ -1,230 +1,157 @@
 # StackSpirit
 
-**StackSpirit** is the free, MIT-licensed home for your AI coding agents: an always-on machine
-(a VPS, spare laptop or home server) plus the tools to run and watch it. Work keeps running
-after your laptop closes, and you can drive it from the desktop app, a mobile-first web app, the
-`stackspirit` CLI, or any harness over MCP. See [`docs/STRATEGY.md`](docs/STRATEGY.md) for the
+**StackSpirit** is the free, MIT-licensed home for your AI coding agents: bring your own VPS, spare
+laptop or home server, and work keeps running after your laptop closes. The software is free to
+run; you pay only for the machine you choose, and [`docs/STRATEGY.md`](docs/STRATEGY.md) records the
 vision, brand rules and roadmap.
 
-This repository is one open-source monorepo:
+## Install
+
+StackSpirit 0.6.1 is released on GitHub, npm and PyPI for Linux and macOS on x86_64 and arm64.
+Windows and musl/Alpine are not shipped targets; use WSL 2 on Windows, or build from source.
+
+### Run from npm or PyPI
+
+The npm launcher needs Node.js 18 or newer; the wheels need Python 3.9 or newer. Both commands run
+the released `stackspirit` CLI without a global install:
+
+```sh
+npx -y stackspirit@0.6.1 --version
+uvx stackspirit==0.6.1 --version
+```
+
+For a permanent install, use `npm install -g stackspirit@0.6.1` or
+`pip install stackspirit==0.6.1`. Both put the `stackspirit` CLI, the preserved `vowp` alias,
+`stackspirit-daemon` and `vowp-daemon` on `PATH`. If you previously installed the frozen `vowp`
+npm package, run `npm uninstall -g vowp` first; both packages provide a global `vowp` command.
+
+### Prebuilt archives
+
+[The v0.6.1 release](https://github.com/Stack-Spirit/stackspirit/releases/tag/v0.6.1) publishes
+`stackspirit-0.6.1-<target>.tar.gz` for four native targets, matching `.sha256` files and one
+combined `SHA256SUMS`. The legacy `vowp-0.6.1-<target>.tar.gz` archives are published beside them.
+
+| Platform | Architecture | Archive |
+|---|---|---|
+| Linux (glibc 2.35 or newer) | x86_64 | `stackspirit-0.6.1-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux (glibc 2.35 or newer) | arm64 | `stackspirit-0.6.1-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS | Intel | `stackspirit-0.6.1-x86_64-apple-darwin.tar.gz` |
+| macOS | Apple silicon | `stackspirit-0.6.1-aarch64-apple-darwin.tar.gz` |
+
+Each `stackspirit` archive contains `stackspirit`, `vowp`, `stackspirit-daemon`,
+`vowp-daemon`, `LICENSE`, `README.md` and `THIRD-PARTY-LICENSES.md`. Download, verify and check
+both CLI names:
+
+```sh
+VERSION=0.6.1
+TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
+BASE=https://github.com/Stack-Spirit/stackspirit/releases/download/v$VERSION
+
+curl -fLO "$BASE/stackspirit-$VERSION-$TARGET.tar.gz"
+curl -fLO "$BASE/stackspirit-$VERSION-$TARGET.tar.gz.sha256"
+curl -fLO "$BASE/SHA256SUMS"
+
+sha256sum -c "stackspirit-$VERSION-$TARGET.tar.gz.sha256"   # macOS: shasum -a 256 -c ...
+tar -xzf "stackspirit-$VERSION-$TARGET.tar.gz"
+"./stackspirit-$VERSION-$TARGET/stackspirit" --version       # stackspirit 0.6.1
+"./stackspirit-$VERSION-$TARGET/vowp" --version              # vowp 0.6.1
+```
+
+Both commands must print `stackspirit 0.6.1` and `vowp 0.6.1`. The macOS archives are not
+code-signed or notarized, so Gatekeeper may ask you to confirm the first run.
+
+> **Homebrew is not published yet.** The release workflow renders a formula artifact, but this
+> repository does not create or push a tap. There is no supported `brew install` path; use npm,
+> PyPI, an archive or a source build.
+
+### Desktop app
+
+0.6.1 does not ship a signed or notarized desktop installer; the desktop is not part of the CLI
+archives, npm package or wheels. Build the Tauri 2 app from source with Node 22 and Rust 1.90:
+
+```sh
+git clone https://github.com/Stack-Spirit/stackspirit.git
+cd stackspirit
+npm ci
+node scripts/fetch-engine.mjs
+(cd apps/spirit-desktop && npx tauri build)   # release bundle
+(cd apps/spirit-desktop && npx tauri dev)     # development window
+```
+
+`node scripts/fetch-engine.mjs` downloads and checksum-verifies the pinned `opencode` sidecar that
+the app bundles and supervises as the StackSpirit Engine. The build is unsigned (no Developer ID
+and no notarization), so Gatekeeper may require an explicit first-launch approval if the app
+carries a quarantine flag. Linux host packages and the container build are in
+[`docs/DEV-SETUP.md`](docs/DEV-SETUP.md).
+
+Read the [0.6.1 release note](runtime/docs/release/0.6.1.md) for the patch changes and
+[`SECURITY.md`](SECURITY.md) for the security model and vulnerability-reporting route.
+
+## Surfaces
 
 | Surface | Path | What it is |
 |---|---|---|
-| Desktop | `apps/spirit-desktop` | Tauri 2 + React/TypeScript cockpit: add a VPS once, **Connect**, and see workers, job graphs, capacity and sessions. |
-| Web (mobile-first PWA) | `apps/spirit-web` | Read-only Web cockpit over the daemon HTTP/SSE API, reusing the shared UI. |
-| Shared UI | `packages/spirit-ui` | `@stackspirit/ui`: design system, views, store, `SpiritBridge` contract and `MockBridge`. |
-| Desktop core | `crates/spirit-core`, `crates/spirit-cli` | Rust host/SSH/VOWP logic used by the desktop, and the thin `spirit` CLI over it. |
-| Core runtime | `runtime/` | The Rust CLI, daemon, MCP server and relay, plus npm/PyPI/Homebrew packaging. |
+| Desktop | `apps/spirit-desktop` | Tauri 2 + React/TypeScript cockpit: add a server once, connect over pinned SSH, and see workers, job graphs, capacity, sessions and orchestrator chat. An optional StackSpirit Account sign-in and Always-On Home selector live in Settings → StackSpirit Cloud; local/SSH mode needs no account ([`docs/STRATEGY.md`](docs/STRATEGY.md) §4). |
+| Web/PWA | `apps/spirit-web` | Mobile-first PWA: a read-only daemon cockpit at `/` over the daemon HTTP/SSE API, plus an optional StackSpirit Account/Always-On Homes app at `/cloud`. Account sign-in is optional, and its token lives in memory only. It reuses the shared UI and ships `manifest.webmanifest` and `sw.js`, so it installs as a PWA. |
+| Shared UI | `packages/spirit-ui` | `@stackspirit/ui`: design system, Meadow views, store, `SpiritBridge` contract and `MockBridge`. |
+| Released CLI, daemons and MCP | `runtime/` | The `stackspirit` CLI built from the separate `runtime/` Cargo workspace, with the `vowp` alias preserved, plus `stackspirit-daemon`, `vowp-daemon` and `stackspirit mcp`. This is the released product CLI. |
+| Desktop core | `crates/spirit-core` | Rust host, SSH, VOWP JSON and engine-supervision logic used by the desktop. |
+| Developer helper | `crates/spirit-cli` | The thin `spirit` CLI over `crates/spirit-core`: host profiles, fleet, capacity, gates, engine status and fixtures. A developer/testing helper, not the released `stackspirit` CLI. |
 
-The desktop also bundles and supervises `opencode` as the **StackSpirit Engine**, so users can
-run immediately with included models or their own provider API keys (local OS keychain, or the
-VOWP vault on the connected server) while existing `opencode` or `claude-code` installs stay
-supported.
+The desktop bundles and supervises `opencode` as the StackSpirit Engine, so it can run with
+included models or your own provider keys while existing `opencode` and `claude-code` installs stay
+supported. Provider keys stay local (a mode-`0600` file) or in the connected server's `vowp secret`
+vault; they never reach argv, logs or the assistant's context. See [`SECURITY.md`](SECURITY.md).
 
-## Surface Order
+The Universal Harness Registry in Settings → Advanced → Harnesses adds one-click connect for the
+presets in [`docs/HARNESSES.md`](docs/HARNESSES.md). The orchestrator chat contract, including the
+non-streaming setup caveat and the Server/Local gates, is in
+[`docs/ORCHESTRATOR-CHAT.md`](docs/ORCHESTRATOR-CHAT.md).
 
-1. **Desktop first (`apps/spirit-desktop` + `crates/spirit-core`)**.
-2. **Web second (`apps/spirit-web`)**: read-only, reuses `@stackspirit/ui`, and shows unavailable
-   capacity, host and engine data explicitly instead of inventing it.
-3. **CLI third (`crates/spirit-cli`)**: thin Rust `spirit` CLI over `crates/spirit-core`.
-
-The runtime under `runtime/` is a separate Cargo workspace with its own toolchain, tests and
-release flow; see [`runtime/README.md`](runtime/README.md).
-
-## Quick start
+## Develop
 
 Node 22 and Rust 1.90 are the supported toolchains. The desktop needs the pinned engine sidecar
-before `tauri dev` or a Tauri bundle; see [Fetching the sidecar](#fetching-the-sidecar).
+before `tauri dev` or a Tauri bundle.
 
 ```sh
 npm ci
 node scripts/fetch-engine.mjs               # pinned, checksum-verified sidecar
 (cd apps/spirit-desktop && npx tauri dev)   # desktop app
-cargo run -p spirit-cli -- --help           # spirit CLI
-npm run dev:web                             # read-only Web shell
+cargo run -p spirit-cli -- --help           # developer helper CLI
+npm run dev:web                             # Web/PWA: cockpit and /cloud
 ```
 
 The desktop runs Meadow (`packages/spirit-ui/src/next`), the only desktop shell: a chat-first
-layout with the sprout-face mark, light and dark themes that follow the system, and the
-server, workers and details views. In preview mode (`VITE_SPIRIT_MOCK=1`), `?scenario=`
-switches the MockBridge data without a restart. Brand sources and the icon builder live in
-`design/brand`.
+layout with the sprout-face mark, light and dark themes that follow the system, and the server,
+workers and details views. In preview mode (`VITE_SPIRIT_MOCK=1`), `?scenario=` switches the
+MockBridge data without a restart. Brand sources and the icon builder live in `design/brand`.
 
-The Web shell is read-only and has no browser token. Set `VITE_SPIRIT_MOCK=1` for the shared
+The Web/PWA app serves the read-only daemon cockpit at `/` and the optional account/Always-On
+Homes app at `/cloud` (`?cloud=1` also opens it). The daemon cockpit is still token-free and
+read-only; a signed-in account token lives in memory only. Set `VITE_SPIRIT_MOCK=1` for the shared
 `MockBridge` preview, or set the loopback proxy target and browser origin for a live daemon; see
-[`docs/WEB.md`](docs/WEB.md). The CLI quickstart, fixture mode, and exit codes are in
+[`docs/WEB.md`](docs/WEB.md). The `spirit` helper's commands, fixture mode and exit codes are in
 [`crates/spirit-cli/README.md`](crates/spirit-cli/README.md).
 
-## Repository layout
-
-| Path | Role |
-|---|---|
-| `crates/spirit-core` | Rust core: host profiles, outbound SSH, VOWP JSON parsing, view models, and engine supervision. |
-| `apps/spirit-desktop` | Tauri 2 shell. `src/main.tsx` creates a `SpiritBridge` and mounts the shared shell; `src/bridge/TauriBridge.ts` is the only renderer file allowed to import `@tauri-apps/api`. |
-| `packages/spirit-ui` | `@stackspirit/ui`: the reusable React cockpit (design-system primitives, views, store), the `SpiritBridge` contract, and `MockBridge`. It is exported from TypeScript source, so Vite and Vitest consume it without a separate build step. |
-| `apps/spirit-web` | `@stackspirit/web`: read-only Web cockpit over the VOWP daemon HTTP/SSE API. It reuses `@stackspirit/ui`, sends no browser token, and shows unavailable daemon data explicitly. |
-| `crates/spirit-cli` | `spirit` CLI over `spirit-core`: host profiles, fleet, capacity, gates, engine status, JSON output, and fixture mode. |
-| `runtime/` | Separate Cargo workspace: `stackspirit`/`vowp` CLI, daemon, MCP server, relay, and the npm, PyPI and Homebrew packaging. Build and test it with `cd runtime && cargo test --workspace`. |
-
-The root `npm` workspaces cover `apps/*` and `packages/*`. `npm test` runs the shared UI suite
-and then the desktop and Web suites; `npm run test:e2e` runs the desktop and Web Playwright flows.
-
-## Documentation
-
-- [`docs/HANDOFF-DESKTOP-UI.md`](docs/HANDOFF-DESKTOP-UI.md) — start here for the desktop UI
-  redesign: owner decisions (brand, layout, naming, sessions, SSH and secrets), real versus
-  preview features, and next steps.
-
-- [`docs/ORCHESTRATOR-CHAT.md`](docs/ORCHESTRATOR-CHAT.md) — the orchestrator chat
-  contract: the bundled-engine setup assistant, the honest non-streaming
-  (`streaming_supported: false`) caveat, the Server chat and Local/Server switch gates, and
-  the owner checklist. The static check and checklist live in
-  [`scripts/verify-orchestrator-chat.mjs`](scripts/verify-orchestrator-chat.mjs).
-
-- [`SECURITY.md`](SECURITY.md) — the implemented security model: SSH host-key pinning, the
-  app-owned SSH key, one-time-password onboarding, server secrets in VOWP's vault, and the
-  honest limits (VOWP `0.4.0` does not encrypt the vault at rest).
-
-- [`docs/RELEASE-DESKTOP-MVP.md`](docs/RELEASE-DESKTOP-MVP.md) — Desktop MVP release and
-  closeout note: scope, evidence, limitations, and owner sign-off status.
-- [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md) — D5 ASIF release and closeout note:
-  shipped core/bridge/Sessions UI, capability-probe evidence, the local CLI round trip, the
-  pending owner-run live smoke, and the `ss-13-asif-core`, `ss-14-asif-bridge`, and
-  `ss-15-asif-ui` evidence status.
-- [`docs/RELEASE-D6.md`](docs/RELEASE-D6.md) — D6 local-orchestrator release and closeout note:
-  shipped core/bridge/Engine UI, the `LocalOrchestratorGate` capability gate, the D6 core,
-  bridge, and panel test evidence, and the pending owner-run live setup and smoke.
-- [`docs/DEV-SETUP.md`](docs/DEV-SETUP.md) — non-root Linux Docker build container for the Tauri
-  host and desktop UI gates.
-- [`docs/OWNER-VERIFICATION.md`](docs/OWNER-VERIFICATION.md) — owner-run macOS/Linux/Windows
-  checklist, evidence template, and sign-off rule.
-- [`docs/WEB.md`](docs/WEB.md) — W1 Web contract, implementation status, and daemon route gaps.
-- [`crates/spirit-cli/README.md`](crates/spirit-cli/README.md) — CLI commands, storage, fixture
-  mode, and exit codes.
-
-## StackSpirit Engine (Phase D4)
-
-The desktop ships a pinned `opencode` sidecar as the **StackSpirit Engine** and never asks the user
-to install or configure `opencode` in the normal onboarding path.
-
-- **Bundled and verified.** `engine/manifest.json` pins the release, archive SHA-256, source and
-  license. `scripts/fetch-engine.mjs` downloads the archive for a target triple, verifies the
-  checksum, extracts the sidecar to
-  `apps/spirit-desktop/src-tauri/binaries/opencode-<target-triple>`, and records the extracted
-  binary digest in a generated lock file next to it. The binary is never committed.
-- **Supervised locally.** `spirit-core::engine::ProcessEngineRuntime` starts the sidecar with
-  `serve --hostname 127.0.0.1 --port <ephemeral>`, probes `/global/health`, restarts with capped
-  backoff, keeps the last 200 redacted log lines, and kills the child on shutdown and app exit.
-  The bundled choice is resolved only from Tauri's binary/resource directories, never from `PATH`.
-- **Included models are verified.** `engine/models.json` lists the free models generated for the
-  pinned build. The view labels a model **Included · no key** only after the running engine reports
-  its id. An engine build with no included models shows the BYOK empty state instead.
-- **BYOK is local by default.** Provider keys go to the OS keychain through the
-  `Keychain`/`SecretStore` boundary. Status exposes provider names and states only; keys are
-  zeroized, never logged, never written to fixtures or reports, and local keys are never sent
-  to the VPS. Verification exercises the key on an isolated loopback engine with a minimal
-  model call. Stored keys reach the sidecar only through its ephemeral
-  `OPENCODE_AUTH_CONTENT` environment; StackSpirit never writes them into the engine's auth
-  file. Provider keys may instead be stored on the connected server in VOWP's own vault
-  through Settings → Advanced → **Server secrets** (`ss-35`, `506d9d2`); the value travels
-  only over verified SSH stdin after VOWP's hidden prompt, and the AI sees names/metadata
-  only. See [`SECURITY.md`](SECURITY.md).
-- **External harnesses are opt-in.** **Scan PATH** checks only the exact names `opencode`, `claude`
-  and `claude-code`, probes `--version`, and requires an explicit **Use this installation**. It
-  never edits the external configuration and never falls back silently.
-- **First-run is local only.** The selection (bundled/external plus model id) is saved in the app's
-  local `engine.json`. It does not write to VOWP. Provider/model names cross the SSH boundary only
-  later, when a VOWP profile or local orchestrator is configured.
-
-### Fetching the sidecar
+The released runtime is a separate Cargo workspace with its own toolchain, tests and release flow:
 
 ```sh
-node scripts/fetch-engine.mjs --target aarch64-apple-darwin
-bash scripts/verify-engine-checksum.sh
-bash scripts/verify-engine-checksum.sh --self-test
-(cd runtime && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace)
+cd runtime
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-CI (`.github/workflows/ci.yml`) runs the Node UI gates, the root Rust workspace, the `runtime/`
-Rust workspace on Linux and macOS, and the runtime npm/PyPI launcher tests. Project gates for the
-supervisor live in `stackspirit.toml` (`rust-core-check`, `runtime-check`); `vowp.toml` stays for
-backwards compatibility until cutover.
+See [`runtime/README.md`](runtime/README.md). `engine/manifest.json` pins the sidecar release and
+checksum, and `engine/models.json` lists the included models for the pinned build.
 
-`--all` fetches every pinned target; `--force` replaces an existing binary. The fetch host needs
-`tar` for `.tar.gz` assets and `unzip` for `.zip` assets. CI should run the fetch and checksum
-script before packaging, because Tauri's `bundle.externalBin` expects the sidecar to exist.
-
-### Capability gates
-
-The Engine view ends with two honest VOWP gate cards:
-
-- **Local orchestrator** — shipped in D6 for the desktop behind the live
-  `LocalOrchestratorGate`; the probe covers the VOWP Phase 2 offload read and the Phase 3/4
-  local-node CLI surface.
-- **.asif.zip sessions** — shipped in D5 for the desktop. The read-only probe must prove
-  export and import independently; a partial Ready gate enables only the proven direction.
-
-The probes read VOWP command surfaces and exit codes; a version string alone never makes a gate
-Ready. The desktop build enables `features.asif_actions` (the `d5` Cargo feature is on by
-default). D6 is implemented in the core, bridge, and Engine UI: actions enable only when the
-published `features.local_orchestrator_actions` flag is on, `LocalOrchestratorGate` is `Ready`,
-and the local agent is `connected`, with the node, protocol, and path-map prerequisites
-re-checked by the backend. The probes now match the installed `vowp 0.4.0` surface (`ss-32`,
-`cd6a975`; live home read `ss-37`, `39d8538`). On this host the live gate remains **Waiting**:
-the live home reports an online `macbook` agent card with protocol `vowp-agent/1`, but the
-Mac-side `vowp agent status` (`connection: connected`) has not been verified from this host and
-the live agent reports `agent_version: 0.3.0`. Live execution remains owner-gated, D6 actions
-are not enabled, and no live desktop smoke has been recorded.
-
-## Sessions and ASIF (Phase D5)
-
-The desktop ships a read-only **Sessions** drawer from the last VOWP snapshot and two actions
-enabled per direction only when the live `AsifGate` proves them:
-
-- **Export .asif.zip** writes a private package on the VOWP host, copies it over SSH after a
-  size and byte-count check, removes the remote temp directory, and shows the declared losses,
-  unsupported operations, and local file name. The remote path never reaches the renderer.
-- **Import .asif.zip** streams a local package to
-  `vowp --project <project> --json session import - --format asif` and shows the new session
-  id, `idle` state, losses, reindex warnings, and unsupported operations. The imported session
-  is never run automatically; there is no force switch or `--allow-unsupported`.
-
-Strict and allow-declared-loss are advanced, mutually exclusive choices; allow-loss is the
-default and no result is called lossless. Packages may contain secrets, so an export is not
-secret-free by default. See [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md) for the
-capability-probe evidence, the local disposable CLI round trip, the D5 report status, and the
-owner-run live smoke that is still pending.
-
-## Cross-Project Relationship with VOWP (`/home/user/vowp`)
-
-StackSpirit is a separate repository and VOWP project (`stackspirit`), but relies on VOWP wire
-contracts and milestones in `/home/user/vowp`:
-
-- **Available now (Phases D0–D5):** Outbound SSH connection, VOWP snapshot & capacity/storage
-  telemetry (`vowp fleet status --json`, `vowp capacity report --json`), visual worker/job lanes,
-  recommended worker advisor, job/capacity actions, local StackSpirit Engine (`opencode`)
-  configuration, and desktop `.asif.zip` session export/import behind the live ASIF capability
-  probe.
-- **Shipped in D5 but not owner-smoke-tested:** ASIF 0.4 remains a review draft. Export and
-  import are enabled independently only after the read-only probe proves them; see
-  [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md). No live host/desktop smoke has been
-  recorded by the owner.
-- **Shipped in D6 but still gated:** VOWP `0.4.0` is installed and ships the Phase 3/4
-  local-orchestrator CLI surface; StackSpirit's gate probes and live-home evidence were
-  reconciled with it (`ss-32`, `cd6a975`; `ss-37`, `39d8538`). The live `macbook` agent card is
-  online with protocol `vowp-agent/1`, while the home node is offline and non-agent. The
-  Mac-side `vowp agent status` is still an owner check, so D6 actions remain disabled and the
-  owner-run smoke is pending. See [`docs/RELEASE-D6.md`](docs/RELEASE-D6.md) and
-  [`docs/D6-READINESS.md`](docs/D6-READINESS.md).
-
-## Development gates
+### Gates
 
 ```sh
 cargo fmt --all -- --check
 cargo test -p spirit-core --features fixtures
 cargo clippy -p spirit-core --all-targets -- -D warnings
 cargo test -p spirit-cli
-npm ci
 npm run typecheck
 npm run lint
 npm test
@@ -233,12 +160,90 @@ npm run test:e2e
 bash scripts/verify-engine-checksum.sh --self-test
 ```
 
-The macOS desktop build (`npx tauri build --debug`), a signed/notarized bundle, and the real OS
-keychain round trip remain owner verification. On Linux, `scripts/desktop-build-container.sh
-check` compiles and tests the Tauri host in the pinned container without host packages; add
-`tauri-build` for a `--no-bundle` host build. See [`docs/DEV-SETUP.md`](docs/DEV-SETUP.md).
+CI (`.github/workflows/ci.yml`) runs the Node UI gates, the root Rust workspace, the `runtime/`
+Rust workspace on Linux and macOS, and the runtime npm/PyPI launcher tests. Project gates for the
+supervisor live in `stackspirit.toml` (`rust-check`, `rust-core-check`); `vowp.toml` stays for
+backwards compatibility until cutover.
 
-See [`SECURITY.md`](SECURITY.md) for the security model and supported versions, and
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the bundled engine license.
+## Repository layout
 
-StackSpirit is released under the [MIT License](LICENSE).
+| Path | Role |
+|---|---|
+| `crates/spirit-core` | Rust core: host profiles, outbound SSH, VOWP JSON parsing, view models and engine supervision. |
+| `apps/spirit-desktop` | Tauri 2 shell. `src/main.tsx` creates a `SpiritBridge` and mounts the shared shell; `src/bridge/TauriBridge.ts` is the only renderer file allowed to import `@tauri-apps/api`. |
+| `packages/spirit-ui` | `@stackspirit/ui`: the reusable React cockpit (design system, views, store), the `SpiritBridge` contract and `MockBridge`. Exported from TypeScript source, so Vite and Vitest consume it without a separate build step. |
+| `apps/spirit-web` | `@stackspirit/web`: Web/PWA with the read-only daemon cockpit at `/` and the optional account/Always-On Homes app at `/cloud`. It reuses `@stackspirit/ui`, keeps the account token in memory only, and shows unavailable daemon data explicitly. |
+| `crates/spirit-cli` | Developer helper `spirit` CLI over `spirit-core`: host profiles, fleet, capacity, gates, engine status, JSON output and fixture mode. Not the released `stackspirit` CLI. |
+| `runtime/` | Separate Cargo workspace: `stackspirit`/`vowp` CLI, daemons, MCP server and the npm/PyPI packaging. Build and test it with `cd runtime && cargo test --workspace`. |
+| `engine/` | Pinned sidecar manifest (`manifest.json`) and included model list (`models.json`). |
+| `design/brand` | Logo, palette and icon builders. |
+| `scripts/` | Engine fetch and checksum, desktop build container, public-readiness scan and verification scripts. |
+
+The root `npm` workspaces cover `apps/*` and `packages/*`. `npm test` runs the shared UI suite
+and then the desktop and Web suites; `npm run test:e2e` runs the desktop and Web Playwright flows.
+
+## Status and limits
+
+The 0.6.1 release ships the desktop cockpit source, the read-only Web PWA source, the
+`stackspirit`/`vowp` CLI and daemons, and `stackspirit mcp`. The honest limits that matter:
+
+- **Desktop builds are unsigned.** There is no signed or notarized installer; macOS Gatekeeper may
+  ask you to allow the first launch.
+- **Server chat remains gated.** Desktop Server `global`/`project` chat returns the typed
+  `chat_gated` gate until the owner chooses a transport. The options and recommendation are in
+  [`docs/SERVER-CHAT-OPTIONS.md`](docs/SERVER-CHAT-OPTIONS.md).
+- **The Mac D6 live check is owner-run.** The local-orchestrator gate stays `Waiting` until the
+  owner's Mac agent reports the required version and the owner records the run. D6 actions stay
+  disabled until that check passes, and no live desktop smoke is claimed; the checklist is
+  [`docs/OWNER-VERIFICATION.md`](docs/OWNER-VERIFICATION.md).
+- **Setup chat is non-streaming.** The production transport reports `streaming_supported: false`;
+  the final assistant message is real but arrives as one complete message. See
+  [`docs/ORCHESTRATOR-CHAT.md`](docs/ORCHESTRATOR-CHAT.md).
+- **ASIF 0.4 is a review draft.** Export/import reports declared losses and does not claim ASIF
+  conformance, a lossless round trip or portable continuation. See
+  [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md).
+- **Windows and musl/Alpine are not shipped targets.** Use WSL 2 on Windows, or build from source.
+
+## Documentation
+
+- [`docs/STRATEGY.md`](docs/STRATEGY.md) — vision, brand rules and roadmap.
+- [`docs/HARNESSES.md`](docs/HARNESSES.md) — Universal Harness Registry: presets, protocols,
+  auth modes and one-click connect.
+- [`docs/ORCHESTRATOR-CHAT.md`](docs/ORCHESTRATOR-CHAT.md) — orchestrator chat contract, the
+  non-streaming caveat and the Server/Local gates.
+- [`docs/HANDOFF-DESKTOP-UI.md`](docs/HANDOFF-DESKTOP-UI.md) — desktop UI source of truth: owner
+  decisions, real versus preview features and next steps.
+- [`SECURITY.md`](SECURITY.md) — security model and vulnerability reporting.
+- [`runtime/docs/release/0.6.1.md`](runtime/docs/release/0.6.1.md) — the 0.6.1 release note.
+- [`docs/PUBLIC-READINESS.md`](docs/PUBLIC-READINESS.md) — public-readiness audit, secret scan
+  and release state.
+- [`docs/OWNER-VERIFICATION.md`](docs/OWNER-VERIFICATION.md) — owner-run macOS/Linux/Windows
+  checklist, evidence template and sign-off rule.
+- [`docs/DEV-SETUP.md`](docs/DEV-SETUP.md) — non-root Linux Docker build container for the Tauri
+  host and desktop UI gates.
+- [`docs/WEB.md`](docs/WEB.md) — Web/PWA routes, optional account sign-in with an in-memory
+  token, the historical W1 daemon contract, implementation status and route gaps.
+- [`docs/SERVER-CHAT-OPTIONS.md`](docs/SERVER-CHAT-OPTIONS.md) — owner decision note for the
+  Server chat transport.
+- [`docs/RELEASE-DESKTOP-MVP.md`](docs/RELEASE-DESKTOP-MVP.md),
+  [`docs/RELEASE-D5-ASIF.md`](docs/RELEASE-D5-ASIF.md) and
+  [`docs/RELEASE-D6.md`](docs/RELEASE-D6.md) — desktop MVP, ASIF and local-orchestrator closeout
+  notes.
+- [`runtime/README.md`](runtime/README.md) — runtime CLI, daemon, MCP and packaging.
+- [`crates/spirit-cli/README.md`](crates/spirit-cli/README.md) — developer helper `spirit`
+  commands, storage, fixture mode and exit codes.
+
+## Contributing
+
+Contributions are welcome through GitHub issues and pull requests. Run the gates in
+[Develop](#develop) before opening a pull request. Start with [`AGENTS.md`](AGENTS.md) for the
+repository's worker contract and [`docs/DEV-SETUP.md`](docs/DEV-SETUP.md) for build environments.
+
+Never include a secret, a real hostname or IP address, or a personal path in an issue, commit,
+fixture or report. Refer to secrets by name only and use placeholders such as `/home/user`. Report
+suspected vulnerabilities privately as described in [`SECURITY.md`](SECURITY.md).
+
+## License
+
+StackSpirit is released under the [MIT License](LICENSE). The bundled StackSpirit Engine and other
+third-party components are covered by [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

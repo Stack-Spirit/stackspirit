@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import { MockBridge } from "../../bridge/MockBridge";
 import type {
   HarnessListView,
   HarnessManifest,
@@ -160,8 +161,9 @@ function fakeHarnesses(options: FakeOptions = {}) {
 function bridge(
   surface: HarnessesSurface | undefined,
   kind: HarnessesBridge["kind"] = "tauri",
+  preview = false,
 ): HarnessesBridge {
-  return { kind, preview: false, harnesses: surface };
+  return { kind, preview, harnesses: surface };
 }
 
 describe("HarnessesPanel", () => {
@@ -197,6 +199,30 @@ describe("HarnessesPanel", () => {
     });
     expect(fake.probe).toHaveBeenCalledWith({ id: "opencode", target: "local" });
     expect(fake.probe).toHaveBeenCalledWith({ id: "opencode", target: "home_vps" });
+  });
+
+  it("says Connect does not change the embedded chat transport and keeps Connect available", async () => {
+    const fake = fakeHarnesses();
+    render(<HarnessesPanel bridge={bridge(fake.surface)} />);
+
+    expect(await screen.findByTestId("harness-chat-transport-note")).toHaveTextContent(
+      "Connect installs and signs in a harness. The embedded chat still runs on OpenCode; choosing another chat transport is not available yet.",
+    );
+
+    const claude = await screen.findByTestId("harness-claude-code");
+    expect(within(claude).getByText("Embedded Chat")).toBeTruthy();
+    expect(
+      within(claude).getByRole("button", { name: "Connect on this Mac" }),
+    ).toBeEnabled();
+  });
+
+  it("keeps the chat transport note visible in preview", async () => {
+    const fake = fakeHarnesses();
+    render(<HarnessesPanel bridge={bridge(fake.surface, "mock", true)} />);
+
+    expect(await screen.findByTestId("harness-chat-transport-note")).toHaveTextContent(
+      /choosing another chat transport is not available yet/,
+    );
   });
 
   it("starts a one-click Home VPS connect and shows the automatic loopback forward", async () => {
@@ -362,6 +388,38 @@ describe("HarnessesPanel", () => {
         "Check failed: SSH authentication failed",
       ),
     );
+  });
+
+  it("nests provider management inside the default OpenCode card", async () => {
+    const user = userEvent.setup();
+    const fake = fakeHarnesses({ initial: [manifest({ id: "opencode" })] });
+    const mock = new MockBridge("empty");
+    const desktop = {
+      ...mock,
+      kind: "tauri" as const,
+      preview: false,
+      harnesses: fake.surface,
+    } as unknown as HarnessesBridge;
+    render(<HarnessesPanel bridge={desktop} />);
+
+    const opencode = await screen.findByTestId("harness-opencode");
+    expect(within(opencode).getByTestId("harness-opencode-default")).toHaveTextContent(
+      "Default harness",
+    );
+    expect(within(opencode).getByTestId("harness-opencode-providers")).toBeInTheDocument();
+    const row = await within(opencode).findByTestId("opencode-provider-deepseek");
+    expect(row).toHaveTextContent("DeepSeek");
+
+    const secret = ["sk", "harnessOnly1234567890"].join("_");
+    await user.click(within(row).getByRole("button", { name: "Connect DeepSeek" }));
+    await user.type(within(row).getByLabelText("API key for DeepSeek"), secret);
+    await user.click(within(row).getByRole("button", { name: "Save key" }));
+
+    expect(
+      await within(opencode).findByTestId("harness-opencode-provider-notice"),
+    ).toHaveTextContent(/DeepSeek (connected|key saved)/);
+    expect(document.body.innerHTML).not.toContain(secret);
+    mock.dispose();
   });
 
   it("says honestly when the bridge has no harness surface", async () => {

@@ -1,5 +1,4 @@
 import {
-  StackSpiritCloudClient,
   configureCloudRuntime,
   resetCloudAccount,
   type CloudAccountApi,
@@ -7,6 +6,7 @@ import {
   type CloudRelayConnector,
 } from "@stackspirit/ui";
 
+import { WebCloudClient, type WebAuthClient } from "../auth/client";
 import { CloudRelayClient, type RelaySocketFactory } from "../bridge/CloudRelayClient";
 import type { RelayCryptoProvider } from "../bridge/relayCrypto";
 
@@ -21,7 +21,10 @@ export interface WebCloudRuntimeOptions {
 }
 
 export interface WebCloudRuntime {
+  /** The shared account API the cloud store consumes. */
   client: CloudAccountApi;
+  /** The Web-only email/OAuth sign-in and enrollment-token surface. */
+  auth: WebAuthClient;
   relay: CloudRelayConnector;
   dispose(): void;
 }
@@ -29,10 +32,10 @@ export interface WebCloudRuntime {
 /**
  * Wires the real account API and relay transport into the shared cloud store.
  * Construction is inert: no account request and no WebSocket happens until the
- * owner clicks Sign in or Connect.
+ * owner clicks a sign-in action or Connect.
  */
 export function createWebCloudRuntime(options: WebCloudRuntimeOptions = {}): WebCloudRuntime {
-  const client = new StackSpiritCloudClient({
+  const client = new WebCloudClient({
     apiBaseUrl: options.apiBaseUrl,
     fetchImpl: options.fetchImpl,
     now: options.now,
@@ -55,6 +58,7 @@ export function createWebCloudRuntime(options: WebCloudRuntimeOptions = {}): Web
   configureCloudRuntime({ client, relay });
   return {
     client,
+    auth: client,
     relay,
     dispose() {
       relay.dispose();

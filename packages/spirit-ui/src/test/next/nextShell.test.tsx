@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SpiritBridge } from "../../bridge/SpiritBridge";
 import type { HostProfile } from "../../bridge/wire";
 import { MockBridge, type MockScenario } from "../../bridge/MockBridge";
+import { resetCloudAccount, useCloudAccount } from "../../cloud/store";
 import { resetConversations, useConversations } from "../../next/conversations";
 import { NextShell } from "../../next/NextShell";
 import { resetShellUi, useShellUi } from "../../next/shellUi";
@@ -54,6 +55,7 @@ function savedHost(): HostProfile {
 
 afterEach(() => {
   for (const bridge of bridges.splice(0)) bridge.dispose?.();
+  resetCloudAccount();
   resetConversations();
   resetShellUi();
   resetFleetStore();
@@ -429,18 +431,36 @@ describe("NextShell", () => {
     expect(card).toHaveTextContent(/GiB free/);
   });
 
-  it("keeps settings to one line that opens three options", async () => {
+  it("puts the account button beside Settings and keeps Theme inside Settings", async () => {
     const { user } = await renderConnected();
+    const account = screen.getByTestId("account-trigger");
+    expect(account).toHaveTextContent("Sign in");
+
     await user.click(screen.getByTestId("settings-trigger"));
     const menu = screen.getByRole("menu", { name: "Settings" });
     expect(within(menu).getByRole("menuitem", { name: "Add server" })).toBeInTheDocument();
-    expect(within(menu).getByRole("group", { name: "Theme" })).toBeInTheDocument();
-    await user.click(within(menu).getByRole("menuitemradio", { name: "Dark" }));
-    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(within(menu).getByRole("menuitem", { name: "All settings" })).toBeInTheDocument();
+    expect(within(menu).queryByRole("group", { name: "Theme" })).not.toBeInTheDocument();
 
     await user.click(within(menu).getByRole("menuitem", { name: "All settings" }));
     expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Theme" })).toBeInTheDocument();
+    await user.click(within(screen.getByRole("group", { name: "Theme" })).getByRole("button", { name: "Dark" }));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+
+  it("shows the signed-in email in the sidebar account button", async () => {
+    useCloudAccount.setState({
+      phase: "signed_in",
+      account: { id: "acct_1", email: "owner@example.com", name: "Owner" },
+    });
+    await renderConnected();
+    expect(screen.getByTestId("account-trigger")).toHaveTextContent("owner@example.com");
+    expect(screen.getByTestId("account-trigger")).toHaveAttribute(
+      "title",
+      "StackSpirit Account: owner@example.com",
+    );
   });
 
   async function openAddProject(user: ReturnType<typeof userEvent.setup>) {
