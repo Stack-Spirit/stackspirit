@@ -280,10 +280,11 @@ Gated, not preview: Server `global`/`project` chat shows a typed gate (`chat_gat
 with the composer disabled and no assistant reply. The blocker is VOWP `0.5`'s
 `vowp orchestrator endpoint` (`docs/ORCHESTRATOR-CHAT.md` §3.6 and §7.2); the app-owned
 SSH forward is not approved (owner decision A, 2026-11-19). Local `global`/`project` is
-not gated when the installed VOWP reports an endpoint: it attaches there, continues the
-newest host session when no native id is reported, and never creates a session or falls
-back to the bundled engine (`ss-61`, `66563cd`; `ss-62`, `0237770`, `147e153`). The
-Local/Server transport chip is still read-only and derived from the transport. The
+not gated when the installed VOWP reports an endpoint: it attaches to the reported native
+session id (VOWP 0.5.1+) and never creates a session or falls back to the bundled engine;
+a missing id is typed `chat_not_configured` (`ss-61`, `66563cd`; `ss-62`, `0237770`,
+`147e153`; fallback removed `ss-154`). The Local/Server transport chip is still
+read-only and derived from the transport. The
 separate chat **Host** control moves the session's orchestrator explicitly with
 `vowp orchestrator move` (§5 step 6; `ss-97`, `c589c79`; `ss-98`, `eb2474f`). **Add
 project** is live, not preview: it runs `vowp project add` (`ss-99`, `6fc6d8d`; `ss-100`,
@@ -316,7 +317,8 @@ project** is live, not preview: it runs `vowp project add` (`ss-99`, `6fc6d8d`; 
    `ss-43`; facts `ss-44`, `ff89ea6`; setup core `ss-42`, `cc83371`; host/bridge `ss-45`,
    `fe6d6e5`; view `ss-46`, `c1e2402`; owner verification script `ss-47`, `76b48ac`;
    Local endpoint `ss-61`, `66563cd`; newest-session continuity `ss-62`, `0237770`,
-   `147e153`; live verification `ss-63`, `1528aba`).** The owner decision stands: use the
+   `147e153`, replaced by the reported-id requirement `ss-154`; live verification `ss-63`,
+   `1528aba`).** The owner decision stands: use the
    orchestrator's OpenCode server, not a new chat store or a per-turn `vowp chat`
    shell-out.
    - **Setup chat** — real on the bundled StackSpirit Engine through `bridge.chat`: it
@@ -327,12 +329,13 @@ project** is live, not preview: it runs `vowp project add` (`ss-99`, `6fc6d8d`; 
    - **Local `global`/`project`** — landed and version-gated. It attaches when the
      installed VOWP provides `vowp agent orchestrator endpoint <name> --json`;
      `crates/spirit-core/src/engine/chat/endpoint.rs` runs it with argv only, a bounded
-     timeout and typed refusals (`chat_not_configured`, `chat_gated`). When the endpoint
-     reports `native_session_id: null`, the app continues the newest host session
-     (`GET /api/session`, greatest `time.updated`); it never creates a native session and
-     never falls back to the bundled engine. The owner's Mac endpoint document was
-     live-verified 2026-11-19 (`app: opencode`, loopback URL, Basic auth,
-     `native_session_id: null`; no id, URL or port is recorded here). This Linux host runs
+     timeout and typed refusals (`chat_not_configured`, `chat_gated`). The transport
+     requires the reported `native_session_id` (VOWP 0.5.1+); a null value is typed
+     `chat_not_configured` instead of a guessed host session, and it never creates a
+     native session or falls back to the bundled engine. The owner's Mac endpoint
+     document was live-verified 2026-11-19 (`app: opencode`, loopback URL, Basic auth,
+     `native_session_id: null`; no id, URL or port is recorded here), which is exactly
+     why the reported-id requirement now names the VOWP version. This Linux host runs
      VOWP `0.4.0` with no local orchestrator record, so it honestly returns
      `chat_not_configured`; Local chat is not live here. The §9.1b owner run in the
      checklist is still outstanding.
@@ -467,14 +470,16 @@ copy of the VOWP plan):
    decision 2026-11-20), so ownership is recorded and cooperative and a direct engine writer
    is not fenced: full takeover and writer fencing remain open, and do not type into the same
    orchestrator from two windows.
-4. **Use the VOWP-reported native session id — landed (`ss-61`, `66563cd`; `ss-62`,
-   `0237770`).** `vowp agent orchestrator endpoint` now reports `native_session_id` (runtime
-   slice 2 is done in `runtime/docs/design/v0.5.1/scope.md`), and
-   `LocalChatProvider::open_orchestrator` (`crates/spirit-core/src/engine/chat/local.rs`)
-   attaches to it whenever it is present. `discover_native_session` (`GET /api/session`,
-   newest `time.updated`) runs only when the field is `null`, so the old heuristic remains
-   as the explicit fallback rather than the default; the `chat_endpoint` tests cover both
-   paths.
+4. **Use the VOWP-reported native session id — landed and required (`ss-61`, `66563cd`;
+   `ss-62`, `0237770`; fallback removed `ss-154`, `773b54a`).** `vowp agent orchestrator
+   endpoint` reports `native_session_id` (VOWP 0.5.1+; runtime slice 2 is done in
+   `runtime/docs/design/v0.5.1/scope.md`), and `LocalChatProvider::open_orchestrator`
+   (`crates/spirit-core/src/engine/chat/local.rs`) now requires it. A null value returns a
+   typed `chat_not_configured` naming the VOWP version requirement; the
+   `discover_native_session` newest-`time.updated` fallback is deleted, so the transport
+   never attaches another host session. `detect_api_prefix` still probes `/api/session`
+   for OpenCode 2.x detection, and the `chat_endpoint` tests cover a reported id with no
+   list read beyond that probe plus a null id that never attaches.
 5. **Owner style advice** to be turned into a UI job when supplied.
 6. **Live owner smoke test** stays an owner step: the real endpoint lives on the owner's Mac, so a
    server-side worker cannot exercise it.

@@ -46,7 +46,7 @@ questions; §11 references; §12 chat UX state after ss-116..ss-118.
 |---|---|
 | Setup assistant on the bundled engine | Contract complete; the live probe pinned the v1 surface; core/view jobs can land; no VOWP dependency |
 | `global`/`project` on the home | **Gated** on VOWP `0.5` `orchestrator endpoint`; the app-owned forward (§3.3) is not approved |
-| `global`/`project` Local on the owner's Mac | **Live**, verified 2026-11-19: the installed VOWP returns a `global` endpoint document (loopback URL, Basic auth, `native_session_id: null`), and the ss-62 continuity rule attaches to the newest host session. |
+| `global`/`project` Local on the owner's Mac | **Live**, verified 2026-11-19 for the endpoint document (loopback URL and Basic auth). The transport requires the `native_session_id` reported by VOWP 0.5.1+ and returns typed `chat_not_configured` when it is absent (`ss-154`); it never guesses a host session. |
 | `global`/`project` Local on this Linux host | **Still `chat_not_configured`** — not live. `/home/user/.local/bin/vowp` is `0.4.0`; its `agent orchestrator` subcommand has no local orchestrator record on this host (`vowp agent orchestrator endpoint global --json` exits `3` with `not_found`), so there is no endpoint to attach to. The bundled engine is not silently used as a fallback. |
 | Local/Server switch | Out of scope; `vowp orchestrator move` (VOWP `0.5`, HANDOFF §5 step 6) |
 | Preview chat in `MockBridge` | Stays, explicitly `origin: "preview"` |
@@ -324,12 +324,11 @@ assistant still uses the bundled engine.
 - `setup`: the app creates one native session in the private setup workspace, with the
   title `StackSpirit setup`. It is local-only; no VOWP session and no server log. It may
   be resumed across app restarts from the private data dir.
-- `global`/`project` local — the target is a VOWP local orchestrator. When VOWP reports a
-  `native_session_id`, the app attaches to it. When VOWP reports `null`, the app lists the
-  host's own sessions and continues the newest one in the orchestrator workspace
-  (§4.3, ss-62). It **attaches**, never creates, and never invents a reply; an empty or
-  unreadable list is `chat_not_configured`, not a local-only session under a
-  global/project key.
+- `global`/`project` local — the target is a VOWP local orchestrator. The app attaches
+  only to the `native_session_id` that `vowp agent orchestrator endpoint --json` reports
+  (VOWP 0.5.1+). A missing id is a typed `chat_not_configured` naming the version
+  requirement; the app never lists or guesses a host session. It **attaches**, never
+  creates, and never invents a reply.
 - `global`/`project` server: same rule; the VOWP endpoint reports the native session. The
   app attaches and never creates an unmirrored server session.
 
@@ -851,10 +850,10 @@ userinfo (`user:pass@`), a query string, a path other than `/`, a non-loopback h
 auth are never serialized to a `ChatSessionView`, `ChatMessage`, `ChatEvent` or Tauri
 error.
 
-`native_session_id` is normally reported for `global`/`project`. For the Local endpoint,
-a null value triggers the host-session discovery rule in §4.3 (ss-62). The Server path is
-still gated; it does not use discovery and does not create a native session. That is how
-the contract enforces "the log always lives on the server".
+`native_session_id` must be reported for `global`/`project` Local endpoints; VOWP 0.5.1+
+provides it. A null value is a typed `chat_not_configured` and the transport never lists
+host sessions to guess one. The Server path is still gated; it does not create a native
+session. That is how the contract enforces "the log always lives on the server".
 
 If the home document reports `location: "local"` and `node` is this Mac, the app reads the
 local endpoint with the local-agent command and uses that URL/auth; the home URL is not
@@ -1403,10 +1402,11 @@ Semantics:
   owns its model config; StackSpirit does not pretend to change it.
 - `start` is idempotent. For `setup`, it ensures the bundled engine and creates one native
   session if none is attached; `resume: false` creates a new one and leaves the old log
-  intact. For `global`/`project`, `start` resolves the VOWP endpoint and attaches to the
-  native session VOWP reports, or continues the host's newest existing session when VOWP
-  reports none (§4.3, ss-62); it **never creates one**. An unusable reported native id or
-  a different `session_id` is `chat_not_mirrored`; if the mapping is stale, `session_lost`.
+  intact. For `global`/`project`, `start` resolves the VOWP endpoint and attaches only to
+  the `native_session_id` VOWP reports (0.5.1+); a missing id is a typed
+  `chat_not_configured`, never a guessed host session. It **never creates one**. An
+  unusable reported native id or a different `session_id` is `chat_not_mirrored`; if the
+  mapping is stale, `session_lost`.
   `resume: false` on a `global`/`project` session is a gate ("create a new orchestrator
   session in VOWP"), not a new unmirrored local session.
 - **Local `global`/`project` endpoint source (ss-61).** For `location: "local"`,
@@ -1424,28 +1424,16 @@ Semantics:
   URL/host/port, auth value, VOWP `session_id`, `native_session_id` and workspace path
   stay core-only; no chat DTO, error, log or report carries them. This bullet opens only
   the Local endpoint. Server remains gated pending the owner's transport decision (A).
-- **Continue the existing session when no native id is reported (ss-62).** The OpenCode
-  orchestrator host does not put a session id in its `service.json`, so a live local
-  endpoint may report `native_session_id: null`. When that happens, `start`/`attach`
-  must discover the host's existing conversation before attaching:
-  1. `GET /api/session` on the same reported loopback URL, with the reported Basic
-     credential and, when VOWP reports a workspace, the
-     `x-opencode-directory: <ORCHESTRATOR_WORKSPACE>` header. The current VOWP endpoint
-     document does not carry a workspace; the transport accepts `workspace` /
-     `working_dir` / `directory` forward-compatibly. When none is reported, the
-     discovered session's own `location.directory` becomes the workspace header for the
-     attach and log requests.
-  2. Parse the documented `{"data":[{"id","time":{"updated"},"location":{"directory"}}]}`
-     shape and choose the entry with the greatest `time.updated` in milliseconds. When a
-     workspace is known, entries in another directory are ignored. When no workspace is
-     reported, every usable entry must report the same `location.directory`; a missing or
-     mixed workspace is `chat_not_configured`, never a guess.
-  3. An empty list or an unexpected shape is `chat_not_configured`; 401/403 is
-     `chat_auth`. No path creates a native session (`POST /session` stays setup-only) and
-     no path invents a reply. Once chosen, the id is attached and its newest log page is
-     read through the normal v1 attach path above.
-  When VOWP **does** report a native id, the app uses it and never lists the host's
-  sessions. The workspace, the native id and the credential remain core-only.
+- **Require the reported native session id (ss-154).** `start`/`attach` never guess.
+  VOWP 0.5.1+ reports `native_session_id` from `vowp agent orchestrator endpoint --json`;
+  a null value is a typed `chat_not_configured` ("the orchestrator did not report its
+  OpenCode session id; VOWP 0.5.1 or newer is required") and the transport makes no
+  `/api/session` list read and no per-session attach or log read. The deleted
+  newest-`time.updated` discovery fallback (ss-62) was the wrong-session bug the handoff
+  called out. `detect_api_prefix` still probes `/session` and `/api/session` to recognise
+  an OpenCode 2.x host; that probe is not discovery. A reported id is still checked with
+  `get_native_session` and its log read; an id that no longer exists stays `session_lost`.
+  The workspace, the native id and the credential remain core-only.
 - `attach` never creates. A missing/stale mapping is `chat_not_started` or
   `session_lost`, not a silent new session.
 - `send` rejects while `streaming` (`chat_busy`). There is no queue. The composer is
@@ -2007,8 +1995,7 @@ The UI shows `errorTitle(error)` plus the message and hint; it never shows a raw
 | `gate` — `chat_unavailable` | `bridge.chat` is absent (Web) or the bridge cannot run chat | "Chat is not available in this client." | No |
 | `gate` — `chat_gated` (unsupported app) | The orchestrator's `app` is `claude-code` or `chat`, not `opencode` | "This orchestrator uses <app>; the OpenCode chat contract does not apply." | No (different app) |
 | `gate` — `chat_not_configured` | No local endpoint: the installed VOWP has no `agent orchestrator endpoint`, the local agent is not enrolled/paired, or no orchestrator card exists | "Create the orchestrator in VOWP first." | After enrolling with VOWP or creating the orchestrator |
-| `gate` — `chat_not_configured` (discovery) | A null `native_session_id` and the host lists no session, an unreadable/malformed list, a missing or mixed workspace, or an unreachable local app | "This orchestrator has no OpenCode conversation to continue." | After opening the conversation in the orchestrator, or after the app recovers |
-| `auth` — `chat_auth` (discovery) | The reported endpoint credential is rejected (401/403) while listing the host's sessions | "The orchestrator rejected its local credential." | After VOWP restarts/refreshes the orchestrator endpoint |
+| `gate` — `chat_not_configured` (missing native session id) | A Local endpoint reports `native_session_id: null` (VOWP older than 0.5.1) | "The orchestrator did not report its OpenCode session id; VOWP 0.5.1 or newer is required." | After upgrading VOWP and restarting the orchestrator |
 | `gate` — `chat_not_mirrored` | The endpoint reports an unusable `native_session_id`, or reports a different `session_id` than the attached home log | "This orchestrator has no usable mirrored OpenCode session." | After VOWP repairs the mirror |
 | `gate` — `path_unmapped` | The project has no local path map for a local session | "Map the project path in Engine → Local orchestrator paths." | After adding the path |
 | `gate` — `local_agent_not_connected` | The Mac agent is not enrolled/connected for a local endpoint | "Connect the local agent in Engine → Local orchestrator." | After the agent connects |
