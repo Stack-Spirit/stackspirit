@@ -1,103 +1,37 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 
 import { toSpiritError, type SpiritError } from "../bridge/errors";
-import type { SpiritBridge } from "../bridge/SpiritBridge";
+import type { HarnessesSurface, SpiritBridge } from "../bridge/SpiritBridge";
+import type {
+  HarnessAuthMode,
+  HarnessBinaryState,
+  HarnessConnectStarted,
+  HarnessListView,
+  HarnessManifest,
+  HarnessProbeReport,
+  HarnessProtocol,
+  HarnessReadiness,
+  HarnessTarget,
+} from "../bridge/wire";
 
-/** One transport/protocol family, matching `spirit_core::harnesses::HarnessProtocol`. */
-export type HarnessProtocol =
-  | "opencode-http"
-  | "acp"
-  | "stream-json"
-  | "codex-json"
-  | "cli-pty";
-
-/** One authentication mode, matching `spirit_core::harnesses::HarnessAuthMode`. */
-export type HarnessAuthMode = "api_key" | "subscription";
-
-/** A probe or connect destination. */
-export type HarnessTarget = "local" | "home_vps";
-
-/** One harness manifest, matching `spirit_core::harnesses::HarnessManifest`. */
-export interface HarnessManifest {
-  id: string;
-  name: string;
-  binary: string;
-  install_cmd: string;
-  auth_cmd: string;
-  protocol: HarnessProtocol;
-  supports_embedded_chat: boolean;
-  auth_modes: HarnessAuthMode[];
-  tos_note: string;
-  docs_url: string;
-  oauth_callback_port: number | null;
-  builtin: boolean;
-}
-
-/** The registry listing plus safe warnings for skipped files. */
-export interface HarnessListView {
-  harnesses: HarnessManifest[];
-  warnings: string[];
-}
-
-/** The binary-presence result. */
-export type HarnessBinaryState = "found" | "missing" | "unknown";
-/** The non-interactive auth result. */
-export type HarnessAuthState = "configured" | "missing" | "unknown";
-/** The shortest honest readiness summary. */
-export type HarnessReadiness = "ready" | "install_required" | "auth_required" | "unknown";
-
-/** A path-free probe result. */
-export interface HarnessProbe {
-  harness_id: string;
-  target: HarnessTarget;
-  protocol: HarnessProtocol;
-  supports_embedded_chat: boolean;
-  binary: HarnessBinaryState;
-  version: string | null;
-  auth: HarnessAuthState;
-  auth_detail: string;
-  readiness: HarnessReadiness;
-  oauth_callback_port: number | null;
-  requires_loopback_forward: boolean;
-  warnings: string[];
-}
-
-/** A display-safe connect plan. */
-export interface HarnessConnectPlanView {
-  install_command: string | null;
-  auth_command: string | null;
-  requires_loopback_forward: boolean;
-  forward_port: number | null;
-}
-
-/** A probe plus its plan. */
-export interface HarnessProbeReport {
-  probe: HarnessProbe;
-  plan: HarnessConnectPlanView;
-}
-
-/** The result of one one-click connect. */
-export interface HarnessConnectStarted {
-  harness_id: string;
-  target: HarnessTarget;
-  auth_started: boolean;
-  browser_opened: boolean;
-  forward_port: number | null;
-  message: string;
-}
-
-/**
- * The optional harness surface. The desktop Tauri bridge implements it; a read-only
- * bridge may omit it. Presence is the capability, exactly like the cluster and chat
- * surfaces on `SpiritBridge`.
- */
-export interface HarnessesSurface {
-  list(): Promise<HarnessListView>;
-  saveCustom(manifest: HarnessManifest): Promise<HarnessManifest>;
-  deleteCustom(id: string): Promise<boolean>;
-  probe(input: { id: string; target: HarnessTarget }): Promise<HarnessProbeReport>;
-  connectStart(input: { id: string; target: HarnessTarget }): Promise<HarnessConnectStarted>;
-}
+// The panel consumes the bridge DTOs; it does not define them. Re-exported here so the
+// existing panel tests and any callers keep their imports while every type has one home
+// in `bridge/wire.ts` (and `HarnessesSurface` in `bridge/SpiritBridge.ts`).
+export type {
+  HarnessAuthMode,
+  HarnessAuthState,
+  HarnessBinaryState,
+  HarnessConnectPlanView,
+  HarnessConnectStarted,
+  HarnessListView,
+  HarnessManifest,
+  HarnessProbe,
+  HarnessProbeReport,
+  HarnessProtocol,
+  HarnessReadiness,
+  HarnessTarget,
+} from "../bridge/wire";
+export type { HarnessesSurface } from "../bridge/SpiritBridge";
 
 /** The bridge shape this panel needs; it stays a subset of `SpiritBridge`. */
 export type HarnessesBridge = Pick<SpiritBridge, "kind" | "preview"> & {

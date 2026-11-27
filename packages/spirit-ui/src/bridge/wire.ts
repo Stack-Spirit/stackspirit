@@ -371,6 +371,98 @@ export interface EngineStatus {
   providers?: EngineProvider[];
 }
 
+/*
+ * Universal harness registry (`crates/spirit-core/src/harnesses`).
+ *
+ * A harness manifest describes how StackSpirit launches and signs in to one coding
+ * harness. It deliberately has no key, token or password field; credentials stay in the
+ * harness's own store, the OS keychain or VOWP's `vowp secret` vault. Probe results are
+ * path-free and never carry raw command output.
+ */
+
+/** One transport/protocol family, matching `spirit_core::harnesses::HarnessProtocol`. */
+export type HarnessProtocol =
+  | "opencode-http"
+  | "acp"
+  | "stream-json"
+  | "codex-json"
+  | "cli-pty";
+
+/** One authentication mode, matching `spirit_core::harnesses::HarnessAuthMode`. */
+export type HarnessAuthMode = "api_key" | "subscription";
+
+/** A probe or connect destination. */
+export type HarnessTarget = "local" | "home_vps";
+
+/** One harness manifest, matching `spirit_core::harnesses::HarnessManifest`. */
+export interface HarnessManifest {
+  id: string;
+  name: string;
+  binary: string;
+  install_cmd: string;
+  auth_cmd: string;
+  protocol: HarnessProtocol;
+  supports_embedded_chat: boolean;
+  auth_modes: HarnessAuthMode[];
+  tos_note: string;
+  docs_url: string;
+  oauth_callback_port: number | null;
+  builtin: boolean;
+}
+
+/** The registry listing plus safe warnings for skipped files. */
+export interface HarnessListView {
+  harnesses: HarnessManifest[];
+  warnings: string[];
+}
+
+/** The binary-presence result. */
+export type HarnessBinaryState = "found" | "missing" | "unknown";
+/** The non-interactive auth result. */
+export type HarnessAuthState = "configured" | "missing" | "unknown";
+/** The shortest honest readiness summary. */
+export type HarnessReadiness = "ready" | "install_required" | "auth_required" | "unknown";
+
+/** A path-free probe result. */
+export interface HarnessProbe {
+  harness_id: string;
+  target: HarnessTarget;
+  protocol: HarnessProtocol;
+  supports_embedded_chat: boolean;
+  binary: HarnessBinaryState;
+  version: string | null;
+  auth: HarnessAuthState;
+  auth_detail: string;
+  readiness: HarnessReadiness;
+  oauth_callback_port: number | null;
+  requires_loopback_forward: boolean;
+  warnings: string[];
+}
+
+/** A display-safe connect plan. */
+export interface HarnessConnectPlanView {
+  install_command: string | null;
+  auth_command: string | null;
+  requires_loopback_forward: boolean;
+  forward_port: number | null;
+}
+
+/** A probe plus its plan. */
+export interface HarnessProbeReport {
+  probe: HarnessProbe;
+  plan: HarnessConnectPlanView;
+}
+
+/** The result of one one-click connect. */
+export interface HarnessConnectStarted {
+  harness_id: string;
+  target: HarnessTarget;
+  auth_started: boolean;
+  browser_opened: boolean;
+  forward_port: number | null;
+  message: string;
+}
+
 export type LocalAgentState =
   | "unknown"
   | "not_installed"

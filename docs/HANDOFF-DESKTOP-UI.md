@@ -1,7 +1,7 @@
 # Handoff: StackSpirit desktop UI redesign (Meadow shell)
 
 Read this first if you are picking up the desktop UI, the brand, or the next integration
-steps. Last updated 2026-11-21. It records the decisions the owner made in the design
+steps. Last updated 2026-11-27. It records the decisions the owner made in the design
 sessions, what is real versus preview, and what to do next. `AGENTS.md` still applies
 (Rust core owns host/SSH/VOWP logic, UI calls go through `SpiritBridge`, no secrets).
 
@@ -14,6 +14,8 @@ sessions, what is real versus preview, and what to do next. `AGENTS.md` still ap
 | Shell unit tests | `packages/spirit-ui/src/test/next/nextShell.test.tsx` |
 | Composer, hero and context meter | `packages/spirit-ui/src/next/{ComposerBar,EmptyHero,ContextMeter}.tsx` |
 | Composer unit tests | `packages/spirit-ui/src/test/next/composer.test.tsx` |
+| Universal Harness Registry | `packages/spirit-ui/src/next/HarnessesPanel.tsx` (Settings → Advanced → **Harnesses**); `SpiritBridge.harnesses` in `packages/spirit-ui/src/bridge/SpiritBridge.ts`; DTOs in `packages/spirit-ui/src/bridge/wire.ts`; tests in `packages/spirit-ui/src/test/next/{harnessesPanel,harnessSettings}.test.tsx`; contract [`HARNESSES.md`](HARNESSES.md) |
+| Harness core and host adapter | `crates/spirit-core/src/harnesses/`, `apps/spirit-desktop/src/bridge/TauriBridge.ts`, `apps/spirit-desktop/src-tauri/src/harnesses.rs` |
 | Shell e2e + axe | `apps/spirit-desktop/e2e/next-shell.spec.ts` |
 | Brand sheet, logo sources, icon builders | `design/brand/` (see its `README.md`) |
 | App icons | `apps/spirit-desktop/src-tauri/icons/` (built by `design/brand/tools/app_icon.py`) |
@@ -170,6 +172,19 @@ log or an error. The card shows `name`, `•••• last4`, the update time an
 badge from the `mode` that `secret ls --json` reports (`basic`, `vault_user` or
 `encrypted`; an unknown safe token is shown verbatim, and the card says so when nothing is
 reported instead of guessing) (`ss-96`, `90c515b`). See [`SECURITY.md`](../SECURITY.md) for the exact path and limits.
+
+**Settings → Advanced → Harnesses is now reachable (`ss-155`).** The
+`packages/spirit-ui/src/next/HarnessesPanel.tsx` panel is mounted next to Engine &
+Models, with the app bridge and the connected Home VPS label/state passed from
+`SettingsView`. It lists the eight built-in presets plus valid custom manifests from
+`~/.stackspirit/harnesses/<id>.toml`, shows Embedded Chat versus Worker-Only and the
+API-key versus subscription terms note, and probes Local and the connected Home VPS.
+**One-click connect is still desktop-only:** the desktop host owns the shell-free
+sign-in child and the temporary loopback SSH forward; preview lists the built-in presets
+and returns a typed `preview_unavailable` for every probe, save, delete and connect, and
+the Web/read-only bridge omits `SpiritBridge.harnesses`. No harness key, token or
+password value is read or stored by this feature. See [`HARNESSES.md`](HARNESSES.md) for
+the registry, custom manifest format, probe/connect plan, loopback forward and limits.
 
 Chat has three surfaces (see §5 step 4): **setup chat** on the bundled engine (below);
 **Local `global`/`project`** through `vowp agent orchestrator endpoint`, real when the

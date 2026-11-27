@@ -44,6 +44,11 @@ import type {
   ExternalHarnessKind,
   FleetView,
   GateSnapshot,
+  HarnessConnectStarted,
+  HarnessListView,
+  HarnessManifest,
+  HarnessProbeReport,
+  HarnessTarget,
   HostDraft,
   HostKeyPin,
   HostKeyScan,
@@ -198,6 +203,134 @@ const MOCK_HOME = "/home/owner";
 /** A 1x1 transparent PNG, so the preview pane has a real image to show. */
 const MOCK_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+/**
+ * The built-in harness presets, mirroring `spirit_core::harnesses::builtin_harnesses`.
+ * Preview lists these so Settings → Advanced → Harnesses is reachable, but the preview
+ * bridge never probes, saves, deletes or connects a real harness.
+ */
+const MOCK_HARNESSES: HarnessManifest[] = [
+  {
+    id: "opencode",
+    name: "OpenCode",
+    binary: "opencode",
+    install_cmd: "curl -fsSL https://opencode.ai/install | bash",
+    auth_cmd: "opencode auth login",
+    protocol: "opencode-http",
+    supports_embedded_chat: true,
+    auth_modes: ["api_key"],
+    tos_note:
+      "BYOK: OpenCode uses the provider API key you connect. Provider billing and terms apply; StackSpirit does not assume a consumer subscription.",
+    docs_url: "https://opencode.ai/docs/",
+    oauth_callback_port: null,
+    builtin: true,
+  },
+  {
+    id: "claude-code",
+    name: "Claude Code",
+    binary: "claude",
+    install_cmd: "npm install -g @anthropic-ai/claude-code",
+    auth_cmd: "claude auth login",
+    protocol: "stream-json",
+    supports_embedded_chat: true,
+    auth_modes: ["api_key", "subscription"],
+    tos_note:
+      "API-key use is billed under Anthropic's commercial API terms. Claude Pro/Max subscription sign-in in a third-party client is governed by Anthropic's Consumer Terms and may be restricted; check them before connecting.",
+    docs_url: "https://docs.anthropic.com/en/docs/claude-code",
+    oauth_callback_port: 54545,
+    builtin: true,
+  },
+  {
+    id: "codex",
+    name: "Codex",
+    binary: "codex",
+    install_cmd: "npm install -g @openai/codex",
+    auth_cmd: "codex login",
+    protocol: "codex-json",
+    supports_embedded_chat: true,
+    auth_modes: ["api_key", "subscription"],
+    tos_note:
+      "API-key use is billed under OpenAI's API terms. ChatGPT subscription sign-in in a third-party client is governed by OpenAI's Consumer Terms and may be restricted; check them before connecting.",
+    docs_url: "https://developers.openai.com/codex/cli/",
+    oauth_callback_port: 1455,
+    builtin: true,
+  },
+  {
+    id: "gemini-cli",
+    name: "Gemini CLI",
+    binary: "gemini",
+    install_cmd: "npm install -g @google/gemini-cli",
+    auth_cmd: "",
+    protocol: "acp",
+    supports_embedded_chat: true,
+    auth_modes: ["api_key", "subscription"],
+    tos_note:
+      "A Gemini API key is billed under Google's API terms. Personal Google-account sign-in is governed by Google's Consumer Terms and may be restricted for automated use.",
+    docs_url: "https://github.com/google-gemini/gemini-cli",
+    oauth_callback_port: 8085,
+    builtin: true,
+  },
+  {
+    id: "antigravity",
+    name: "Antigravity",
+    binary: "antigravity",
+    install_cmd: "Download Google Antigravity from https://antigravity.google",
+    auth_cmd: "",
+    protocol: "cli-pty",
+    supports_embedded_chat: false,
+    auth_modes: ["subscription"],
+    tos_note:
+      "Sign-in uses your Google account and is governed by Google's Antigravity terms; automated or third-party use may be restricted.",
+    docs_url: "https://antigravity.google/docs",
+    oauth_callback_port: null,
+    builtin: true,
+  },
+  {
+    id: "cursor-cli",
+    name: "Cursor CLI",
+    binary: "cursor-agent",
+    install_cmd: "curl https://cursor.com/install -fsS | bash",
+    auth_cmd: "cursor-agent login",
+    protocol: "cli-pty",
+    supports_embedded_chat: false,
+    auth_modes: ["subscription"],
+    tos_note:
+      "Sign-in uses your Cursor subscription and is governed by Cursor's terms; automated or third-party use may be restricted.",
+    docs_url: "https://cursor.com/cli",
+    oauth_callback_port: null,
+    builtin: true,
+  },
+  {
+    id: "aider",
+    name: "Aider",
+    binary: "aider",
+    install_cmd: "python -m pip install aider-install && aider-install",
+    auth_cmd: "",
+    protocol: "cli-pty",
+    supports_embedded_chat: false,
+    auth_modes: ["api_key"],
+    tos_note:
+      "BYOK: Aider uses the provider API key you configure. Provider billing and terms apply.",
+    docs_url: "https://aider.chat/docs/",
+    oauth_callback_port: null,
+    builtin: true,
+  },
+  {
+    id: "goose",
+    name: "Goose",
+    binary: "goose",
+    install_cmd: "curl -fsSL https://block.github.io/goose/install.sh | bash",
+    auth_cmd: "goose configure",
+    protocol: "acp",
+    supports_embedded_chat: true,
+    auth_modes: ["api_key"],
+    tos_note:
+      "BYOK: Goose uses the provider API key you configure. Provider billing and terms apply.",
+    docs_url: "https://block.github.io/goose/docs/getting-started/installation",
+    oauth_callback_port: null,
+    builtin: true,
+  },
+];
 
 interface MockNode {
   kind: "file" | "dir" | "symlink";
@@ -435,6 +568,19 @@ function previewClusterUnavailable(): SpiritErrorDto {
     "preview_unavailable",
     "Clusters need the desktop host; preview mode has no SSH connection and does not form, read or promote one.",
     "Run the desktop app without VITE_SPIRIT_MOCK to work with clusters.",
+  );
+}
+
+/**
+ * Preview mode has no registry directory, host child processes or SSH connection: it
+ * lists the built-in presets, and every probe or change must fail honestly instead of
+ * inventing a result, a saved manifest or a sign-in.
+ */
+function previewHarnessesUnavailable(): SpiritErrorDto {
+  return errorDto(
+    "preview_unavailable",
+    "Harness probes and changes need the desktop host; preview mode lists the built-in presets only and never probes or starts a sign-in.",
+    "Run the desktop app without VITE_SPIRIT_MOCK to probe, add or connect a harness.",
   );
 }
 
@@ -881,6 +1027,46 @@ export class MockBridge implements SpiritBridge {
     remove: async (name: string): Promise<SecretRemoveOutcome> => {
       void name;
       throw previewSecretsUnavailable();
+    },
+  };
+
+  /**
+   * Preview harness surface: the built-in presets are readable so the Settings panel is
+   * reachable, but every probe, save, delete and connect fails with a typed
+   * `preview_unavailable` error. Preview never fakes a built-in probe result, never
+   * writes `~/.stackspirit/harnesses`, and never claims that a sign-in started.
+   */
+  harnessesApi = {
+    list: async (): Promise<HarnessListView> => ({
+      harnesses: clone(MOCK_HARNESSES),
+      warnings: [
+        "Preview: built-in presets only. No custom manifest was read; no harness is really probed or connected.",
+      ],
+    }),
+    saveCustom: async (manifest: HarnessManifest): Promise<HarnessManifest> => {
+      // Preview mode has no host and no registry directory; it never writes a file.
+      void manifest;
+      throw previewHarnessesUnavailable();
+    },
+    deleteCustom: async (id: string): Promise<boolean> => {
+      void id;
+      throw previewHarnessesUnavailable();
+    },
+    probe: async (input: {
+      id: string;
+      target: HarnessTarget;
+    }): Promise<HarnessProbeReport> => {
+      // Never return a fabricated "ready" probe.
+      void input;
+      throw previewHarnessesUnavailable();
+    },
+    connectStart: async (input: {
+      id: string;
+      target: HarnessTarget;
+    }): Promise<HarnessConnectStarted> => {
+      // Never pretend a sign-in or loopback forward started.
+      void input;
+      throw previewHarnessesUnavailable();
     },
   };
 
@@ -2108,6 +2294,7 @@ export class MockBridge implements SpiritBridge {
   hosts = this.hostsApi;
   onboarding = this.onboardingApi;
   secrets = this.secretsApi;
+  harnesses = this.harnessesApi;
   files = this.filesApi;
   projects = {
     add: async (input: ProjectAddInput): Promise<ProjectAddOutcome> => {

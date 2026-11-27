@@ -2,8 +2,14 @@ import { useState } from "react";
 
 import { EngineView } from "../views/engine/EngineView";
 import { HostManager } from "../views/hosts/HostManager";
-import { useConnection, useFleetStore } from "../state/fleetStore";
+import {
+  useConnection,
+  useFleetStore,
+  useHosts,
+  useSelectedHostId,
+} from "../state/fleetStore";
 import { CloudAccountPanel } from "./CloudAccountPanel";
+import { HarnessesPanel } from "./HarnessesPanel";
 import { ManagedHomesPanel } from "./ManagedHomesPanel";
 import { PageHeader } from "./PageHeader";
 import { SettingsPage } from "./SettingsPage";
@@ -32,8 +38,26 @@ export function SettingsView({
 }: SettingsViewProps) {
   const openSessions = useFleetStore((state) => state.openSessions);
   const sessionsAvailable = useFleetStore((state) => Boolean(state.bridge?.sessions));
-  const connected = useConnection().state === "connected";
+  const bridge = useFleetStore((state) => state.bridge);
+  const connect = useFleetStore((state) => state.connect);
+  const connection = useConnection();
+  const hosts = useHosts();
+  const selectedHostId = useSelectedHostId();
+  const connected = connection.state === "connected";
   const [advanced, setAdvanced] = useState(initialAdvanced);
+
+  // The Harnesses panel probes the connected Home VPS over the same SSH path as the rest
+  // of the app. Without a connected server it stays local-only and says so.
+  const connectedHost = hosts.find((host) => host.id === connection.host_id) ?? null;
+  const fallbackHost =
+    hosts.find((host) => host.id === selectedHostId) ?? hosts[0] ?? null;
+  const homeLabel = (connectedHost ?? fallbackHost)?.label ?? "Home VPS";
+  const requestConnectServer =
+    !connected && fallbackHost
+      ? () => {
+          void connect(fallbackHost.id);
+        }
+      : undefined;
 
   return (
     <section className="nx-main" aria-label="Settings">
@@ -116,6 +140,23 @@ export function SettingsView({
                 <SecretStore />
                 <HostManager />
                 <EngineView />
+                {bridge ? (
+                  <div className="nx-settings__card">
+                    <HarnessesPanel
+                      bridge={bridge}
+                      homeConnected={connected}
+                      homeLabel={homeLabel}
+                      onRequestConnectServer={requestConnectServer}
+                    />
+                  </div>
+                ) : (
+                  <div className="nx-settings__card" data-testid="harnesses-unavailable">
+                    <h2>Harnesses</h2>
+                    <p>
+                      The harness registry appears once the app bridge is ready.
+                    </p>
+                  </div>
+                )}
               </div>
             ) : null}
           </div>

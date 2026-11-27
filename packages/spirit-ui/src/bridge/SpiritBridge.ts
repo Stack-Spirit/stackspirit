@@ -34,6 +34,11 @@ import type {
   ExternalHarnessKind,
   FleetView,
   GateSnapshot,
+  HarnessConnectStarted,
+  HarnessListView,
+  HarnessManifest,
+  HarnessProbeReport,
+  HarnessTarget,
   HostDraft,
   HostKeyPin,
   HostKeyScan,
@@ -151,6 +156,35 @@ export interface ChatBridgeSurface {
    * a monotonic `revision`; a gap means call `log` and replace the messages.
    */
   subscribe(listener: (event: ChatEvent) => void): () => void;
+}
+
+/**
+ * The optional Universal Harness Registry surface (`docs/HARNESSES.md`).
+ *
+ * Presence is the capability: the desktop `TauriBridge` implements it; `MockBridge`
+ * lists the built-in presets but returns a typed `preview_unavailable` error for every
+ * change, probe and connect; the read-only Web bridge omits it.
+ *
+ * The registry lives in `spirit-core`: built-ins ship in code and owner manifests are
+ * read from `~/.stackspirit/harnesses/<id>.toml`. A manifest has no credential field,
+ * and no method here reads, stores or returns a key or token value. Probe results are
+ * path-free and never contain raw command output.
+ */
+export interface HarnessesSurface {
+  /** Built-in presets first, then valid custom manifests, plus safe warnings. */
+  list(): Promise<HarnessListView>;
+  /** Save one custom manifest; a built-in id or `builtin: true` is rejected. */
+  saveCustom(manifest: HarnessManifest): Promise<HarnessManifest>;
+  /** Delete one custom manifest; a built-in id is rejected; missing returns false. */
+  deleteCustom(id: string): Promise<boolean>;
+  /** Probe one target; never reads a credential value or returns raw output. */
+  probe(input: { id: string; target: HarnessTarget }): Promise<HarnessProbeReport>;
+  /**
+   * Start the desktop one-click sign-in plan. A Home VPS harness with a loopback OAuth
+   * callback gets a temporary SSH forward owned by the host and torn down when the
+   * sign-in finishes. Preview and Web bridges never fake this call.
+   */
+  connectStart(input: { id: string; target: HarnessTarget }): Promise<HarnessConnectStarted>;
 }
 
 /** The only surface the UI may call. Tauri, Mock, and the Web HTTP/SSE bridge implement it. */
@@ -349,6 +383,14 @@ export interface SpiritBridge {
     get(): Promise<GateSnapshot>;
     probe(): Promise<GateSnapshot>;
   };
+
+  /**
+   * Optional Universal Harness Registry. Presence is the capability. The desktop host
+   * implements every method; the preview bridge lists the built-in presets and refuses
+   * every probe or change with `preview_unavailable`; Web/read-only bridges omit it.
+   * See `HarnessesSurface` and `docs/HARNESSES.md`.
+   */
+  harnesses?: HarnessesSurface;
 
   /**
    * Optional orchestrator chat. Presence is the capability; the Web bridge omits it.

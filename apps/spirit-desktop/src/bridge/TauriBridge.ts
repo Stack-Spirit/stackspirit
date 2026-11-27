@@ -38,6 +38,11 @@ import type {
   FleetView,
   GateSnapshot,
   GcReportView,
+  HarnessConnectStarted,
+  HarnessListView,
+  HarnessManifest,
+  HarnessProbeReport,
+  HarnessTarget,
   HistoryJobView,
   HostDraft,
   HostKeyPin,
@@ -294,6 +299,19 @@ export class TauriBridge implements SpiritBridge {
   gates = {
     get: (): Promise<GateSnapshot> => call("gates_get"),
     probe: (): Promise<GateSnapshot> => call("probe_gates"),
+  };
+
+  harnesses = {
+    list: (): Promise<HarnessListView> => call("harnesses_list"),
+    saveCustom: (manifest: HarnessManifest): Promise<HarnessManifest> =>
+      call("harnesses_save_custom", { manifest }),
+    deleteCustom: (id: string): Promise<boolean> => call("harnesses_delete_custom", { id }),
+    probe: (input: { id: string; target: HarnessTarget }): Promise<HarnessProbeReport> =>
+      call("harnesses_probe", { input }),
+    connectStart: (input: {
+      id: string;
+      target: HarnessTarget;
+    }): Promise<HarnessConnectStarted> => call("harnesses_connect_start", { input }),
   };
 
   chat = {
