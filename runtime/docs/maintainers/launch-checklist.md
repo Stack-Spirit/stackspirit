@@ -5,7 +5,7 @@ This is the ordered runbook for the owner/orchestrator who publishes VOWP
 ([`scripts/audit/go-public.md`](../../scripts/audit/go-public.md)), the release
 process ([`release-process.md`](release-process.md)), the crates.io procedure
 ([`publishing.md`](publishing.md)) and the npm publish script
-([`packaging/npm/scripts/publish.sh`](../../packaging/npm/scripts/publish.sh)).
+([`packaging/npm/legacy-vowp/scripts/publish.sh`](../../packaging/npm/legacy-vowp/scripts/publish.sh)).
 
 The public repository already exists from 0.1.0 (`syver777/vowp`; the old
 private repository is `syver777/vowp-private`). **Add a 0.3.0 release commit to

@@ -31,6 +31,16 @@ jobs:
       - run: npm run build
       - run: bash scripts/verify-engine-checksum.sh --self-test
 
+  docs-links:
+    name: docs relative links (node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: node scripts/check-doc-links.mjs
+
   rust-core:
     name: spirit-core workspace (rust)
     runs-on: ubuntu-latest
