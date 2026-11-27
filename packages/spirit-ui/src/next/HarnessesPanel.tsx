@@ -990,6 +990,11 @@ export function HarnessesPanel({
         your own with a strict local manifest.
       </p>
 
+      <p className="nx-form__hint" data-testid="harness-chat-transport-note">
+        Connect installs and signs in a harness. The embedded chat still runs on
+        OpenCode; choosing another chat transport is not available yet.
+      </p>
+
       {!surface ? (
         <p className="nx-banner nx-banner--warn" role="status">
           Harness connect is available in the desktop app. This bridge has no harness

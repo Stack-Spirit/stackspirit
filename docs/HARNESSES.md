@@ -167,6 +167,22 @@ documentation instead. Every child process is kept in host state and is torn dow
 the sign-in finishes or the app exits. A second connect for the same harness and target
 is refused as a `conflict`.
 
+### What Connect does (and does not)
+
+Connect installs the selected harness and starts its own sign-in. For a Home VPS
+sign-in that needs an OAuth callback, the host can also run the temporary loopback
+forward described above. That is the whole of Connect today.
+
+The embedded chat transport still runs on the bundled OpenCode engine. A registry
+harness with `supports_embedded_chat = true` says it could back that transport, but the
+panel does not switch chat to it: choosing a non-OpenCode harness as the chat transport
+is not implemented yet. Worker-only harnesses are unaffected — they are for jobs, not
+chat, and the panel keeps labelling them **Worker-Only**.
+
+The capability table above describes the manifest field and its intended meaning, not a
+live chat-transport selector. The panel shows a short inline note to the same effect so
+a successful Connect is not mistaken for a chat switch.
+
 ## Security limits
 
 - The manifest schema has no secret field, unknown fields are rejected, and free-text

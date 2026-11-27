@@ -161,8 +161,9 @@ function fakeHarnesses(options: FakeOptions = {}) {
 function bridge(
   surface: HarnessesSurface | undefined,
   kind: HarnessesBridge["kind"] = "tauri",
+  preview = false,
 ): HarnessesBridge {
-  return { kind, preview: false, harnesses: surface };
+  return { kind, preview, harnesses: surface };
 }
 
 describe("HarnessesPanel", () => {
@@ -198,6 +199,30 @@ describe("HarnessesPanel", () => {
     });
     expect(fake.probe).toHaveBeenCalledWith({ id: "opencode", target: "local" });
     expect(fake.probe).toHaveBeenCalledWith({ id: "opencode", target: "home_vps" });
+  });
+
+  it("says Connect does not change the embedded chat transport and keeps Connect available", async () => {
+    const fake = fakeHarnesses();
+    render(<HarnessesPanel bridge={bridge(fake.surface)} />);
+
+    expect(await screen.findByTestId("harness-chat-transport-note")).toHaveTextContent(
+      "Connect installs and signs in a harness. The embedded chat still runs on OpenCode; choosing another chat transport is not available yet.",
+    );
+
+    const claude = await screen.findByTestId("harness-claude-code");
+    expect(within(claude).getByText("Embedded Chat")).toBeTruthy();
+    expect(
+      within(claude).getByRole("button", { name: "Connect on this Mac" }),
+    ).toBeEnabled();
+  });
+
+  it("keeps the chat transport note visible in preview", async () => {
+    const fake = fakeHarnesses();
+    render(<HarnessesPanel bridge={bridge(fake.surface, "mock", true)} />);
+
+    expect(await screen.findByTestId("harness-chat-transport-note")).toHaveTextContent(
+      /choosing another chat transport is not available yet/,
+    );
   });
 
   it("starts a one-click Home VPS connect and shows the automatic loopback forward", async () => {
