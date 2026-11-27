@@ -19,9 +19,9 @@
 #
 # The script refuses a dirty working tree (untracked files included), a missing
 # HEAD and a missing scanner. It builds the commit with `git commit-tree` from
-# the current HEAD tree in a temporary index-free step, so the working tree and
-# the private branch are not changed. Author and committer are the public
-# identity already used by the runtime squash script:
+# the current HEAD tree without touching the index, so the working tree and the
+# private branch are not changed. Author and committer are the public identity
+# already used by the runtime squash script:
 #   Syver-August <92798051+syver777@users.noreply.github.com>
 #
 # After creating (or, with --dry-run, only computing) the commit, the script

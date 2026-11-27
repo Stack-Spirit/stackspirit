@@ -57,7 +57,7 @@ working-tree findings.
 | Working-tree scan exit status | **0 (PASS)** at the ss-144 and ss-149 re-runs; the command and output are shown below |
 | Release workflow YAML | **Valid**; the 76 structural, mutation and version-checker checks recorded by the ss-135 audit pass |
 | Private git history | **Do not publish**: the ss-144 history scan found **9 secret-class** and **486 privacy-class** findings; see the History scan subsection in §1 |
-| Candidate public commit (`public-main`, `880e483`) | **PASS**: `--rev` scans the exact tree that would be published and finds **0** blocked findings (1717 blobs, exit 0); see the Candidate public commit subsection in §1 |
+| Candidate public commit (`880e483`, recorded run) | **PASS**: `--rev` scans the exact tree that would be published and finds **0** blocked findings (1717 blobs, exit 0); see the Candidate public commit subsection in §1 |
 | First release version state | **Aligned at `0.6.0`**: workspace, inter-crate dependencies, lockfile, version test and npm/PyPI packaging agree; `check-release.sh` passes |
 
 The working-tree scan and the history/publication checks are independent. A clean scan does not
