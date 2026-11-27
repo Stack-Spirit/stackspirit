@@ -68,6 +68,15 @@ fn local_tools() -> Value {
                 .and_then(Value::as_str)
                 .is_none_or(|name| refusal(name).is_none())
         });
+        // The proxy forwards tools only; a resource link it cannot serve would make an
+        // MCP Apps client ask this process for a `resources/read` it must refuse.
+        if let Some(dashboard) = entries
+            .iter_mut()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("fleet_dashboard"))
+            && let Some(object) = dashboard.as_object_mut()
+        {
+            object.remove("_meta");
+        }
     }
     definitions
 }

@@ -8,6 +8,7 @@
 //! `tools/call` over the agent socket to the home.
 
 mod backend;
+mod dashboard;
 mod jsonrpc;
 pub(crate) mod proxy;
 mod tools;
@@ -56,9 +57,9 @@ pub(crate) fn serve_with_ctx(ctx: &Ctx, io: &mut dyn IoStreams, opts: &McpOption
 
 /// Serves the read-only no-session MCP server until stdin closes.
 ///
-/// Spec: `docs/design/relay-and-packaging.md` §3.7. It lists only the five read tools and
-/// answers a write tool with JSON-RPC `-32601`; it never opens a writable store, creates a
-/// surface or lease, or logs a request.
+/// Spec: `docs/design/relay-and-packaging.md` §3.7. It lists only the read tools and the
+/// fleet-status resource and answers a write tool with JSON-RPC `-32601`; it never opens a
+/// writable store, creates a surface or lease, or logs a request.
 pub(crate) fn serve_read_only_with_ctx(ctx: &Ctx, io: &mut dyn IoStreams) -> Result<i32, CliError> {
     let placeholder = McpOptions {
         session: SessionId::parse("00000000000000000000000000")?,
@@ -76,7 +77,10 @@ fn handle_read_only(backend: &Backend<'_>, tools: &Value, request: &jsonrpc::Req
         return None;
     }
     let id = request.id_value();
-    let result = if let Some(mut result) = local_method(request, tools) {
+    if let Some(response) = resource_read(backend, request) {
+        return Some(response);
+    }
+    let result = if let Some(mut result) = local_method_with_resources(request, tools) {
         if request.method == "initialize" {
             result["serverInfo"]["name"] = json!("stackspirit-engine");
         }
@@ -143,8 +147,20 @@ pub(crate) fn serve_jsonrpc(
 /// Answers the methods every MCP server serves without the home; `None` for any other.
 ///
 /// `tools` is the caller's `tools/list` result, so the proxy can advertise only the tools
-/// it may forward.
+/// it may forward. The proxy does not serve resources; the home and read-only servers use
+/// [`local_method_with_resources`].
 pub(crate) fn local_method(request: &jsonrpc::Request, tools: &Value) -> Option<Value> {
+    local_method_for(request, tools, false)
+}
+
+/// Answers the local methods of a server that also serves the fleet-status resource.
+pub(crate) fn local_method_with_resources(request: &jsonrpc::Request, tools: &Value) -> Option<Value> {
+    local_method_for(request, tools, true)
+}
+
+/// Answers the shared local methods, advertising resources only when the caller serves them.
+fn local_method_for(request: &jsonrpc::Request, tools: &Value, resources: bool) -> Option<Value> {
+    let capabilities = capabilities(resources);
     match request.method.as_str() {
         "initialize" => {
             let version = request
@@ -154,20 +170,63 @@ pub(crate) fn local_method(request: &jsonrpc::Request, tools: &Value) -> Option<
                 .unwrap_or("2024-11-05");
             Some(json!({
                 "protocolVersion": version,
-                "capabilities": {"tools": {"listChanged": false}},
+                "capabilities": capabilities,
                 "serverInfo": {"name": "stackspirit", "title": vowp_protocol::brand::PRODUCT_NAME, "description": vowp_protocol::brand::PRODUCT_DESCRIPTION, "version": env!("CARGO_PKG_VERSION")},
             }))
         }
-        // Claude Code sends this probe before initialize. A valid empty capability is
-        // friendlier than -32601 and is accepted by the MCP clients we tested.
+        // Claude Code sends this probe before initialize. A valid capability is friendlier
+        // than -32601 and is accepted by the MCP clients we tested.
         "server/discover" => Some(json!({
             "protocolVersion": "2024-11-05",
-            "capabilities": {},
+            "capabilities": capabilities,
             "serverInfo": {"name": "stackspirit", "title": vowp_protocol::brand::PRODUCT_NAME, "description": vowp_protocol::brand::PRODUCT_DESCRIPTION, "version": env!("CARGO_PKG_VERSION")},
         })),
         "ping" => Some(json!({})),
         "tools/list" => Some(tools.clone()),
+        "resources/list" if resources => Some(dashboard::resources_list()),
         _ => None,
+    }
+}
+
+/// Returns the advertised server capabilities.
+fn capabilities(resources: bool) -> Value {
+    if resources {
+        json!({
+            "tools": {"listChanged": false},
+            "resources": {"listChanged": false, "subscribe": false},
+        })
+    } else {
+        json!({"tools": {"listChanged": false}})
+    }
+}
+
+/// Answers `resources/read` for the fleet-status widget; `None` for any other method.
+fn resource_read(backend: &Backend<'_>, request: &jsonrpc::Request) -> Option<Value> {
+    if request.method != "resources/read" {
+        return None;
+    }
+    let id = request.id_value();
+    let Some(uri) = request.params.get("uri").and_then(Value::as_str) else {
+        return Some(jsonrpc::error_response(
+            id,
+            jsonrpc::INVALID_PARAMS,
+            "resources/read requires a uri",
+        ));
+    };
+    if uri != dashboard::RESOURCE_URI {
+        return Some(jsonrpc::error_response(
+            id,
+            jsonrpc::RESOURCE_NOT_FOUND,
+            &format!("resource not found: {uri}"),
+        ));
+    }
+    match backend.dashboard_html() {
+        Ok(html) => Some(jsonrpc::success(id, dashboard::resource_contents(&html))),
+        Err(error) => Some(jsonrpc::error_response(
+            id,
+            jsonrpc::INTERNAL_ERROR,
+            &format!("resource read failed: {error}"),
+        )),
     }
 }
 
@@ -190,7 +249,10 @@ fn handle_request(backend: &Backend<'_>, tools: &Value, request: &jsonrpc::Reque
         return None;
     }
     let id = request.id_value();
-    let result = if let Some(result) = local_method(request, tools) {
+    if let Some(response) = resource_read(backend, request) {
+        return Some(response);
+    }
+    let result = if let Some(result) = local_method_with_resources(request, tools) {
         result
     } else if request.method == "tools/call" {
         let (name, arguments) = match tools_call(request) {

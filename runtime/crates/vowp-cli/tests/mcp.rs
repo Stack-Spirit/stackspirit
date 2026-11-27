@@ -22,12 +22,12 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use vowp_cli::BufferIo;
 use vowp_protocol::{
-    Actor, Capsule, CapsuleState, CapsuleTrigger, EventBody, EventSource, Executor, ExecutorRef, HarnessKind, Job,
-    JobId, JobKind, Lease, NewJob, Node, NodeName, Note, Project, Role, SessionId, Surface, SurfaceId, SurfaceKind,
-    Timestamp, VowpConfig,
+    Actor, Capsule, CapsuleState, CapsuleTrigger, EventBody, EventSource, Executor, ExecutorRef, HarnessKind, InboxId,
+    InboxItem, InboxKind, InboxState, Job, JobId, JobKind, JobState, Lease, NewJob, Node, NodeName, Note, Project,
+    Role, SessionId, Surface, SurfaceId, SurfaceKind, Timestamp, VowpConfig,
 };
 use vowp_store::session_log::{NewEvent, SessionLog};
-use vowp_store::{LedgerFilter, NodePaths, Store};
+use vowp_store::{LedgerFilter, NodePaths, StateChange, Store};
 
 /// One temporary node home and project.
 struct TestEnv {
@@ -117,6 +117,20 @@ impl TestEnv {
         store
             .insert_job(&self.config.project.name, &new, "test")
             .expect("insert job")
+    }
+
+    /// Moves a job into `state` through the store's normal transition row.
+    fn set_job_state(&self, job: &Job, state: JobState) {
+        self.store()
+            .set_job_state(
+                &job.id,
+                state,
+                &StateChange {
+                    note: None,
+                    parked_reason: None,
+                },
+            )
+            .expect("set job state");
     }
 }
 
@@ -657,14 +671,22 @@ fn mcp_initialize_and_tools_list() {
     let init = response(&values, 1);
     assert_eq!(init["result"]["serverInfo"]["name"], "stackspirit");
     assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
-    let tools = response(&values, 2)["result"]["tools"]
-        .as_array()
-        .expect("tools array")
+    let tool_list = response(&values, 2)["result"]["tools"].as_array().expect("tools array");
+    let dashboard = tool_list
+        .iter()
+        .find(|tool| tool["name"] == "fleet_dashboard")
+        .expect("fleet_dashboard tool");
+    assert_eq!(
+        dashboard["_meta"]["ui"]["resourceUri"], "ui://stackspirit/fleet-status",
+        "the tool must link its MCP App resource: {dashboard}"
+    );
+    let tools = tool_list
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect::<Vec<_>>();
     for name in [
         "fleet_status",
+        "fleet_dashboard",
         "fleet_queue",
         "inbox_list",
         "capacity_report",
@@ -682,7 +704,7 @@ fn mcp_initialize_and_tools_list() {
     ] {
         assert!(tools.contains(&name), "missing tool {name}: {tools:?}");
     }
-    assert_eq!(tools.len(), 15, "the frozen tool list changed: {tools:?}");
+    assert_eq!(tools.len(), 16, "the frozen tool list changed: {tools:?}");
 }
 
 #[test]
@@ -737,6 +759,7 @@ fn stackspirit_mcp_serves_the_same_identity_tools_and_backend_as_vowp_mcp() {
         .collect();
     let mut expected = vec![
         "fleet_status",
+        "fleet_dashboard",
         "fleet_queue",
         "inbox_list",
         "capacity_report",
@@ -819,6 +842,175 @@ fn mcp_read_tools_return_snapshot_data() {
     assert!(
         tail.as_array().is_some_and(|events| !events.is_empty()),
         "session tail must contain session.created: {tail}"
+    );
+}
+
+#[test]
+fn mcp_fleet_dashboard_returns_markdown_and_ascii_gauges() {
+    let env = TestEnv::new();
+    let session = create_session(&env);
+    let token = token_file(&env, "unused");
+    let running = env.insert_job("job-run", "running mcp job", JobKind::Build, &[]);
+    env.set_job_state(&running, JobState::Running);
+    let ready = env.insert_job("job-ready", "ready mcp job", JobKind::Build, &[]);
+    env.set_job_state(&ready, JobState::Ready);
+    let parked = env.insert_job("job-parked", "parked mcp job", JobKind::Fix, &[]);
+    env.set_job_state(&parked, JobState::Parked);
+    let (code, _, stderr) = env.run(&[
+        "capacity",
+        "set",
+        "--target",
+        "3",
+        "--override",
+        "--reason",
+        "dashboard test",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let store = env.store();
+    let now = store.clock().now();
+    store
+        .insert_inbox(&InboxItem {
+            id: InboxId::new(),
+            project: None,
+            job_id: None,
+            kind: InboxKind::Question,
+            title: "dashboard inbox question".to_owned(),
+            body: String::new(),
+            options: Vec::new(),
+            state: InboxState::Open,
+            answer: None,
+            answered_by: None,
+            created_at: now,
+            answered_at: None,
+        })
+        .expect("node inbox item");
+
+    let input = format!("{}\n", tool_call(1, "fleet_dashboard", json!({})));
+    let (code, stdout, stderr) = run_mcp(&env, &session, "surf-test", &token, &input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+    let result = response(&values, 1);
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    assert_eq!(result["result"]["content"][0]["type"], "text", "{result}");
+    let text = result["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("dashboard text missing: {result}"));
+    assert!(text.starts_with("# StackSpirit fleet"), "{text}");
+    assert!(text.contains("1/3 busy"), "worker slots missing: {text}");
+    assert!(text.contains("fixed target"), "target mode missing: {text}");
+    assert!(
+        text.contains("| test | active | 1 | 1 | 1 |"),
+        "per-project counts missing: {text}"
+    );
+    assert!(text.contains("inbox       1 open"), "inbox count missing: {text}");
+    for gauge in ["[###-------]", "[----------]"] {
+        assert!(text.contains(gauge), "ASCII gauge {gauge} missing: {text}");
+    }
+    assert!(
+        text.contains("cpu") && text.contains("ram") && text.contains("disk"),
+        "host gauges missing: {text}"
+    );
+}
+
+#[test]
+fn mcp_fleet_status_resource_lists_reads_and_escapes() {
+    let env = TestEnv::new();
+    let session = create_session(&env);
+    let token = token_file(&env, "unused");
+
+    // Build a real snapshot, then make one dynamic string hostile and keep it fresh. The
+    // supervisor version is a dynamic field the HTML widget renders.
+    let (code, stdout, stderr) = env.run(&["--json", "fleet", "status", "--refresh"]);
+    assert_eq!(code, 0, "{stderr}");
+    let mut status: Value = serde_json::from_str(&stdout).expect("fleet status JSON");
+    status["snapshot"]["generated_at"] = json!(Timestamp::now().as_rfc3339());
+    status["snapshot"]["supervisor"]["running"] = json!(true);
+    status["snapshot"]["supervisor"]["started_at"] =
+        json!(Timestamp::now().minus(Duration::from_secs(3_725)).as_rfc3339());
+    status["snapshot"]["supervisor"]["version"] = json!("<script>alert('mcp-xss')</script>");
+    std::fs::write(
+        env.home_path().join("snapshot.json"),
+        serde_json::to_string_pretty(&status["snapshot"]).expect("snapshot JSON"),
+    )
+    .expect("write crafted snapshot");
+
+    let input = format!(
+        "{}\n{}\n{}\n{}\n",
+        request(
+            1,
+            "initialize",
+            json!({"protocolVersion": "2024-11-05", "capabilities": {}})
+        ),
+        request(2, "resources/list", json!({})),
+        request(3, "resources/read", json!({"uri": "ui://stackspirit/fleet-status"})),
+        request(4, "resources/read", json!({"uri": "ui://stackspirit/unknown"})),
+    );
+    let (code, stdout, stderr) = run_mcp(&env, &session, "surf-test", &token, &input);
+    assert_eq!(code, 0, "{stderr}");
+    let values = responses(&stdout);
+
+    let init = response(&values, 1);
+    assert_eq!(
+        init["result"]["capabilities"]["resources"]["subscribe"], false,
+        "{init}"
+    );
+    assert_eq!(
+        init["result"]["capabilities"]["resources"]["listChanged"], false,
+        "{init}"
+    );
+
+    let listed = response(&values, 2)["result"]["resources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("resources array missing: {}", response(&values, 2)));
+    let resource = listed
+        .iter()
+        .find(|resource| resource["uri"] == "ui://stackspirit/fleet-status")
+        .unwrap_or_else(|| panic!("fleet status resource missing: {listed:?}"));
+    assert_eq!(resource["mimeType"], "text/html;profile=mcp-app");
+    assert!(
+        resource["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Zero-secret")),
+        "{resource}"
+    );
+
+    let contents = response(&values, 3)["result"]["contents"]
+        .as_array()
+        .unwrap_or_else(|| panic!("contents array missing: {}", response(&values, 3)));
+    assert_eq!(contents.len(), 1, "{contents:?}");
+    let content = &contents[0];
+    assert_eq!(content["uri"], "ui://stackspirit/fleet-status");
+    assert_eq!(content["mimeType"], "text/html;profile=mcp-app");
+    let html = content["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("html missing: {content}"));
+    assert!(html.starts_with("<!doctype html>"), "{html}");
+    for color in ["#F5F7F0", "#1E5B36", "#43A85A", "#0D120F"] {
+        assert!(html.contains(color), "Meadow color {color} missing from the widget");
+    }
+    for section in ["VPS", "Workers", "Active jobs", "Capacity", "Projects", "Inbox"] {
+        assert!(html.contains(section), "widget section {section} missing");
+    }
+    assert!(
+        html.contains("&lt;script&gt;alert(&#39;mcp-xss&#39;)&lt;/script&gt;"),
+        "a dynamic field was not HTML-escaped: {html}"
+    );
+    assert!(
+        !html.contains("<script>alert"),
+        "a raw script tag reached the widget: {html}"
+    );
+    assert!(
+        !html.contains("ui://stackspirit/unknown"),
+        "the unknown URI must not be echoed into the widget"
+    );
+
+    let missing = response(&values, 4);
+    assert_eq!(missing["error"]["code"], -32002, "{missing}");
+    assert!(
+        missing["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("resource not found")),
+        "{missing}"
     );
 }
 
@@ -1321,10 +1513,21 @@ fn mcp_proxy_serves_initialize_list_and_ping_without_a_home() {
     let init = response(&values, 1);
     assert_eq!(init["result"]["serverInfo"]["name"], "stackspirit");
     assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    assert!(
+        init["result"]["capabilities"].get("resources").is_none(),
+        "the proxy cannot serve resources and must not advertise them: {init}"
+    );
     assert_eq!(response(&values, 2)["result"], json!({}));
-    let tools = response(&values, 3)["result"]["tools"]
-        .as_array()
-        .expect("tools array")
+    let tool_list = response(&values, 3)["result"]["tools"].as_array().expect("tools array");
+    let dashboard = tool_list
+        .iter()
+        .find(|tool| tool["name"] == "fleet_dashboard")
+        .expect("fleet_dashboard is a read-only tool the proxy may forward");
+    assert!(
+        dashboard.get("_meta").is_none(),
+        "the proxy must not link to a resource it cannot read: {dashboard}"
+    );
+    let tools = tool_list
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect::<Vec<_>>();
@@ -1734,7 +1937,7 @@ fn run_mcp_child(env: &TestEnv, args: &[&str], input: &str) -> (i32, String, Str
 fn mcp_without_a_session_is_read_only() {
     let env = TestEnv::new();
     let input = format!(
-        "{}\n{}\n{}\n",
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
         request(
             1,
             "initialize",
@@ -1742,6 +1945,9 @@ fn mcp_without_a_session_is_read_only() {
         ),
         request(2, "tools/list", json!({})),
         request(3, "ping", json!({})),
+        request(4, "resources/list", json!({})),
+        request(5, "resources/read", json!({"uri": "ui://stackspirit/fleet-status"})),
+        tool_call(6, "fleet_dashboard", json!({})),
     );
     let (code, stdout, stderr) = run_mcp_child(&env, &[], &input);
     assert_eq!(
@@ -1752,6 +1958,10 @@ fn mcp_without_a_session_is_read_only() {
     let init = response(&values, 1);
     assert_eq!(init["result"]["serverInfo"]["name"], "stackspirit-engine");
     assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
+    assert!(
+        init["result"]["capabilities"]["resources"].is_object(),
+        "the read-only server must advertise resources: {init}"
+    );
     assert!(response(&values, 3)["result"].is_object());
     let mut tools: Vec<&str> = response(&values, 2)["result"]["tools"]
         .as_array()
@@ -1764,11 +1974,38 @@ fn mcp_without_a_session_is_read_only() {
         tools,
         [
             "capacity_report",
+            "fleet_dashboard",
             "fleet_queue",
             "fleet_status",
             "inbox_list",
             "session_tail"
         ]
+    );
+    let resources = response(&values, 4)["result"]["resources"]
+        .as_array()
+        .expect("resources array");
+    assert!(
+        resources
+            .iter()
+            .any(|resource| resource["uri"] == "ui://stackspirit/fleet-status"),
+        "the read-only server must list the fleet resource: {resources:?}"
+    );
+    let contents = response(&values, 5)["result"]["contents"]
+        .as_array()
+        .expect("resource contents");
+    assert!(
+        contents[0]["text"]
+            .as_str()
+            .is_some_and(|html| html.starts_with("<!doctype html>")),
+        "the read-only server must read the fleet widget: {contents:?}"
+    );
+    let dashboard = response(&values, 6);
+    assert_eq!(dashboard["result"]["isError"], false, "{dashboard}");
+    assert!(
+        dashboard["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("# StackSpirit fleet")),
+        "{dashboard}"
     );
 }
 

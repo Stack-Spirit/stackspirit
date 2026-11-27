@@ -14,6 +14,10 @@ pub const INVALID_REQUEST: i64 = -32600;
 pub const METHOD_NOT_FOUND: i64 = -32601;
 /// JSON-RPC invalid params.
 pub const INVALID_PARAMS: i64 = -32602;
+/// JSON-RPC internal error.
+pub const INTERNAL_ERROR: i64 = -32603;
+/// MCP resource not found.
+pub const RESOURCE_NOT_FOUND: i64 = -32002;
 
 /// One parsed request or notification.
 #[derive(Debug, Clone, PartialEq)]

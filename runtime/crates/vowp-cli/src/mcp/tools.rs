@@ -83,15 +83,16 @@ impl std::fmt::Display for ToolError {
 }
 
 /// The read tools the no-session server lists and serves.
-pub const READ_ONLY_TOOLS: [&str; 5] = [
+pub const READ_ONLY_TOOLS: [&str; 6] = [
     "fleet_status",
+    "fleet_dashboard",
     "fleet_queue",
     "inbox_list",
     "capacity_report",
     "session_tail",
 ];
 
-/// Returns the `tools/list` result of the read-only server: the five read tools.
+/// Returns the `tools/list` result of the read-only server: the read tools.
 ///
 /// `session_tail` takes its session as a required argument because there is no session to
 /// default to.
@@ -134,6 +135,17 @@ pub fn definitions() -> Value {
                         "project": {"type": "string", "description": "Restrict the snapshot to one project."}
                     }
                 }
+            },
+            {
+                "name": "fleet_dashboard",
+                "description": "Read a compact Markdown + ASCII fleet dashboard: supervisor uptime, worker slots, CPU/RAM/disk gauges, per-project job counts and open inbox.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {"type": "string", "description": "Restrict the snapshot to one project."}
+                    }
+                },
+                "_meta": {"ui": {"resourceUri": "ui://stackspirit/fleet-status"}}
             },
             {
                 "name": "fleet_queue",
@@ -310,9 +322,23 @@ pub fn definitions() -> Value {
 /// Handles one `tools/call` request.
 pub fn call(backend: &Backend<'_>, name: &str, arguments: &Value) -> Value {
     match backend.call(name, arguments) {
+        // The dashboard is Markdown for a model to read, not a JSON document.
+        Ok(value) if name == "fleet_dashboard" => text_success(&value),
         Ok(value) => tool_success(&value),
         Err(error) => tool_failure(&error),
     }
+}
+
+/// Wraps a raw text result in the MCP content envelope.
+fn text_success(value: &Value) -> Value {
+    let text = match value {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "null".to_owned()),
+    };
+    json!({
+        "content": [{"type": "text", "text": text}],
+        "isError": false,
+    })
 }
 
 /// Wraps a successful value in the MCP content envelope.
