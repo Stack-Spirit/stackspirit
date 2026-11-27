@@ -638,6 +638,8 @@ mod tests {
             error: None,
             pending_permissions: None,
             retry: None,
+            ownership: None,
+            access: crate::engine::chat::model::ChatAccess::Owner,
         }
     }
 

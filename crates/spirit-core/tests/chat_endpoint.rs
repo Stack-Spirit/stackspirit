@@ -21,9 +21,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use spirit_core::engine::chat::{
-    ChatEndpointResolver, ChatEngine, ChatEvent, ChatLogQuery, ChatModelView, ChatRole,
-    ChatSessionId, ChatSessionLocation, ChatSessionState, ChatStartInput, LocalChatProvider,
-    VowpEndpointResolver,
+    ChatAccess, ChatEndpointResolver, ChatEngine, ChatEvent, ChatLogQuery, ChatModelView,
+    ChatOwnershipView, ChatRole, ChatSessionId, ChatSessionLocation, ChatSessionState,
+    ChatStartInput, LocalChatProvider, VowpEndpointResolver,
 };
 use spirit_core::error::{SpiritError, SpiritErrorCode};
 
@@ -909,6 +909,9 @@ async fn setup_assistant_still_creates_and_streams_on_the_bundled_engine() {
     assert!(view.attached);
     assert_eq!(view.model, Some(model()));
     assert_eq!(server.created_sessions(), 1);
+    // The bundled engine is the app's own writer: no cooperative owner is invented.
+    assert!(view.ownership.is_none());
+    assert_eq!(view.access, ChatAccess::Owner);
 
     let receipt = provider
         .send(&ChatSessionId::Setup, "Hello?")
@@ -1660,4 +1663,130 @@ async fn opencode_2x_api_prefix_is_detected_and_applied_to_every_call() {
         !paths.iter().any(|path| path.starts_with("/session/")),
         "no unprefixed JSON call may reach a 2.x host: {paths:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn endpoint_ownership_is_display_only_and_maps_to_the_view() {
+    let server = FakeServer::new(None);
+    let workspace = tempfile::tempdir().unwrap();
+    let vowp_dir = tempfile::tempdir().unwrap();
+    let url = format!("http://127.0.0.1:{}", server.port());
+    let mut document = endpoint_document(
+        "global",
+        "opencode",
+        "running",
+        Some(&url),
+        Some(NATIVE),
+        HOME_SESSION,
+    );
+    document["owner"] = json!({
+        "kind": "opencode",
+        "label": "Mac Studio",
+        "holder": "the other window",
+        "node": "mac-studio",
+        "mode": "cooperative",
+        "state": "attached",
+        "activity": "thinking",
+        "surface_id": "surf_private_identity",
+        "session_id": "ses_private_mirror",
+        "epoch": 42,
+        "lease_expires_at": "2031-02-03T04:05:06.000Z",
+        "lease": {"token": "lease_private_token"},
+    });
+    document["access"] = json!("read_only");
+    write_endpoint_vowp(vowp_dir.path(), &document);
+    let provider = provider_with_vowp(Arc::new(PanicEngine), workspace.path(), vowp_dir.path());
+
+    let view = provider.start(&global_input()).await.unwrap();
+    assert_eq!(view.access, ChatAccess::ReadOnly);
+    let ownership = view.ownership.clone().expect("the owner is reported");
+    assert_eq!(
+        ownership,
+        ChatOwnershipView {
+            kind: "opencode".to_owned(),
+            label: Some("Mac Studio".to_owned()),
+            holder: Some("the other window".to_owned()),
+            node: Some("mac-studio".to_owned()),
+            mode: Some("cooperative".to_owned()),
+            state: Some("attached".to_owned()),
+            activity: Some("thinking".to_owned()),
+        }
+    );
+
+    let value = serde_json::to_value(&view).unwrap();
+    let owner = value["ownership"]
+        .as_object()
+        .expect("ownership serializes as an object");
+    let mut keys: Vec<&str> = owner.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "activity", "holder", "kind", "label", "mode", "node", "state"
+        ]
+    );
+    let text = serde_json::to_string(&value).unwrap();
+    for forbidden in [
+        "surface_id",
+        "surf_private_identity",
+        "ses_private_mirror",
+        "epoch",
+        "lease",
+        "lease_private_token",
+        "2031-02-03",
+    ] {
+        assert!(!text.contains(forbidden), "the view leaked {forbidden}");
+    }
+    assert_safe_view(&value, &[NATIVE, HOME_SESSION, &server.port().to_string()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_local_endpoint_without_ownership_metadata_is_read_only() {
+    let server = FakeServer::new(None);
+    let workspace = tempfile::tempdir().unwrap();
+    let vowp_dir = tempfile::tempdir().unwrap();
+    let url = format!("http://127.0.0.1:{}", server.port());
+    let document = endpoint_document(
+        "global",
+        "opencode",
+        "running",
+        Some(&url),
+        Some(NATIVE),
+        HOME_SESSION,
+    );
+    write_endpoint_vowp(vowp_dir.path(), &document);
+    let provider = provider_with_vowp(Arc::new(PanicEngine), workspace.path(), vowp_dir.path());
+
+    let view = provider.start(&global_input()).await.unwrap();
+    assert!(view.ownership.is_none());
+    assert_eq!(view.access, ChatAccess::ReadOnly);
+    let value = serde_json::to_value(&view).unwrap();
+    assert!(value.get("ownership").is_none());
+    assert_eq!(value["access"], "read_only");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_owner_kind_does_not_fail_the_endpoint_document() {
+    let server = FakeServer::new(None);
+    let workspace = tempfile::tempdir().unwrap();
+    let vowp_dir = tempfile::tempdir().unwrap();
+    let url = format!("http://127.0.0.1:{}", server.port());
+    let mut document = endpoint_document(
+        "global",
+        "opencode",
+        "running",
+        Some(&url),
+        Some(NATIVE),
+        HOME_SESSION,
+    );
+    document["owner"] = json!({"kind": "hologram", "label": "Future surface"});
+    document["access"] = json!("owner");
+    write_endpoint_vowp(vowp_dir.path(), &document);
+    let provider = provider_with_vowp(Arc::new(PanicEngine), workspace.path(), vowp_dir.path());
+
+    let view = provider.start(&global_input()).await.unwrap();
+    let ownership = view.ownership.expect("an unknown kind is still displayed");
+    assert_eq!(ownership.kind, "hologram");
+    assert_eq!(ownership.label.as_deref(), Some("Future surface"));
+    assert_eq!(view.access, ChatAccess::Owner);
 }

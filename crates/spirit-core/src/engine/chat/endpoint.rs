@@ -6,13 +6,18 @@
 //! carries no inherited secret. The document's URL, host, port, auth value, VOWP session id
 //! and native session id stay core-only: no `Debug`, error, log or serialized chat value
 //! carries them.
+//!
+//! VOWP 0.5.1 also reports cooperative ownership (`owner`) and this caller's writability
+//! (`access`). The resolver keeps only the display-safe owner fields and drops surface
+//! identity, log identity, epoch and lease timestamps; an absent or unknown `access`
+//! value is treated as `read_only`.
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use tokio::process::Command;
 use zeroize::Zeroizing;
 
@@ -108,6 +113,13 @@ pub struct ResolvedEndpoint {
     /// `None` tells the chat transport to discover the host's newest session instead
     /// of creating a new one.
     pub(crate) native_session_id: Option<String>,
+    /// Display-only cooperative owner reported by VOWP, when one is held.
+    ///
+    /// Only the safe display fields survive parsing; surface identity, log identity,
+    /// epoch and lease timestamps never reach a view or an error.
+    pub(crate) owner: Option<SessionOwnerWire>,
+    /// Whether this caller may write to the surface. Absent documents are read-only.
+    pub(crate) access: EndpointAccessWire,
     /// Private orchestrator workspace reported by VOWP, when it provides one; core-only.
     ///
     /// The current VOWP endpoint document does not carry this field. It is accepted
@@ -130,6 +142,8 @@ impl fmt::Debug for ResolvedEndpoint {
             .field("port", &"[redacted]")
             .field("session_id", &"[redacted]")
             .field("native_session_id", &"[redacted]")
+            .field("owner", &self.owner.as_ref().map(|_| "[display-only]"))
+            .field("access", &self.access)
             .field("workspace", &self.workspace.as_ref().map(|_| "[redacted]"))
             .field("auth", &self.auth)
             .finish()
@@ -291,6 +305,63 @@ impl ChatEndpointResolver for VowpEndpointResolver {
     }
 }
 
+/// The display-safe subset of VOWP's cooperative owner report.
+///
+/// VOWP also reports surface ids, the mirrored log id, an epoch and lease timestamps.
+/// None of those are parsed: they are identity or lease data, not display data. `kind`
+/// stays a free-form string so a newer VOWP kind never rejects the whole document.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub(crate) struct SessionOwnerWire {
+    /// `chat`, `opencode`, `claude-code`, `mcp`, `mirror`, `api`, `agent` or a newer kind.
+    #[serde(default)]
+    pub(crate) kind: String,
+    /// Optional human label for the holder.
+    #[serde(default)]
+    pub(crate) label: Option<String>,
+    /// Optional holder description.
+    #[serde(default)]
+    pub(crate) holder: Option<String>,
+    /// Optional node that holds the lease.
+    #[serde(default)]
+    pub(crate) node: Option<String>,
+    /// Optional ownership mode.
+    #[serde(default)]
+    pub(crate) mode: Option<String>,
+    /// Optional owner state.
+    #[serde(default)]
+    pub(crate) state: Option<String>,
+    /// Optional short activity description.
+    #[serde(default)]
+    pub(crate) activity: Option<String>,
+}
+
+/// Whether the calling surface may write to a local orchestrator.
+///
+/// Parsing is deliberately lenient: an absent, null or unknown value is `read_only`,
+/// so a newer VOWP access name never grants write access by accident.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum EndpointAccessWire {
+    /// This caller holds the cooperative lease.
+    Owner,
+    /// Every other caller, including an absent or unrecognized document value.
+    #[default]
+    ReadOnly,
+}
+
+impl<'de> Deserialize<'de> for EndpointAccessWire {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = Option::<String>::deserialize(deserializer)?;
+        Ok(if raw.as_deref() == Some("owner") {
+            Self::Owner
+        } else {
+            Self::ReadOnly
+        })
+    }
+}
+
 #[derive(Deserialize)]
 struct EndpointDocument {
     name: String,
@@ -304,6 +375,12 @@ struct EndpointDocument {
     url: Option<String>,
     #[serde(default)]
     native_session_id: Option<String>,
+    /// The cooperative owner, when VOWP reports one. Only display fields are kept.
+    #[serde(default)]
+    owner: Option<SessionOwnerWire>,
+    /// This caller's writability. Absent documents are read-only.
+    #[serde(default)]
+    access: EndpointAccessWire,
     /// Forward-compatible private workspace, absent from the current VOWP document.
     #[serde(
         default,
@@ -402,6 +479,8 @@ impl EndpointDocument {
             host,
             port,
             native_session_id,
+            owner: self.owner,
+            access: self.access,
             workspace,
             auth,
         })
@@ -718,6 +797,8 @@ mod tests {
                 state: state.to_owned(),
                 url: url.map(str::to_owned),
                 native_session_id: native.map(str::to_owned),
+                owner: None,
+                access: EndpointAccessWire::ReadOnly,
                 workspace: None,
                 auth: None,
             };
@@ -806,6 +887,8 @@ mod tests {
             state: "running".to_owned(),
             url: Some("http://127.0.0.1:12345".to_owned()),
             native_session_id: None,
+            owner: None,
+            access: EndpointAccessWire::ReadOnly,
             workspace: Some(workspace.to_owned()),
             auth: None,
         };
@@ -835,5 +918,46 @@ mod tests {
         for rejected in ["", "relative/path", "/tmp/../escape", "/tmp/bad\npath"] {
             assert_eq!(parse_workspace_path(rejected), None, "{rejected:?}");
         }
+    }
+
+    #[test]
+    fn ownership_defaults_are_safe_and_unknown_values_do_not_fail_parsing() {
+        let minimal = r#"{
+            "name": "global", "app": "opencode", "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "location": "node", "state": "running"
+        }"#;
+        let document: EndpointDocument = serde_json::from_str(minimal).unwrap();
+        assert!(document.owner.is_none());
+        assert_eq!(document.access, EndpointAccessWire::ReadOnly);
+
+        let future = r#"{
+            "name": "global", "app": "opencode", "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "location": "node", "state": "running",
+            "owner": {
+                "kind": "hologram", "label": "Future surface", "holder": "pi",
+                "node": "mac-studio", "mode": "cooperative", "state": "attached",
+                "activity": "thinking",
+                "surface_id": "surf_1", "session_id": "ses_private",
+                "epoch": 42, "lease_expires_at": "2026-11-27T00:00:00.000Z"
+            },
+            "access": "owner"
+        }"#;
+        let document: EndpointDocument = serde_json::from_str(future).unwrap();
+        let owner = document.owner.unwrap();
+        assert_eq!(owner.kind, "hologram");
+        assert_eq!(owner.label.as_deref(), Some("Future surface"));
+        assert_eq!(owner.holder.as_deref(), Some("pi"));
+        assert_eq!(owner.node.as_deref(), Some("mac-studio"));
+        assert_eq!(owner.mode.as_deref(), Some("cooperative"));
+        assert_eq!(owner.state.as_deref(), Some("attached"));
+        assert_eq!(owner.activity.as_deref(), Some("thinking"));
+        assert_eq!(document.access, EndpointAccessWire::Owner);
+
+        let unknown_access = r#"{
+            "name": "global", "app": "opencode", "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "location": "node", "state": "running", "access": "future_writer"
+        }"#;
+        let document: EndpointDocument = serde_json::from_str(unknown_access).unwrap();
+        assert_eq!(document.access, EndpointAccessWire::ReadOnly);
     }
 }

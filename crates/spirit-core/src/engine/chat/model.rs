@@ -3,6 +3,10 @@
 //! Everything in this module may cross to the renderer. It deliberately has no
 //! endpoint URL, port, credential, native session id, workspace or binary path. The
 //! transport keeps those values private in [`super::local`].
+//!
+//! Cooperative ownership is display-only here: [`ChatOwnershipView`] carries the safe
+//! owner metadata and [`ChatAccess`] says whether this caller may write. Neither type
+//! carries surface identity, the mirrored log id, an epoch, a lease timestamp or a token.
 
 use std::fmt;
 
@@ -144,6 +148,49 @@ pub enum ChatSessionLocation {
     Local,
     /// A VOWP-reported orchestrator reached through the server path.
     Server,
+}
+
+/// Whether this caller may write to a local orchestrator.
+///
+/// This is a display/report value, not a takeover primitive. A `read_only` session keeps
+/// streaming and reading its mirrored log; the composer is what the UI must disable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatAccess {
+    /// The bundled engine, or a local orchestrator whose lease this caller holds.
+    Owner,
+    /// Another surface holds the cooperative lease; this caller may only read.
+    #[default]
+    ReadOnly,
+}
+
+/// Display-only cooperative ownership reported by VOWP.
+///
+/// The values describe another writer so the UI can name it and make the previous writer
+/// read-only. They are cooperative metadata, not an enforcement mechanism, and never
+/// include a surface id, a session/log id, an epoch, a lease timestamp or a token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatOwnershipView {
+    /// Surface kind such as `opencode`, or a newer safe kind string from VOWP.
+    pub kind: String,
+    /// Human label for the holder, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Holder description, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
+    /// Node that holds the lease, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// Cooperative ownership mode, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Owner state, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// Short activity description, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
 }
 
 /// The chat state machine from §4.5.
@@ -499,6 +546,14 @@ pub struct ChatSessionView {
     /// An active `session.status` retry, when OpenCode is sleeping before another try.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<ChatRetryStatus>,
+    /// Display-only cooperative owner, when VOWP reports one.
+    ///
+    /// The bundled engine is the app's own writer and reports `None` here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<ChatOwnershipView>,
+    /// Whether this caller may write; VOWP orchestrators default to `read_only`.
+    #[serde(default)]
+    pub access: ChatAccess,
 }
 
 /// Why a session closed.
@@ -912,6 +967,8 @@ mod tests {
             error: None,
             pending_permissions: None,
             retry: None,
+            ownership: None,
+            access: ChatAccess::ReadOnly,
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(!json.contains("\"url\""));
@@ -919,6 +976,44 @@ mod tests {
         assert!(!json.contains("\"token\""));
         assert!(!json.contains("\"directory\""));
         assert!(!json.contains("\"native_session_id\""));
+        assert!(json.contains("\"access\":\"read_only\""));
+        assert!(!json.contains("\"ownership\""));
+    }
+
+    #[test]
+    fn ownership_serializes_only_display_fields() {
+        let ownership = ChatOwnershipView {
+            kind: "opencode".to_owned(),
+            label: Some("Mac Studio".to_owned()),
+            holder: Some("opencode".to_owned()),
+            node: Some("mac-studio".to_owned()),
+            mode: Some("cooperative".to_owned()),
+            state: Some("attached".to_owned()),
+            activity: Some("thinking".to_owned()),
+        };
+        let value = serde_json::to_value(&ownership).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "opencode",
+                "label": "Mac Studio",
+                "holder": "opencode",
+                "node": "mac-studio",
+                "mode": "cooperative",
+                "state": "attached",
+                "activity": "thinking",
+            })
+        );
+        for forbidden in [
+            "surface_id",
+            "session_id",
+            "epoch",
+            "lease",
+            "expires_at",
+            "token",
+        ] {
+            assert!(value.get(forbidden).is_none(), "{forbidden}");
+        }
     }
 
     #[test]

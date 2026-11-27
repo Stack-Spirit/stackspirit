@@ -4,6 +4,10 @@
 //! the desktop wires to the existing `EngineSupervisor` singleton. The loopback port,
 //! workspace and native session ids stay in this module: no serialized DTO or error
 //! carries an endpoint URL, port, credential or path.
+//!
+//! VOWP's cooperative owner is reduced to display fields here. The bundled engine is the
+//! app's only writer and reports `ownership: None` / `access: owner`; a local orchestrator
+//! reports the document's owner and writability, defaulting to `read_only`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -21,16 +25,16 @@ use ulid::Ulid;
 use zeroize::Zeroizing;
 
 use crate::engine::chat::endpoint::{
-    ChatEndpointResolver, LoopbackAuth, LoopbackHost, ResolvedEndpoint, VowpEndpointResolver,
-    parse_workspace_path,
+    ChatEndpointResolver, EndpointAccessWire, LoopbackAuth, LoopbackHost, ResolvedEndpoint,
+    SessionOwnerWire, VowpEndpointResolver, parse_workspace_path,
 };
 use crate::engine::chat::model::{
-    ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage, ChatMessageOrigin,
-    ChatModelTier, ChatModelView, ChatPermissionDecision, ChatPermissionPrompt, ChatRetryStatus,
-    ChatRole, ChatSendReceipt, ChatSessionId, ChatSessionLocation, ChatSessionState,
-    ChatSessionView, ChatStartInput, ChatToolActivity, ChatToolStatus, ChatUsageView,
-    MAX_ACTIVITY_ITEMS, MAX_MESSAGE_CHARS, cap_text, display_snippet, normalize_text,
-    validate_project_name, validate_user_text,
+    ChatAccess, ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage,
+    ChatMessageOrigin, ChatModelTier, ChatModelView, ChatOwnershipView, ChatPermissionDecision,
+    ChatPermissionPrompt, ChatRetryStatus, ChatRole, ChatSendReceipt, ChatSessionId,
+    ChatSessionLocation, ChatSessionState, ChatSessionView, ChatStartInput, ChatToolActivity,
+    ChatToolStatus, ChatUsageView, MAX_ACTIVITY_ITEMS, MAX_MESSAGE_CHARS, cap_text,
+    display_snippet, normalize_text, validate_project_name, validate_user_text,
 };
 use crate::engine::chat::pump::{
     ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper, retry_status,
@@ -359,6 +363,10 @@ struct SessionRecord {
     pending_permissions: Vec<ChatPermissionPrompt>,
     /// An active `session.status` retry, when OpenCode is sleeping before another try.
     retry: Option<ChatRetryStatus>,
+    /// Display-only cooperative owner from the last resolved endpoint, when reported.
+    ownership: Option<ChatOwnershipView>,
+    /// Whether this caller may write to the local endpoint.
+    access: ChatAccess,
     /// True while a coalesced tool-activity log refresh is queued.
     tool_refresh_queued: bool,
     /// Identifies the in-flight background turn so a late response after Stop is ignored.
@@ -388,6 +396,8 @@ impl SessionRecord {
             turn_completed: false,
             pending_permissions: Vec::new(),
             retry: None,
+            ownership: None,
+            access: ChatAccess::ReadOnly,
             tool_refresh_queued: false,
             turn_seq: 0,
             turn_cancelled: false,
@@ -816,6 +826,8 @@ impl LocalChatProvider {
     ) -> Result<ChatSessionView, SpiritError> {
         let reported_native = resolved.native_session_id.clone();
         let vowp_session_id = resolved.session_id.clone();
+        let ownership = resolved.owner.as_ref().map(chat_ownership_view);
+        let access = ChatAccess::from(resolved.access);
         let mut endpoint = ChatEndpoint::orchestrator(resolved);
         endpoint.api_prefix = self.inner.detect_api_prefix(&endpoint).await;
         let native = match reported_native {
@@ -856,6 +868,8 @@ impl LocalChatProvider {
             record.engine_backed = false;
             record.known = None;
             record.vowp_mcp_wired = false;
+            record.ownership = ownership;
+            record.access = access;
             if !preserve_turn {
                 record.state = ChatSessionState::Ready;
                 record.active_turn = None;
@@ -1372,6 +1386,14 @@ impl Inner {
             } else {
                 (None, None)
             };
+        // The bundled engine is the app's own single writer. A VOWP orchestrator reports
+        // the document's owner and writability exactly; absent metadata stays read-only.
+        let (ownership, access) = if matches!(session, ChatSessionId::Setup) || record.engine_backed
+        {
+            (None, ChatAccess::Owner)
+        } else {
+            (record.ownership.clone(), record.access)
+        };
         ChatSessionView {
             session: session.clone(),
             location: ChatSessionLocation::Local,
@@ -1387,6 +1409,8 @@ impl Inner {
             pending_permissions: (!record.pending_permissions.is_empty())
                 .then(|| record.pending_permissions.clone()),
             retry: record.retry.clone(),
+            ownership,
+            access,
         }
     }
 
@@ -4090,6 +4114,36 @@ fn orchestrator_name(session: &ChatSessionId) -> Option<&str> {
         ChatSessionId::Project(name) => Some(name),
         ChatSessionId::Setup => None,
     }
+}
+
+impl From<EndpointAccessWire> for ChatAccess {
+    fn from(value: EndpointAccessWire) -> Self {
+        match value {
+            EndpointAccessWire::Owner => Self::Owner,
+            EndpointAccessWire::ReadOnly => Self::ReadOnly,
+        }
+    }
+}
+
+/// Reduces VOWP's owner report to the display-only view.
+///
+/// Every value is redacted and capped by [`display_snippet`]. An empty or missing kind
+/// becomes `unknown`, so an older or newer VOWP still yields a safe kind string.
+fn chat_ownership_view(owner: &SessionOwnerWire) -> ChatOwnershipView {
+    ChatOwnershipView {
+        kind: owner_field(Some(owner.kind.as_str())).unwrap_or_else(|| "unknown".to_owned()),
+        label: owner_field(owner.label.as_deref()),
+        holder: owner_field(owner.holder.as_deref()),
+        node: owner_field(owner.node.as_deref()),
+        mode: owner_field(owner.mode.as_deref()),
+        state: owner_field(owner.state.as_deref()),
+        activity: owner_field(owner.activity.as_deref()),
+    }
+}
+
+fn owner_field(value: Option<&str>) -> Option<String> {
+    let value = display_snippet(value?);
+    (!value.is_empty()).then_some(value)
 }
 
 fn validate_start(input: &ChatStartInput) -> Result<(), SpiritError> {

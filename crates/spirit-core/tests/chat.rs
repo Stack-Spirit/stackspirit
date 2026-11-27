@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use spirit_core::engine::chat::{
-    ApplyOutcome, ChatEndpointResolver, ChatEngine, ChatEvent, ChatEventApplier, ChatEventBus,
-    ChatLogQuery, ChatMessage, ChatSessionId, ChatSessionLocation, ChatSessionState,
+    ApplyOutcome, ChatAccess, ChatEndpointResolver, ChatEngine, ChatEvent, ChatEventApplier,
+    ChatEventBus, ChatLogQuery, ChatMessage, ChatSessionId, ChatSessionLocation, ChatSessionState,
     ChatStartInput, KnownOrchestratorSession, LocalChatProvider, ResolvedEndpoint, StreamSupport,
 };
 use spirit_core::engine::{
@@ -895,6 +895,9 @@ async fn one_turn_streams_deltas_and_done_without_duplicates() {
     assert!(view.streaming_supported);
     assert!(view.error.is_none());
     assert_eq!(view.location, ChatSessionLocation::Local);
+    // The bundled engine is the app's own writer.
+    assert!(view.ownership.is_none());
+    assert_eq!(view.access, ChatAccess::Owner);
 
     wait_until(|| server.event_connections() >= 1, Duration::from_secs(2)).await;
     let receipt = provider.send(&SETUP, "Hello?").await.unwrap();
@@ -1478,6 +1481,11 @@ async fn project_without_a_local_record_is_a_dead_end_until_it_is_provisioned() 
     assert!(view.error.is_none());
     assert_eq!(view.location, ChatSessionLocation::Local);
     assert!(view.model.is_some(), "the connected model is shown");
+    assert!(
+        view.ownership.is_none(),
+        "the bundled fallback has no cooperative owner"
+    );
+    assert_eq!(view.access, ChatAccess::Owner);
     assert_eq!(server.created_sessions(), 1);
     let created = server
         .requests()
