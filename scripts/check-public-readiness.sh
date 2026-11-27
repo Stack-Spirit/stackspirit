@@ -68,7 +68,7 @@ while [ "$#" -gt 0 ]; do
       strict_history=1
       ;;
     --rev)
-      [ "$#" -ge 2 ] || {
+      [ "$#" -ge 2 ] && [ -n "$2" ] || {
         echo "check-public-readiness: --rev requires a commit" >&2
         exit 2
       }
@@ -77,6 +77,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --rev=*)
       rev=${1#*=}
+      [ -n "$rev" ] || {
+        echo "check-public-readiness: --rev requires a commit" >&2
+        exit 2
+      }
       ;;
     *)
       echo "check-public-readiness: unknown argument: $1 (try --help)" >&2

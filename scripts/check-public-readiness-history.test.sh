@@ -103,10 +103,14 @@ assert_contains "tree: "
 assert_contains "PASS"
 assert_not_contains "scope: all commits"
 
-# 2. --rev is mutually exclusive with --history/--strict-history.
+# 2. --rev is mutually exclusive with --history/--strict-history and requires
+#    a commit argument.
 run_scan --rev "$repo_initial" --history
 assert_status 2
 assert_contains "cannot be combined"
+run_scan --rev
+assert_status 2
+assert_contains "--rev requires a commit"
 
 # 3. A clean history passes.
 run_scan --history
