@@ -51,8 +51,8 @@ publication checkbox stays unchecked.
   `check-release.sh --version 0.6.1 --tag v0.6.1 --publish` prints `check-release: ok (0.6.1)`.
 - **The GitHub repository reports `PUBLIC` visibility** with default branch `main` at `82f2ca7`
   (`gh repo view`); this job did not change visibility.
-- **The only ref this job changed is the local `public-main` branch.** It pushed, tagged and
-  published nothing.
+- **Outside its own job branch, the only ref this job changed is the local `public-main`
+  branch.** It pushed, tagged and published nothing.
 
 All **49** working-tree findings at the start of the ss-137 job were replaced with
 `/home/user`:
@@ -464,11 +464,13 @@ e-mail placeholder count may rise because this section names the public noreply 
 - It does not push, publish, tag or change visibility. Replacing the public `main` with the
   reviewed `public-main` commit is the owner's action.
 - The audit does not inspect GitHub issues, pull requests, wikis or package-registry metadata;
-  this refresh only checked the two release entries with `gh release view`.
+  this refresh checked the two release entries with `gh release view`, the repository visibility
+  with `gh repo view`, and the tags with `git ls-remote`.
 - It does not run the Playwright end-to-end suites or the full runtime workspace; the ss-137
   audit's evidence is the public-readiness scan, the `spirit-core` tests, the version test,
   `check-release.sh` and the root TypeScript typecheck/lint/unit suite. The ss-150 refresh re-ran
-  the public-readiness scans, `check-release.sh` and the history self-test only.
+  the public-readiness scans, `check-release.sh`, the history self-test and the edited-file link
+  check only.
 - It does not publish, tag, push, sign, notarize, or change repository visibility.
 - A clean scan is necessary but not sufficient for a public launch; the manual review and the
   owner settings above remain required.
