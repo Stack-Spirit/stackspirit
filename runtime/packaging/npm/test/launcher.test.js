@@ -92,7 +92,8 @@ hostTest("launcher_refuses_a_version_mismatch", () => {
   fs.writeFileSync(manifest, JSON.stringify(json));
   const result = npx(cwd, ["stackspirit", "--version"]);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /version mismatch: stackspirit 0\.6\.0 needs .* found 0\.5\.1/);
+  const version = f.VERSION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(result.stderr, new RegExp(`version mismatch: stackspirit ${version} needs .* found 0\\.5\\.1`));
   assert.equal(result.stdout, "", "a mixed-version binary must not run");
 });
 
