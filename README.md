@@ -206,6 +206,8 @@ The 0.6.1 release ships the desktop cockpit source, the read-only Web PWA source
 
 ## Documentation
 
+- [`docs/README.md`](docs/README.md) — the full documentation index: start here, desktop, runtime,
+  release and history.
 - [`docs/STRATEGY.md`](docs/STRATEGY.md) — vision, brand rules and roadmap.
 - [`docs/HARNESSES.md`](docs/HARNESSES.md) — Universal Harness Registry: presets, protocols,
   auth modes and one-click connect.
