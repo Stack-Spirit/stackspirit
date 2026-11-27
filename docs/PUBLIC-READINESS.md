@@ -1,6 +1,7 @@
 # Public readiness — StackSpirit monorepo
 
 - **Audit date:** 2026-11-26
+- **History scan:** 2026-11-27, job `ss-144-history-secret-scan`, at commit `3c8ac2f`
 - **Repository:** `Stack-Spirit/stackspirit` (MIT, public launch pending)
 - **Audited tree:** the job branch `job/ss-137-public-launch-scrub-and-v060` based on `57fa1d6`
 - **Scope:** every tracked text file in the working tree, including `apps/`, `packages/`,
@@ -9,10 +10,13 @@
 
 ## Verdict
 
-**The working-tree scan is clean and the release version is aligned.** The scan finds **no secret,
-no public IP address, no tracked `.env` or credential file, no personal e-mail address, and no
-non-placeholder `/home/<user>` path**. All **49** findings at the start of this job were replaced
-with `/home/user`:
+**The working-tree scan is clean, but the history scan is a publication blocker.** The
+working-tree scan finds **no secret, no public IP address, no tracked `.env` or credential file,
+no personal e-mail address, and no non-placeholder `/home/<user>` path**. The history-aware scan
+walks every commit reachable from `git rev-list --all` and finds **9 secret-class matches** and
+**486 privacy-class matches** in old commits; see [History scan](#history-scan-job-ss-144-history-secret-scan-2026-11-27)
+under §1. All **49** working-tree findings at the start of the ss-137 job were replaced with
+`/home/user`:
 
 - **29** in the `docs/` and `runtime/docs/maintainers/` files this job already owned;
 - **20** in `AGENTS.md`, `README.md`, `crates/spirit-core/src/` and
@@ -22,21 +26,21 @@ The release version is now aligned at **`0.6.0`** across `runtime/Cargo.toml`, e
 dependency, `runtime/Cargo.lock`, the version test, `runtime/CHANGELOG.md` and the npm/PyPI
 packaging manifests. `check-release.sh --version 0.6.0 --tag v0.6.0 --publish` passes.
 
-The remaining launch pre-flight items are the history-aware secret scan, the GitHub repository and
-registry settings, and the dry release build; they are not working-tree findings.
+The remaining launch pre-flight items are the publication-history decision, the GitHub repository
+and registry settings, and the dry release build; they are not working-tree findings.
 
 | Area | Result |
 |---|---|
-| Provider API keys, GitHub/AWS/Slack/Stripe/PyPI/npm tokens, private-key headers | **0** |
+| Provider API keys, GitHub/AWS/Slack/Stripe/PyPI/npm tokens, private-key headers | **0** in the working tree; **9** in history (see §1) |
 | Globally routable IPv4 addresses | **0** |
 | Tracked `.env`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, `*.pem`, SSH private-key names | **0** |
 | Personal e-mail addresses outside the reserved example domains | **0** |
-| Non-placeholder `/home/<user>` or `/Users/<user>` paths | **0 blocked** (49 replaced with `/home/user` by this job) |
+| Non-placeholder `/home/<user>` or `/Users/<user>` paths | **0 blocked** in the working tree (49 replaced with `/home/user` by the ss-137 job); **486** in history |
 | Home paths scrubbed by this job | **49** (29 in `docs/` and `runtime/docs/`, 20 in `AGENTS.md`, `README.md` and `crates/spirit-core/`) |
-| Placeholder/service/home-fixture paths recognised by the scan | 483 home paths, 820 reserved/private IPs and 135 reserved e-mails allowed |
-| Working-tree scan exit status | **0 (PASS)**; the command and output are shown below |
+| Placeholder/service/home-fixture paths recognised by the scan | 487 home paths, 856 reserved/private IPs and 160 reserved e-mails allowed at the ss-144 re-run |
+| Working-tree scan exit status | **0 (PASS)** at the ss-144 re-run; the command and output are shown below |
 | Release workflow YAML | **Valid**; the 76 structural, mutation and version-checker checks recorded by the ss-135 audit pass |
-| Git history | **Not scanned by this script**; a history-aware scan is a required pre-flight item |
+| Git history | **BLOCKER**: the ss-144 history scan found **9 secret-class** and **486 privacy-class** findings; see the History scan subsection in §1 |
 | First release version state | **Aligned at `0.6.0`**: workspace, inter-crate dependencies, lockfile, version test and npm/PyPI packaging agree; `check-release.sh` passes |
 
 The working-tree scan and the history/publication checks are independent. A clean scan does not
@@ -45,13 +49,21 @@ prove the git history is clean, and the history scan does not replace the path s
 ## How to reproduce the scan
 
 ```sh
-bash scripts/check-public-readiness.sh
+bash scripts/check-public-readiness.sh                 # working tree at HEAD
+bash scripts/check-public-readiness.sh --history       # every commit in git rev-list --all
+bash scripts/check-public-readiness.sh --history --strict-history
+bash scripts/check-public-readiness-history.test.sh    # hermetic self-test
 ```
 
-The script is a working-tree scan of `git ls-files`. It reads text files up to 4 MiB, skips
-binary files, masks every matched value after its first four characters, and exits `1` on any
-blocked finding. It uses only `git` and Python's standard library; it makes no network calls and
-does not read `.env` values or any other file outside the checkout.
+The default mode is a working-tree scan of `git ls-files`. `--history` walks every commit
+reachable from `git rev-list --all`, deduplicates blobs by object id, and applies the same rules
+and the same 4 MiB/binary limits. Secret-class findings (`private_key`, provider/registry tokens
+and `secret_path`) are fatal in `--history`; privacy-class findings (`home_path`, `ipv4` and
+`email`) are reported with counts and masked rows but are fatal only with `--strict-history`.
+`--strict-history` implies `--history`. The script reads text files up to 4 MiB, skips binary
+files, masks every matched value after its first four characters, and uses only `git` and
+Python's standard library; it makes no network calls and does not read `.env` values or any
+other file outside the checkout.
 
 It checks:
 
@@ -60,23 +72,23 @@ It checks:
 | `private_key` | PEM private-key headers. |
 | provider/registry tokens | `sk-…`, GitHub, GitLab, AWS, Google, Slack, Stripe live, PyPI, npm and Hugging Face token shapes. |
 | `secret_path` | Tracked `.env` (except `.env.example`/`.sample`/`.template`), `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, `*.pem`, `*.p12`, `*.pfx`, `*.key`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`, and `.ssh/` paths. |
-| `ipv4` | IPv4 addresses that are globally routable. Loopback, RFC 1918/6598 private space, link-local, multicast, unspecified and the RFC 5737 documentation ranges are recognised as non-public. |
+| `ipv4` | IPv4 addresses that are globally routable. Loopback, RFC 1918/6598 private space, link-local, multicast, unspecified and the RFC 5737 documentation ranges are recognised as non-public. Decimal runs inside SVG `d`/`points` path data are not addresses. |
 | `home_path` | `/home/<user>` and `/Users/<user>` outside the documented placeholder/service accounts. The scan does not match `.../home/...` inside a relative fixture path. |
-| `email` | Addresses outside reserved example domains, `@users.noreply.github.com`, the project's own `stackspirit.io` addresses, and obvious file/systemd-unit false positives. |
+| `email` | Addresses outside reserved example domains, `@users.noreply.github.com`, the project's own `stackspirit.io` addresses (including subdomains), and obvious file/systemd-unit false positives. |
 
 Intentional fixtures and placeholders are allowed by name: `/home/user`, `/home/you`,
-`/home/owner`, `/home/fake`, `/Users/me`, `/Users/example`, the documented `/home/vowp` and
-`/home/vowp-vault` service accounts, and the acceptance-rig accounts. A new real home path is
-still reported.
+`/home/owner`, `/home/fake`, `/Users/me`, `/Users/example`, the documented `/home/stackspirit`,
+`/home/vowp` and `/home/vowp-vault` service accounts, and the acceptance-rig accounts. A new real
+home path is still reported.
 
-## Exact scan output at the end of this job
+## Exact working-tree scan output (ss-144 re-run)
 
 ```text
 $ bash scripts/check-public-readiness.sh
 public-readiness: repository <git top level>
 public-readiness: scope: tracked working tree at HEAD
-public-readiness: scanned 1604 of 1650 tracked text files
-public-readiness: allowed placeholders: 483 home path(s), 820 reserved/private IP(s), 135 reserved e-mail(s)
+public-readiness: scanned 1663 of 1715 tracked text files
+public-readiness: allowed placeholders: 487 home path(s), 856 reserved/private IP(s), 160 reserved e-mail(s)
 public-readiness: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found
 ```
 
@@ -192,15 +204,79 @@ change; the dry-build items block the first release.
       now prints `PASS` and exits `0`.
 - [ ] Decide whether `runtime/docs/maintainers/` ships at all. It no longer contains private home
       paths, but it still holds old acceptance transcripts and internal runbooks.
-- [ ] Run a history-aware secret scan over every commit that will be public. This script only
-      scans the tracked working tree. From `runtime/`, the existing
-      `scripts/audit/scan.sh --history --strict-history` is one option; a dedicated scanner such
-      as `gitleaks` is also acceptable. Require zero blocked findings.
+- [ ] Run a history-aware secret scan over every commit that will be public. The ss-144 job added
+      `--history` / `--history --strict-history` to the scanner and ran it below; the result is a
+      blocker, so this box stays unchecked. From `runtime/`, the existing
+      `scripts/audit/scan.sh --history --strict-history` remains another option; a dedicated
+      scanner such as `gitleaks` is also acceptable. Require zero blocked findings.
 - [ ] Confirm no `.env`, private key, token, SSH key, credential file, database, or local log is
       tracked in any commit that will be public.
 - [ ] Review tracked media/large files and third-party notices (`LICENSE`,
       `THIRD_PARTY_NOTICES.md`, `runtime/THIRD-PARTY-LICENSES.md`). All runtime release
       archives carry the licence bundle.
+
+#### History scan (job `ss-144-history-secret-scan`, 2026-11-27)
+
+The scanner now has a history mode. It walks every commit reachable from `git rev-list --all`,
+deduplicates blobs by object id, and applies the same rules and 4 MiB/binary limits as the
+working-tree scan. Secret-class findings are fatal in `--history`; privacy-class findings are
+reported with counts and masked rows but are fatal only with `--strict-history`.
+
+Exact commands and results at commit `3c8ac2f` (wall-clock time 95.5 s for `--history`, 90.9 s
+for the strict re-run):
+
+```sh
+bash scripts/check-public-readiness-history.test.sh
+# history-test: PASS (exit 0)
+
+bash scripts/check-public-readiness.sh
+# scanned 1663 of 1715 tracked text files
+# PASS (exit 0)
+
+bash scripts/check-public-readiness.sh --history
+# commits walked: 1180
+# unique blobs: 6646 (6592 text scanned, 2 over size cap, 52 binary/undecodable)
+# secret-class findings: 9 (private_key 3, provider_token 6)
+# privacy-class findings: 486 (home_path 486, ipv4 0, email 0)
+# exit status: 1
+
+bash scripts/check-public-readiness.sh --history --strict-history
+# same counts; exit status: 1
+```
+
+**BLOCKER — do not publish this history.** Nine secret-class rows were found (all values masked
+exactly as the scanner prints them):
+
+```text
+19ade78542bd crates/vowp-adapters/tests/classify.rs:237: private_key: ----***
+a47b7aa9385c scripts/audit/allowlist.txt:44: private_key: ----***
+a47b7aa9385c scripts/audit/allowlist.txt:48: private_key: ----***
+f14d4cb4401e crates/spirit-core/tests/chat_permissions.rs:28: provider_token: sk-l***
+ec75071ead97 crates/spirit-core/tests/chat_permissions.rs:28: provider_token: sk-l***
+09ed8dd00b97 crates/spirit-core/tests/chat_permissions.rs:28: provider_token: sk-l***
+ded09727f725 docs/ORCHESTRATOR-CHAT.md:2595: provider_token: sk-o***
+e7ba19716402 crates/spirit-core/tests/worker_session.rs:130: provider_token: sk-a***
+b951d5921c3a crates/spirit-core/tests/worker_session.rs:131: provider_token: sk-a***
+```
+
+These look like synthetic test fixtures, audit-allowlist text and an orchestrator-chat example
+rather than live credentials, but the scanner cannot treat secret-shaped history as safe without
+an owner decision. Four of the nine rows are in `main` ancestry (`19ade78542bd`, `a47b7aa9385c`
+twice and `ded09727f725`); the other five are on local job branches
+(`job/ss-81-chat-tool-activity-and-permissions` and
+`job/ss-125-worker-live-session-and-takeover`) that are not ancestors of `main`. Because the scan
+uses `--all`, those refs are included; they matter only if those branches are published.
+
+The 486 privacy-class findings are all `home_path`; there is no public IPv4 address and no
+personal e-mail in history. The scanner prints the first 200 rows and counts the rest. They are
+the pre-0.6 `/home/<user>` and `/Users/<user>` paths in old docs, tests and fixtures, including
+the ones later scrubbed from the working tree. Publishing the existing history would still expose
+those paths, so a fresh squashed public history is the recommended option even after the
+secret-shaped fixtures are addressed.
+
+The owner-approved fresh-history path is `runtime/scripts/audit/squash-for-public.sh`, or the
+owner can make an explicit rewrite decision. This job did not rewrite, rebase or filter history.
+The checklist box above stays unchecked because the owner makes the publication-history decision.
 
 ### 2. Repository and account settings
 
@@ -250,7 +326,9 @@ change; the dry-build items block the first release.
 
 ## What this audit does not claim
 
-- It does not prove the repository history is clean.
+- It does not prove the repository history is clean: the ss-144 scan found **9 secret-class** and
+  **486 privacy-class** matches in commits reachable from local refs (see §1). It does not inspect
+  remote-only refs that are not fetched locally.
 - It does not inspect GitHub issues, pull requests, wikis, releases or package-registry
   metadata.
 - It does not run the Playwright end-to-end suites or the full runtime workspace; this job's
