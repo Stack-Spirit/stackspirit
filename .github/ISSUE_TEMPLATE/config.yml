@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Roadmap and strategy
+    url: https://github.com/Stack-Spirit/stackspirit/blob/main/docs/STRATEGY.md
+    about: Read the vision, brand rules and roadmap before proposing a large change.
+  - name: Supported harnesses
+    url: https://github.com/Stack-Spirit/stackspirit/blob/main/docs/HARNESSES.md
+    about: Check the harness presets, protocols, auth modes and one-click connect rules.
+  - name: Security policy
+    url: https://github.com/Stack-Spirit/stackspirit/blob/main/SECURITY.md
+    about: Report suspected vulnerabilities privately. Do not open a public issue.
+  - name: Contributing guide
+    url: https://github.com/Stack-Spirit/stackspirit/blob/main/CONTRIBUTING.md
+    about: Read the setup, test gates and pull-request expectations.

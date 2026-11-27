@@ -1,0 +1,72 @@
+name: Feature request
+description: Suggest an improvement to StackSpirit.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem before the solution. Do not include tokens, API keys,
+        passwords, real hostnames or IP addresses, or private paths in this request.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the workflow that is difficult or missing today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: Describe the behaviour or API you would like.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe workarounds or other designs you considered.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Which StackSpirit surface would this change?
+      options:
+        - Desktop
+        - Web
+        - CLI (`stackspirit` / `vowp`)
+        - MCP (`stackspirit mcp`)
+        - Daemon (`stackspirit-daemon` / `vowp-daemon`)
+        - Scripts (`scripts/`)
+        - Docs or site
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: path
+    attributes:
+      label: Which path does this affect?
+      description: Choose the product path this request belongs to.
+      options:
+        - Free / bring-your-own machine
+        - Managed cloud
+        - Both
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add links, sketches or examples that help explain the request.
+    validations:
+      required: false

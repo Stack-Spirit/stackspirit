@@ -1,0 +1,109 @@
+name: Bug report
+description: Report a reproducible problem in StackSpirit.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Keep the report reproducible and redact it
+        before submitting: remove tokens, API keys, passwords, real hostnames or IP
+        addresses, and private paths. Use placeholders such as `/home/user`, `<host>`
+        and `<token>`.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the actual behaviour, including the error text you saw.
+      placeholder: "When I ..., StackSpirit ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+      description: Describe the behaviour you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Give the smallest sequence that reproduces the problem.
+      placeholder: |
+        1. Open ...
+        2. Click ...
+        3. See ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: StackSpirit version
+      description: Run `stackspirit --version` and/or give the desktop app version.
+      placeholder: "stackspirit 0.6.1; desktop 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Operating system and architecture.
+      placeholder: "macOS 15 arm64 / Ubuntu 24.04 x86_64 / Windows 11 x86_64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Which StackSpirit surface is affected?
+      options:
+        - Desktop
+        - Web
+        - CLI (`stackspirit` / `vowp`)
+        - MCP (`stackspirit mcp`)
+        - Daemon (`stackspirit-daemon` / `vowp-daemon`)
+        - Scripts (`scripts/`)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      description: How did you install or run StackSpirit?
+      options:
+        - npx
+        - uvx
+        - Prebuilt archive
+        - Source build
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs (optional)
+      description: |
+        Paste only the relevant lines. Remove tokens, API keys, passwords, real
+        hostnames or IP addresses, and private paths first. Refer to secrets by name
+        only.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      options:
+        - label: I removed tokens, keys, passwords, real hostnames or IP addresses, and private paths from this report and any logs.
+          required: true
