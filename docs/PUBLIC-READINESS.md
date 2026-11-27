@@ -2,6 +2,8 @@
 
 - **Audit date:** 2026-11-26
 - **History scan:** 2026-11-27, job `ss-144-history-secret-scan`, at commit `3c8ac2f`
+- **Public-history candidate:** 2026-11-27, job `ss-149-public-history-candidate`, at commit
+  `68b81cd`; candidate commit `880e483` scans clean
 - **Repository:** `Stack-Spirit/stackspirit` (MIT, public launch pending)
 - **Audited tree:** the job branch `job/ss-137-public-launch-scrub-and-v060` based on `57fa1d6`
 - **Scope:** every tracked text file in the working tree, including `apps/`, `packages/`,
@@ -10,12 +12,25 @@
 
 ## Verdict
 
-**The working-tree scan is clean, but the history scan is a publication blocker.** The
+**The private history stays private; the public branch is one clean orphan commit.** The
 working-tree scan finds **no secret, no public IP address, no tracked `.env` or credential file,
 no personal e-mail address, and no non-placeholder `/home/<user>` path**. The history-aware scan
-walks every commit reachable from `git rev-list --all` and finds **9 secret-class matches** and
-**486 privacy-class matches** in old commits; see [History scan](#history-scan-job-ss-144-history-secret-scan-2026-11-27)
-under §1. All **49** working-tree findings at the start of the ss-137 job were replaced with
+walks every commit reachable from `git rev-list --all` and still finds **9 secret-class matches**
+and **486 privacy-class matches** in old commits; see
+[History scan](#history-scan-job-ss-144-history-secret-scan-2026-11-27) under §1. That history
+must not be published, so this job implements the owner-approved model (2026-11-09): the private
+repository and its history stay private, and the public repository starts with a single commit.
+
+`scripts/prepare-public-history.sh` builds that commit as one parentless commit of the current
+`HEAD` tree and immediately scans the exact tree with `scripts/check-public-readiness.sh --rev`.
+At commit `68b81cd` the candidate commit `880e483` scans **clean: 0 blocked findings, exit 0**
+(1717 blobs, 1 over the size cap and 51 binary/undecodable files skipped by the same limits as the
+working-tree scan). The exact `--rev public-main` run is recorded in
+[Candidate public commit](#candidate-public-commit-job-ss-149-2026-11-27) under §1. Pushing is the
+owner's action; this job pushed, tagged, and published nothing, so the publication checkbox stays
+unchecked.
+
+All **49** working-tree findings at the start of the ss-137 job were replaced with
 `/home/user`:
 
 - **29** in the `docs/` and `runtime/docs/maintainers/` files this job already owned;
@@ -26,21 +41,23 @@ The release version is now aligned at **`0.6.0`** across `runtime/Cargo.toml`, e
 dependency, `runtime/Cargo.lock`, the version test, `runtime/CHANGELOG.md` and the npm/PyPI
 packaging manifests. `check-release.sh --version 0.6.0 --tag v0.6.0 --publish` passes.
 
-The remaining launch pre-flight items are the publication-history decision, the GitHub repository
-and registry settings, and the dry release build; they are not working-tree findings.
+The remaining launch pre-flight items are the owner's GitHub repository and registry settings,
+the dry release build, and the actual push of the reviewed `public-main` commit; they are not
+working-tree findings.
 
 | Area | Result |
 |---|---|
-| Provider API keys, GitHub/AWS/Slack/Stripe/PyPI/npm tokens, private-key headers | **0** in the working tree; **9** in history (see §1) |
+| Provider API keys, GitHub/AWS/Slack/Stripe/PyPI/npm tokens, private-key headers | **0** in the working tree and in the candidate public commit; **9** in the private history (do not publish; see §1) |
 | Globally routable IPv4 addresses | **0** |
 | Tracked `.env`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, `*.pem`, SSH private-key names | **0** |
 | Personal e-mail addresses outside the reserved example domains | **0** |
-| Non-placeholder `/home/<user>` or `/Users/<user>` paths | **0 blocked** in the working tree (49 replaced with `/home/user` by the ss-137 job); **486** in history |
+| Non-placeholder `/home/<user>` or `/Users/<user>` paths | **0 blocked** in the working tree and in the candidate public commit (49 replaced with `/home/user` by the ss-137 job); **486** in the private history (do not publish) |
 | Home paths scrubbed by this job | **49** (29 in `docs/` and `runtime/docs/`, 20 in `AGENTS.md`, `README.md` and `crates/spirit-core/`) |
-| Placeholder/service/home-fixture paths recognised by the scan | 487 home paths, 856 reserved/private IPs and 160 reserved e-mails allowed at the ss-144 re-run |
-| Working-tree scan exit status | **0 (PASS)** at the ss-144 re-run; the command and output are shown below |
+| Placeholder/service/home-fixture paths recognised by the scan | 487 home paths, 856 reserved/private IPs and 160 reserved e-mails allowed at the ss-144 re-run; 487/856/162 at the ss-149 candidate run |
+| Working-tree scan exit status | **0 (PASS)** at the ss-144 and ss-149 re-runs; the command and output are shown below |
 | Release workflow YAML | **Valid**; the 76 structural, mutation and version-checker checks recorded by the ss-135 audit pass |
-| Git history | **BLOCKER**: the ss-144 history scan found **9 secret-class** and **486 privacy-class** findings; see the History scan subsection in §1 |
+| Private git history | **Do not publish**: the ss-144 history scan found **9 secret-class** and **486 privacy-class** findings; see the History scan subsection in §1 |
+| Candidate public commit (`public-main`, `880e483`) | **PASS**: `--rev` scans the exact tree that would be published and finds **0** blocked findings (1717 blobs, exit 0); see the Candidate public commit subsection in §1 |
 | First release version state | **Aligned at `0.6.0`**: workspace, inter-crate dependencies, lockfile, version test and npm/PyPI packaging agree; `check-release.sh` passes |
 
 The working-tree scan and the history/publication checks are independent. A clean scan does not
@@ -52,6 +69,9 @@ prove the git history is clean, and the history scan does not replace the path s
 bash scripts/check-public-readiness.sh                 # working tree at HEAD
 bash scripts/check-public-readiness.sh --history       # every commit in git rev-list --all
 bash scripts/check-public-readiness.sh --history --strict-history
+bash scripts/check-public-readiness.sh --rev <commit>  # the tree of one commit
+bash scripts/prepare-public-history.sh --dry-run       # compute the candidate, create no branch
+bash scripts/prepare-public-history.sh                 # create/update local public-main
 bash scripts/check-public-readiness-history.test.sh    # hermetic self-test
 ```
 
@@ -60,10 +80,25 @@ reachable from `git rev-list --all`, deduplicates blobs by object id, and applie
 and the same 4 MiB/binary limits. Secret-class findings (`private_key`, provider/registry tokens
 and `secret_path`) are fatal in `--history`; privacy-class findings (`home_path`, `ipv4` and
 `email`) are reported with counts and masked rows but are fatal only with `--strict-history`.
-`--strict-history` implies `--history`. The script reads text files up to 4 MiB, skips binary
-files, masks every matched value after its first four characters, and uses only `git` and
-Python's standard library; it makes no network calls and does not read `.env` values or any
-other file outside the checkout.
+`--strict-history` implies `--history`.
+
+`--rev <commit>` scans the tree of exactly one commit, not the working tree, with the same rules,
+masking, size/binary limits and placeholder allowlists. Every finding class is fatal there because
+that tree is what a public branch would publish; `--rev` is mutually exclusive with `--history`
+and `--strict-history`. It prints the full commit and tree ids and the file/blob counts so the
+evidence names the exact object that was scanned.
+
+`scripts/prepare-public-history.sh` refuses a dirty working tree, a missing `HEAD` and a missing
+scanner. It builds one parentless commit from the current `HEAD` tree with the public identity
+`Syver-August <92798051+syver777@users.noreply.github.com>` and the message `StackSpirit 0.6.0`
+(`--message` overrides it). Without `--dry-run` it creates the local `public-main` branch, or
+replaces it only with `--force`, then runs `check-public-readiness.sh --rev public-main` and exits
+non-zero if the scan fails. It never pushes, runs `git filter-branch`, rewrites `main`, or deletes
+a branch or tag.
+
+The script reads text files up to 4 MiB, skips binary files, masks every matched value after its
+first four characters, and uses only `git` and Python's standard library; it makes no network
+calls and does not read `.env` values or any other file outside the checkout.
 
 It checks:
 
@@ -193,8 +228,8 @@ uses when that file is absent.
 
 ## Owner pre-flight checklist
 
-Complete these in order. The history scan and the repository settings block the visibility
-change; the dry-build items block the first release.
+Complete these in order. The private history stays private; the candidate public commit and the
+repository settings gate the visibility change, and the dry-build items block the first release.
 
 ### 1. Remove private data from the tree
 
@@ -204,13 +239,20 @@ change; the dry-build items block the first release.
       now prints `PASS` and exits `0`.
 - [ ] Decide whether `runtime/docs/maintainers/` ships at all. It no longer contains private home
       paths, but it still holds old acceptance transcripts and internal runbooks.
-- [ ] Run a history-aware secret scan over every commit that will be public. The ss-144 job added
-      `--history` / `--history --strict-history` to the scanner and ran it below; the result is a
-      blocker, so this box stays unchecked. From `runtime/`, the existing
-      `scripts/audit/scan.sh --history --strict-history` remains another option; a dedicated
-      scanner such as `gitleaks` is also acceptable. Require zero blocked findings.
+- [ ] Run a history-aware secret scan over every commit that will be public. This applies only if
+      the private history is ever published; it must not be. The ss-144 `--history` scan found
+      9 secret-class and 486 privacy-class rows (below), so this box stays unchecked. From
+      `runtime/`, the existing `scripts/audit/scan.sh --history --strict-history` remains another
+      option; a dedicated scanner such as `gitleaks` is also acceptable. Require zero blocked
+      findings.
+- [x] Build the candidate public history as one parentless commit and scan that exact tree:
+      `bash scripts/prepare-public-history.sh`; `--rev public-main` finds 0 blocked findings at
+      candidate commit `880e483` (see the Candidate public commit subsection below).
+- [ ] Review the `public-main` branch and push it as the public `main` when the repository settings
+      are ready. This is the owner action; the script never pushes, and the private history stays
+      private. This box stays unchecked.
 - [ ] Confirm no `.env`, private key, token, SSH key, credential file, database, or local log is
-      tracked in any commit that will be public.
+      tracked in the candidate public commit (the `--rev` scan reports 0).
 - [ ] Review tracked media/large files and third-party notices (`LICENSE`,
       `THIRD_PARTY_NOTICES.md`, `runtime/THIRD-PARTY-LICENSES.md`). All runtime release
       archives carry the licence bundle.
@@ -244,7 +286,7 @@ bash scripts/check-public-readiness.sh --history --strict-history
 # same counts; exit status: 1
 ```
 
-**BLOCKER — do not publish this history.** Nine secret-class rows were found (all values masked
+**Do not publish this private history.** Nine secret-class rows were found (all values masked
 exactly as the scanner prints them):
 
 ```text
@@ -271,12 +313,83 @@ The 486 privacy-class findings are all `home_path`; there is no public IPv4 addr
 personal e-mail in history. The scanner prints the first 200 rows and counts the rest. They are
 the pre-0.6 `/home/<user>` and `/Users/<user>` paths in old docs, tests and fixtures, including
 the ones later scrubbed from the working tree. Publishing the existing history would still expose
-those paths, so a fresh squashed public history is the recommended option even after the
-secret-shaped fixtures are addressed.
+those paths, so the private history stays private and the public repository starts from a fresh
+single commit.
 
-The owner-approved fresh-history path is `runtime/scripts/audit/squash-for-public.sh`, or the
-owner can make an explicit rewrite decision. This job did not rewrite, rebase or filter history.
-The checklist box above stays unchecked because the owner makes the publication-history decision.
+`runtime/scripts/audit/squash-for-public.sh` is the runtime-only version of that path. The root
+monorepo now has `scripts/prepare-public-history.sh`, which builds the local `public-main` branch
+from the current tree without rewriting, rebasing or filtering the private history. This job ran
+it; nothing was pushed.
+
+#### Candidate public commit (job `ss-149-public-history-candidate`, 2026-11-27)
+
+`scripts/prepare-public-history.sh` refuses a dirty working tree, a missing `HEAD` and a missing
+scanner. It builds one parentless commit from the current `HEAD` tree with the public identity
+`Syver-August <92798051+syver777@users.noreply.github.com>`, creates or force-replaces the local
+`public-main` branch, and immediately runs the `--rev` scan. `--dry-run` computes the same tree and
+commit and runs the same scan without creating the branch. The script never pushes, rewrites
+`main`, runs `git filter-branch`, or deletes a branch or tag.
+
+Exact commands and output at commit `68b81cd`:
+
+```text
+$ bash scripts/prepare-public-history.sh
+prepare-public-history: repository <git top level>
+prepare-public-history: source HEAD 68b81cda87f7baa37f2f28ba32b99a7550c094cf
+prepare-public-history: tree 66f7f7a43dd8ddf959e819d800720e5fe472eb14 (1717 files)
+prepare-public-history: commit 880e483eb5d8ae302a0d917161483714154956f9 (parentless)
+prepare-public-history: author Syver-August <92798051+syver777@users.noreply.github.com>
+prepare-public-history: committer Syver-August <92798051+syver777@users.noreply.github.com>
+prepare-public-history: message: StackSpirit 0.6.0
+prepare-public-history: branch public-main -> 880e483eb5d8ae302a0d917161483714154956f9
+prepare-public-history: scanning public-main with scripts/check-public-readiness.sh --rev
+public-readiness: repository <git top level>
+public-readiness: scope: tree of one commit
+public-readiness: revision: 880e483eb5d8ae302a0d917161483714154956f9
+public-readiness: tree: 66f7f7a43dd8ddf959e819d800720e5fe472eb14 (1717 entries, 1717 blobs)
+public-readiness: scanned 1665 of 1717 blobs in 880e483eb5d8 (1 over size cap, 51 binary/undecodable, 0 unreadable)
+public-readiness: allowed placeholders: 487 home path(s), 856 reserved/private IP(s), 162 reserved e-mail(s)
+public-readiness: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found in the commit tree
+prepare-public-history: public-readiness PASS
+prepare-public-history: the working tree, main and every other ref are unchanged; nothing was pushed
+prepare-public-history: inspect (owner):
+  git log -1 --format=fuller public-main
+  git show --stat public-main
+  git diff --stat HEAD public-main
+prepare-public-history: push (owner action, after review; this script never pushes):
+  git push <remote> public-main:main
+```
+
+```text
+$ bash scripts/check-public-readiness.sh --rev public-main
+public-readiness: repository <git top level>
+public-readiness: scope: tree of one commit
+public-readiness: revision: 880e483eb5d8ae302a0d917161483714154956f9
+public-readiness: tree: 66f7f7a43dd8ddf959e819d800720e5fe472eb14 (1717 entries, 1717 blobs)
+public-readiness: scanned 1665 of 1717 blobs in 880e483eb5d8 (1 over size cap, 51 binary/undecodable, 0 unreadable)
+public-readiness: allowed placeholders: 487 home path(s), 856 reserved/private IP(s), 162 reserved e-mail(s)
+public-readiness: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found in the commit tree
+```
+
+```text
+$ bash scripts/check-public-readiness.sh --rev main
+public-readiness: repository <git top level>
+public-readiness: scope: tree of one commit
+public-readiness: revision: e55e1f7523b211243f30ba020db21ad11d2934b5
+public-readiness: tree: 045b8072c719b800e07c4d0b96f6dda1a4ef535d (1716 entries, 1716 blobs)
+public-readiness: scanned 1664 of 1716 blobs in e55e1f7523b2 (1 over size cap, 51 binary/undecodable, 0 unreadable)
+public-readiness: allowed placeholders: 487 home path(s), 856 reserved/private IP(s), 160 reserved e-mail(s)
+public-readiness: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found in the commit tree
+```
+
+The candidate commit is parentless with the stated public identity and the `StackSpirit 0.6.0`
+message, and its tree scans clean at exit 0. The 9 secret-class and 486 privacy-class rows remain
+only in the private history; none of them is in this tree. The branch is local: this job pushed,
+tagged, and published nothing, and did not delete a branch or tag. After this documentation update,
+`bash scripts/prepare-public-history.sh --force` followed by
+`bash scripts/check-public-readiness.sh --rev public-main` prints the same **0 blocked findings**
+and `PASS` at the final job HEAD. The documentation commit adds no blocked finding; the permitted
+e-mail placeholder count rises because this section names the public noreply identity.
 
 ### 2. Repository and account settings
 
@@ -291,9 +404,9 @@ The checklist box above stays unchecked because the owner makes the publication-
       platform packages, naming workflow `release.yml` and environment `npm`.
 - [ ] Configure the PyPI trusted publisher for `stackspirit`, naming workflow `release.yml`
       and environment `pypi`.
-- [ ] Check the packaging metadata no longer points at the old `syver777/vowp` repository
+- [x] Check the packaging metadata no longer points at the old `syver777/vowp` repository
       (the PyPI backend URLs, platform `package.json` repository fields and Homebrew formulas);
-      point them at `Stack-Spirit/stackspirit`.
+      point them at `Stack-Spirit/stackspirit`. Landed by `ss-145` in `9c2f379`.
 - [ ] Confirm the default branch is `main`, no unintended branches or tags will be published,
       and issues/discussions settings match the launch decision.
 
@@ -326,9 +439,13 @@ The checklist box above stays unchecked because the owner makes the publication-
 
 ## What this audit does not claim
 
-- It does not prove the repository history is clean: the ss-144 scan found **9 secret-class** and
-  **486 privacy-class** matches in commits reachable from local refs (see §1). It does not inspect
-  remote-only refs that are not fetched locally.
+- It does not make the private repository history clean: the ss-144 scan found **9 secret-class**
+  and **486 privacy-class** matches in commits reachable from local refs (see §1), and that
+  history must not be published. The clean result applies to the candidate orphan commit
+  `880e483` built from `68b81cd`; rebuild and rescan `public-main` after any later change. It does
+  not inspect remote-only refs that are not fetched locally.
+- It does not push, publish, tag or change visibility. Pushing the reviewed `public-main` commit
+  as the public `main` is the owner's action.
 - It does not inspect GitHub issues, pull requests, wikis, releases or package-registry
   metadata.
 - It does not run the Playwright end-to-end suites or the full runtime workspace; this job's
