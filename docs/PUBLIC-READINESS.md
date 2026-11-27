@@ -2,11 +2,11 @@
 
 - **Audit date:** 2026-11-26
 - **Release refresh:** 2026-11-27, job `ss-150-release-changelog-061`, at commit
-  `60d0341b579174392a4a043b6d54870d9aff3494`
+  `11d1dce1d81260179aac88a0374a0c866da4f30f`
 - **History scan:** 2026-11-27, job `ss-144-history-secret-scan`, at commit `3c8ac2f`
 - **Public-history candidate:** 2026-11-27, job `ss-150-release-changelog-061`, at commit
-  `60d0341b579174392a4a043b6d54870d9aff3494`; candidate commit
-  `0f69c90dc4f637999a7ed6c6388862ca247c707c` scans clean
+  `11d1dce1d81260179aac88a0374a0c866da4f30f`; candidate commit
+  `876cc928136435c33ce3cc7c6282daade465552d` scans clean
 - **Repository:** `Stack-Spirit/stackspirit` (MIT; GitHub reports the repository public)
 - **Audited tree:** the job branch `job/ss-137-public-launch-scrub-and-v060` based on `57fa1d6`;
   the release state and candidate were refreshed at `82f2ca7` by this job
@@ -30,8 +30,8 @@ public repository from a single commit. The public GitHub repository now reports
 
 `scripts/prepare-public-history.sh` builds that commit as one parentless commit of the current
 `HEAD` tree and immediately scans the exact tree with `scripts/check-public-readiness.sh --rev`.
-At commit `60d0341b579174392a4a043b6d54870d9aff3494` the candidate commit
-`0f69c90dc4f637999a7ed6c6388862ca247c707c` scans **clean: 0 blocked findings, exit 0** (`1719`
+At commit `11d1dce1d81260179aac88a0374a0c866da4f30f` the candidate commit
+`876cc928136435c33ce3cc7c6282daade465552d` scans **clean: 0 blocked findings, exit 0** (`1719`
 blobs, 1 over the size cap and 51 binary/undecodable files skipped by the same limits as the
 working-tree scan). The exact `--rev public-main` run is recorded in
 [Candidate public commit](#candidate-public-commit-job-ss-150-release-changelog-061-2026-11-27)
@@ -77,11 +77,11 @@ findings.
 | Personal e-mail addresses outside the reserved example domains | **0** |
 | Non-placeholder `/home/<user>` or `/Users/<user>` paths | **0 blocked** in the working tree and in the candidate public commit (49 replaced with `/home/user` by the ss-137 job); **486** in the private history (do not publish) |
 | Home paths scrubbed by this job | **49** (29 in `docs/` and `runtime/docs/`, 20 in `AGENTS.md`, `README.md` and `crates/spirit-core/`) |
-| Placeholder/service/home-fixture paths recognised by the scan | 487 home paths, 856 reserved/private IPs and 160 reserved e-mails allowed at the ss-144 re-run; 487/856/162 at the ss-149 candidate run; 487/856/164 at the ss-150 candidate run and 487/856/166 at the final ss-150 working-tree run |
+| Placeholder/service/home-fixture paths recognised by the scan | 487 home paths, 856 reserved/private IPs and 160 reserved e-mails allowed at the ss-144 re-run; 487/856/162 at the ss-149 candidate run; 487/856/166 at the ss-150 candidate and final working-tree runs |
 | Working-tree scan exit status | **0 (PASS)** at the ss-144, ss-149 and ss-150 re-runs; the command and output are shown below |
 | Release workflow YAML | **Valid**; the 76 structural, mutation and version-checker checks recorded by the ss-135 audit pass |
 | Private git history | **Do not publish as a new candidate**: the ss-144 history scan found **9 secret-class** and **486 privacy-class** findings; see the History scan subsection in §1 |
-| Candidate public commit (`0f69c90dc4f637999a7ed6c6388862ca247c707c`, recorded run) | **PASS**: `--rev` scans the exact tree that would be published and finds **0** blocked findings (`1719` blobs, exit 0); see the Candidate public commit subsection in §1 |
+| Candidate public commit (`876cc928136435c33ce3cc7c6282daade465552d`, recorded run) | **PASS**: `--rev` scans the exact tree that would be published and finds **0** blocked findings (`1719` blobs, exit 0); see the Candidate public commit subsection in §1 |
 | Release state | **`v0.6.0` published** 2026-11-27T09:37:53Z; **`v0.6.1` tagged** at `82f2ca7`, with no GitHub release visible to this job (`gh release view v0.6.1` returns `release not found`; owner confirms) |
 | Current release version state | **Aligned at `0.6.1`**: workspace, inter-crate dependencies, lockfile, version test and npm/PyPI packaging agree; `check-release.sh --version 0.6.1 --tag v0.6.1 --publish` passes |
 
@@ -266,7 +266,7 @@ replacement; the release state is recorded in [Release state](#release-state-202
       scanner such as `gitleaks` is also acceptable. Require zero blocked findings.
 - [x] Build the candidate public history as one parentless commit and scan that exact tree:
       `bash scripts/prepare-public-history.sh --force`; `--rev public-main` finds 0 blocked findings
-      at candidate commit `0f69c90dc4f637999a7ed6c6388862ca247c707c` (see the Candidate public commit subsection below).
+      at candidate commit `876cc928136435c33ce3cc7c6282daade465552d` (see the Candidate public commit subsection below).
 - [ ] Review the local `public-main` candidate and decide whether it replaces the public `main`
       history. This is the owner action; the script never pushes. The public `main` is at
       `82f2ca7` at this refresh, so this box stays unchecked.
@@ -349,25 +349,25 @@ scanner. It builds one parentless commit from the current `HEAD` tree with the p
 commit and runs the same scan without creating the branch. The script never pushes, rewrites
 `main`, runs `git filter-branch`, or deletes a branch or tag.
 
-Exact commands and output at commit `60d0341b579174392a4a043b6d54870d9aff3494`:
+Exact commands and output at commit `11d1dce1d81260179aac88a0374a0c866da4f30f`:
 
 ```text
 $ bash scripts/prepare-public-history.sh --force --message "StackSpirit 0.6.1"
 prepare-public-history: repository <git top level>
-prepare-public-history: source HEAD 60d0341b579174392a4a043b6d54870d9aff3494
-prepare-public-history: tree 542bb9b7a03096c609a27aa364d18b272ca42e8f (1719 files)
-prepare-public-history: commit 0f69c90dc4f637999a7ed6c6388862ca247c707c (parentless)
+prepare-public-history: source HEAD 11d1dce1d81260179aac88a0374a0c866da4f30f
+prepare-public-history: tree 4bd7d7dfe51fed50835222940786899b57787448 (1719 files)
+prepare-public-history: commit 876cc928136435c33ce3cc7c6282daade465552d (parentless)
 prepare-public-history: author Syver-August <92798051+syver777@users.noreply.github.com>
 prepare-public-history: committer Syver-August <92798051+syver777@users.noreply.github.com>
 prepare-public-history: message: StackSpirit 0.6.1
-prepare-public-history: branch public-main -> 0f69c90dc4f637999a7ed6c6388862ca247c707c
+prepare-public-history: branch public-main -> 876cc928136435c33ce3cc7c6282daade465552d
 prepare-public-history: scanning public-main with scripts/check-public-readiness.sh --rev
 public-readiness: repository <git top level>
 public-readiness: scope: tree of one commit
-public-readiness: revision: 0f69c90dc4f637999a7ed6c6388862ca247c707c
-public-readiness: tree: 542bb9b7a03096c609a27aa364d18b272ca42e8f (1719 entries, 1719 blobs)
-public-readiness: scanned 1667 of 1719 blobs in 0f69c90dc4f6 (1 over size cap, 51 binary/undecodable, 0 unreadable)
-public-readiness: allowed placeholders: 487 home path(s), 856 reserved/private IP(s), 164 reserved e-mail(s)
+public-readiness: revision: 876cc928136435c33ce3cc7c6282daade465552d
+public-readiness: tree: 4bd7d7dfe51fed50835222940786899b57787448 (1719 entries, 1719 blobs)
+public-readiness: scanned 1667 of 1719 blobs in 876cc9281364 (1 over size cap, 51 binary/undecodable, 0 unreadable)
+public-readiness: allowed placeholders: 487 home path(s), 856 reserved/private IP(s), 166 reserved e-mail(s)
 public-readiness: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found in the commit tree
 prepare-public-history: public-readiness PASS
 prepare-public-history: the working tree, main and every other ref are unchanged; nothing was pushed
@@ -383,18 +383,19 @@ prepare-public-history: push (owner action, after review; this script never push
 $ bash scripts/check-public-readiness.sh --rev public-main
 public-readiness: repository <git top level>
 public-readiness: scope: tree of one commit
-public-readiness: revision: 0f69c90dc4f637999a7ed6c6388862ca247c707c
-public-readiness: tree: 542bb9b7a03096c609a27aa364d18b272ca42e8f (1719 entries, 1719 blobs)
-public-readiness: scanned 1667 of 1719 blobs in 0f69c90dc4f6 (1 over size cap, 51 binary/undecodable, 0 unreadable)
-public-readiness: allowed placeholders: 487 home path(s), 856 reserved/private IP(s), 164 reserved e-mail(s)
+public-readiness: revision: 876cc928136435c33ce3cc7c6282daade465552d
+public-readiness: tree: 4bd7d7dfe51fed50835222940786899b57787448 (1719 entries, 1719 blobs)
+public-readiness: scanned 1667 of 1719 blobs in 876cc9281364 (1 over size cap, 51 binary/undecodable, 0 unreadable)
+public-readiness: allowed placeholders: 487 home path(s), 856 reserved/private IP(s), 166 reserved e-mail(s)
 public-readiness: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found in the commit tree
 ```
 
 The candidate commit is parentless with the stated public identity and the `StackSpirit 0.6.1`
 message, and its tree scans clean at exit 0. The previous ss-149 candidate was `880e483` (tree
-`66f7f7a`) from `68b81cd`, and the local branch pointed at `20ba6c2`; this run supersedes that
-stale `0.6.0` evidence. The 9 secret-class and 486 privacy-class rows remain only in the private
-history; none of them is in this tree. The
+`66f7f7a`) from `68b81cd`, and the local branch pointed at `20ba6c2`; an earlier ss-150 rebuild
+produced `0f69c90` (tree `542bb9b`) from `60d0341`. This run uses the final documentation tree and
+supersedes that stale `0.6.0` evidence. The 9 secret-class and 486 privacy-class rows remain only
+in the private history; none of them is in this tree. The
 branch is local: this job pushed, tagged, and published nothing, and did not delete a branch or
 tag. After this documentation update, `bash scripts/prepare-public-history.sh --force` followed by
 `bash scripts/check-public-readiness.sh --rev public-main` prints the same **0 blocked findings**
@@ -458,8 +459,8 @@ e-mail placeholder count may rise because this section names the public noreply 
 
 - It does not make the private repository history clean: the ss-144 scan found **9 secret-class**
   and **486 privacy-class** matches in commits reachable from local refs (see §1). The clean result
-  applies to the local candidate orphan commit `0f69c90dc4f637999a7ed6c6388862ca247c707c` built
-  from `60d0341b579174392a4a043b6d54870d9aff3494`; rebuild and rescan `public-main` after any
+  applies to the local candidate orphan commit `876cc928136435c33ce3cc7c6282daade465552d` built
+  from `11d1dce1d81260179aac88a0374a0c866da4f30f`; rebuild and rescan `public-main` after any
   later change. It does not inspect remote-only refs that are not fetched locally.
 - It does not push, publish, tag or change visibility. Replacing the public `main` with the
   reviewed `public-main` commit is the owner's action.
