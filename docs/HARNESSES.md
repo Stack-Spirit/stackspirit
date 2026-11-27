@@ -214,6 +214,11 @@ The capability table above describes the manifest field and its intended meaning
 live chat-transport selector. The panel shows a short inline note to the same effect so
 a successful Connect is not mistaken for a chat switch.
 
+See [`HARNESS-CHAT.md`](HARNESS-CHAT.md) for the transport-agnostic design of the next
+phase: the selection model, the adapter contract for the four chat protocols, the safety
+gates and the phased plan. It is a design only, and the first protocol is still an open
+owner choice, so no transport is live.
+
 ## Security limits
 
 - The manifest schema has no secret field, unknown fields are rejected, and free-text
