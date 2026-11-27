@@ -107,15 +107,19 @@ source_head=$(git -C "$root" rev-parse --verify --quiet 'HEAD^{commit}') \
   || fail "HEAD is missing or does not point at a commit"
 
 current_branch=$(git -C "$root" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+branch_exists=0
 if git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
-  if [ "$force" -ne 1 ]; then
-    fail "branch $branch already exists; use --force to replace it"
-  fi
-  [ "$current_branch" != "$branch" ] \
-    || fail "cannot replace $branch while it is checked out"
-  if git -C "$root" worktree list --porcelain \
-      | grep -qx "branch refs/heads/$branch"; then
-    fail "cannot replace $branch while it is checked out in another worktree"
+  branch_exists=1
+  if [ "$dry_run" -eq 0 ]; then
+    if [ "$force" -ne 1 ]; then
+      fail "branch $branch already exists; use --force to replace it"
+    fi
+    [ "$current_branch" != "$branch" ] \
+      || fail "cannot replace $branch while it is checked out"
+    if git -C "$root" worktree list --porcelain \
+        | grep -qx "branch refs/heads/$branch"; then
+      fail "cannot replace $branch while it is checked out in another worktree"
+    fi
   fi
 fi
 
@@ -142,7 +146,11 @@ echo "prepare-public-history: committer $author_name <$author_email>"
 echo "prepare-public-history: message: $message"
 
 if [ "$dry_run" -eq 1 ]; then
-  echo "prepare-public-history: dry run: branch $branch was not created"
+  if [ "$branch_exists" -eq 1 ]; then
+    echo "prepare-public-history: dry run: branch $branch already exists and was not touched"
+  else
+    echo "prepare-public-history: dry run: branch $branch was not created"
+  fi
   target=$commit
 else
   git -C "$root" update-ref "refs/heads/$branch" "$commit"
@@ -163,8 +171,7 @@ echo "prepare-public-history: inspect (owner):"
 if [ "$dry_run" -eq 1 ]; then
   echo "  git show --stat $commit"
   echo "  git diff --stat HEAD $commit"
-  echo "  # create the branch, then inspect it:"
-  echo "  git branch $branch $commit"
+  echo "  # create the branch without --dry-run, or replace it with --force"
 else
   echo "  git log -1 --format=fuller $branch"
   echo "  git show --stat $branch"
