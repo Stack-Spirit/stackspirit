@@ -4,7 +4,8 @@ All notable changes to VOWP are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
-Release notes are in [`docs/release/0.4.0.md`](docs/release/0.4.0.md),
+Release notes are in [`docs/release/0.6.0.md`](docs/release/0.6.0.md),
+[`docs/release/0.4.0.md`](docs/release/0.4.0.md),
 [`docs/release/0.3.0.md`](docs/release/0.3.0.md),
 [`docs/release/0.2.0.md`](docs/release/0.2.0.md) and
 [`docs/release/0.1.0.md`](docs/release/0.1.0.md). The product scope and the
@@ -14,7 +15,8 @@ features deliberately left out of v0.4 are in [`docs/roadmap.md`](docs/roadmap.m
 
 The six v0.5 slices are implemented and gated in the tree. The workspace version is now `0.6.0`;
 `0.5.0` is the private snapshot tag (`snapshot/0.5.0-private`), not a release. No release date has
-been cut and the latest public release remains 0.4.0 (2026-11-18).
+been cut and the latest public release remains 0.4.0 (2026-11-18). The user-facing release note is
+[`docs/release/0.6.0.md`](docs/release/0.6.0.md).
 
 ### Changed
 
