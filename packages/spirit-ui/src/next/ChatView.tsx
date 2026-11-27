@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent 
 import { errorTitle, toSpiritError, type SpiritError } from "../bridge/errors";
 import type {
   ChatModelView,
+  ChatOwnershipView,
   ChatPermissionDecision,
   ChatPermissionPrompt,
   ChatRetryStatus,
@@ -406,6 +407,121 @@ function whereLabel(owner: SessionOwnerView): string {
     : `${owner.label} · ${owner.node}`;
 }
 
+/**
+ * A human name for the surface kind VOWP reports on a chat session owner.
+ *
+ * Known VOWP kinds get their product spelling; an unknown kind is title-cased so a
+ * newer VOWP still shows something readable instead of hiding the owner.
+ */
+function chatOwnerKindLabel(kind: string): string {
+  switch (kind.trim().toLowerCase()) {
+    case "chat":
+    case "cli":
+      return "CLI";
+    case "opencode":
+      return "OpenCode";
+    case "claude-code":
+    case "claude_code":
+    case "claudecode":
+      return "Claude Code";
+    case "desktop-ui":
+    case "desktop_ui":
+    case "stackspirit":
+      return "StackSpirit";
+    case "agent":
+      return "Agent";
+    case "mcp":
+      return "MCP";
+    case "mirror":
+      return "Mirror";
+    case "api":
+      return "API";
+    case "unknown":
+    case "":
+      return "Unknown owner";
+    default: {
+      const words = kind.trim().replace(/[_-]+/g, " ").split(/\s+/).filter(Boolean);
+      return words.length > 0
+        ? words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")
+        : "Unknown owner";
+    }
+  }
+}
+
+/**
+ * The header chip text: kind first, then only the label/holder/node values that add
+ * information. A saved label often repeats the kind ("OpenCode · macbook"), so it
+ * becomes the base instead of being prefixed a second time.
+ */
+function chatOwnerChipLabel(owner: ChatOwnershipView): string {
+  const kind = chatOwnerKindLabel(owner.kind);
+  const label = owner.label?.trim() ?? "";
+  const holder = owner.holder?.trim() ?? "";
+  const node = owner.node?.trim() ?? "";
+  const rawKind = owner.kind.trim().replace(/[_-]+/g, " ").toLowerCase();
+  const labelNamesKind =
+    label.length > 0 &&
+    [kind.toLowerCase(), rawKind].some(
+      (term) => term.length > 0 && label.toLowerCase().includes(term),
+    );
+  const parts: string[] = labelNamesKind ? [label] : [kind, ...(label ? [label] : [])];
+  const add = (value: string) => {
+    if (!value) return;
+    if (parts.join(" · ").toLowerCase().includes(value.toLowerCase())) return;
+    parts.push(value);
+  };
+  add(holder);
+  add(node);
+  return parts.join(" · ");
+}
+
+/** The name the read-only notice uses for the writer. */
+function chatOwnerWriter(owner: ChatOwnershipView | null): string {
+  const label = owner?.label?.trim();
+  if (label) return label;
+  const holder = owner?.holder?.trim();
+  if (holder) return holder;
+  return owner ? chatOwnerKindLabel(owner.kind) : "Another window";
+}
+
+function chatOwnerTitle(owner: ChatOwnershipView): string {
+  const activity = owner.activity?.trim();
+  return `Session owner: ${chatOwnerChipLabel(owner)}${
+    activity ? ` · ${activityLabel(activity)}` : ""
+  }`;
+}
+
+/** The composer placeholder when the transport says this window is read-only. */
+function readOnlyPlaceholder(owner: ChatOwnershipView | null): string {
+  return owner
+    ? `Read-only · ${chatOwnerWriter(owner)} is writing here`
+    : "Read-only · another window holds this session";
+}
+
+/**
+ * The calm read-only notice above the composer. It names the writer and explains the
+ * cooperative release path; it deliberately offers no takeover action.
+ */
+function ReadOnlyNotice({ owner }: { owner: ChatOwnershipView | null }) {
+  const titleId = useId();
+  return (
+    <section
+      className="nx-readonly"
+      aria-labelledby={titleId}
+      data-testid="readonly-notice"
+    >
+      <p className="nx-readonly__title" id={titleId}>
+        <strong>{chatOwnerWriter(owner)}</strong> is writing in this session. This window is
+        read-only.
+      </p>
+      <p className="nx-readonly__body">
+        Close the other window or end the CLI session to release it. This window becomes
+        writable again when the session is free.
+      </p>
+    </section>
+  );
+}
+
 function confirmCopy(owner: SessionOwnerView): string {
   if (owner.activity === "running") {
     return `${owner.label} is currently running a turn. Taking over will fence its writes and tell it to stop. Take over anyway?`;
@@ -802,6 +918,11 @@ export function ChatView({
   // disables send even though there is no list to prove why.
   const missingModel = isSetup && state === "ready" && !view?.model;
   const canChat = state === "ready" && !missingModel;
+  // A read-only session streams and reads, but this window must not write. Older
+  // bridges omit `access`; they keep the exact behaviour they had before.
+  const readOnly = view?.access === "read_only";
+  const canWrite = canChat && !readOnly;
+  const ownership = view?.ownership ?? null;
   // A saved profile never shows the new-server password form unless the owner asks
   // for another server from the saved-server card.
   const showSecureServerForm = !savedServer || newServerRequested;
@@ -835,6 +956,9 @@ export function ChatView({
     (lastVisible.origin === "model" || lastVisible.origin === "preview") &&
     lastVisible.text.some((paragraph) => paragraph.trim() !== "");
   const hero = !hasConversation && visibleMessages.length === 0 && pendingPermissions.length === 0;
+  const readonlyNotice = readOnly ? (
+    <ReadOnlyNotice owner={ownership} />
+  ) : null;
   const secureCardOpen = visibleMessages.some(
     (message) => message.card?.kind === "secure-server",
   );
@@ -850,7 +974,8 @@ export function ChatView({
     isSetup &&
     (error?.code === "not_found" || /session_lost/.test(error?.message ?? ""));
   const canSwitchModel = models !== undefined && models.length > 0;
-  const allowModelSwitch = canSwitchModel && (Boolean(retry) || state === "error");
+  const allowModelSwitch =
+    !readOnly && canSwitchModel && (Boolean(retry) || state === "error");
 
   function requestModelPicker() {
     if (canSwitchModel) {
@@ -947,6 +1072,16 @@ export function ChatView({
           </span>
           {chipLabel}
         </span>
+        {ownership ? (
+          <span
+            className="nx-chip nx-chip--owner"
+            data-testid="session-ownership"
+            title={chatOwnerTitle(ownership)}
+          >
+            <span aria-hidden="true">✎</span>
+            {chatOwnerChipLabel(ownership)}
+          </span>
+        ) : null}
         {view ? (
           <span
             className={`nx-chat-state nx-chat-state--${state}`}
@@ -1019,7 +1154,9 @@ export function ChatView({
                   live={state === "streaming" && index === visibleMessages.length - 1}
                   usage={index === lastAnswerIndex ? (view?.usage ?? null) : null}
                   onRetry={
-                    state === "ready" && retryText(visibleMessages, index)
+                    !readOnly &&
+                    state === "ready" &&
+                    retryText(visibleMessages, index)
                       ? () => void send(session, retryText(visibleMessages, index)!)
                       : null
                   }
@@ -1049,23 +1186,28 @@ export function ChatView({
           />
         ) : null}
 
+        {readonlyNotice && !hero ? readonlyNotice : null}
+
         <EmptyHero
           active={hero}
           title={heroTitle}
           lede={copy.lede}
           suggestions={copy.suggestions}
-          disabled={!canChat}
+          disabled={!canWrite}
           onPick={(text) => void send(session, text)}
           above={
-            isSetup && savedServer ? (
-              <SavedServerCard
-                host={savedServer}
-                onAddServer={() => {
-                  setNewServerRequested(true);
-                  requestSecureServerCard();
-                }}
-              />
-            ) : null
+            <>
+              {readonlyNotice && hero ? readonlyNotice : null}
+              {isSetup && savedServer ? (
+                <SavedServerCard
+                  host={savedServer}
+                  onAddServer={() => {
+                    setNewServerRequested(true);
+                    requestSecureServerCard();
+                  }}
+                />
+              ) : null}
+            </>
           }
         >
           {pendingPermissions.length > 0 ? (
@@ -1075,7 +1217,7 @@ export function ChatView({
                   key={prompt.id}
                   prompt={prompt}
                   busy={permissionBusy === prompt.id}
-                  locked={permissionBusy !== null}
+                  locked={readOnly || permissionBusy !== null}
                   error={permissionError?.message ?? null}
                   onReply={(decision) => void replyPermission(session, prompt.id, decision)}
                 />
@@ -1084,12 +1226,16 @@ export function ChatView({
           ) : null}
           <ComposerBar
             session={session}
-            placeholder={composerPlaceholder(session, state, missingModel, Boolean(retry))}
+            placeholder={
+              readOnly
+                ? readOnlyPlaceholder(ownership)
+                : composerPlaceholder(session, state, missingModel, Boolean(retry))
+            }
             model={view?.model ?? null}
             models={models}
             modelMissing={noModelsReported}
-            disabled={!canChat}
-            streaming={state === "streaming"}
+            disabled={!canWrite}
+            streaming={state === "streaming" && !readOnly}
             sending={state === "connecting"}
             stopped={state === "stopped" || state === "idle"}
             allowModelSwitch={allowModelSwitch}

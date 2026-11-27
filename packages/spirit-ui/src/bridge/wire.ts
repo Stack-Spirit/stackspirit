@@ -1517,6 +1517,38 @@ export type ChatSessionState =
   | "error";
 
 /**
+ * Whether this caller may write to a local orchestrator.
+ *
+ * Cooperative, not enforced: `read_only` means a well-behaved client must not write
+ * while another surface holds the session.
+ */
+export type ChatAccess = "owner" | "read_only";
+
+/**
+ * Display-only cooperative ownership reported by VOWP.
+ *
+ * These values name another writer so the UI can make the previous writer read-only.
+ * They never include a surface id, a session/log id, an epoch, a lease timestamp or a
+ * token; `kind` stays free-form so a newer VOWP kind never rejects the whole view.
+ */
+export interface ChatOwnershipView {
+  /** Surface kind such as `opencode`, or a newer safe kind string from VOWP. */
+  kind: string;
+  /** Human label for the holder, when reported. */
+  label?: string | null;
+  /** Holder description, when reported. */
+  holder?: string | null;
+  /** Node that holds the lease, when reported. */
+  node?: string | null;
+  /** Cooperative ownership mode, when reported. */
+  mode?: string | null;
+  /** Owner state, when reported. */
+  state?: string | null;
+  /** Short activity description, when reported. */
+  activity?: string | null;
+}
+
+/**
  * Why a model is usable without visiting Settings: included free with the engine,
  * configured with a BYOK key, or owned by the orchestrator.
  */
@@ -1604,6 +1636,13 @@ export interface ChatSessionView {
   pending_permissions?: ChatPermissionPrompt[];
   /** An active retry wait, absent when OpenCode is not sleeping before another try. */
   retry?: ChatRetryStatus | null;
+  /** Display-only cooperative owner; absent on older bridges or when no one holds it. */
+  ownership?: ChatOwnershipView;
+  /**
+   * Whether this caller may write. Absent on older bridges, which are treated exactly
+   * as today (the window keeps its composer).
+   */
+  access?: ChatAccess;
 }
 
 export interface ChatStartInput {

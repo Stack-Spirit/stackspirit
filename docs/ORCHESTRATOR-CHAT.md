@@ -1192,6 +1192,20 @@ export interface ChatUsageView {
   cost_usd: number | null;
 }
 
+/** Cooperative, not enforced: read_only means a well-behaved client must not write. */
+export type ChatAccess = "owner" | "read_only";
+
+/** Display-only owner metadata from VOWP; never a surface id, lease or token. */
+export interface ChatOwnershipView {
+  kind: string;
+  label?: string | null;
+  holder?: string | null;
+  node?: string | null;
+  mode?: string | null;
+  state?: string | null;
+  activity?: string | null;
+}
+
 export interface ChatSessionView {
   session: SessionId;
   /** The actual transport location, never the requested label. */
@@ -1218,6 +1232,10 @@ export interface ChatSessionView {
   pending_permissions?: ChatPermissionPrompt[];
   /** An active retry wait, absent when OpenCode is not sleeping before another try. */
   retry?: ChatRetryStatus | null;
+  /** Display-only cooperative owner; absent on older bridges or when no one holds it. */
+  ownership?: ChatOwnershipView;
+  /** Whether this caller may write; absent on older bridges (treated as today). */
+  access?: ChatAccess;
 }
 
 export interface ChatStartInput {
@@ -1832,6 +1850,32 @@ optional `chat` field means no type break. If a later Web chat is wanted, it mus
 through a Web bridge method with the same `ChatSessionView`/`ChatEvent` shapes and a
 server-side endpoint; it must not fetch the engine directly from the browser. That is not
 in this contract.
+
+### 4.9 Ownership in the UI (ss-153)
+
+`ss-152` maps VOWP's endpoint `owner`/`access` to `ChatSessionView.ownership` and
+`ChatSessionView.access`. Both fields are optional on the wire so an older bridge keeps
+today's behaviour exactly: no chip, no notice, composer enabled.
+
+- **Chip.** When `ownership` is present, the session header shows a calm chip with the
+  human kind (`OpenCode`, `Claude Code`, `CLI`, `StackSpirit`, `Agent`, `MCP`, `API`, …)
+  plus the label, holder or node only when each adds information. A label that already
+  names the kind or node is not prefixed or repeated. The chip's title also names the
+  reported activity.
+- **Read-only.** When `access === "read_only"`, a calm inline notice above the composer
+  names the writer: “<Holder> is writing in this session. This window is read-only.” The
+  notice explains that closing the other window or ending the CLI session releases the
+  session. The message field and Send are disabled, so Enter cannot submit, and the
+  placeholder names the read-only reason instead of “engine not ready”. The model picker
+  stays locked because a transport that reports no model list (an orchestrator) never
+  exposes one here. No takeover action is added by this notice.
+- **Owner.** `access === "owner"` shows the chip when an owner is reported and no notice;
+  composing is unchanged.
+
+This is cooperative metadata, not enforcement. StackSpirit does not fence the other
+writer or imply that it was stopped. Full takeover and direct-engine writer fencing
+remain open (HANDOFF §5.1 item 3); the existing worker-session ownership banner and its
+Take over command are a separate surface.
 
 ## 5. Security
 

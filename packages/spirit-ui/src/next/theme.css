@@ -440,6 +440,11 @@ button.nx-node:focus-visible {
   color: var(--nx-muted);
 }
 
+.nx-chip--owner {
+  background: var(--nx-accent-soft);
+  color: var(--nx-accent-soft-ink);
+}
+
 .nx-pill {
   padding: 1px 7px;
   border-radius: 999px;
@@ -2291,6 +2296,36 @@ button.nx-composer__start:hover {
 }
 
 .nx-composer--disabled textarea::placeholder {
+  color: var(--nx-muted);
+}
+
+/* Cooperative read-only session: a calm notice, never an alert or a takeover prompt. */
+.nx-readonly {
+  display: grid;
+  flex: none;
+  gap: 4px;
+  width: min(760px, calc(100% - 40px));
+  margin: 0 auto 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--nx-line);
+  border-left: 4px solid var(--nx-local);
+  border-radius: var(--nx-radius);
+  background: var(--nx-raised);
+  color: var(--nx-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.nx-readonly__title,
+.nx-readonly__body {
+  margin: 0;
+}
+
+.nx-readonly__title {
+  font-weight: 600;
+}
+
+.nx-readonly__body {
   color: var(--nx-muted);
 }
 
