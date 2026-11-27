@@ -112,3 +112,13 @@ jobs:
           python -m pip install pytest
           (cd pypi-stackspirit && PYTHONPATH=src python -m pytest tests)
           python -m pytest pypi/tests
+
+  site:
+    name: site (node, static contract)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: node apps/site/scripts/verify.mjs
