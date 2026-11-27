@@ -209,6 +209,8 @@ The 0.6.1 release ships the desktop cockpit source, the read-only Web PWA source
 - [`docs/STRATEGY.md`](docs/STRATEGY.md) — vision, brand rules and roadmap.
 - [`docs/HARNESSES.md`](docs/HARNESSES.md) — Universal Harness Registry: presets, protocols,
   auth modes and one-click connect.
+- [`docs/MCP.md`](docs/MCP.md) — MCP server: stdio client setup, fleet tools, the dashboard and
+  MCP Apps widget, the local proxy and safety.
 - [`docs/ORCHESTRATOR-CHAT.md`](docs/ORCHESTRATOR-CHAT.md) — orchestrator chat contract, the
   non-streaming caveat and the Server/Local gates.
 - [`docs/HANDOFF-DESKTOP-UI.md`](docs/HANDOFF-DESKTOP-UI.md) — desktop UI source of truth: owner
