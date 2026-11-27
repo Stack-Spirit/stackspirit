@@ -15,6 +15,7 @@ pub mod engine;
 pub mod error;
 #[cfg(feature = "fixtures")]
 pub mod fixtures;
+pub mod harnesses;
 pub mod host;
 pub mod service;
 pub mod ssh;
@@ -50,6 +51,13 @@ pub use engine::local::{
 };
 pub use engine::{EngineStatus, Keychain, SecretString, StackSpiritEngine};
 pub use error::{SpiritError, SpiritErrorCode};
+pub use harnesses::{
+    BUILTIN_HARNESS_IDS, DEFAULT_HARNESS_ID, HarnessAuthMode, HarnessAuthState, HarnessBinaryState,
+    HarnessConnectPlan, HarnessConnectPlanView, HarnessListView, HarnessManifest, HarnessProbe,
+    HarnessProbeReport, HarnessProbeTarget, HarnessProtocol, HarnessReadiness, HarnessRegistry,
+    HarnessTargetKind, LoopbackForwardPlan, build_connect_plan, builtin_harnesses,
+    default_harness_dir, loopback_forward_plan, probe_harness,
+};
 pub use host::{
     HostId, HostKeyPin, HostProfile, HostProfilePatch, HostStore, NewHostProfile, SshTarget,
 };

@@ -3,6 +3,7 @@
 mod commands;
 mod error;
 mod events;
+mod harnesses;
 mod state;
 
 use std::sync::Arc;
@@ -75,6 +76,7 @@ pub fn run() {
             events::spawn_chat_event_forwarder(app.handle().clone(), state.chat().subscribe());
             let runtime = state.engine_runtime();
             app.manage(state);
+            app.manage(harnesses::HarnessConnects::default());
             // SIGTERM/SIGINT: stop the sidecar, then leave through Tauri's normal exit.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -92,6 +94,11 @@ pub fn run() {
             commands::hosts::scan_fingerprint,
             commands::hosts::trust_fingerprint,
             commands::hosts::probe_host,
+            harnesses::harnesses_list,
+            harnesses::harnesses_save_custom,
+            harnesses::harnesses_delete_custom,
+            harnesses::harnesses_probe,
+            harnesses::harnesses_connect_start,
             commands::onboarding::onboarding_key_status,
             commands::onboarding::onboarding_create_key,
             commands::onboarding::onboarding_install_key,
@@ -171,10 +178,13 @@ pub fn run() {
         .expect("error while building StackSpirit")
         .run(|app, event| {
             // Quit, window close and `app.exit` all pass through one of these.
-            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit)
-                && let Some(state) = app.try_state::<AppState>()
-            {
-                stop_engine(state.engine_runtime().as_ref());
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                if let Some(connects) = app.try_state::<harnesses::HarnessConnects>() {
+                    connects.stop_all();
+                }
+                if let Some(state) = app.try_state::<AppState>() {
+                    stop_engine(state.engine_runtime().as_ref());
+                }
             }
         });
 }
