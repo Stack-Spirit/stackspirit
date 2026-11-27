@@ -304,7 +304,13 @@ function JobDetail({
         {worker ? (
           <>
             <dt>Last activity</dt>
-            <dd>{worker.last_event_age_secs != null ? `${formatAge(worker.last_event_age_secs)} ago` : "unknown"}</dd>
+            <dd>
+              {worker.last_event_age_secs != null
+                ? `${formatAge(worker.last_event_age_secs)} ago`
+                : !job.executor && !worker.session_id
+                  ? "waiting for verification"
+                  : "unknown"}
+            </dd>
           </>
         ) : null}
         {job.gate ? (

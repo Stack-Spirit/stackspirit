@@ -14,6 +14,7 @@ and `--check` fails when the bundle is stale.
 | `Apache-2.0-WITH-LLVM-exception.txt` | Apache-2.0 WITH LLVM-exception | `linux-raw-sys` 0.12.1 `LICENSE-Apache-2.0_WITH_LLVM-exception` |
 | `BSD-2-Clause.txt` | BSD-2-Clause | `zerocopy` 0.8.63 `LICENSE-BSD` |
 | `BSD-3-Clause.txt` | BSD-3-Clause | Standard SPDX BSD-3-Clause template (no locked crate selects it today) |
+| `CDLA-Permissive-2.0.txt` | CDLA-Permissive-2.0 | `webpki-roots` 1.0.12 `LICENSE` |
 | `ISC.txt` | ISC | Standard SPDX ISC template (no locked crate selects it today) |
 | `Unicode-3.0.txt` | Unicode-3.0 | `unicode-ident` 1.0.27 `LICENSE-UNICODE` |
 | `Zlib.txt` | Zlib | `foldhash` 0.2.0 `LICENSE` |

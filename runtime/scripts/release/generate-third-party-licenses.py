@@ -60,6 +60,11 @@ LICENCE_TEXTS = (
     ),
     ("BSD-2-Clause", "BSD-2-Clause.txt", "BSD 2-Clause License"),
     ("BSD-3-Clause", "BSD-3-Clause.txt", "BSD 3-Clause License"),
+    (
+        "CDLA-Permissive-2.0",
+        "CDLA-Permissive-2.0.txt",
+        "Community Data License Agreement - Permissive, Version 2.0",
+    ),
     ("ISC", "ISC.txt", "ISC License"),
     ("Unicode-3.0", "Unicode-3.0.txt", "Unicode License V3"),
     ("Zlib", "Zlib.txt", "Zlib License"),
@@ -132,7 +137,7 @@ MARKER_RE = re.compile(r"(?<![A-Za-z])(?:Copyright\b(?:\s*©)?|©)")
 
 
 def allowed_text_id(identifier: str) -> bool:
-    if identifier in ("MIT", "MIT-0", "Apache-2.0", "ISC", "Zlib"):
+    if identifier in ("MIT", "MIT-0", "Apache-2.0", "CDLA-Permissive-2.0", "ISC", "Zlib"):
         return True
     if identifier in ("Apache-2.0 WITH LLVM-exception", "Unicode-3.0"):
         return True
