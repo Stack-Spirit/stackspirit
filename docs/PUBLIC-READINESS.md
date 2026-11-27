@@ -1,10 +1,12 @@
 # Public readiness — StackSpirit monorepo
 
 - **Audit date:** 2026-11-26
-- **Release refresh:** 2026-11-27, job `ss-150-release-changelog-061`, at commit `60d0341b579174392a4a043b6d54870d9aff3494`
+- **Release refresh:** 2026-11-27, job `ss-150-release-changelog-061`, at commit
+  `60d0341b579174392a4a043b6d54870d9aff3494`
 - **History scan:** 2026-11-27, job `ss-144-history-secret-scan`, at commit `3c8ac2f`
 - **Public-history candidate:** 2026-11-27, job `ss-150-release-changelog-061`, at commit
-  `60d0341b579174392a4a043b6d54870d9aff3494`; candidate commit `0f69c90dc4f637999a7ed6c6388862ca247c707c` scans clean
+  `60d0341b579174392a4a043b6d54870d9aff3494`; candidate commit
+  `0f69c90dc4f637999a7ed6c6388862ca247c707c` scans clean
 - **Repository:** `Stack-Spirit/stackspirit` (MIT; GitHub reports the repository public)
 - **Audited tree:** the job branch `job/ss-137-public-launch-scrub-and-v060` based on `57fa1d6`;
   the release state and candidate were refreshed at `82f2ca7` by this job
@@ -49,8 +51,8 @@ publication checkbox stays unchecked.
   `check-release.sh --version 0.6.1 --tag v0.6.1 --publish` prints `check-release: ok (0.6.1)`.
 - **The GitHub repository reports `PUBLIC` visibility** with default branch `main` at `82f2ca7`
   (`gh repo view`); this job did not change visibility.
-- **This job changed only the local `public-main` branch.** It pushed, tagged and published
-  nothing.
+- **The only ref this job changed is the local `public-main` branch.** It pushed, tagged and
+  published nothing.
 
 All **49** working-tree findings at the start of the ss-137 job were replaced with
 `/home/user`:
@@ -390,8 +392,9 @@ public-readiness: PASS: no secret, public IP, personal home path, tracked .env o
 
 The candidate commit is parentless with the stated public identity and the `StackSpirit 0.6.1`
 message, and its tree scans clean at exit 0. The previous ss-149 candidate was `880e483` (tree
-`66f7f7a`) from `68b81cd`; this run supersedes that stale `0.6.0` candidate. The 9 secret-class
-and 486 privacy-class rows remain only in the private history; none of them is in this tree. The
+`66f7f7a`) from `68b81cd`, and the local branch pointed at `20ba6c2`; this run supersedes that
+stale `0.6.0` evidence. The 9 secret-class and 486 privacy-class rows remain only in the private
+history; none of them is in this tree. The
 branch is local: this job pushed, tagged, and published nothing, and did not delete a branch or
 tag. After this documentation update, `bash scripts/prepare-public-history.sh --force` followed by
 `bash scripts/check-public-readiness.sh --rev public-main` prints the same **0 blocked findings**
@@ -433,7 +436,7 @@ e-mail placeholder count may rise because this section names the public noreply 
       archives, npm tarballs, wheels, `SHA256SUMS` and both `--version` outputs. A dry build must
       not create a tag or release.
 
-### 4. Release state
+### 4. Release verification
 
 - [x] `v0.6.0` is published: `gh release view v0.6.0` reports `isDraft: false`,
       `isPrerelease: false`, published 2026-11-27T09:37:53Z.
@@ -455,9 +458,9 @@ e-mail placeholder count may rise because this section names the public noreply 
 
 - It does not make the private repository history clean: the ss-144 scan found **9 secret-class**
   and **486 privacy-class** matches in commits reachable from local refs (see §1). The clean result
-  applies to the local candidate orphan commit `0f69c90dc4f637999a7ed6c6388862ca247c707c` built from `60d0341b579174392a4a043b6d54870d9aff3494`; rebuild
-  and rescan `public-main` after any later change. It does not inspect remote-only refs that are
-  not fetched locally.
+  applies to the local candidate orphan commit `0f69c90dc4f637999a7ed6c6388862ca247c707c` built
+  from `60d0341b579174392a4a043b6d54870d9aff3494`; rebuild and rescan `public-main` after any
+  later change. It does not inspect remote-only refs that are not fetched locally.
 - It does not push, publish, tag or change visibility. Replacing the public `main` with the
   reviewed `public-main` commit is the owner's action.
 - The audit does not inspect GitHub issues, pull requests, wikis or package-registry metadata;
