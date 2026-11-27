@@ -25,8 +25,10 @@ the proxy needs a paired surface, opens no store and reads no secret.
 
 With no flags, `stackspirit mcp` is read-only. On a Home it reads the local state. On a
 control machine it resolves the saved Home through the desktop host and reads through that
-saved route; when the Home is unreachable it can serve the cached snapshot and marks it
-stale. The client entry never names an SSH target.
+saved route; when the Home is unreachable it can serve the cached snapshot and reports the
+cache's freshness. The snapshot is marked `stale` only when the fetch is older than three
+supervisor ticks or its recorded heartbeat is stale, so a fresh cache still reports
+`stale: false`. The client entry never names an SSH target.
 
 ## Connect a client
 
@@ -46,9 +48,11 @@ The minimal entry for any MCP client is:
 It contains no token, API key, password or SSH argument. The saved machine is resolved by
 the CLI, not by an argument in the file. The desktop app's Settings → **CLI & MCP Connect**
 panel shows this entry for **This Mac** and for the saved Home; the Home entry uses a
-readable key such as `stackspirit-<home>` but the command is identical. The panel is
-copy-only: it does not run the command, write a client config, start the server or open a
-tunnel.
+readable key such as `stackspirit-<home>` but the command is identical. The MCP JSON
+snippet is copy-only: it does not run the command, write a client config, start the server
+or open a tunnel. The panel's External CLI tools Connect buttons call
+`SpiritBridge.harnesses.connectStart`, so a Home sign-in can use the host-owned loopback
+forward.
 
 If the CLI is not installed globally, `npx -y stackspirit mcp` starts the same server. The
 Settings panel uses the installed `stackspirit` binary.
@@ -81,8 +85,9 @@ Home.
 
 Write tools need a session-bound server: the full session server directly, or the local
 agent proxy forwarding to the Home. The read-only server refuses them. Session and fleet
-writes check the lease token; a moved session's old surface gets a `lease_revoked` failure
-and the write is not retried. Read tools keep working after a lease loss.
+writes check the lease token; a moved session's old surface gets a `refused` failure with
+the takeover notice, and the write is not retried. Read tools keep working after a lease
+loss.
 
 | Tool | Arguments | Returns |
 |---|---|---|
@@ -125,11 +130,11 @@ The home and read-only servers list one resource:
 | MIME type | `text/html;profile=mcp-app` |
 | Contents | One `text` item containing a complete HTML document |
 
-`resources/list` advertises the resource with `listChanged: false` and
-`subscribe: false`; `resources/read` returns the rendered widget for that URI and a
-resource-not-found error for any other URI. The widget is self-contained Meadow HTML:
-inline CSS, no script, no remote font, image or stylesheet, and no network fetch. It
-renders the same facts as the Markdown dashboard.
+The `initialize` result advertises `capabilities.resources` with `listChanged: false` and
+`subscribe: false`. `resources/list` returns that one resource; `resources/read` returns the
+rendered widget for its URI and a resource-not-found error for any other URI. The widget is
+self-contained Meadow HTML: inline CSS, no script, no remote font, image or stylesheet, and
+no network fetch. It renders the same facts as the Markdown dashboard.
 
 A client must support MCP Apps UI resources to display it: it reads the tool's
 `_meta.ui.resourceUri`, calls `resources/read`, and renders the
