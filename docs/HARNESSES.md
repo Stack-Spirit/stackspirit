@@ -5,12 +5,43 @@ this Mac or the connected Home VPS: how to install one, how to sign in, whether 
 back the embedded chat or only run as a worker, and what the owner should know about
 API-key versus subscription terms.
 
-It is reachable at **Settings → Advanced → Harnesses** in the desktop app and is backed
-by `spirit-core`. It is real, not a mock: the desktop host reads the registry, probes
-both targets, and owns the one-click sign-in child processes. The panel is desktop-only
-for connect. Preview mode lists the built-in presets and refuses every probe, change and
+It is reachable at **Settings → Harnesses** in the desktop app and is backed by
+`spirit-core`. It is real, not a mock: the desktop host reads the registry, probes both
+targets, and owns the one-click sign-in child processes. The panel is desktop-only for
+connect. Preview mode lists the built-in presets and refuses every probe, change and
 connect with a typed `preview_unavailable` error; the read-only Web bridge has no harness
 surface at all.
+
+## Where to find it (desktop Settings)
+
+Settings is a centered modal over the shell, not a separate page: Esc, the close button
+or a backdrop click returns to where you were. Its left rail has five items:
+**General** (theme, appearance and workspace defaults), **Account**,
+**Server & Machines**, **Harnesses** and **CLI & MCP Connect**. The harness registry is
+the **Harnesses** item. The MCP server itself is documented in [`MCP.md`](MCP.md); this
+section only maps the desktop controls.
+
+**Harnesses** lists the built-in presets plus valid custom manifests, probes
+**Local · this Mac** and the connected Home, and offers the two Connect buttons for those
+targets. Each card carries the **Embedded Chat** or **Worker-Only** badge, the harness's
+API-key or subscription chips, and its ToS note. Connect installs the harness and starts
+its own sign-in; the embedded chat still runs on OpenCode, and choosing a non-OpenCode
+chat transport is not available yet.
+
+**CLI & MCP Connect** switches between **This Mac** and the connected Home and shows two
+copy-only blocks: the CLI install command (`npm install -g stackspirit`) and the local
+stdio MCP JSON entry. The snippet contains no token, key, password or SSH argument; the
+CLI resolves the saved Home through the desktop host. The same panel offers the built-in
+external CLI sign-ins. See [`MCP.md`](MCP.md) for the server, its tools and client setup.
+
+**Server & Machines** is where a Home server is added, re-pinned or removed, an
+Always-On Machine is connected through the optional encrypted relay, and server secrets
+and password login are managed. See [`HANDOFF-DESKTOP-UI.md`](HANDOFF-DESKTOP-UI.md) §3
+for the SSH and server-secret model.
+
+**Account** is the optional StackSpirit sign-in: it syncs Always-On Homes and opens the
+Managed Homes catalog. Local and SSH servers need no account. See
+[`STRATEGY.md`](STRATEGY.md) §4.
 
 ## Where it lives
 
