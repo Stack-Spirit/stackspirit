@@ -1,5 +1,12 @@
 # Web Surface Contract — W1
 
+> **Historical document.** This is the frozen W1 **pre-build** contract from 2026-11-15,
+> kept for the transport, data-honesty and bridge rules that still govern the daemon
+> cockpit. Its “read-only Web shell with no browser token” statements describe the
+> no-account `/` cockpit; the shipped app also has the optional account/Always-On Homes
+> route at `/cloud`. The current app is described in
+> [Current Web/PWA state (0.6.1+)](#11-current-webpwa-state-061) at the end of this file.
+
 Status: frozen pre-build contract, 2026-11-15. The W1a read-only implementation is
 recorded in §9.
 Audience: the W1 Web job, `packages/spirit-ui`, and the VOWP daemon owner.
@@ -1366,3 +1373,120 @@ The e2e run includes the three WCAG 2.2 AA axe checks (fleet view, inbox drawer,
 drawer). No bridge test, route, copy constant, write action, or network request changed.
 §9 remains the data and transport contract; this section only records the visual
 alignment.
+
+---
+
+## 11. Current Web/PWA state (0.6.1+)
+
+Status: current implementation, 2026-11-27. This section records the shipped app after the
+account-first Web work (`048e13e`). The app now has a `/cloud` route and an account session in
+addition to the read-only W1a cockpit; the no-account path is unchanged. The transport,
+data-honesty and bridge rules in §1–§4 still govern the daemon cockpit, and §9–§10 remain the W1a
+and Meadow history.
+
+Source of truth for this section:
+[`main.tsx`](../apps/spirit-web/src/main.tsx),
+[`WebAuthPanel.tsx`](../apps/spirit-web/src/app/WebAuthPanel.tsx),
+[`session.ts`](../apps/spirit-web/src/auth/session.ts),
+[`client.ts`](../apps/spirit-web/src/auth/client.ts),
+[`CloudApp.tsx`](../apps/spirit-web/src/app/CloudApp.tsx),
+[`cloud/runtime.ts`](../apps/spirit-web/src/cloud/runtime.ts),
+[`relayBridge.ts`](../apps/spirit-web/src/bridge/relayBridge.ts),
+[`CloudRelayClient.ts`](../apps/spirit-web/src/bridge/CloudRelayClient.ts),
+[`relayCrypto.ts`](../apps/spirit-web/src/bridge/relayCrypto.ts),
+[`registerServiceWorker.ts`](../apps/spirit-web/src/registerServiceWorker.ts),
+[`manifest.webmanifest`](../apps/spirit-web/public/manifest.webmanifest) and
+[`sw.js`](../apps/spirit-web/public/sw.js).
+
+### 11.1 Routes
+
+| Route | What ships |
+|---|---|
+| `/` | The read-only daemon cockpit over the daemon HTTP/SSE API. It is the W1a app in §9 and needs no account. |
+| `/cloud` | The optional StackSpirit Account / Always-On Homes app. It is never the boot default, offers a local-daemon link, and keeps the account flow separate from the daemon cockpit. |
+| `?cloud=1` | An alias for `/cloud`: `main.tsx` renders `CloudApp` when the query value is `1`. |
+
+`main.tsx` still sends `/hosts`, `/engine` and `/gates` to the desktop-only page and every other
+path to the daemon cockpit. Constructing the cloud runtime is inert: the root page makes no cloud
+request and opens no WebSocket until the owner signs in or connects a Home.
+
+### 11.2 Account authentication
+
+Sign-in is optional and belongs to `/cloud`; the no-account cockpit at `/` never asks for an
+account.
+
+- `WebAuthPanel` offers Google and GitHub OAuth starts, email sign-up with a six-digit
+  verification code, and email/password sign-in. A signed-in account with no enrolled machine
+  gets the two onboarding paths: link an existing VPS with a one-time enrollment token, or open
+  the Managed Homes plan catalogue.
+- The OAuth callback arrives as `#auth_token=<token>`. `consumeAuthTokenFragment` in
+  `src/auth/session.ts` reads it once in the first-render state initializer, validates the opaque
+  bearer pattern, stores a valid value in module memory, and calls `history.replaceState` to
+  remove the fragment from the address bar and history before any UI can display it. A malformed
+  `auth_token` is also scrubbed and is not stored.
+- The token lives in `src/auth/session.ts` memory only. `WebCloudClient` reads it when it sends an
+  authenticated cloud request and puts it in the `Authorization: Bearer` header for that request.
+  It is never written to `localStorage`, `sessionStorage`, a cookie, a log, an error or a view
+  model. Cloud requests use `credentials: "omit"`.
+- Sign-out calls `client.clearSession()`, which calls `setSessionToken(null)`; disposing the cloud
+  runtime clears the session too.
+- The cloud API is a separate origin (`api.stackspirit.io` by default) from the local daemon. The
+  account token is never sent to the daemon or used for `/api/v1` reads.
+
+The historical no-browser-token statements in §5.1 and §9.7 remain true for the daemon
+`VOWP_API_TOKEN` and the no-account cockpit; the StackSpirit account token is a separate cloud
+credential.
+
+### 11.3 No-account daemon cockpit
+
+`/` is unchanged. `HttpSseBridge` performs token-free `GET` reads and the board SSE stream against
+the daemon, under the same route, data-honesty and read-only rules as §2, §3 and §9. It has no
+token input and sends no `Authorization` header to the daemon. Job and inbox actions stay hidden
+or reject with `writes_disabled` because the W1c local write proxy is still not in this tree
+(§5.4). Everything in §9.7 still applies to this route.
+
+### 11.4 PWA shell and service worker
+
+`index.html` links `manifest.webmanifest`, whose `start_url` and `scope` are `/` and whose display
+mode is `standalone`; the manifest supplies 192 px, 512 px and maskable icons. The app is
+installable as a PWA on browsers that support the manifest and service worker; it is not a
+separate native app.
+
+`registerServiceWorker` registers `/sw.js` in production builds only. The service worker caches
+the static shell (`/`, the manifest and two icons) at install, then caches only same-origin `GET`
+requests under `/assets/` and `/icons/`; navigation is network-first with the cached `/` as the
+offline fallback. It returns before caching for `/api/`, `Accept: text/event-stream` (SSE),
+non-`GET` and cross-origin requests, so daemon API and stream data are never served from the
+cache.
+
+### 11.5 Cloud route and account actions
+
+`CloudApp` and `createWebCloudRuntime` in `src/cloud/runtime.ts` wire the account API and the
+encrypted relay. The `/cloud` page exposes what the cloud client actually provides:
+Google/GitHub OAuth starts, email sign-up/verification/login, the account and Always-On Home list,
+one-time enrollment tokens, the published Managed Homes plan catalogue, and provisioning status
+returned by the API. These account and cloud actions live in `WebCloudClient`
+(`src/auth/client.ts`), not in the daemon bridge. This tree contains no checkout or billing call;
+the plan catalogue and provisioning panel are reads, not a claim that purchase or provisioning is
+live here.
+
+After sign-in and machine selection, `CloudApp` mounts the same read-only `WebApp` over
+`createRelayBridge`. The Web runtime does not enable writes (`CloudRelayClient` defaults to
+`allowWrites: false`), and the mounted shell exposes no job or inbox action controls. Board SSE is
+not tunnelled in v1, so the relay-backed cockpit uses the bridge's documented 5-second polling
+fallback. There is no second daemon write surface on `/cloud`; the cockpit's read-only rules are
+the same as §9.
+
+The account model — account-free local mode as the default, and an optional free account for Web,
+cross-device and Managed Home access — is in [`docs/STRATEGY.md`](STRATEGY.md) §4.
+
+### 11.6 Relay, hub and CSP notes
+
+- The Web/PWA relay client, the per-machine `MachineHub` Durable Object and the relay security
+  model are described in
+  [`runtime/docs/design/relay-and-packaging.md`](../runtime/docs/design/relay-and-packaging.md)
+  §6.7–§6.8. That is a design note for the relay; the hosted MCP endpoint it describes at
+  `mcp.stackspirit.io` is a separate planned surface, not part of the Web app in this tree.
+- The production CSP and reverse-proxy rules for the Web build are in §5.3 of this document. The
+  static marketing site's own CSP, cache and security headers are in
+  [`apps/site/_headers`](../apps/site/_headers).

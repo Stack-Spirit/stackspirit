@@ -91,8 +91,8 @@ Read the [0.6.1 release note](runtime/docs/release/0.6.1.md) for the patch chang
 
 | Surface | Path | What it is |
 |---|---|---|
-| Desktop | `apps/spirit-desktop` | Tauri 2 + React/TypeScript cockpit: add a server once, connect over pinned SSH, and see workers, job graphs, capacity, sessions and orchestrator chat. |
-| Web (read-only PWA) | `apps/spirit-web` | Mobile-first, read-only cockpit over the daemon HTTP/SSE API. It reuses the shared UI and ships `manifest.webmanifest` and `sw.js`, so it installs as a PWA. |
+| Desktop | `apps/spirit-desktop` | Tauri 2 + React/TypeScript cockpit: add a server once, connect over pinned SSH, and see workers, job graphs, capacity, sessions and orchestrator chat. An optional StackSpirit Account sign-in and Always-On Home selector live in Settings → StackSpirit Cloud; local/SSH mode needs no account ([`docs/STRATEGY.md`](docs/STRATEGY.md) §4). |
+| Web/PWA | `apps/spirit-web` | Mobile-first PWA: a read-only daemon cockpit at `/` over the daemon HTTP/SSE API, plus an optional StackSpirit Account/Always-On Homes app at `/cloud`. Account sign-in is optional, and its token lives in memory only. It reuses the shared UI and ships `manifest.webmanifest` and `sw.js`, so it installs as a PWA. |
 | Shared UI | `packages/spirit-ui` | `@stackspirit/ui`: design system, Meadow views, store, `SpiritBridge` contract and `MockBridge`. |
 | Released CLI, daemons and MCP | `runtime/` | The `stackspirit` CLI built from the separate `runtime/` Cargo workspace, with the `vowp` alias preserved, plus `stackspirit-daemon`, `vowp-daemon` and `stackspirit mcp`. This is the released product CLI. |
 | Desktop core | `crates/spirit-core` | Rust host, SSH, VOWP JSON and engine-supervision logic used by the desktop. |
@@ -118,7 +118,7 @@ npm ci
 node scripts/fetch-engine.mjs               # pinned, checksum-verified sidecar
 (cd apps/spirit-desktop && npx tauri dev)   # desktop app
 cargo run -p spirit-cli -- --help           # developer helper CLI
-npm run dev:web                             # read-only Web/PWA shell
+npm run dev:web                             # Web/PWA: cockpit and /cloud
 ```
 
 The desktop runs Meadow (`packages/spirit-ui/src/next`), the only desktop shell: a chat-first
@@ -126,7 +126,9 @@ layout with the sprout-face mark, light and dark themes that follow the system, 
 workers and details views. In preview mode (`VITE_SPIRIT_MOCK=1`), `?scenario=` switches the
 MockBridge data without a restart. Brand sources and the icon builder live in `design/brand`.
 
-The Web shell is read-only and has no browser token. Set `VITE_SPIRIT_MOCK=1` for the shared
+The Web/PWA app serves the read-only daemon cockpit at `/` and the optional account/Always-On
+Homes app at `/cloud` (`?cloud=1` also opens it). The daemon cockpit is still token-free and
+read-only; a signed-in account token lives in memory only. Set `VITE_SPIRIT_MOCK=1` for the shared
 `MockBridge` preview, or set the loopback proxy target and browser origin for a live daemon; see
 [`docs/WEB.md`](docs/WEB.md). The `spirit` helper's commands, fixture mode and exit codes are in
 [`crates/spirit-cli/README.md`](crates/spirit-cli/README.md).
@@ -170,7 +172,7 @@ backwards compatibility until cutover.
 | `crates/spirit-core` | Rust core: host profiles, outbound SSH, VOWP JSON parsing, view models and engine supervision. |
 | `apps/spirit-desktop` | Tauri 2 shell. `src/main.tsx` creates a `SpiritBridge` and mounts the shared shell; `src/bridge/TauriBridge.ts` is the only renderer file allowed to import `@tauri-apps/api`. |
 | `packages/spirit-ui` | `@stackspirit/ui`: the reusable React cockpit (design system, views, store), the `SpiritBridge` contract and `MockBridge`. Exported from TypeScript source, so Vite and Vitest consume it without a separate build step. |
-| `apps/spirit-web` | `@stackspirit/web`: read-only Web cockpit over the daemon HTTP/SSE API. It reuses `@stackspirit/ui`, sends no browser token, and shows unavailable daemon data explicitly. |
+| `apps/spirit-web` | `@stackspirit/web`: Web/PWA with the read-only daemon cockpit at `/` and the optional account/Always-On Homes app at `/cloud`. It reuses `@stackspirit/ui`, keeps the account token in memory only, and shows unavailable daemon data explicitly. |
 | `crates/spirit-cli` | Developer helper `spirit` CLI over `spirit-core`: host profiles, fleet, capacity, gates, engine status, JSON output and fixture mode. Not the released `stackspirit` CLI. |
 | `runtime/` | Separate Cargo workspace: `stackspirit`/`vowp` CLI, daemons, MCP server and the npm/PyPI packaging. Build and test it with `cd runtime && cargo test --workspace`. |
 | `engine/` | Pinned sidecar manifest (`manifest.json`) and included model list (`models.json`). |
@@ -219,7 +221,8 @@ The 0.6.1 release ships the desktop cockpit source, the read-only Web PWA source
   checklist, evidence template and sign-off rule.
 - [`docs/DEV-SETUP.md`](docs/DEV-SETUP.md) — non-root Linux Docker build container for the Tauri
   host and desktop UI gates.
-- [`docs/WEB.md`](docs/WEB.md) — Web contract, implementation status and daemon route gaps.
+- [`docs/WEB.md`](docs/WEB.md) — Web/PWA routes, optional account sign-in with an in-memory
+  token, the historical W1 daemon contract, implementation status and route gaps.
 - [`docs/SERVER-CHAT-OPTIONS.md`](docs/SERVER-CHAT-OPTIONS.md) — owner decision note for the
   Server chat transport.
 - [`docs/RELEASE-DESKTOP-MVP.md`](docs/RELEASE-DESKTOP-MVP.md),
