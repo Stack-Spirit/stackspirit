@@ -1,5 +1,12 @@
 # StackSpirit — Engineering Plan (Desktop First)
 
+> **Historical baseline — 2026-11-14.** This is the planning baseline for the D1–D4
+> desktop MVP. It is kept as the historical record of those phases and is superseded for
+> current decisions by [`STRATEGY.md`](STRATEGY.md) (product, architecture, roadmap),
+> [`HANDOFF-DESKTOP-UI.md`](HANDOFF-DESKTOP-UI.md) (desktop UI, brand, security),
+> [`ORCHESTRATOR-CHAT.md`](ORCHESTRATOR-CHAT.md) (chat contract) and
+> [`PUBLIC-READINESS.md`](PUBLIC-READINESS.md) (launch state).
+
 Status: planning baseline for `ss-0-plan`, 2026-11-14.
 Audience: the `ss-1-core`, `ss-2-desktop-shell`, `ss-3-fleet-canvas`, and
 `ss-4-engine-onboarding` workers, and the human owner.
@@ -7,9 +14,11 @@ Companion document: [`VOWP-CONTRACT.md`](VOWP-CONTRACT.md) pins the exact JSON r
 `/home/user/vowp` and the cross-project dependency gates.
 
 This document freezes the build order, module boundaries, data flow, UI specification,
-and test strategy for the Desktop MVP. It writes no application code. It deliberately
-does not add a Web app, a CLI, a second VOWP implementation, or any live feature that
-VOWP has not shipped yet.
+and test strategy for the Desktop MVP. It writes no application code. At the time of
+writing, this plan deliberately did not add a Web app, a CLI, a second VOWP
+implementation, or any live feature that VOWP had not shipped yet. The project has since
+added the `stackspirit` CLI (with the temporary `vowp` alias), a read-only Web cockpit,
+and an optional cloud account/relay.
 
 ---
 
