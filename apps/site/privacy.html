@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Privacy Policy — StackSpirit</title>
+    <meta
+      name="description"
+      content="StackSpirit's plain-English privacy policy: local-first by default, no SSH private keys or provider OAuth tokens in StackSpirit Cloud, and a short list of subprocessors."
+    />
+    <link rel="canonical" href="https://stackspirit.io/privacy" />
+    <meta name="theme-color" content="#f5f7f0" />
+    <meta name="color-scheme" content="light" />
+    <meta name="robots" content="index, follow" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="StackSpirit" />
+    <meta property="og:title" content="Privacy Policy — StackSpirit" />
+    <meta
+      property="og:description"
+      content="Local-first by default. No SSH private keys or provider OAuth tokens in StackSpirit Cloud."
+    />
+    <meta property="og:url" content="https://stackspirit.io/privacy" />
+    <link rel="icon" href="/assets/icon-32.svg" type="image/svg+xml" />
+    <link rel="icon" href="/assets/icon-32.png" sizes="32x32" type="image/png" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="container header-inner">
+        <a class="brand" href="/" aria-label="StackSpirit home">
+          <img
+            class="brand__mark"
+            src="/assets/stackspirit-mark-128.png"
+            alt=""
+            width="34"
+            height="34"
+          />
+          <span class="brand__name">StackSpirit</span>
+        </a>
+        <nav class="site-nav" aria-label="Primary">
+          <a href="/#why">Why</a>
+          <a href="/#quickstart">Quickstart</a>
+          <a href="/#harnesses">Harnesses</a>
+          <a href="/#homes">Homes</a>
+          <a href="/#faq">FAQ</a>
+        </nav>
+        <div class="header-actions">
+          <a class="btn btn--primary" href="https://app.stackspirit.io">Open Web App</a>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" class="legal-page" tabindex="-1">
+      <div class="container">
+        <header class="legal-hero">
+          <p class="kicker"><span class="kicker__index">P</span> Privacy Policy</p>
+          <h1>The short version: your machine is the default.</h1>
+          <p class="lede">
+            StackSpirit is local-first. If you use the desktop app or connect your own Linux box,
+            your code, sessions and keys stay on machines you control. This policy explains the
+            narrow set of things we process when you choose a cloud surface, and what we
+            deliberately never store.
+          </p>
+          <p class="legal-meta">
+            <span>Last updated: 27 November 2026</span>
+            <span>Applies to stackspirit.io and StackSpirit Cloud</span>
+          </p>
+        </header>
+
+        <div class="legal-layout">
+          <nav class="legal-toc" aria-label="On this page">
+            <h2>On this page</h2>
+            <ol>
+              <li><a href="#short-version">The short version</a></li>
+              <li><a href="#who-we-are">Who we are</a></li>
+              <li><a href="#local-first">Local-first by default</a></li>
+              <li><a href="#cloud">When StackSpirit Cloud is involved</a></li>
+              <li><a href="#never-stored">What we never store</a></li>
+              <li><a href="#managed-homes">Managed Homes</a></li>
+              <li><a href="#subprocessors">Subprocessors</a></li>
+              <li><a href="#cookies">Cookies and analytics</a></li>
+              <li><a href="#retention">Retention and deletion</a></li>
+              <li><a href="#security">Security</a></li>
+              <li><a href="#rights">Your choices and rights</a></li>
+              <li><a href="#changes">Changes to this policy</a></li>
+              <li><a href="#contact">Contact</a></li>
+            </ol>
+          </nav>
+
+          <div class="legal-body">
+            <section class="legal-section" id="short-version" aria-labelledby="short-version-title">
+              <h2 id="short-version-title">1. The short version</h2>
+              <ul>
+                <li>
+                  <strong>Local mode is local.</strong> The desktop app and CLI can run without a
+                  StackSpirit account. Your code, prompts, outputs, server profiles and keys stay on
+                  your devices.
+                </li>
+                <li>
+                  <strong>Bring your own box stays yours.</strong> When you connect your own VPS,
+                  laptop or home server over SSH, StackSpirit Cloud is not in the data path.
+                </li>
+                <li>
+                  <strong>The cloud is optional.</strong> It exists for cross-device Web App access
+                  and for Managed Homes. We collect the account and operational metadata needed to
+                  run those services.
+                </li>
+                <li>
+                  <strong>No secret values in the cloud.</strong> StackSpirit Cloud never stores SSH
+                  private keys or provider OAuth tokens. Provider API keys live in your OS keychain
+                  or in the secret vault on your own Home.
+                </li>
+                <li>
+                  <strong>No trackers, no ad tech, no selling data.</strong> The marketing site loads
+                  no third-party scripts, fonts or analytics.
+                </li>
+              </ul>
+            </section>
+
+            <section class="legal-section" id="who-we-are" aria-labelledby="who-we-are-title">
+              <h2 id="who-we-are-title">2. Who we are</h2>
+              <p>
+                StackSpirit is an independent, MIT-licensed software project. In this policy,
+                “StackSpirit”, “we”, “us” and “our” mean the people who maintain the project and, if
+                you use them, operate StackSpirit Cloud and the Managed Always-On Homes service.
+              </p>
+              <p>
+                For privacy questions, anything in this policy, or a data request, write to
+                <a href="mailto:syver@stackspirit.io">syver@stackspirit.io</a>. That address is also
+                the contact for billing and account questions.
+              </p>
+            </section>
+
+            <section class="legal-section" id="local-first" aria-labelledby="local-first-title">
+              <h2 id="local-first-title">3. Local-first by default</h2>
+              <p>
+                The normal way to use StackSpirit is on a machine you control. There is no account
+                gate, no license key and no trial timer. In local and SSH mode, the desktop app
+                stores server profiles, connection details and its local database on your device.
+                The Home stores its own database, session logs and project state.
+              </p>
+              <p>
+                When you do not sign in, we do not receive your code, prompt text, model output,
+                shell history, SSH credentials or provider keys. Diagnostics you choose to export
+                are yours to review before you send them anywhere; do not send secret values in a
+                support message.
+              </p>
+            </section>
+
+            <section class="legal-section" id="cloud" aria-labelledby="cloud-title">
+              <h2 id="cloud-title">4. When StackSpirit Cloud is involved</h2>
+              <p>
+                An optional free account is used for cross-device sign-in to the Web App and for
+                Managed Homes. If you create one, we process:
+              </p>
+              <ul>
+                <li>
+                  <strong>Account data:</strong> your email address, display name, authentication
+                  state and security-event records needed to keep the account safe.
+                </li>
+                <li>
+                  <strong>Device and server metadata:</strong> labels you choose, host names, ports,
+                  connection status, the server fingerprint you confirmed, and timestamps. We do not
+                  receive the private half of your SSH key.
+                </li>
+                <li>
+                  <strong>Job and session metadata:</strong> project names, session titles, job
+                  status, queue position, capacity numbers and timing. The content of prompts and
+                  outputs stays on the Home unless you explicitly send it through a cloud surface.
+                </li>
+                <li>
+                  <strong>Billing records:</strong> plan, invoice status and the last four digits or
+                  equivalent non-sensitive identifiers returned by our payment processor. Card data
+                  is handled by Stripe, not by us.
+                </li>
+                <li>
+                  <strong>Support messages:</strong> what you send to us and what we send back.
+                </li>
+              </ul>
+              <p>
+                We use this data to provide the service, secure it, support you, bill correctly and
+                understand aggregate reliability. We do not sell it, rent it or use it for
+                advertising.
+              </p>
+            </section>
+
+            <section class="legal-section" id="never-stored" aria-labelledby="never-stored-title">
+              <h2 id="never-stored-title">5. What we never store</h2>
+              <p class="legal-callout">
+                <strong>StackSpirit Cloud does not store SSH private keys or provider OAuth tokens.</strong>
+                It also does not store provider API keys as plaintext.
+              </p>
+              <p>
+                The desktop app verifies a server's host-key fingerprint before installing its own
+                key. Server profiles keep a path to a key, not the key material. Provider secrets
+                live in the local OS keychain or in the secret vault on the Home. The AI only sees
+                secret names and metadata, never values.
+              </p>
+              <p>
+                If you enable a cloud feature that must hold a session token for you, we treat it as
+                a short-lived credential, scope it to that feature and expire it. We do not use it to
+                read your repository or your provider account.
+              </p>
+            </section>
+
+            <section class="legal-section" id="managed-homes" aria-labelledby="managed-homes-title">
+              <h2 id="managed-homes-title">6. Managed Homes</h2>
+              <p>
+                A Managed Always-On Home is a dedicated Contabo VPS provisioned on your behalf. We
+                receive machine health and provisioning metadata so we can operate it. Your code,
+                projects and session data on that Home remain yours. We do not browse your
+                workspace or read your prompts for our own purposes.
+              </p>
+              <p>
+                Off-site encrypted R2 backups are optional and off by default. If you enable them,
+                StackSpirit writes an encrypted copy of your <code>~/.stackspirit</code> data to
+                Cloudflare R2. The add-on is billed monthly and you can turn it off.
+              </p>
+              <p>
+                Managed Homes are paid hardware, not a software license. Billing is handled by
+                Stripe; current prices, the one-time setup fee where applicable, VAT treatment and
+                the +20% StackSpirit markup over Contabo's regular rate are shown before checkout.
+                See the <a href="/terms">Terms of Service</a> for billing and cancellation.
+              </p>
+            </section>
+
+            <section class="legal-section" id="subprocessors" aria-labelledby="subprocessors-title">
+              <h2 id="subprocessors-title">7. Subprocessors</h2>
+              <p>
+                We keep the list short and use providers that process data on our instructions:
+              </p>
+              <ul>
+                <li>
+                  <strong>Cloudflare</strong> — website hosting and DNS, security in front of the
+                  site and API, and Cloudflare R2 for optional encrypted backups.
+                </li>
+                <li>
+                  <strong>Stripe</strong> — payment processing, invoices and billing records for
+                  Managed Homes and the backup add-on.
+                </li>
+                <li>
+                  <strong>Resend</strong> — transactional email such as sign-in, receipts and
+                  operational notices.
+                </li>
+                <li>
+                  <strong>Contabo</strong> — the underlying VPS infrastructure for Managed Homes.
+                </li>
+              </ul>
+              <p>
+                Each provider has its own privacy terms. We do not add advertising, analytics or
+                session-recording subprocessors. If this list changes in a material way, we will
+                update this page.
+              </p>
+            </section>
+
+            <section class="legal-section" id="cookies" aria-labelledby="cookies-title">
+              <h2 id="cookies-title">8. Cookies and analytics</h2>
+              <p>
+                The marketing site at stackspirit.io sets no cookies, uses no localStorage and loads
+                no third-party trackers, analytics or advertising code. The optional plan catalog
+                fetch goes only to <code>api.stackspirit.io</code>.
+              </p>
+              <p>
+                The Web App uses the minimum cookies or local storage needed to keep you signed in
+                and protect the session. Cloudflare may process technical request logs and security
+                signals as part of hosting. We do not use those logs to build an advertising
+                profile.
+              </p>
+            </section>
+
+            <section class="legal-section" id="retention" aria-labelledby="retention-title">
+              <h2 id="retention-title">9. Retention and deletion</h2>
+              <p>
+                Local data stays on your devices until you delete it. Cloud account and operational
+                records are kept while your account or Managed Home is active, then for a short
+                period needed to close billing, resolve disputes and meet legal obligations. Backup
+                copies age out under the provider's retention windows.
+              </p>
+              <p>
+                You can ask us to delete your account by emailing
+                <a href="mailto:syver@stackspirit.io">syver@stackspirit.io</a>. We will confirm what
+                is deleted and what must be retained for legal or accounting reasons. Deleting a
+                Managed Home destroys the machine and its local data; export anything you need
+                first.
+              </p>
+            </section>
+
+            <section class="legal-section" id="security" aria-labelledby="security-title">
+              <h2 id="security-title">10. Security</h2>
+              <p>
+                We use TLS in transit, least-privilege access, pinned SSH host keys and a
+                secret-by-name design. The open-source security model and its limits are documented
+                in
+                <a
+                  href="https://github.com/Stack-Spirit/stackspirit/blob/main/SECURITY.md"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >SECURITY.md</a
+                >. No system is perfectly secure; if you find a vulnerability, email
+                <a href="mailto:syver@stackspirit.io">syver@stackspirit.io</a> instead of posting
+                secret details in a public issue.
+              </p>
+            </section>
+
+            <section class="legal-section" id="rights" aria-labelledby="rights-title">
+              <h2 id="rights-title">11. Your choices and rights</h2>
+              <p>
+                Depending on where you live, you may have the right to access, correct, export or
+                delete personal data we hold, to object to some processing, or to complain to your
+                local data-protection authority. To make a request, email
+                <a href="mailto:syver@stackspirit.io">syver@stackspirit.io</a>. We may need to verify
+                that the request comes from the account holder.
+              </p>
+              <p>
+                You can avoid the cloud entirely by using local mode. You can remove a saved server,
+                revoke its key and delete local data from the desktop app.
+              </p>
+            </section>
+
+            <section class="legal-section" id="changes" aria-labelledby="changes-title">
+              <h2 id="changes-title">12. Changes to this policy</h2>
+              <p>
+                We will update this page when the product or the law changes. The “last updated”
+                date at the top is the reliable version marker. If a change materially affects what
+                we collect or why, we will make that clear on the site or by email before it applies
+                to existing accounts.
+              </p>
+            </section>
+
+            <section class="legal-section" id="contact" aria-labelledby="contact-title">
+              <h2 id="contact-title">13. Contact</h2>
+              <p>
+                Questions, corrections and data requests:
+                <a href="mailto:syver@stackspirit.io">syver@stackspirit.io</a>. We are a small
+                independent project, so please allow a reasonable amount of time for a personal
+                reply.
+              </p>
+            </section>
+
+            <aside class="legal-contact" aria-label="Contact StackSpirit">
+              <h2>One address for the serious stuff</h2>
+              <p>
+                Privacy, security, billing and legal questions all reach a human at
+                <a href="mailto:syver@stackspirit.io">syver@stackspirit.io</a>.
+              </p>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container footer-bottom">
+        <p>© 2026 StackSpirit. Free software under the MIT License.</p>
+        <p>
+          <a href="/privacy" aria-current="page">Privacy</a>
+          <span aria-hidden="true">·</span>
+          <a href="/terms">Terms</a>
+          <span aria-hidden="true">·</span>
+          <a href="mailto:syver@stackspirit.io">syver@stackspirit.io</a>
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

@@ -7,6 +7,7 @@
  * sets a cookie, or sends a request anywhere except the public plans endpoint.
  */
 
+import { initCraft } from "./craft.mjs";
 import {
   FALLBACK_CATALOG,
   PLANS_URL,
@@ -285,3 +286,4 @@ initTabs();
 initCopyButtons();
 initBackups();
 initPricing();
+initCraft();

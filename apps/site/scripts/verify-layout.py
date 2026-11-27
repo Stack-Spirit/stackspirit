@@ -14,8 +14,10 @@ checks both 390x844 (mobile) and 1280x800 (desktop):
   * one h1, landmarks, labelled tabs and an accessible switch
   * the four quickstart tabs (mouse and keyboard)
   * the copy button
+  * the pixel-shimmer canvases and the scroll-path mascot
   * offline pricing fallback and the off-by-default backups switch
   * a simulated live catalog response (and that it cannot enable backups)
+  * the privacy and terms pages at their extensionless routes
   * no requests to any origin except the local site and api.stackspirit.io
 
 Screenshots are written to the system temporary directory as
@@ -227,7 +229,7 @@ def check_page(page, checks: Checks, width: int, requests: list[str], errors: li
     checks.equal(
         f"{width}px hero promise",
         page.get_by_role("heading", level=1).inner_text().strip(),
-        "An always-on machine as a home for your AI coding agents",
+        "Manage the always-on computers your coding agents work on.",
     )
     checks.equal(f"{width}px primary nav", page.get_by_role("navigation", name="Primary").count(), 1)
     checks.equal(f"{width}px main landmark", page.get_by_role("main").count(), 1)
@@ -240,6 +242,11 @@ def check_page(page, checks: Checks, width: int, requests: list[str], errors: li
         == 1,
     )
     checks.equal(f"{width}px images with alt", page.locator("img:not([alt])").count(), 0)
+    checks.equal(
+        f"{width}px pixel shimmer canvases",
+        page.locator("canvas[data-shimmer]").count(),
+        7,
+    )
 
     nav_links = page.eval_on_selector_all(
         ".site-nav a",
@@ -248,15 +255,15 @@ def check_page(page, checks: Checks, width: int, requests: list[str], errors: li
           return { text: el.textContent.trim(), top: Math.round(box.top), right: Math.round(box.right) };
         })""",
     )
-    checks.equal(f"{width}px nav link count", len(nav_links), 5)
+    checks.equal(f"{width}px nav link count", len(nav_links), 6)
     checks.ok(
-        f"{width}px nav links stay on screen",
+        f"{width}px nav links fit on screen",
         all(link["right"] <= width + 1 for link in nav_links),
         str(nav_links),
     )
     checks.ok(
-        f"{width}px nav links share one row",
-        len({link["top"] for link in nav_links}) == 1,
+        f"{width}px nav links use at most two rows",
+        len({link["top"] for link in nav_links}) <= 2,
         str(nav_links),
     )
 
@@ -365,12 +372,81 @@ def check_page(page, checks: Checks, width: int, requests: list[str], errors: li
 
     checks.ok(f"{width}px no page errors", not errors, "; ".join(errors[:3]))
 
+    if width >= 1280:
+        checks.ok(
+            f"{width}px scroll path visible",
+            page.locator("#scroll-path").is_visible(),
+        )
+        page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight * 0.55)")
+        page.wait_for_timeout(250)
+        checks.ok(
+            f"{width}px mascot follows the scroll path",
+            page.eval_on_selector(
+                "#scroll-path-mascot", "el => el.style.transform.includes('translate3d')"
+            ),
+        )
+    else:
+        checks.ok(
+            f"{width}px scroll path stays out of small layouts",
+            page.locator("#scroll-path").is_hidden(),
+        )
+
     # Return to the top so the saved screenshot shows the hero and header.
     page.evaluate("window.scrollTo(0, 0)")
     page.wait_for_timeout(100)
     screenshot = SCREENSHOT_DIR / f"stackspirit-site-{width}.png"
     page.screenshot(path=str(screenshot), full_page=False)
     print(f"     screenshot: {screenshot}")
+
+
+def check_legal(browser, base: str, checks: Checks) -> None:
+    """The legal pages load as static documents with no script or tracking."""
+    context = browser.new_context(viewport={"width": 1280, "height": 800})
+    page = context.new_page()
+    requests: list[str] = []
+    errors: list[str] = []
+    page.on("request", lambda request: requests.append(request.url))
+    page.on("pageerror", lambda error: errors.append(str(error)))
+
+    for path, heading, contact in [
+        (
+            "privacy.html",
+            "The short version: your machine is the default.",
+            "syver@stackspirit.io",
+        ),
+        (
+            "terms.html",
+            "The software is free. The managed machine is a paid service.",
+            "syver@stackspirit.io",
+        ),
+    ]:
+        page.goto(f"{base}/{path}", wait_until="domcontentloaded")
+        checks.equal(f"{path} one h1", page.locator("h1").count(), 1)
+        checks.equal(f"{path} title", page.locator("h1").inner_text().strip(), heading)
+        checks.ok(
+            f"{path} contact link",
+            page.get_by_role("link", name=contact).count() >= 1,
+        )
+        checks.equal(f"{path} no scripts", page.locator("script").count(), 0)
+        metrics = page.evaluate(
+            """() => ({
+              scrollWidth: document.documentElement.scrollWidth,
+              innerWidth: window.innerWidth,
+            })"""
+        )
+        checks.ok(
+            f"{path} no horizontal overflow",
+            metrics["scrollWidth"] <= metrics["innerWidth"] + 1,
+            json.dumps(metrics),
+        )
+
+    allowed = {urlparse(base).netloc}
+    unexpected = [
+        url for url in requests if urlparse(url).netloc not in allowed and urlparse(url).netloc
+    ]
+    checks.ok("legal pages no external requests", not unexpected, str(unexpected[:5]))
+    checks.ok("legal pages no page errors", not errors, "; ".join(errors[:3]))
+    context.close()
 
 
 def check_no_javascript(browser, base: str, checks: Checks) -> None:
@@ -464,6 +540,7 @@ def main() -> int:
                     finally:
                         context.close()
                 check_no_javascript(browser, base, checks)
+                check_legal(browser, base, checks)
                 check_live_catalog(browser, base, checks)
             finally:
                 browser.close()

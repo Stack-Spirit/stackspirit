@@ -67,6 +67,17 @@ const server = createServer(async (request, response) => {
     } catch {
       target = null;
     }
+    // Cloudflare Pages serves /privacy from privacy.html. Mirror that
+    // extensionless route in the local preview so legal-page smoke checks and
+    // shared links behave the same way.
+    if (!target && !file.endsWith(".html")) {
+      try {
+        const info = await stat(`${file}.html`);
+        if (info.isFile()) target = `${file}.html`;
+      } catch {
+        target = null;
+      }
+    }
   }
 
   if (!target) {

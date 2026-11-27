@@ -4,9 +4,11 @@
  *
  *   node apps/site/scripts/verify.mjs
  *
- * Covers the brief's static contract: required sections and CTAs, the four
- * quickstart tabs, the pricing fallback and off-by-default backup switch, the
- * host redirect middleware, tracker-free assets, security headers, accessible
+ * Covers the brief's static contract: the adoption-first hero, the free
+ * install path ahead of Managed Homes, the four quickstart tabs, the pricing
+ * fallback and off-by-default backup switch, the custom canvas and scroll-path
+ * craft, the seven-harness matrix, the privacy and terms pages, the host
+ * redirect middleware, tracker-free assets, security headers, accessible
  * markup basics, and a local HTTP smoke test.
  *
  * The optional visual/responsive browser pass lives in verify-layout.py.
@@ -76,10 +78,6 @@ function textOf(html) {
     .trim();
 }
 
-function normalized(html) {
-  return textOf(html);
-}
-
 function attributeValues(html, attribute) {
   return [...html.matchAll(new RegExp(`\\b${attribute}="([^"]*)"`, "gi"))].map(
     (match) => match[1],
@@ -94,12 +92,45 @@ function assertNotIncludes(haystack, needle, label) {
   assert.ok(!haystack.includes(needle), `${label ?? "text"} must not include ${JSON.stringify(needle)}`);
 }
 
+function sectionHtml(html, id) {
+  const marker = `id="${id}"`;
+  const markerIndex = html.indexOf(marker);
+  assert.ok(markerIndex !== -1, `missing #${id}`);
+  const start = html.lastIndexOf("<section", markerIndex);
+  const end = html.indexOf("</section>", markerIndex);
+  assert.ok(start !== -1 && end !== -1, `could not slice #${id}`);
+  return html.slice(start, end);
+}
+
+function h1Of(html) {
+  const match = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+  assert.ok(match, "missing h1");
+  return textOf(match[1]);
+}
+
 function pngSize(buffer) {
   assert.equal(buffer.subarray(0, 8).toString("hex"), "89504e470d0a1a0a", "expected a PNG");
   return {
     width: buffer.readUInt32BE(16),
     height: buffer.readUInt32BE(20),
   };
+}
+
+function checkAccessibleIds(html, label) {
+  const ids = new Set(attributeValues(html, "id"));
+  assert.equal(ids.size, attributeValues(html, "id").length, `${label}: duplicate id`);
+  for (const attribute of ["aria-labelledby", "aria-describedby", "aria-controls"]) {
+    for (const value of attributeValues(html, attribute)) {
+      for (const id of value.split(/\s+/).filter(Boolean)) {
+        assert.ok(ids.has(id), `${label}: ${attribute} points at missing #${id}`);
+      }
+    }
+  }
+  for (const href of attributeValues(html, "href")) {
+    if (href.startsWith("#")) {
+      assert.ok(ids.has(href.slice(1)), `${label}: internal link points at missing ${href}`);
+    }
+  }
 }
 
 async function freePort() {
@@ -155,7 +186,12 @@ async function startPreviewServer() {
 }
 
 const indexHtml = await read("index.html");
-const text = normalized(indexHtml);
+const text = textOf(indexHtml);
+const privacyHtml = await read("privacy.html");
+const privacyText = textOf(privacyHtml);
+const termsHtml = await read("terms.html");
+const termsText = textOf(termsHtml);
+const sitemap = await read("sitemap.xml");
 const pricingData = await import(
   pathToFileURL(join(SITE_ROOT, "pricing-data.mjs")).href
 );
@@ -169,8 +205,11 @@ const middleware = await import(
 await check("required site files exist", async () => {
   for (const file of [
     "index.html",
+    "privacy.html",
+    "terms.html",
     "styles.css",
     "app.mjs",
+    "craft.mjs",
     "pricing-data.mjs",
     "404.html",
     "favicon.ico",
@@ -180,6 +219,10 @@ await check("required site files exist", async () => {
     "README.md",
     "functions/_middleware.js",
     "assets/stackspirit-mark-128.png",
+    "assets/stackspirit-mark-256.png",
+    "assets/mascot-thick-256.png",
+    "assets/mascot-thick-walk-128.png",
+    "assets/mascot-gazer-256.png",
     "assets/icon-16.png",
     "assets/icon-32.png",
     "assets/icon-32.svg",
@@ -245,20 +288,47 @@ await check("official hosts and preview deployments are not redirected", async (
   }
 });
 
-/* ---------- Hero, CTAs, quickstart ---------- */
+/* ---------- Hero, adoption path, CTAs ---------- */
 
-await check("hero has the exact promise", async () => {
-  const match = indexHtml.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
-  assert.ok(match, "missing h1");
+await check("hero has the adoption-first promise and subline", async () => {
   assert.equal(
-    textOf(match[1]),
-    "An always-on machine as a home for your AI coding agents",
+    h1Of(indexHtml),
+    "Manage the always-on computers your coding agents work on.",
   );
-  assertIncludes(text, "Free & MIT open source");
-  assertIncludes(text, "optional turnkey homes");
+  const lede = indexHtml.match(/<p class="lede">([\s\S]*?)<\/p>/i);
+  assert.ok(lede, "missing hero lede");
+  assert.equal(
+    textOf(lede[1]),
+    "One open-source cockpit for OpenCode, Claude Code, Codex, and your own CLI harnesses — from your Mac, phone, CLI, or MCP.",
+  );
+  assertIncludes(text, "MIT open source");
+  assertIncludes(text, "local-first");
+  assertIncludes(text, "optional managed homes");
 });
 
-await check("primary CTAs point at the Web App and GitHub", async () => {
+await check("free local and BYO-VPS install comes before Managed Homes", async () => {
+  const hero = sectionHtml(indexHtml, "hero-title");
+  const heroText = textOf(hero);
+  for (const command of ["npx -y stackspirit", "uvx stackspirit", "Desktop app"]) {
+    assertIncludes(heroText, command, `hero install ${command}`);
+  }
+  const homes = sectionHtml(indexHtml, "homes-title");
+  assertIncludes(
+    textOf(homes),
+    "Don't have a Linux box yet? Spin up a pre-configured home in 60 seconds.",
+    "managed homes prompt",
+  );
+  assert.ok(
+    indexHtml.indexOf("npx -y stackspirit") < indexHtml.indexOf('id="homes"'),
+    "the free install command must appear before the Managed Homes section",
+  );
+  assert.ok(
+    indexHtml.indexOf("uvx stackspirit") < indexHtml.indexOf('id="homes"'),
+    "the PyPI install command must appear before the Managed Homes section",
+  );
+});
+
+await check("primary CTAs point at the Web App, GitHub and cloud checkout", async () => {
   const hrefs = attributeValues(indexHtml, "href");
   assert.ok(
     hrefs.filter((href) => href === "https://app.stackspirit.io").length >= 3,
@@ -301,20 +371,112 @@ await check("quickstart commands are exact", async () => {
   assertIncludes(indexHtml, "<noscript>", "no-JS command fallback");
 });
 
-/* ---------- Harnesses ---------- */
+/* ---------- Custom craft ---------- */
 
-await check("harness compatibility names every required harness", async () => {
+await check("hero and feature cards carry the pixel-shimmer canvas", async () => {
+  const canvases = indexHtml.match(/<canvas\b[^>]*>/g) ?? [];
+  assert.equal(canvases.length, 7, "expected seven canvases");
+  assert.equal((indexHtml.match(/data-shimmer-ambient/g) ?? []).length, 1);
+  for (const canvas of canvases) {
+    assertIncludes(canvas, "data-shimmer", "shimmer canvas marker");
+    assertIncludes(canvas, 'aria-hidden="true"', "decorative canvas");
+  }
+  assertIncludes(indexHtml, 'class="shimmer hero__shimmer"', "hero shimmer canvas");
+  const features = indexHtml.match(/<article class="feature">[\s\S]*?<\/article>/g) ?? [];
+  assert.equal(features.length, 6, "expected six feature cards");
+  for (const feature of features) {
+    assertIncludes(feature, "<canvas", "feature shimmer canvas");
+  }
+});
+
+await check("the scroll path has a curved SVG and a pixel mascot", async () => {
+  assertIncludes(indexHtml, 'id="scroll-path"');
+  assertIncludes(indexHtml, 'id="scroll-path-line"');
+  assertIncludes(indexHtml, 'id="scroll-path-progress"');
+  assertIncludes(indexHtml, 'id="scroll-path-mascot"');
+  assertIncludes(indexHtml, 'class="scroll-path__sprite"');
+  assertIncludes(indexHtml, "/assets/mascot-thick-walk-128.png");
+  const path = indexHtml.match(/<path\b[^>]*id="scroll-path-line"[^>]*>/i)?.[0] ?? "";
+  assert.ok(/\bd="[^"]*C/.test(path), "scroll path should be a curve");
+  const craft = await read("craft.mjs");
+  for (const part of [
+    "prefers-reduced-motion: reduce",
+    "getPointAtLength",
+    "getScreenCTM",
+    "requestAnimationFrame",
+    "classList.toggle(\"is-flipped\"",
+  ]) {
+    assertIncludes(craft, part, "craft.mjs");
+  }
+});
+
+await check("the harness matrix names every requested harness", async () => {
   for (const harness of [
+    "OpenCode",
     "Claude Code",
     "Codex",
-    "OpenCode",
-    "Antigravity",
-    "T3 Code",
-    "Any MCP or CLI harness",
+    "Gemini CLI",
+    "Cursor CLI",
+    "Aider",
+    "Goose",
+    "Custom CLI",
   ]) {
     assertIncludes(text, harness, `harness ${harness}`);
   }
+  assertIncludes(text, "default engine", "OpenCode default engine");
+  assertIncludes(text, "bring-your-own", "bring-your-own harness note");
   assertIncludes(text, "not affiliated with or endorsed by them");
+  const rows = indexHtml.match(/<tr class="harness-row(?: [^"]*)?">/g) ?? [];
+  assert.equal(rows.length, 8, "expected eight harness rows");
+});
+
+/* ---------- Legal pages ---------- */
+
+await check("privacy and terms pages are complete and linked", async () => {
+  assert.equal(
+    h1Of(privacyHtml),
+    "The short version: your machine is the default.",
+  );
+  assert.equal(
+    h1Of(termsHtml),
+    "The software is free. The managed machine is a paid service.",
+  );
+  assert.equal((privacyHtml.match(/<h1\b/g) ?? []).length, 1);
+  assert.equal((termsHtml.match(/<h1\b/g) ?? []).length, 1);
+  assertIncludes(privacyHtml, '<link rel="canonical" href="https://stackspirit.io/privacy"');
+  assertIncludes(termsHtml, '<link rel="canonical" href="https://stackspirit.io/terms"');
+  assertIncludes(privacyText, "local-first");
+  assertIncludes(privacyText, "SSH private keys");
+  assertIncludes(privacyText, "OAuth tokens");
+  assertIncludes(privacyText, "Cloudflare");
+  assertIncludes(privacyText, "Stripe");
+  assertIncludes(privacyText, "Resend");
+  assertIncludes(privacyText, "syver@stackspirit.io");
+  assertIncludes(termsText, "MIT License");
+  assertIncludes(termsText, "Managed", "terms mention managed homes");
+  assertIncludes(termsText, "Stripe");
+  assertIncludes(termsText, "syver@stackspirit.io");
+  assertIncludes(termsText, "SSH private keys");
+  assertIncludes(termsText, "OAuth tokens");
+  const hrefs = attributeValues(indexHtml, "href");
+  assert.ok(hrefs.includes("/privacy"), "index footer should link /privacy");
+  assert.ok(hrefs.includes("/terms"), "index footer should link /terms");
+  assertIncludes(sitemap, "<loc>https://stackspirit.io/privacy</loc>");
+  assertIncludes(sitemap, "<loc>https://stackspirit.io/terms</loc>");
+});
+
+await check("legal pages keep valid landmarks and ARIA references", async () => {
+  for (const [label, html] of [
+    ["privacy.html", privacyHtml],
+    ["terms.html", termsHtml],
+  ]) {
+    assertIncludes(html, '<main id="main"');
+    assertIncludes(html, '<a class="skip-link" href="#main">Skip to content</a>');
+    assertIncludes(html, '<header class="site-header"');
+    assertIncludes(html, '<footer class="site-footer"');
+    assertIncludes(html, 'lang="en"');
+    checkAccessibleIds(html, label);
+  }
 });
 
 /* ---------- Pricing ---------- */
@@ -476,37 +638,26 @@ await check("HTML has one h1, landmarks and a skip link", async () => {
 });
 
 await check("ARIA references and HTML ids are valid", async () => {
-  const ids = new Set(attributeValues(indexHtml, "id"));
-  assert.equal(ids.size, attributeValues(indexHtml, "id").length, "duplicate id");
-  for (const attribute of ["aria-labelledby", "aria-describedby", "aria-controls"]) {
-    for (const value of attributeValues(indexHtml, attribute)) {
-      for (const id of value.split(/\s+/).filter(Boolean)) {
-        assert.ok(ids.has(id), `${attribute} points at missing #${id}`);
-      }
-    }
-  }
-  for (const href of attributeValues(indexHtml, "href")) {
-    if (href.startsWith("#")) {
-      assert.ok(ids.has(href.slice(1)), `internal link points at missing ${href}`);
-    }
-  }
+  checkAccessibleIds(indexHtml, "index.html");
 });
 
 await check("images, buttons and new-tab links are accessible", async () => {
-  for (const tag of indexHtml.match(/<img\b[^>]*>/g) ?? []) {
-    assertIncludes(tag, "alt=", "img alt");
-    const src = tag.match(/\bsrc="([^"]+)"/)?.[1] ?? "";
-    assert.ok(src.startsWith("/assets/"), `image ${src} must be local`);
-  }
-  for (const tag of indexHtml.match(/<button\b[^>]*>/g) ?? []) {
-    assertIncludes(tag, 'type="button"', "button type");
-  }
-  for (const tag of indexHtml.match(/<a\b[^>]*>/g) ?? []) {
-    if (tag.includes('target="_blank"')) {
-      assert.ok(
-        /rel="[^"]*noopener/.test(tag),
-        `target=_blank link lacks rel=noopener: ${tag}`,
-      );
+  for (const html of [indexHtml, privacyHtml, termsHtml]) {
+    for (const tag of html.match(/<img\b[^>]*>/g) ?? []) {
+      assertIncludes(tag, "alt=", "img alt");
+      const src = tag.match(/\bsrc="([^"]+)"/)?.[1] ?? "";
+      assert.ok(src.startsWith("/assets/"), `image ${src} must be local`);
+    }
+    for (const tag of html.match(/<button\b[^>]*>/g) ?? []) {
+      assertIncludes(tag, 'type="button"', "button type");
+    }
+    for (const tag of html.match(/<a\b[^>]*>/g) ?? []) {
+      if (tag.includes('target="_blank"')) {
+        assert.ok(
+          /rel="[^"]*noopener/.test(tag),
+          `target=_blank link lacks rel=noopener: ${tag}`,
+        );
+      }
     }
   }
   assert.equal((indexHtml.match(/role="switch"/g) ?? []).length, 1);
@@ -520,6 +671,7 @@ await check("the page declares exactly one external module script", async () => 
   assertIncludes(scripts[0], 'src="/app.mjs"');
   assertNotIncludes(scripts[0], "http", "script src");
   assertNotIncludes(indexHtml, "<iframe");
+  assertIncludes(await read("app.mjs"), 'from "./craft.mjs"', "craft module import");
 });
 
 /* ---------- Tracker-free and client-side safety ---------- */
@@ -527,9 +679,12 @@ await check("the page declares exactly one external module script", async () => 
 await check("no tracker, analytics or external font code", async () => {
   const files = [
     "index.html",
+    "privacy.html",
+    "terms.html",
     "404.html",
     "styles.css",
     "app.mjs",
+    "craft.mjs",
     "pricing-data.mjs",
     "functions/_middleware.js",
     "robots.txt",
@@ -543,14 +698,18 @@ await check("no tracker, analytics or external font code", async () => {
     assert.ok(!trackerPattern.test(source), `${file} contains a tracker reference`);
     assert.ok(!source.includes("@import url(http"), `${file} imports an external stylesheet`);
   }
-  assertNotIncludes(indexHtml, "<link rel=\"stylesheet\" href=\"http");
+  assertNotIncludes(indexHtml, '<link rel="stylesheet" href="http');
+  assertNotIncludes(indexHtml, "<link rel=\"preconnect\"");
 });
 
 await check("client code avoids unsafe HTML injection", async () => {
-  const app = await read("app.mjs");
-  for (const banned of ["innerHTML", "insertAdjacentHTML", "outerHTML", "eval(", "new Function"]) {
-    assertNotIncludes(app, banned, "app.mjs");
+  for (const file of ["app.mjs", "craft.mjs"]) {
+    const source = await read(file);
+    for (const banned of ["innerHTML", "insertAdjacentHTML", "outerHTML", "eval(", "new Function"]) {
+      assertNotIncludes(source, banned, file);
+    }
   }
+  const app = await read("app.mjs");
   assertIncludes(app, "fetch(PLANS_URL");
   assertIncludes(app, 'credentials: "omit"');
   assertIncludes(app, "parseCatalog(await response.json())");
@@ -587,8 +746,9 @@ await check("SEO basics and sitemap are present", async () => {
   assertIncludes(indexHtml, '<link rel="canonical" href="https://stackspirit.io/"');
   assertIncludes(indexHtml, 'property="og:image" content="https://stackspirit.io/assets/og-image.png"');
   assertIncludes(indexHtml, 'name="twitter:card" content="summary_large_image"');
-  const sitemap = await read("sitemap.xml");
   assertIncludes(sitemap, "<loc>https://stackspirit.io/</loc>");
+  assertIncludes(sitemap, "<loc>https://stackspirit.io/privacy</loc>");
+  assertIncludes(sitemap, "<loc>https://stackspirit.io/terms</loc>");
   const robots = await read("robots.txt");
   assertIncludes(robots, "Sitemap: https://stackspirit.io/sitemap.xml");
 });
@@ -600,6 +760,16 @@ await check("image assets have the expected dimensions", async () => {
   assert.deepEqual(touch, { width: 180, height: 180 });
   const mark = pngSize(await readFile(join(SITE_ROOT, "assets", "stackspirit-mark-128.png")));
   assert.deepEqual(mark, { width: 128, height: 128 });
+  const master = pngSize(await readFile(join(SITE_ROOT, "assets", "stackspirit-mark-256.png")));
+  assert.deepEqual(master, { width: 256, height: 256 });
+  const thick = pngSize(await readFile(join(SITE_ROOT, "assets", "mascot-thick-256.png")));
+  assert.equal(thick.width, 256);
+  const walk = pngSize(
+    await readFile(join(SITE_ROOT, "assets", "mascot-thick-walk-128.png")),
+  );
+  assert.equal(walk.width, 128);
+  const gazer = pngSize(await readFile(join(SITE_ROOT, "assets", "mascot-gazer-256.png")));
+  assert.equal(gazer.width, 256);
 });
 
 await check("responsive CSS keeps mobile and desktop breakpoints", async () => {
@@ -612,11 +782,25 @@ await check("responsive CSS keeps mobile and desktop breakpoints", async () => {
   assertIncludes(css, "grid-template-columns: 1fr");
   assertIncludes(css, "prefers-reduced-motion: reduce");
   assertIncludes(css, ".has-js .copy-button");
+  assertIncludes(css, "image-rendering: pixelated");
   assertNotIncludes(css, "url(http");
 });
 
+await check("the Meadow palette is present as explicit tokens", async () => {
+  const css = (await read("styles.css")).toLowerCase();
+  for (const token of ["#43a85a", "#1e5b36", "#cdedb0", "#f5f7f0", "#0d120f"]) {
+    assertIncludes(css, token, "Meadow token");
+  }
+});
+
 await check("JavaScript syntax checks pass", async () => {
-  for (const file of ["app.mjs", "pricing-data.mjs", "scripts/serve.mjs", "scripts/verify.mjs"]) {
+  for (const file of [
+    "app.mjs",
+    "craft.mjs",
+    "pricing-data.mjs",
+    "scripts/serve.mjs",
+    "scripts/verify.mjs",
+  ]) {
     execFileSync(process.execPath, ["--check", join(SITE_ROOT, file)], {
       stdio: "pipe",
     });
@@ -631,7 +815,7 @@ await check("the local preview server serves the real static contract", async ()
     const home = await fetch(`${server.base}/`);
     assert.equal(home.status, 200);
     assertIncludes(home.headers.get("content-type") ?? "", "text/html");
-    assertIncludes(await home.text(), "An always-on machine as a home");
+    assertIncludes(await home.text(), "Manage the always-on computers");
 
     const css = await fetch(`${server.base}/styles.css`);
     assert.equal(css.status, 200);
@@ -641,9 +825,30 @@ await check("the local preview server serves the real static contract", async ()
     assert.equal(app.status, 200);
     assertIncludes(app.headers.get("content-type") ?? "", "text/javascript");
 
+    const craft = await fetch(`${server.base}/craft.mjs`);
+    assert.equal(craft.status, 200);
+    assertIncludes(craft.headers.get("content-type") ?? "", "text/javascript");
+
     const image = await fetch(`${server.base}/assets/og-image.png`);
     assert.equal(image.status, 200);
     assertIncludes(image.headers.get("content-type") ?? "", "image/png");
+
+    const mascot = await fetch(`${server.base}/assets/mascot-gazer-256.png`);
+    assert.equal(mascot.status, 200);
+    assertIncludes(mascot.headers.get("content-type") ?? "", "image/png");
+
+    const privacy = await fetch(`${server.base}/privacy`);
+    assert.equal(privacy.status, 200, "expected /privacy to serve privacy.html");
+    assertIncludes(privacy.headers.get("content-type") ?? "", "text/html");
+    assertIncludes(textOf(await privacy.text()), "Privacy Policy");
+
+    const terms = await fetch(`${server.base}/terms`);
+    assert.equal(terms.status, 200, "expected /terms to serve terms.html");
+    assertIncludes(terms.headers.get("content-type") ?? "", "text/html");
+    assertIncludes(textOf(await terms.text()), "Terms of Service");
+
+    const privacyHtmlFile = await fetch(`${server.base}/privacy.html`);
+    assert.equal(privacyHtmlFile.status, 200, "expected /privacy.html to be served");
 
     const missing = await fetch(`${server.base}/not-a-real-page`);
     assert.equal(missing.status, 404);

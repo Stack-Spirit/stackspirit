@@ -3,13 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>StackSpirit — An always-on machine as a home for your AI coding agents</title>
+    <title>StackSpirit — Manage the always-on computers your coding agents work on</title>
     <meta
       name="description"
-      content="StackSpirit is free, MIT-licensed software that turns any always-on machine into a home for Claude Code, Codex, OpenCode, Antigravity, T3 Code and any MCP or CLI harness. Bring your own server or choose a managed Always-On Home."
+      content="StackSpirit is one open-source cockpit for OpenCode, Claude Code, Codex, and your own CLI harnesses — from your Mac, phone, CLI, or MCP. Free and MIT licensed. Bring your own Linux box, or spin up a Managed Home."
     />
     <link rel="canonical" href="https://stackspirit.io/" />
-    <meta name="theme-color" content="#fbfcf8" />
+    <meta name="theme-color" content="#f5f7f0" />
     <meta name="color-scheme" content="light" />
     <meta name="robots" content="index, follow" />
 
@@ -17,11 +17,11 @@
     <meta property="og:site_name" content="StackSpirit" />
     <meta
       property="og:title"
-      content="StackSpirit — An always-on machine as a home for your AI coding agents"
+      content="StackSpirit — Manage the always-on computers your coding agents work on"
     />
     <meta
       property="og:description"
-      content="Free, MIT-licensed software for an always-on home for your AI coding agents. Bring your own machine or choose a managed Always-On Home."
+      content="One open-source cockpit for OpenCode, Claude Code, Codex, and your own CLI harnesses — from your Mac, phone, CLI, or MCP."
     />
     <meta property="og:url" content="https://stackspirit.io/" />
     <meta property="og:image" content="https://stackspirit.io/assets/og-image.png" />
@@ -30,16 +30,16 @@
     <meta property="og:image:height" content="630" />
     <meta
       property="og:image:alt"
-      content="StackSpirit — an always-on home for your AI coding agents"
+      content="StackSpirit — manage the always-on computers your coding agents work on"
     />
     <meta name="twitter:card" content="summary_large_image" />
     <meta
       name="twitter:title"
-      content="StackSpirit — An always-on machine as a home for your AI coding agents"
+      content="StackSpirit — Manage the always-on computers your coding agents work on"
     />
     <meta
       name="twitter:description"
-      content="Free, MIT-licensed software for an always-on home for your AI coding agents. Bring your own machine or choose a managed Always-On Home."
+      content="One open-source cockpit for OpenCode, Claude Code, Codex, and your own CLI harnesses — from your Mac, phone, CLI, or MCP."
     />
     <meta name="twitter:image" content="https://stackspirit.io/assets/og-image.png" />
 
@@ -53,6 +53,39 @@
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
+
+    <div class="scroll-path" id="scroll-path" aria-hidden="true">
+      <svg
+        class="scroll-path__svg"
+        viewBox="0 0 72 4000"
+        preserveAspectRatio="none"
+        focusable="false"
+      >
+        <path
+          class="scroll-path__track"
+          id="scroll-path-line"
+          d="M36 0 C64 180 8 300 36 470 C64 640 8 760 36 930 C64 1100 8 1220 36 1390 C64 1560 8 1680 36 1850 C64 2020 8 2140 36 2310 C64 2480 8 2600 36 2770 C64 2940 8 3060 36 3230 C64 3400 8 3520 36 3690 C50 3800 30 3900 36 4000"
+        />
+        <path
+          class="scroll-path__progress"
+          id="scroll-path-progress"
+          d="M36 0 C64 180 8 300 36 470 C64 640 8 760 36 930 C64 1100 8 1220 36 1390 C64 1560 8 1680 36 1850 C64 2020 8 2140 36 2310 C64 2480 8 2600 36 2770 C64 2940 8 3060 36 3230 C64 3400 8 3520 36 3690 C50 3800 30 3900 36 4000"
+        />
+      </svg>
+      <div class="scroll-path__mascot" id="scroll-path-mascot">
+        <span class="scroll-path__shadow" aria-hidden="true"></span>
+        <span class="scroll-path__flip">
+          <img
+            class="scroll-path__sprite"
+            src="/assets/mascot-thick-walk-128.png"
+            alt=""
+            width="56"
+            height="89"
+            decoding="async"
+          />
+        </span>
+      </div>
+    </div>
 
     <header class="site-header">
       <div class="container header-inner">
@@ -70,6 +103,7 @@
         <nav class="site-nav" aria-label="Primary">
           <a href="#why">Why</a>
           <a href="#quickstart">Quickstart</a>
+          <a href="#cockpit">Cockpit</a>
           <a href="#harnesses">Harnesses</a>
           <a href="#homes">Homes</a>
           <a href="#faq">FAQ</a>
@@ -105,22 +139,37 @@
     <main id="main" tabindex="-1">
       <section class="hero" aria-labelledby="hero-title">
         <div class="hero__glow" aria-hidden="true"></div>
+        <canvas class="shimmer hero__shimmer" data-shimmer data-shimmer-ambient aria-hidden="true"
+        ></canvas>
         <div class="container hero__grid">
           <div class="hero__copy">
             <p class="eyebrow">
               <span class="eyebrow__dot" aria-hidden="true"></span>
-              Free &amp; MIT open source · optional turnkey homes
+              MIT open source · local-first · optional managed homes
             </p>
-            <h1 id="hero-title">An always-on machine as a home for your AI coding agents</h1>
+            <h1 id="hero-title">Manage the always-on computers your coding agents work on.</h1>
+            <svg
+              class="scribble"
+              viewBox="0 0 320 14"
+              width="280"
+              height="14"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path
+                d="M3 9c38-5 72 3 109-1s74-6 110-2 70 5 94 1"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="3"
+                stroke-linecap="round"
+              />
+            </svg>
             <p class="lede">
-              StackSpirit keeps work moving after your laptop closes. Run the free software on
-              your own VPS, spare laptop or home server — or choose a managed Always-On Home
-              and skip the setup.
+              One open-source cockpit for OpenCode, Claude Code, Codex, and your own CLI
+              harnesses — from your Mac, phone, CLI, or MCP.
             </p>
             <div class="hero__actions">
-              <a class="btn btn--primary btn--lg" href="https://app.stackspirit.io">
-                Open Web App
-              </a>
+              <a class="btn btn--primary btn--lg" href="#quickstart">Start free</a>
               <a
                 class="btn btn--outline btn--lg"
                 href="https://github.com/Stack-Spirit/stackspirit"
@@ -143,62 +192,148 @@
                 Star on GitHub
               </a>
             </div>
+
+            <div class="hero__install" role="group" aria-label="Free install options">
+              <span class="install-chip"
+                ><span class="install-chip__prompt" aria-hidden="true">$</span>
+                <code>npx -y stackspirit</code></span
+              >
+              <span class="install-chip"
+                ><span class="install-chip__prompt" aria-hidden="true">$</span>
+                <code>uvx stackspirit</code></span
+              >
+              <a
+                class="install-chip install-chip--link"
+                href="https://github.com/Stack-Spirit/stackspirit/releases"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Desktop app
+                <svg class="icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    d="M5 12h14m-5-5 5 5-5 5"
+                  />
+                </svg>
+              </a>
+            </div>
+
             <ul class="hero__points" role="list">
-              <li>Free forever</li>
-              <li>Account-free local mode</li>
-              <li>Any harness, one Home</li>
+              <li>MIT licensed</li>
+              <li>No account in local mode</li>
+              <li>Your VPS or your Mac</li>
             </ul>
           </div>
 
           <figure class="hero__visual">
-            <div class="home-card" aria-hidden="true">
-              <div class="home-card__top">
-                <span class="status-pill"><span class="status-dot"></span>Home · online</span>
-                <span class="home-card__muted">always-on</span>
+            <img
+              class="cockpit-peek"
+              src="/assets/mascot-gazer-256.png"
+              alt=""
+              width="122"
+              height="127"
+              decoding="async"
+            />
+            <div class="cockpit cockpit--hero" aria-hidden="true">
+              <div class="cockpit__bar">
+                <span class="cockpit__lights" aria-hidden="true"
+                  ><span></span><span></span><span></span
+                ></span>
+                <span class="cockpit__path">~/stackspirit/home-01</span>
+                <span class="cockpit__badge">preview</span>
               </div>
-              <div class="home-card__title">
-                <img
-                  src="/assets/stackspirit-mark-128.png"
-                  alt=""
-                  width="30"
-                  height="30"
-                />
-                <span>StackSpirit Home</span>
+              <div class="cockpit__metrics">
+                <div class="metric">
+                  <span class="metric__k">home</span>
+                  <span class="metric__v metric__v--live">online</span>
+                </div>
+                <div class="metric">
+                  <span class="metric__k">workers</span>
+                  <span class="metric__v">04 / 04</span>
+                </div>
+                <div class="metric">
+                  <span class="metric__k">queue</span>
+                  <span class="metric__v">03</span>
+                </div>
+                <div class="metric">
+                  <span class="metric__k">load</span>
+                  <span class="metric__v">2.4</span>
+                </div>
               </div>
-              <ul class="home-card__lanes" role="list">
-                <li>
-                  <span class="lane lane--run"></span>
-                  <span class="lane__name">Claude Code</span>
-                  <span class="lane__state">running</span>
-                </li>
-                <li>
-                  <span class="lane lane--queue"></span>
-                  <span class="lane__name">Codex</span>
-                  <span class="lane__state">queued</span>
-                </li>
-                <li>
-                  <span class="lane lane--run"></span>
-                  <span class="lane__name">OpenCode</span>
-                  <span class="lane__state">running</span>
-                </li>
-                <li>
-                  <span class="lane lane--idle"></span>
-                  <span class="lane__name">MCP client</span>
-                  <span class="lane__state">connected</span>
-                </li>
-              </ul>
-              <div class="home-card__meter">
-                <span><strong>8</strong> GB RAM</span>
-                <span><strong>4</strong> vCPU</span>
-                <span><strong>100</strong> GB SSD</span>
+              <div class="cockpit__panes">
+                <div class="cockpit__pane">
+                  <div class="pane__head">
+                    <span>sessions</span>
+                    <span>04 open</span>
+                  </div>
+                  <ul class="session-list" role="list">
+                    <li>
+                      <span class="state state--run" aria-hidden="true"></span>
+                      <span class="session-list__name">main</span>
+                      <span class="session-list__agent">opencode</span>
+                      <span class="session-list__time">00:42:11</span>
+                    </li>
+                    <li>
+                      <span class="state state--think" aria-hidden="true"></span>
+                      <span class="session-list__name">review</span>
+                      <span class="session-list__agent">claude</span>
+                      <span class="session-list__time">thinking</span>
+                    </li>
+                    <li>
+                      <span class="state state--queue" aria-hidden="true"></span>
+                      <span class="session-list__name">ship</span>
+                      <span class="session-list__agent">codex</span>
+                      <span class="session-list__time">queued</span>
+                    </li>
+                    <li>
+                      <span class="state state--idle" aria-hidden="true"></span>
+                      <span class="session-list__name">spike</span>
+                      <span class="session-list__agent">custom</span>
+                      <span class="session-list__time">idle</span>
+                    </li>
+                  </ul>
+                </div>
+                <div class="cockpit__pane">
+                  <div class="pane__head">
+                    <span>capacity</span>
+                    <span>lane board</span>
+                  </div>
+                  <div class="capacity">
+                    <p class="capacity__row">
+                      <span>cpu</span><span class="capacity__value">42%</span>
+                    </p>
+                    <span class="capacity__bar"><span class="capacity__fill capacity__fill--42"></span></span>
+                    <p class="capacity__row">
+                      <span>ram</span><span class="capacity__value">6.1 / 8g</span>
+                    </p>
+                    <span class="capacity__bar"><span class="capacity__fill capacity__fill--76"></span></span>
+                    <p class="capacity__row">
+                      <span>disk</span><span class="capacity__value">38%</span>
+                    </p>
+                    <span class="capacity__bar"><span class="capacity__fill capacity__fill--38"></span></span>
+                  </div>
+                  <div class="node-map">
+                    <span class="node-map__node">home</span>
+                    <span class="node-map__wire" aria-hidden="true"></span>
+                    <span class="node-map__node node-map__node--hot">4 lanes</span>
+                    <span class="node-map__wire" aria-hidden="true"></span>
+                    <span class="node-map__node">jobs</span>
+                  </div>
+                </div>
               </div>
-              <div class="home-card__foot">
-                <span class="status-dot"></span>
-                Jobs continue while you&rsquo;re away
+              <div class="cockpit__footer">
+                <span>jobs today <strong>17</strong></span>
+                <span>mcp <strong>stdio</strong></span>
+                <span class="cockpit__prompt">$ stackspirit status</span>
               </div>
             </div>
             <figcaption>
-              Illustration: one Home, many harnesses. Your laptop can stay closed.
+              Illustration: one Home, every harness. The real cockpit lives in the desktop and
+              Web apps.
             </figcaption>
           </figure>
         </div>
@@ -230,7 +365,7 @@
                 d="m5 12 4 4L19 6"
               />
             </svg>
-            No account needed locally
+            Local mode needs no account
           </p>
           <p class="trust__item">
             <svg class="icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
@@ -256,7 +391,20 @@
                 d="m5 12 4 4L19 6"
               />
             </svg>
-            Works with any harness
+            OpenCode included by default
+          </p>
+          <p class="trust__item">
+            <svg class="icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="m5 12 4 4L19 6"
+              />
+            </svg>
+            No trackers, no analytics
           </p>
         </div>
       </section>
@@ -264,17 +412,18 @@
       <section class="section" id="why" aria-labelledby="why-title">
         <div class="container">
           <header class="section__head">
-            <p class="kicker">Why StackSpirit</p>
+            <p class="kicker"><span class="kicker__index">01</span> Why StackSpirit</p>
             <h2 id="why-title">Your laptop is a great editor. Not an always-on server.</h2>
             <p class="section__lede">
               AI agents need a machine that stays awake, keeps state between sessions, and is
-              reachable from every surface you already use. StackSpirit is that machine — and
-              the control plane around it.
+              reachable from every surface you already use. StackSpirit is that machine — and the
+              cockpit around it.
             </p>
           </header>
 
           <div class="feature-grid">
             <article class="feature">
+              <canvas class="shimmer" data-shimmer aria-hidden="true"></canvas>
               <span class="feature__icon" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
                   <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8" />
@@ -288,14 +437,16 @@
                   />
                 </svg>
               </span>
+              <span class="feature__tag">always-on</span>
               <h3>Work keeps running</h3>
               <p>
-                Long jobs, verifier/fix loops and schedules live on the Home, not on your
-                battery. Close the lid and the work continues.
+                Long jobs, verifier/fix loops and schedules live on the Home, not on your battery.
+                Close the lid and the work continues.
               </p>
             </article>
 
             <article class="feature">
+              <canvas class="shimmer" data-shimmer aria-hidden="true"></canvas>
               <span class="feature__icon" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
                   <path
@@ -321,14 +472,16 @@
                   />
                 </svg>
               </span>
-              <h3>One home, every harness</h3>
+              <span class="feature__tag">one home</span>
+              <h3>Every harness, one place</h3>
               <p>
-                Claude Code, Codex, OpenCode, Antigravity, T3 Code or your own MCP client.
-                StackSpirit sits underneath; it does not replace your harness.
+                OpenCode is bundled. Bring Claude Code, Codex, Gemini CLI, Cursor CLI, Aider,
+                Goose or your own terminal harness. StackSpirit sits underneath.
               </p>
             </article>
 
             <article class="feature">
+              <canvas class="shimmer" data-shimmer aria-hidden="true"></canvas>
               <span class="feature__icon" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
                   <rect
@@ -360,6 +513,7 @@
                   />
                 </svg>
               </span>
+              <span class="feature__tag">every screen</span>
               <h3>Reach it from anywhere</h3>
               <p>
                 Reach the same Home from the desktop app, the mobile-first Web App, the
@@ -368,6 +522,7 @@
             </article>
 
             <article class="feature">
+              <canvas class="shimmer" data-shimmer aria-hidden="true"></canvas>
               <span class="feature__icon" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
                   <rect
@@ -396,14 +551,16 @@
                   />
                 </svg>
               </span>
+              <span class="feature__tag">free</span>
               <h3>Free software, open source</h3>
               <p>
-                MIT licensed and free forever. Bring your own VPS, spare laptop or home server
-                and pay nothing for the software.
+                MIT licensed and free forever. Bring your own VPS, spare laptop or home server and
+                pay nothing for the software.
               </p>
             </article>
 
             <article class="feature">
+              <canvas class="shimmer" data-shimmer aria-hidden="true"></canvas>
               <span class="feature__icon" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
                   <ellipse
@@ -429,14 +586,16 @@
                   />
                 </svg>
               </span>
+              <span class="feature__tag">durable</span>
               <h3>State that survives</h3>
               <p>
-                Projects, sessions and job history stay on the Home. A new device picks up the
-                same work instead of starting over.
+                Projects, sessions and job history stay on the Home. A new device picks up the same
+                work instead of starting over.
               </p>
             </article>
 
             <article class="feature">
+              <canvas class="shimmer" data-shimmer aria-hidden="true"></canvas>
               <span class="feature__icon" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
                   <path
@@ -456,6 +615,7 @@
                   />
                 </svg>
               </span>
+              <span class="feature__tag">guardrails</span>
               <h3>Guardrails built in</h3>
               <p>
                 Capacity limits, job graphs and verifier/fix loops keep long-running work from
@@ -463,18 +623,36 @@
               </p>
             </article>
           </div>
+
+          <aside class="hand-note" aria-label="A handmade note">
+            <span class="hand-note__pin" aria-hidden="true"></span>
+            <p>Built for the quiet hours, when the good ideas compile.</p>
+            <span class="hand-note__sign">— the meadow, probably</span>
+            <img
+              class="hand-note__mascot"
+              src="/assets/mascot-thick-256.png"
+              alt=""
+              width="64"
+              height="102"
+              loading="lazy"
+              decoding="async"
+            />
+          </aside>
         </div>
       </section>
 
       <section class="section section--tint" id="quickstart" aria-labelledby="quickstart-title">
         <div class="container">
-          <header class="section__head">
-            <p class="kicker">Quickstart</p>
-            <h2 id="quickstart-title">From zero to a Home in minutes.</h2>
-            <p class="section__lede">
-              The software is free and needs no account. Install it on the machine that will
-              stay on, then connect from the desktop, Web App, CLI or any MCP client.
-            </p>
+          <header class="section__head section__head--split">
+            <div>
+              <p class="kicker"><span class="kicker__index">02</span> Quickstart</p>
+              <h2 id="quickstart-title">Free in a minute. Yours from the first command.</h2>
+              <p class="section__lede">
+                The software is free and needs no account. Install it on the machine that will stay
+                on, then connect from the desktop, Web App, CLI or any MCP client.
+              </p>
+            </div>
+            <span class="stamp" aria-hidden="true">free<br />forever</span>
           </header>
 
           <div class="quickstart">
@@ -535,8 +713,8 @@
                   tabindex="0"
                 >
                   <p class="tab-panel__lead">
-                    Run the npm launcher with Node.js 22 or newer. It fetches the native
-                    binary for your platform.
+                    Run the npm launcher with Node.js 22 or newer. It fetches the native binary for
+                    your platform.
                   </p>
                   <div class="command-row">
                     <code class="command"
@@ -567,8 +745,8 @@
                   hidden
                 >
                   <p class="tab-panel__lead">
-                    Prefer Python? The PyPI launcher installs the same native StackSpirit
-                    binary with <code>uv</code>.
+                    Prefer Python? The PyPI launcher installs the same native StackSpirit binary
+                    with <code>uv</code>.
                   </p>
                   <div class="command-row">
                     <code class="command"
@@ -599,8 +777,8 @@
                   hidden
                 >
                   <p class="tab-panel__lead">
-                    Expose the Home as a stdio MCP server. Add it to Claude Code, Codex,
-                    OpenCode or any MCP client.
+                    Expose the Home as a stdio MCP server. Add it to Claude Code, Codex, OpenCode or
+                    any MCP client.
                   </p>
                   <div class="command-row">
                     <code class="command"
@@ -617,8 +795,8 @@
                     </button>
                   </div>
                   <p class="tab-panel__note">
-                    MCP tools read and write the same Home, so your harness sees the real job
-                    graph and session log.
+                    MCP tools read and write the same Home, so your harness sees the real job graph
+                    and session log.
                   </p>
                 </div>
 
@@ -631,7 +809,7 @@
                   hidden
                 >
                   <p class="tab-panel__lead">
-                    A native Tauri app for macOS, Windows and Linux, with a bundled agent
+                    A native Tauri app for macOS, Windows and Linux, with a bundled OpenCode agent
                     engine so you can start without installing a harness.
                   </p>
                   <a
@@ -643,8 +821,8 @@
                     Download the desktop app
                   </a>
                   <p class="tab-panel__note">
-                    Add a server once, then connect over SSH. Local and SSH mode need no
-                    StackSpirit account.
+                    Add a server once, then connect over SSH. Local and SSH mode need no StackSpirit
+                    account.
                   </p>
                 </div>
               </div>
@@ -652,8 +830,8 @@
               <noscript>
                 <p class="tab-panel__note">
                   JavaScript is off, so the tabs stay on npm. You can also run
-                  <code>uvx stackspirit</code> or <code>npx -y stackspirit mcp</code>. The
-                  desktop app is on GitHub Releases.
+                  <code>uvx stackspirit</code> or <code>npx -y stackspirit mcp</code>. The desktop
+                  app is on GitHub Releases.
                 </p>
               </noscript>
 
@@ -666,8 +844,8 @@
                 <div>
                   <h3>Install the free software</h3>
                   <p>
-                    Use npm or uv on the always-on machine. No StackSpirit account, no license
-                    key, no trial timer.
+                    Use npm or uv on the always-on machine. No StackSpirit account, no license key,
+                    no trial timer.
                   </p>
                 </div>
               </li>
@@ -676,8 +854,8 @@
                 <div>
                   <h3>Start the Home</h3>
                   <p>
-                    Run <code>stackspirit up</code> to start the supervisor, or open the
-                    desktop app and add the server over SSH.
+                    Run <code>stackspirit up</code> to start the supervisor, or open the desktop app
+                    and add the server over SSH.
                   </p>
                 </div>
               </li>
@@ -686,8 +864,8 @@
                 <div>
                   <h3>Connect a harness</h3>
                   <p>
-                    Point Claude Code, Codex, OpenCode or any MCP client at the Home. The
-                    software stays out of your harness&rsquo;s way.
+                    Point OpenCode, Claude Code, Codex or any MCP client at the Home. The software
+                    stays out of your harness&rsquo;s way.
                   </p>
                 </div>
               </li>
@@ -723,17 +901,323 @@
               </svg>
             </a>
           </div>
+          <p class="quickstart__fallback">
+            No Linux box yet? <a href="#homes">The managed path is underneath.</a> The free software
+            still stays free.
+          </p>
+        </div>
+      </section>
+
+      <section class="section section--cockpit" id="cockpit" aria-labelledby="cockpit-title">
+        <div class="container">
+          <header class="section__head section__head--split">
+            <div>
+              <p class="kicker"><span class="kicker__index">03</span> The cockpit</p>
+              <h2 id="cockpit-title">Dense enough to trust. Quiet enough to leave open.</h2>
+              <p class="section__lede">
+                Sessions, lanes, jobs, capacity and the node map — the information an always-on
+                machine actually produces, arranged like a terminal, not a dashboard toy.
+              </p>
+            </div>
+            <p class="technical-label" aria-hidden="true">
+              tty/01<br />refresh 5s<br />source: local
+            </p>
+          </header>
+
+          <figure class="cockpit-board">
+            <div class="cockpit cockpit--wide" aria-hidden="true">
+              <div class="cockpit__bar">
+                <span class="cockpit__lights" aria-hidden="true"
+                  ><span></span><span></span><span></span
+                ></span>
+                <span class="cockpit__path">~/stackspirit/home-01</span>
+                <span class="cockpit__meta">ssh · ed25519 · pinned</span>
+                <span class="cockpit__badge">rendered preview</span>
+              </div>
+              <div class="cockpit__metrics">
+                <div class="metric">
+                  <span class="metric__k">home</span>
+                  <span class="metric__v metric__v--live">online</span>
+                </div>
+                <div class="metric">
+                  <span class="metric__k">workers</span>
+                  <span class="metric__v">04 / 04</span>
+                </div>
+                <div class="metric">
+                  <span class="metric__k">queued</span>
+                  <span class="metric__v">03</span>
+                </div>
+                <div class="metric">
+                  <span class="metric__k">p95 turn</span>
+                  <span class="metric__v">00:42</span>
+                </div>
+                <div class="metric">
+                  <span class="metric__k">disk</span>
+                  <span class="metric__v">38%</span>
+                </div>
+                <div class="metric">
+                  <span class="metric__k">uptime</span>
+                  <span class="metric__v">31d</span>
+                </div>
+              </div>
+              <div class="cockpit__panes cockpit__panes--wide">
+                <div class="cockpit__pane">
+                  <div class="pane__head">
+                    <span>session / global</span>
+                    <span>transport: server</span>
+                  </div>
+                  <div class="terminal">
+                    <p><span class="terminal__prompt">$</span> stackspirit status --watch</p>
+                    <p class="terminal__dim">home-01 · online · 4 workers · 3 queued</p>
+                    <p>
+                      <span class="terminal__ok">ok</span> orchestrator
+                      <span class="terminal__dim">opencode · default</span>
+                    </p>
+                    <p>
+                      <span class="terminal__run">run</span> main
+                      <span class="terminal__dim">verifier/fix loop · 00:42:11</span>
+                    </p>
+                    <p>
+                      <span class="terminal__think">···</span> review
+                      <span class="terminal__dim">claude code · waiting on model</span>
+                    </p>
+                    <p>
+                      <span class="terminal__queue">que</span> ship
+                      <span class="terminal__dim">codex · position 02</span>
+                    </p>
+                    <p class="terminal__line">
+                      <span class="terminal__prompt">$</span><span class="terminal__cursor"></span>
+                    </p>
+                  </div>
+                </div>
+                <div class="cockpit__pane">
+                  <div class="pane__head">
+                    <span>lane board</span>
+                    <span>04 lanes</span>
+                  </div>
+                  <ul class="lane-board" role="list">
+                    <li>
+                      <span class="lane-board__name">main</span>
+                      <span class="lane-board__job">tests / green</span>
+                      <span class="tag tag--run">run</span>
+                    </li>
+                    <li>
+                      <span class="lane-board__name">review</span>
+                      <span class="lane-board__job">diff / 42 files</span>
+                      <span class="tag tag--think">think</span>
+                    </li>
+                    <li>
+                      <span class="lane-board__name">ship</span>
+                      <span class="lane-board__job">release / next</span>
+                      <span class="tag tag--queue">queue</span>
+                    </li>
+                    <li>
+                      <span class="lane-board__name">ci</span>
+                      <span class="lane-board__job">nightly / 02:00</span>
+                      <span class="tag tag--idle">idle</span>
+                    </li>
+                  </ul>
+                  <div class="node-map node-map--wide">
+                    <span class="node-map__node">home</span>
+                    <span class="node-map__wire" aria-hidden="true"></span>
+                    <span class="node-map__node node-map__node--hot">workers 04</span>
+                    <span class="node-map__wire" aria-hidden="true"></span>
+                    <span class="node-map__node">sessions 17</span>
+                  </div>
+                </div>
+              </div>
+              <div class="cockpit__footer">
+                <span>jobs <strong>017</strong></span>
+                <span>sessions <strong>004</strong></span>
+                <span>mcp <strong>stdio</strong></span>
+                <span>secrets <strong>names only</strong></span>
+                <span class="cockpit__prompt">~/stackspirit $</span>
+              </div>
+            </div>
+            <figcaption>
+              A rendered preview of the desktop cockpit at work. No live server is connected on
+              this page.
+            </figcaption>
+          </figure>
+
+          <div class="cockpit-notes">
+            <article class="cockpit-note">
+              <span class="cockpit-note__num" aria-hidden="true">01</span>
+              <h3>Fleet, not tabs</h3>
+              <p>
+                One Home or several. Switch servers, see capacity and keep the same job history
+                across the desktop app and Web App.
+              </p>
+            </article>
+            <article class="cockpit-note">
+              <span class="cockpit-note__num" aria-hidden="true">02</span>
+              <h3>Lanes that hold state</h3>
+              <p>
+                Long jobs keep their place. A verifier/fix loop, a nightly run or a queued harness
+                does not restart because your laptop slept.
+              </p>
+            </article>
+            <article class="cockpit-note">
+              <span class="cockpit-note__num" aria-hidden="true">03</span>
+              <h3>Terminal honesty</h3>
+              <p>
+                The cockpit shows real job and session state. Previews are labelled; secrets are
+                shown by name and last four, never by value.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--tint" id="harnesses" aria-labelledby="harnesses-title">
+        <div class="container">
+          <header class="section__head section__head--split">
+            <div>
+              <p class="kicker"><span class="kicker__index">04</span> Harness matrix</p>
+              <h2 id="harnesses-title">Bring the harness you already trust.</h2>
+              <p class="section__lede">
+                StackSpirit does not compete with your agent. It gives every harness the same
+                always-on Home, durable workspace and shared state — so you can switch tools
+                without moving machines.
+              </p>
+            </div>
+            <p class="technical-label" aria-hidden="true">
+              08 entries<br />01 default<br />byo cli ok
+            </p>
+          </header>
+
+          <div
+            class="matrix-scroll"
+            role="region"
+            aria-label="Harness matrix, scrolls horizontally on small screens"
+            tabindex="0"
+          >
+            <table class="harness-matrix">
+              <caption class="visually-hidden">
+                Harnesses that can run on a StackSpirit Home, with their default entry point and
+                notes.
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Harness</th>
+                  <th scope="col">Entry</th>
+                  <th scope="col">Lane</th>
+                  <th scope="col">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="harness-row harness-row--default">
+                  <th scope="row">
+                    <span class="harness__mark" aria-hidden="true">OC</span>
+                    <span class="harness__name"
+                      ><strong>OpenCode</strong><small>default engine</small></span
+                    >
+                  </th>
+                  <td><code>opencode</code></td>
+                  <td><span class="tag tag--default">bundled</span></td>
+                  <td>Included with the desktop app. No extra harness install.</td>
+                </tr>
+                <tr class="harness-row">
+                  <th scope="row">
+                    <span class="harness__mark" aria-hidden="true">CC</span>
+                    <span class="harness__name"><strong>Claude Code</strong><small>terminal</small></span>
+                  </th>
+                  <td><code>claude</code></td>
+                  <td><span class="tag tag--ready">ssh + mcp</span></td>
+                  <td>Persistent sessions and project state on the Home.</td>
+                </tr>
+                <tr class="harness-row">
+                  <th scope="row">
+                    <span class="harness__mark" aria-hidden="true">CX</span>
+                    <span class="harness__name"><strong>Codex</strong><small>terminal</small></span>
+                  </th>
+                  <td><code>codex</code></td>
+                  <td><span class="tag tag--ready">ssh + mcp</span></td>
+                  <td>Queue work that keeps moving after you step away.</td>
+                </tr>
+                <tr class="harness-row">
+                  <th scope="row">
+                    <span class="harness__mark" aria-hidden="true">GM</span>
+                    <span class="harness__name"><strong>Gemini CLI</strong><small>terminal</small></span>
+                  </th>
+                  <td><code>gemini</code></td>
+                  <td><span class="tag tag--ready">ssh</span></td>
+                  <td>Run against the Home&rsquo;s persistent workspace.</td>
+                </tr>
+                <tr class="harness-row">
+                  <th scope="row">
+                    <span class="harness__mark" aria-hidden="true">CU</span>
+                    <span class="harness__name"><strong>Cursor CLI</strong><small>terminal</small></span>
+                  </th>
+                  <td><code>cursor-agent</code></td>
+                  <td><span class="tag tag--ready">ssh</span></td>
+                  <td>Keep CLI sessions on the machine that never sleeps.</td>
+                </tr>
+                <tr class="harness-row">
+                  <th scope="row">
+                    <span class="harness__mark" aria-hidden="true">AI</span>
+                    <span class="harness__name"><strong>Aider</strong><small>git-native</small></span>
+                  </th>
+                  <td><code>aider</code></td>
+                  <td><span class="tag tag--ready">git + ssh</span></td>
+                  <td>Let the Home own the repo, the branch and the long run.</td>
+                </tr>
+                <tr class="harness-row">
+                  <th scope="row">
+                    <span class="harness__mark" aria-hidden="true">GO</span>
+                    <span class="harness__name"><strong>Goose</strong><small>mcp-native</small></span>
+                  </th>
+                  <td><code>goose</code></td>
+                  <td><span class="tag tag--ready">mcp</span></td>
+                  <td>Reach the same Home through a typed MCP surface.</td>
+                </tr>
+                <tr class="harness-row">
+                  <th scope="row">
+                    <span class="harness__mark" aria-hidden="true">&gt;_</span>
+                    <span class="harness__name"
+                      ><strong>Custom CLI</strong><small>your own</small></span
+                    >
+                  </th>
+                  <td><code>any command</code></td>
+                  <td><span class="tag tag--ready">ssh + mcp</span></td>
+                  <td>If it runs in a terminal, it can run in a Home.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="harness-foot">
+            <p class="fineprint">
+              OpenCode is bundled and is the default engine. Other harnesses run as bring-your-own
+              CLI tools on the Home; their adapters are not native StackSpirit integrations.
+              Harness names and marks belong to their respective owners. StackSpirit is an
+              independent project and is not affiliated with or endorsed by them.
+            </p>
+            <a class="text-link" href="mailto:syver@stackspirit.io?subject=Harness%20request">
+              Request a harness
+              <svg class="icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M5 12h14m-5-5 5 5-5 5"
+                />
+              </svg>
+            </a>
+          </div>
         </div>
       </section>
 
       <section class="section" id="surfaces" aria-labelledby="surfaces-title">
         <div class="container">
           <header class="section__head">
-            <p class="kicker">Surfaces</p>
+            <p class="kicker"><span class="kicker__index">05</span> Surfaces</p>
             <h2 id="surfaces-title">The same Home from every screen.</h2>
             <p class="section__lede">
-              Start on the desktop, check in from your phone, script it from the CLI, or let
-              your harness call it over MCP. The Home stays the source of truth.
+              Start on the desktop, check in from your phone, script it from the CLI, or let your
+              harness call it over MCP. The Home stays the source of truth.
             </p>
           </header>
 
@@ -762,8 +1246,8 @@
               </span>
               <h3>Desktop app</h3>
               <p>
-                A Tauri cockpit for macOS, Windows and Linux. Add a server once, then watch
-                workers, jobs and sessions.
+                A Tauri cockpit for macOS, Windows and Linux. Add a server once, then watch workers,
+                jobs and sessions.
               </p>
               <a
                 class="text-link"
@@ -798,8 +1282,8 @@
               </span>
               <h3>Web App</h3>
               <p>
-                A mobile-first cockpit for the browser. Check fleet, jobs and sessions from a
-                phone or another computer.
+                A mobile-first cockpit for the browser. Check fleet, jobs and sessions from a phone
+                or another computer.
               </p>
               <a class="text-link" href="https://app.stackspirit.io">Open Web App</a>
             </article>
@@ -829,8 +1313,8 @@
               </span>
               <h3>CLI</h3>
               <p>
-                <code>stackspirit</code> is the terminal-first surface for scripts, servers
-                and repeatable workflows.
+                <code>stackspirit</code> is the terminal-first surface for scripts, servers and
+                repeatable workflows.
               </p>
               <a
                 class="text-link"
@@ -844,14 +1328,7 @@
             <article class="surface">
               <span class="surface__icon" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" width="22" height="22">
-                  <circle
-                    cx="6"
-                    cy="6"
-                    r="2.5"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.8"
-                  />
+                  <circle cx="6" cy="6" r="2.5" fill="none" stroke="currentColor" stroke-width="1.8" />
                   <circle
                     cx="18"
                     cy="6"
@@ -878,8 +1355,8 @@
               </span>
               <h3>MCP</h3>
               <p>
-                <code>stackspirit mcp</code> gives any MCP client typed tools for the same
-                Home, with no bespoke integration.
+                <code>stackspirit mcp</code> gives any MCP client typed tools for the same Home,
+                with no bespoke integration.
               </p>
               <a
                 class="text-link"
@@ -893,79 +1370,17 @@
         </div>
       </section>
 
-      <section class="section section--tint" id="harnesses" aria-labelledby="harnesses-title">
-        <div class="container">
-          <header class="section__head">
-            <p class="kicker">Harness compatibility</p>
-            <h2 id="harnesses-title">Bring the harness you already trust.</h2>
-            <p class="section__lede">
-              StackSpirit does not compete with your agent. It gives every harness the same
-              always-on Home, durable workspace and shared state — so you can switch tools
-              without moving machines.
-            </p>
-          </header>
-
-          <ul class="harness-grid" role="list">
-            <li class="harness">
-              <span class="harness__mark" aria-hidden="true">CC</span>
-              <div>
-                <h3>Claude Code</h3>
-                <p>Keep Claude Code work on a persistent Home instead of a closed laptop.</p>
-              </div>
-            </li>
-            <li class="harness">
-              <span class="harness__mark" aria-hidden="true">CX</span>
-              <div>
-                <h3>Codex</h3>
-                <p>Queue Codex work that keeps moving after you step away.</p>
-              </div>
-            </li>
-            <li class="harness">
-              <span class="harness__mark" aria-hidden="true">OC</span>
-              <div>
-                <h3>OpenCode</h3>
-                <p>Run the open-source agent directly, or use the bundled agent engine.</p>
-              </div>
-            </li>
-            <li class="harness">
-              <span class="harness__mark" aria-hidden="true">AG</span>
-              <div>
-                <h3>Antigravity</h3>
-                <p>Give an agent-first IDE a Home that is always reachable over SSH.</p>
-              </div>
-            </li>
-            <li class="harness">
-              <span class="harness__mark" aria-hidden="true">T3</span>
-              <div>
-                <h3>T3 Code</h3>
-                <p>Keep T3 Code sessions and capacity on the machine that never sleeps.</p>
-              </div>
-            </li>
-            <li class="harness harness--any">
-              <span class="harness__mark" aria-hidden="true">+</span>
-              <div>
-                <h3>Any MCP or CLI harness</h3>
-                <p>If it speaks MCP or runs in a terminal, it can use a StackSpirit Home.</p>
-              </div>
-            </li>
-          </ul>
-
-          <p class="fineprint">
-            Harness names and marks belong to their respective owners. StackSpirit is an
-            independent project and is not affiliated with or endorsed by them.
-          </p>
-        </div>
-      </section>
-
       <section class="section section--homes" id="homes" aria-labelledby="homes-title">
         <div class="container">
           <header class="section__head section__head--split">
-            <div>
-              <p class="kicker">Managed Always-On Homes</p>
-              <h2 id="homes-title">A turnkey home, if you&rsquo;d rather not run the machine.</h2>
+            <div class="homes__head">
+              <p class="kicker"><span class="kicker__index">06</span> Managed Always-On Homes</p>
+              <h2 id="homes-title">
+                Don't have a Linux box yet? Spin up a pre-configured home in 60 seconds.
+              </h2>
               <p class="section__lede">
-                Dedicated Contabo VPS machines, provisioned and connected for you. The
-                StackSpirit software stays free; the price is Contabo&rsquo;s regular monthly
+                The software is still free. A Managed Home is optional hardware: a dedicated Contabo
+                VPS, provisioned and connected for you. The price is Contabo&rsquo;s regular monthly
                 rate plus 20%.
               </p>
             </div>
@@ -975,6 +1390,11 @@
               <li class="badge badge--soft">Cancel anytime</li>
             </ul>
           </header>
+
+          <p class="homes__free-path">
+            Already have a box? The free path is above — <a href="#quickstart">install in a minute</a
+            >. No plan needed.
+          </p>
 
           <div class="pricing" id="pricing" data-source="fallback">
             <p class="visually-hidden" id="plans-status" role="status">
@@ -1074,8 +1494,8 @@
                 <span class="badge badge--warn" id="backup-recommended">Recommended</span>
               </div>
               <p id="backups-help">
-                Off by default. Encrypts your <code>~/.stackspirit</code> data, sessions and
-                configs to Cloudflare R2, off the machine provider.
+                Off by default. Encrypts your <code>~/.stackspirit</code> data, sessions and configs
+                to Cloudflare R2, off the machine provider.
                 <span id="backups-price">€3.50/mo if enabled.</span>
               </p>
             </div>
@@ -1100,14 +1520,16 @@
             <a class="btn btn--primary btn--lg" href="https://app.stackspirit.io/cloud"
               >See Always-On Homes in the Web App</a
             >
-            <a class="btn btn--outline" href="mailto:contact@stackspirit.io">Ask a question</a>
+            <a class="btn btn--outline" href="mailto:syver@stackspirit.io">Ask a question</a>
           </div>
 
           <p class="fineprint">
-            Prices include the +20% StackSpirit markup over Contabo&rsquo;s regular monthly
-            rate and exclude VAT. There is no free trial: every Home is dedicated and
-            provisioned with a verified payment method. Backups are an optional add-on, off by
-            default. Underlying provider specs are shown for transparency.
+            Prices include the +20% StackSpirit markup over Contabo&rsquo;s regular monthly rate and
+            exclude VAT. There is no free trial: every Home is dedicated and provisioned with a
+            verified payment method. Backups are an optional add-on, off by default. Managed Homes
+            billing is handled by Stripe; see the <a href="/terms">Terms</a> and
+            <a href="/privacy">Privacy Policy</a>. Underlying provider specs are shown for
+            transparency.
           </p>
         </div>
       </section>
@@ -1115,39 +1537,42 @@
       <section class="section" id="security" aria-labelledby="security-title">
         <div class="container">
           <header class="section__head">
-            <p class="kicker">Security</p>
+            <p class="kicker"><span class="kicker__index">07</span> Security</p>
             <h2 id="security-title">Your machine. Your keys. Your call.</h2>
             <p class="section__lede">
-              StackSpirit is built around an account-free local mode. Your connection details
-              stay on your device, and the cloud is optional.
+              StackSpirit is built around an account-free local mode. Your connection details stay
+              on your device, and the cloud is optional.
             </p>
           </header>
 
           <div class="security-grid">
             <article class="security-card">
-              <h3>Account-free by default</h3>
+              <h3>Local-first by default</h3>
               <p>
-                Connect a machine over SSH without creating an account. A free StackSpirit
-                account is only needed for the Web App from another device or a managed Home.
+                Connect a machine over SSH without creating an account. A free StackSpirit account
+                is only needed for the Web App from another device or a managed Home.
               </p>
             </article>
             <article class="security-card">
-              <h3>SSH with pinned host keys</h3>
+              <h3>No private keys in the cloud</h3>
               <p>
-                The desktop app verifies the server fingerprint before installing its own key.
-                StackSpirit never stores raw SSH private keys in the cloud.
+                StackSpirit Cloud never stores SSH private keys or provider OAuth tokens. The
+                desktop app verifies the server fingerprint before installing its own key.
               </p>
             </article>
             <article class="security-card">
               <h3>Secrets stay by name</h3>
               <p>
-                Provider keys live in your OS keychain or in the secret vault on the Home.
-                The AI sees secret names and metadata, never the values.
+                Provider keys live in your OS keychain or in the secret vault on the Home. The AI
+                sees secret names and metadata, never the values.
               </p>
             </article>
           </div>
-          <p class="fineprint">
-            Read the full model in
+          <p class="security__subprocessors">
+            When you choose a cloud surface, the subprocessors are Cloudflare (hosting, DNS and R2
+            backups), Stripe (payments), Resend (transactional email), and Contabo (Managed Home
+            machines). Read the full model in <a href="/privacy">Privacy</a>,
+            <a href="/terms">Terms</a> and
             <a
               href="https://github.com/Stack-Spirit/stackspirit/blob/main/SECURITY.md"
               target="_blank"
@@ -1161,7 +1586,7 @@
       <section class="section section--tint" id="faq" aria-labelledby="faq-title">
         <div class="container container--narrow">
           <header class="section__head">
-            <p class="kicker">FAQ</p>
+            <p class="kicker"><span class="kicker__index">08</span> FAQ</p>
             <h2 id="faq-title">Questions, answered plainly.</h2>
           </header>
 
@@ -1181,9 +1606,9 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  Yes. The software is MIT-licensed and free forever. You can connect your own
-                  VPS, spare laptop or home server at no software cost. Managed Always-On Homes
-                  are optional paid hardware, not a software license.
+                  Yes. The software is MIT-licensed and free forever. You can connect your own VPS,
+                  spare laptop or home server at no software cost. Managed Always-On Homes are
+                  optional paid hardware, not a software license.
                 </p>
               </div>
             </details>
@@ -1203,9 +1628,9 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  No for local and SSH mode. An optional free account is only needed when you
-                  want to reach a Home from the Web App on another device, use cross-device
-                  sign-in, or run a managed Always-On Home.
+                  No for local and SSH mode. An optional free account is only needed when you want
+                  to reach a Home from the Web App on another device, use cross-device sign-in, or
+                  run a managed Always-On Home.
                 </p>
               </div>
             </details>
@@ -1225,9 +1650,9 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  Any Linux machine you can reach over SSH: a VPS, a spare laptop, a home
-                  server or a small Mini PC. The Home runs the supervisor and keeps the
-                  session log; the desktop app is the cockpit.
+                  Any Linux machine you can reach over SSH: a VPS, a spare laptop, a home server or
+                  a small Mini PC. The Home runs the supervisor and keeps the session log; the
+                  desktop app is the cockpit.
                 </p>
               </div>
             </details>
@@ -1247,9 +1672,10 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  Claude Code, Codex, OpenCode, Antigravity, T3 Code and any MCP or CLI
-                  harness. StackSpirit sits underneath the harness instead of replacing it, so
-                  you can switch tools without moving machines.
+                  OpenCode is bundled and is the default engine. Claude Code, Codex, Gemini CLI,
+                  Cursor CLI, Aider, Goose and your own Custom CLI can run on the Home as
+                  bring-your-own terminal harnesses. If it runs in a terminal or speaks MCP,
+                  StackSpirit can give it a Home.
                 </p>
               </div>
             </details>
@@ -1269,9 +1695,9 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  No. Each Home is a dedicated Contabo VPS with its own credentials and
-                  firewall. The price is Contabo&rsquo;s regular monthly rate plus a
-                  transparent 20% StackSpirit markup.
+                  No. Each Home is a dedicated Contabo VPS with its own credentials and firewall.
+                  The price is Contabo&rsquo;s regular monthly rate plus a transparent 20%
+                  StackSpirit markup.
                 </p>
               </div>
             </details>
@@ -1291,10 +1717,9 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  No. Off-site encrypted backups to Cloudflare R2 are an optional add-on and
-                  off by default. When enabled, they cover your
-                  <code>~/.stackspirit</code> data, sessions and configs, off the machine
-                  provider. You can turn them on at checkout.
+                  No. Off-site encrypted backups to Cloudflare R2 are an optional add-on and off by
+                  default. When enabled, they cover your <code>~/.stackspirit</code> data, sessions
+                  and configs, off the machine provider. You can turn them on at checkout.
                 </p>
               </div>
             </details>
@@ -1314,9 +1739,8 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  No. Managed Homes are provisioned on demand and require a verified payment
-                  method up front. The free path is to run StackSpirit on hardware you already
-                  own.
+                  No. Managed Homes are provisioned on demand and require a verified payment method
+                  up front. The free path is to run StackSpirit on hardware you already own.
                 </p>
               </div>
             </details>
@@ -1336,9 +1760,11 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  On your machine. The StackSpirit database, session logs and project state
-                  stay on the Home you control. Provider secrets stay in your OS keychain or
-                  the secret vault on the Home, and the AI only sees names and metadata.
+                  On your machine. The StackSpirit database, session logs and project state stay on
+                  the Home you control. Provider secrets stay in your OS keychain or the secret
+                  vault on the Home, and the AI only sees names and metadata. StackSpirit Cloud
+                  never stores SSH private keys or provider OAuth tokens. See the
+                  <a href="/privacy">Privacy Policy</a> for the full model.
                 </p>
               </div>
             </details>
@@ -1350,18 +1776,20 @@
         <div class="container cta">
           <img
             class="cta__mark"
-            src="/assets/stackspirit-mark-128.png"
+            src="/assets/stackspirit-mark-256.png"
             alt=""
-            width="64"
-            height="64"
+            width="80"
+            height="80"
             loading="lazy"
+            decoding="async"
           />
           <h2 id="cta-title">Give your agents a home that stays on.</h2>
           <p>
-            Start free on hardware you already own, or let us run a managed Always-On Home.
+            Start free on hardware you already own, or let us run a managed Always-On Home. Either
+            way, your laptop can close.
           </p>
           <div class="cta__actions">
-            <a class="btn btn--sprout btn--lg" href="https://app.stackspirit.io">Open Web App</a>
+            <a class="btn btn--sprout btn--lg" href="#quickstart">Start free</a>
             <a
               class="btn btn--outline-light btn--lg"
               href="https://github.com/Stack-Spirit/stackspirit"
@@ -1370,6 +1798,15 @@
               >Star on GitHub</a
             >
           </div>
+          <img
+            class="cta__gazer"
+            src="/assets/mascot-gazer-256.png"
+            alt=""
+            width="132"
+            height="137"
+            loading="lazy"
+            decoding="async"
+          />
         </div>
       </section>
     </main>
@@ -1389,12 +1826,11 @@
             <span class="brand__name">StackSpirit</span>
           </a>
           <p>
-            Free, MIT-licensed software for an always-on home for your AI coding agents.
-            Optional managed Homes for teams that would rather not run the machine.
+            Free, MIT-licensed software for an always-on home for your AI coding agents. Optional
+            managed Homes for teams that would rather not run the machine.
           </p>
-          <p class="footer-privacy">
-            No trackers. No analytics. No newsletter pop-up.
-          </p>
+          <p class="footer-privacy">No trackers. No analytics. No newsletter pop-up.</p>
+          <p class="footer-sign">Built with patience in the Meadow.</p>
         </div>
 
         <nav class="footer-col" aria-label="Product">
@@ -1402,7 +1838,7 @@
           <ul role="list">
             <li><a href="#why">Why StackSpirit</a></li>
             <li><a href="#quickstart">Quickstart</a></li>
-            <li><a href="#surfaces">Surfaces</a></li>
+            <li><a href="#cockpit">Cockpit</a></li>
             <li><a href="#harnesses">Harnesses</a></li>
             <li><a href="#homes">Always-On Homes</a></li>
           </ul>
@@ -1466,7 +1902,16 @@
                 >Security</a
               >
             </li>
-            <li><a href="mailto:contact@stackspirit.io">Contact</a></li>
+            <li><a href="mailto:syver@stackspirit.io">Contact</a></li>
+          </ul>
+        </nav>
+
+        <nav class="footer-col" aria-label="Legal">
+          <h2 class="footer-col__title">Legal</h2>
+          <ul role="list">
+            <li><a href="/privacy">Privacy</a></li>
+            <li><a href="/terms">Terms</a></li>
+            <li><a href="mailto:syver@stackspirit.io">syver@stackspirit.io</a></li>
           </ul>
         </nav>
       </div>
@@ -1474,9 +1919,12 @@
       <div class="container footer-bottom">
         <p>© <span id="year">2026</span> StackSpirit. Free software under the MIT License.</p>
         <p>
-          <a href="mailto:contact@stackspirit.io">contact@stackspirit.io</a>
+          <a href="mailto:syver@stackspirit.io">syver@stackspirit.io</a>
           <span aria-hidden="true">·</span>
-          <a href="https://github.com/Stack-Spirit/stackspirit" target="_blank" rel="noopener noreferrer"
+          <a
+            href="https://github.com/Stack-Spirit/stackspirit"
+            target="_blank"
+            rel="noopener noreferrer"
             >github.com/Stack-Spirit</a
           >
         </p>

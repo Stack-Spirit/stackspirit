@@ -2,11 +2,12 @@
 """Build the marketing site's image assets from the committed brand sources.
 
 The site is dependency-free at runtime; this script is only needed when the
-brand mark changes. Run it from anywhere:
+brand mark or mascots change. Run it from anywhere:
 
     python3 apps/site/tools/build-assets.py
 
-Source of truth: design/brand/mark/ (see design/brand/README.md).
+Sources of truth: design/brand/mark/ and design/brand/gen/ (see
+design/brand/README.md). The generated files are committed under apps/site/assets/.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from PIL import Image, ImageDraw, ImageFont
 SITE = Path(__file__).resolve().parents[1]
 REPO = SITE.parents[1]
 BRAND = REPO / "design" / "brand" / "mark"
+GEN = REPO / "design" / "brand" / "gen"
 ASSETS = SITE / "assets"
 
 BOLD_FONTS = [
@@ -46,18 +48,19 @@ def font(size: int, *, bold: bool) -> ImageFont.FreeTypeFont | ImageFont.ImageFo
     except TypeError:
         return ImageFont.load_default()
 
-PAGE = (251, 252, 248)
-TINT = (241, 244, 236)
+
+PAGE = (245, 247, 240)
+TINT = (237, 243, 230)
 INK = (13, 18, 15)
-MUTED = (79, 92, 83)
+MUTED = (76, 90, 80)
 DEEP = (30, 91, 54)
 ACCENT = (37, 107, 60)
 SPROUT = (205, 237, 176)
 GREEN = (67, 168, 90)
 
 
-def load_mark() -> Image.Image:
-    return Image.open(BRAND / "stackspirit-mark-1024.png").convert("RGBA")
+def load_master() -> Image.Image:
+    return Image.open(BRAND / "stackspirit-mark-master.png").convert("RGBA")
 
 
 def resized(mark: Image.Image, size: int) -> Image.Image:
@@ -65,11 +68,44 @@ def resized(mark: Image.Image, size: int) -> Image.Image:
     return mark.resize((size, size), Image.Resampling.NEAREST)
 
 
+def cutout_mascot(name: str, width: int) -> Image.Image:
+    """Remove the flat black generated background and trim to the character.
+
+    The generated mascots are RGB images with a near-black backdrop. A
+    corner flood-fill keeps the dark outline around the character while
+    clearing the background, then the alpha bbox trims the empty canvas. A
+    small transparent padding keeps the sprite from touching the edge.
+    """
+    image = Image.open(GEN / name).convert("RGBA")
+    for corner in [(0, 0), (image.width - 1, 0), (0, image.height - 1), (image.width - 1, image.height - 1)]:
+        ImageDraw.floodfill(image, corner, (0, 0, 0, 0), thresh=24)
+    bbox = image.getbbox()
+    if bbox is None:
+        raise SystemExit(f"{name}: no visible pixels after background removal")
+    cut = image.crop(bbox)
+    pad = 16
+    padded = Image.new("RGBA", (cut.width + pad * 2, cut.height + pad * 2), (0, 0, 0, 0))
+    padded.alpha_composite(cut, (pad, pad))
+    height = round(width * padded.height / padded.width)
+    return padded.resize((width, height), Image.Resampling.NEAREST)
+
+
 def build() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
-    mark = load_mark()
+    mark = load_master()
 
+    # The marketing mark comes from the exact master, not the cropped preview.
+    resized(mark, 256).save(ASSETS / "stackspirit-mark-256.png", optimize=True)
+    # Kept for the sticky header and favicon lockup.
     resized(mark, 128).save(ASSETS / "stackspirit-mark-128.png", optimize=True)
+
+    # Pixel mascots at web sizes. The walk sprite is deliberately smaller so
+    # the scroll path does not ship a large image.
+    cutout_mascot("r3-thick.png", 256).save(ASSETS / "mascot-thick-256.png", optimize=True)
+    cutout_mascot("r3-thick.png", 128).save(
+        ASSETS / "mascot-thick-walk-128.png", optimize=True
+    )
+    cutout_mascot("r3-gazer.png", 256).save(ASSETS / "mascot-gazer-256.png", optimize=True)
 
     # Favicons and touch icon.
     for name in ("icon-16.png", "icon-32.png", "icon-32.svg"):
@@ -105,12 +141,17 @@ def build_og(mark: Image.Image) -> None:
     body_font = font(27, bold=False)
 
     x = 372
-    draw.text((x, 142), "STACKSPIRIT  ·  FREE & MIT OPEN SOURCE", font=eyebrow_font, fill=ACCENT)
-    draw.text((x, 206), "An always-on machine", font=title_font, fill=INK)
-    draw.text((x, 272), "as a home for your", font=title_font, fill=INK)
-    draw.text((x, 338), "AI coding agents", font=title_font, fill=DEEP)
+    draw.text((x, 142), "STACKSPIRIT  ·  MIT OPEN SOURCE  ·  LOCAL FIRST", font=eyebrow_font, fill=ACCENT)
+    draw.text((x, 206), "Manage the always-on", font=title_font, fill=INK)
+    draw.text((x, 272), "computers your coding", font=title_font, fill=INK)
+    draw.text((x, 338), "agents work on.", font=title_font, fill=DEEP)
     draw.text((x, 446), "stackspirit.io", font=body_font, fill=MUTED)
-    draw.text((x, 486), "Turnkey Always-On Homes · Desktop · Web · CLI · MCP", font=body_font, fill=MUTED)
+    draw.text(
+        (x, 486),
+        "OpenCode included · BYO VPS · Managed Homes",
+        font=body_font,
+        fill=MUTED,
+    )
 
     image.save(ASSETS / "og-image.png", optimize=True)
 
