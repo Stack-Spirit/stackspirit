@@ -404,7 +404,7 @@ await check("the scroll path has a curved SVG and a pixel mascot", async () => {
   assertIncludes(indexHtml, 'id="scroll-path-mascot"');
   assertIncludes(indexHtml, 'class="scroll-path__sprite"');
   assertIncludes(indexHtml, "hero-road-canvas");
-  assertIncludes(await read("pixel-film.mjs"), "renderWalkerFrame");
+  assertIncludes(await read("pixel-film.mjs"), "renderFrogHopFrame");
   const path = indexHtml.match(/<path\b[^>]*id="scroll-path-line"[^>]*>/i)?.[0] ?? "";
   assert.ok(/\bd="[^"]*C/.test(path), "scroll path should be a curve");
   const craft = await read("craft.mjs");
@@ -564,7 +564,7 @@ await check("the static fallback cards match the catalog", async () => {
 
 await check("managed homes state no free trial and show the backup add-on", async () => {
   assertIncludes(homesText, "No free trial");
-  assertIncludes(homesText, "Off-Site Encrypted R2 Backups");
+  assertIncludes(homesText, "Off-Site Encrypted Backups");
   assertIncludes(homesText, "Recommended");
   assertIncludes(homesText, "Off by default");
   assertIncludes(homesText, "€3/mo");

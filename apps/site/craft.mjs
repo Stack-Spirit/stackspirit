@@ -1,30 +1,23 @@
 /**
  * Handmade interactions for the StackSpirit marketing site.
  *
- * Four dependency-free progressive enhancements:
- *   1. Authentic pixel-canvas shimmer (ExampleDesign/pixel-canvas): tight
- *      Meadow pixel cells that ripple outward from the cursor on card hover.
- *   2. Code-generated 8-frame pixel-film hero walker: the skinny deadpan
- *      frog-eyed sprout spirit walks across a North Noir rolling Meadow curve
- *      at the bottom of the hero, blinking and leaning into the hill slope.
- *   3. Code-generated blinking spirit icons in the header and developer note.
- *   4. Scroll-driven vertical Meadow path on the page edge with the same
- *      code-generated skinny pixel walker tracking scroll progress.
+ *   1. Authentic ExampleDesign/pixel-canvas shimmer ONLY on card hover (never
+ *      noisy dust scattered across the hero background).
+ *   2. Code-generated hopping frog film along the North Noir rolling Meadow
+ *      curve at the foot of the hero: crouch -> parabolic leap -> land -> blink.
+ *   3. Scroll-driven vertical Meadow path on the page edge with the code-gen
+ *      frog hopping cleanly as you scroll.
  *
  * `prefers-reduced-motion: reduce` disables animation cleanly.
  */
 
 import {
-  ICON_LOGICAL_H,
-  ICON_LOGICAL_W,
-  WALKER_LOGICAL_H,
-  WALKER_LOGICAL_W,
-  renderSproutIcon,
-  renderWalkerFrame,
+  FROG_LOGICAL_H,
+  FROG_LOGICAL_W,
+  renderFrogHopFrame,
 } from "./pixel-film.mjs";
 
 const PALETTE_CARD = ["#cdedb0", "#43a85a", "#2e7f48", "#1e5b36"];
-const PALETTE_HERO = ["#cdedb0", "#43a85a", "#1e5b36"];
 const MAX_DPR = 2;
 
 function clamp(value, min, max) {
@@ -36,8 +29,8 @@ function reducedMotionQuery() {
 }
 
 function isBlinking(timeMs) {
-  const cycle = timeMs % 3900;
-  return cycle > 3720 && cycle < 3860;
+  const cycle = timeMs % 3800;
+  return cycle > 3620 && cycle < 3760;
 }
 
 class ShimmerPixel {
@@ -112,8 +105,14 @@ function initShimmer() {
     item.width = width;
     item.height = height;
 
-    const gap = item.ambient ? 20 : 9;
-    const palette = item.ambient ? PALETTE_HERO : PALETTE_CARD;
+    // Hover-only pixel shimmer: keep the canvas completely clean when not hovered.
+    if (item.ambient) {
+      item.pixels = [];
+      item.ctx.clearRect(0, 0, width, height);
+      return;
+    }
+
+    const gap = 9;
     const pixels = [];
     let n = item.seed;
     const nextRand = () => {
@@ -123,25 +122,14 @@ function initShimmer() {
 
     for (let x = gap * 0.5; x < width; x += gap) {
       for (let y = gap * 0.5; y < height; y += gap) {
-        if (item.ambient) {
-          const nx = x / width;
-          const ny = y / height;
-          const edgeBias = Math.max(nx - 0.45, ny - 0.55);
-          if (edgeBias < 0 || nextRand() > edgeBias * 0.36) continue;
-        }
-        const color = palette[Math.floor(nextRand() * palette.length)];
-        const speed = 0.08 + nextRand() * 0.18;
-        const maxSize = item.ambient ? 2 + Math.floor(nextRand() * 2) : 1.5 + nextRand() * 1.8;
-        const px = new ShimmerPixel(Math.round(x), Math.round(y), color, speed, maxSize);
-        if (item.ambient) {
-          px.phase = nextRand() * Math.PI * 2;
-          px.size = maxSize * 0.65;
-        }
-        pixels.push(px);
+        const color = PALETTE_CARD[Math.floor(nextRand() * PALETTE_CARD.length)];
+        const speed = 0.09 + nextRand() * 0.18;
+        const maxSize = 1.6 + nextRand() * 1.8;
+        pixels.push(new ShimmerPixel(Math.round(x), Math.round(y), color, speed, maxSize));
       }
     }
     item.pixels = pixels;
-    drawStatic(item);
+    item.ctx.clearRect(0, 0, width, height);
   }
 
   function setRippleOrigin(item, ox, oy) {
@@ -153,44 +141,18 @@ function initShimmer() {
     }
   }
 
-  function drawStatic(item) {
-    const { ctx, width, height, pixels, ambient } = item;
-    ctx.clearRect(0, 0, width, height);
-    if (!ambient) return;
-    ctx.globalAlpha = 0.2;
-    for (const px of pixels) {
-      ctx.fillStyle = px.color;
-      ctx.fillRect(px.x, px.y, px.maxSize, px.maxSize);
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  function tick(time) {
+  function tick() {
     frame = 0;
     let keepGoing = false;
 
     for (const item of items) {
-      if (!item.visible) continue;
-      const { ctx, width, height, pixels, ambient } = item;
-
-      if (ambient) {
-        keepGoing = true;
-        ctx.clearRect(0, 0, width, height);
-        for (const px of pixels) {
-          const wave = 0.5 + 0.5 * Math.sin(time * 0.0011 + (px.phase || 0));
-          ctx.globalAlpha = 0.06 + wave * 0.22;
-          ctx.fillStyle = px.color;
-          ctx.fillRect(px.x, px.y, px.maxSize, px.maxSize);
-        }
-        ctx.globalAlpha = 1;
-        continue;
-      }
-
+      if (!item.visible || item.ambient) continue;
       if (!item.active && !item.fading) continue;
 
+      const { ctx, width, height, pixels } = item;
       ctx.clearRect(0, 0, width, height);
       let anyAlive = false;
-      ctx.globalAlpha = 0.34;
+      ctx.globalAlpha = 0.36;
       for (const px of pixels) {
         if (item.active) {
           px.appear(12);
@@ -293,88 +255,30 @@ function initShimmer() {
       for (const item of items) {
         item.active = false;
         item.fading = false;
-        drawStatic(item);
+        item.ctx.clearRect(0, 0, item.width, item.height);
       }
-    } else if (!reduce) {
-      schedule();
     }
   };
   if (typeof media.addEventListener === "function") {
     media.addEventListener("change", onMotionChange);
   }
-
-  schedule();
 }
 
-/** Code-generated pixel icons (header mark & developer field-note idle buddy). */
-function initCodeSprites() {
-  const icons = Array.from(document.querySelectorAll("canvas[data-pixel-icon]"));
-  const idles = Array.from(document.querySelectorAll("canvas[data-pixel-idle]"));
-  if (icons.length === 0 && idles.length === 0) return;
-
-  const media = reducedMotionQuery();
-
-  for (const canvas of icons) {
-    const scale = Number(canvas.getAttribute("data-scale") || 2);
-    canvas.width = ICON_LOGICAL_W * scale;
-    canvas.height = ICON_LOGICAL_H * scale;
-  }
-  for (const canvas of idles) {
-    const scale = Number(canvas.getAttribute("data-scale") || 2);
-    canvas.width = WALKER_LOGICAL_W * scale;
-    canvas.height = WALKER_LOGICAL_H * scale;
-  }
-
-  function paintAll(now) {
-    const blink = !media.matches && isBlinking(now);
-    const sway = media.matches ? 0 : Math.floor(now / 950) % 3;
-    for (const canvas of icons) {
-      const ctx = canvas.getContext("2d");
-      if (!ctx) continue;
-      const scale = Number(canvas.getAttribute("data-scale") || 2);
-      renderSproutIcon(ctx, { blink, sway, scale });
-    }
-    for (const canvas of idles) {
-      const ctx = canvas.getContext("2d");
-      if (!ctx) continue;
-      const scale = Number(canvas.getAttribute("data-scale") || 2);
-      renderWalkerFrame(ctx, -1, { blink, scale });
-    }
-  }
-
-  paintAll(0);
-  if (media.matches) return;
-
-  let raf = 0;
-  let lastPaint = 0;
-  function tick(now) {
-    raf = 0;
-    if (document.hidden) return;
-    if (now - lastPaint >= 120) {
-      lastPaint = now;
-      paintAll(now);
-    }
-    raf = window.requestAnimationFrame(tick);
-  }
-  raf = window.requestAnimationFrame(tick);
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && !media.matches && !raf) {
-      raf = window.requestAnimationFrame(tick);
-    }
-  });
-}
-
-/** North Noir-inspired hero road with our 8-frame code-generated skinny pixel walker. */
-function initHeroWalker() {
+/**
+ * Code-generated pixel frog hopping across the hero rolling road.
+ * Each hop cycle (~1.35s) does: calm pause -> crouch -> parabolic arc leap -> land.
+ */
+function initHeroFrogHopper() {
   const wrap = document.getElementById("hero-road");
   const path = document.getElementById("hero-road-path");
   const walker = document.getElementById("hero-road-walker");
   const canvas = document.getElementById("hero-road-canvas");
+  const shadow = wrap ? wrap.querySelector(".hero-road__shadow") : null;
   if (!wrap || !path || !walker || !canvas) return;
 
   const scale = 2;
-  canvas.width = WALKER_LOGICAL_W * scale;
-  canvas.height = WALKER_LOGICAL_H * scale;
+  canvas.width = FROG_LOGICAL_W * scale;
+  canvas.height = FROG_LOGICAL_H * scale;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
@@ -382,56 +286,96 @@ function initHeroWalker() {
   let raf = 0;
   let total = 0;
   let start = 0;
-  let lastFrameIdx = -99;
-  let lastBlink = false;
-  const DURATION_MS = 20000;
-  const FRAME_MS = 125; // 8 fps crisp pixel-film cadence
+  let lastKey = "";
 
-  function place(progress, now) {
+  const HOPS_ACROSS = 9;
+  const HOP_CYCLE_MS = 1450; // pause + crouch + jump + land
+  const TOTAL_MS = HOPS_ACROSS * HOP_CYCLE_MS;
+
+  function place(now) {
     const rect = wrap.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
     if (total === 0) total = path.getTotalLength();
     const ctm = path.getScreenCTM();
     if (!ctm || total === 0) return;
 
-    const dist = total * clamp(progress, 0, 1);
-    const pt = path.getPointAtLength(dist).matrixTransform(ctm);
-    const ahead = path.getPointAtLength(Math.min(total, dist + 6)).matrixTransform(ctm);
-    const slopeDeg = clamp((Math.atan2(ahead.y - pt.y, ahead.x - pt.x) * 180) / Math.PI, -8, 8);
+    let pathProgress = 0.68;
+    let jumpArcPx = 0;
+    let phase = "sit";
+    let shadowScale = 1;
 
-    const frameIdx = media.matches ? -1 : Math.floor(now / FRAME_MS) % 8;
-    const blink = !media.matches && isBlinking(now);
-    if (frameIdx !== lastFrameIdx || blink !== lastBlink) {
-      lastFrameIdx = frameIdx;
-      lastBlink = blink;
-      renderWalkerFrame(ctx, frameIdx, { blink, scale, facingLeft: false });
+    if (!media.matches) {
+      // Start slightly inside the left edge so the hopping frog is immediately visible on load.
+      const elapsed = (now - start + HOP_CYCLE_MS * 1.45) % TOTAL_MS;
+      const hopIdx = Math.floor(elapsed / HOP_CYCLE_MS);
+      const t = (elapsed % HOP_CYCLE_MS) / HOP_CYCLE_MS; // 0..1 within one hop
+
+      // 0.00..0.38: sit & pause | 0.38..0.50: crouch | 0.50..0.88: airborne leap | 0.88..1.00: land settle
+      let hopAdvance = 0;
+      if (t < 0.38) {
+        phase = "sit";
+        hopAdvance = 0;
+      } else if (t < 0.5) {
+        phase = "crouch";
+        hopAdvance = 0;
+        shadowScale = 1.12;
+      } else if (t < 0.88) {
+        const air = (t - 0.5) / 0.38; // 0..1
+        hopAdvance = air;
+        jumpArcPx = Math.sin(air * Math.PI) * 34;
+        shadowScale = 1 - Math.sin(air * Math.PI) * 0.45;
+        phase = air < 0.32 ? "up" : air < 0.68 ? "air" : "down";
+      } else {
+        phase = "crouch";
+        hopAdvance = 1;
+        shadowScale = 1.1;
+      }
+
+      pathProgress = clamp((hopIdx + hopAdvance) / HOPS_ACROSS, 0, 1);
     }
 
-    const w = walker.offsetWidth || WALKER_LOGICAL_W * scale;
-    const h = walker.offsetHeight || WALKER_LOGICAL_H * scale;
+    const dist = total * pathProgress;
+    const pt = path.getPointAtLength(dist).matrixTransform(ctm);
+    const ahead = path.getPointAtLength(Math.min(total, dist + 6)).matrixTransform(ctm);
+    const slopeDeg = phase === "up" || phase === "air" || phase === "down"
+      ? 0
+      : clamp((Math.atan2(ahead.y - pt.y, ahead.x - pt.x) * 180) / Math.PI, -7, 7);
+
+    const blink = phase === "sit" && !media.matches && isBlinking(now);
+    const key = `${phase}:${blink}`;
+    if (key !== lastKey) {
+      lastKey = key;
+      renderFrogHopFrame(ctx, phase, { blink, scale, facingLeft: false });
+    }
+
+    const w = FROG_LOGICAL_W * scale;
+    const h = FROG_LOGICAL_H * scale;
     const x = pt.x - rect.left - w * 0.5;
-    const y = pt.y - rect.top - h + 4;
-    walker.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) rotate(${slopeDeg.toFixed(1)}deg)`;
+    const groundY = pt.y - rect.top - h + 4;
+    walker.style.transform = `translate3d(${x.toFixed(1)}px, ${(groundY - jumpArcPx).toFixed(1)}px, 0) rotate(${slopeDeg.toFixed(1)}deg)`;
+    if (shadow) {
+      shadow.style.transform = `translate3d(0, ${jumpArcPx.toFixed(1)}px, 0) scaleX(${shadowScale.toFixed(2)})`;
+      shadow.style.opacity = String(clamp(0.24 - jumpArcPx * 0.004, 0.06, 0.24));
+    }
   }
 
   function loop(now) {
     raf = 0;
     if (document.hidden || media.matches) return;
     if (!start) start = now;
-    const progress = ((now - start) % DURATION_MS) / DURATION_MS;
-    place(progress, now);
+    place(now);
     raf = window.requestAnimationFrame(loop);
   }
 
   if (media.matches) {
-    place(0.62, 0);
+    place(0);
   } else {
     raf = window.requestAnimationFrame(loop);
   }
 
   window.addEventListener("resize", () => {
     total = 0;
-    if (media.matches) place(0.62, 0);
+    if (media.matches) place(0);
   });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && !media.matches && !raf) {
@@ -440,7 +384,7 @@ function initHeroWalker() {
   });
 }
 
-/** Scroll-driven Meadow spine path with code-generated skinny pixel walker. */
+/** Scroll-driven Meadow spine path with code-generated hopping frog. */
 function initScrollPath() {
   const wrap = document.getElementById("scroll-path");
   const line = document.getElementById("scroll-path-line");
@@ -450,8 +394,8 @@ function initScrollPath() {
   if (!wrap || !line || !progress || !mascot || !canvas) return;
 
   const scale = 2;
-  canvas.width = WALKER_LOGICAL_W * scale;
-  canvas.height = WALKER_LOGICAL_H * scale;
+  canvas.width = FROG_LOGICAL_W * scale;
+  canvas.height = FROG_LOGICAL_H * scale;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
@@ -484,8 +428,8 @@ function initScrollPath() {
     if (!matrix) return;
     const point = line.getPointAtLength(length * ratio);
     const screen = point.matrixTransform(matrix);
-    const width = mascot.offsetWidth || WALKER_LOGICAL_W * scale;
-    const height = mascot.offsetHeight || WALKER_LOGICAL_H * scale;
+    const width = FROG_LOGICAL_W * scale;
+    const height = FROG_LOGICAL_H * scale;
     mascot.style.transform = `translate3d(${screen.x - rect.left - width / 2}px, ${
       screen.y - rect.top - height / 2
     }px, 0)`;
@@ -500,8 +444,9 @@ function initScrollPath() {
       }
     }
 
-    const walkStep = media.matches ? -1 : Math.floor(ratio * 48) % 8;
-    renderWalkerFrame(ctx, walkStep, { blink: false, scale, facingLeft: false });
+    const phases = ["sit", "crouch", "up", "air", "down"];
+    const phase = media.matches ? "sit" : phases[Math.floor(ratio * 30) % phases.length];
+    renderFrogHopFrame(ctx, phase, { blink: false, scale, facingLeft: false });
   }
 
   function requestUpdate() {
@@ -522,7 +467,6 @@ function initScrollPath() {
 
 export function initCraft() {
   initShimmer();
-  initCodeSprites();
-  initHeroWalker();
+  initHeroFrogHopper();
   initScrollPath();
 }

@@ -6,7 +6,7 @@
     <title>Managed Homes &amp; Pricing — StackSpirit</title>
     <meta
       name="description"
-      content="Don't have a Linux box yet? Spin up a pre-configured always-on StackSpirit Home in 60 seconds. Transparent EUR and USD pricing, no free trial, optional encrypted R2 backups."
+      content="Don't have a Linux box yet? Spin up a pre-configured always-on StackSpirit Home in 60 seconds. Transparent EUR and USD pricing, no free trial, optional off-site encrypted backups."
     />
     <link rel="canonical" href="https://stackspirit.io/homes" />
     <meta name="theme-color" content="#f5f7f0" />
@@ -25,7 +25,7 @@
     <header class="site-header">
       <div class="container header-inner">
         <a class="brand" href="/" aria-label="StackSpirit home">
-          <canvas class="brand__canvas" data-pixel-icon data-scale="2" width="32" height="32" aria-hidden="true"></canvas>
+          <img class="brand__mark" src="/assets/stackspirit-mark-128.png" alt="" width="34" height="34" />
           <span class="brand__name">StackSpirit</span>
         </a>
 
@@ -135,12 +135,12 @@
             <div class="backup-card">
               <div class="backup-card__copy">
                 <div class="backup-card__title">
-                  <h3>Off-Site Encrypted R2 Backups</h3>
+                  <h3>Off-Site Encrypted Backups</h3>
                   <span class="badge badge--soft" id="backup-recommended">Recommended</span>
                   <span class="badge badge--warn">Off by default</span>
                 </div>
                 <p id="backups-help">
-                  Client-side age-encrypted snapshots of your job database, sessions, and configs stored in Cloudflare R2. Keys never leave your machine.
+                  Client-side encrypted snapshots of your job database, sessions, and configs — handled automatically if turned on. Your encryption key never leaves your machine.
                   <strong id="backups-price">€3/mo if enabled.</strong>
                 </p>
                 <p class="backup-status" id="backups-status" role="status" aria-live="polite"></p>
@@ -154,19 +154,16 @@
                   aria-describedby="backups-help"
                 />
                 <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
-                <span class="switch__label">Include R2 backups</span>
+                <span class="switch__label">Include off-site backups</span>
               </label>
             </div>
 
-            <div class="homes__free-path">
-              <div>
+            <div class="homes__free-banner">
+              <div class="homes__free-banner__copy">
                 <h3>Already have a VPS, Mac mini, or home Linux server?</h3>
-                <p>Skip managed hosting completely. Install the open-source runtime in 60 seconds and pay €0 for StackSpirit software.</p>
+                <p>Skip managed hosting completely. Install the open-source runtime in 60 seconds and pay &euro;0 for StackSpirit software.</p>
               </div>
-              <div class="homes__actions">
-                <a class="btn btn--outline" href="/#quickstart">Install free on your own box</a>
-                <a class="btn btn--primary" href="https://app.stackspirit.io/cloud">Open Managed Homes in Web App</a>
-              </div>
+              <a class="btn btn--outline" href="/#quickstart">Install free on your own box &rarr;</a>
             </div>
           </div>
         </div>
