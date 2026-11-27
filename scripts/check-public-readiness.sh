@@ -17,36 +17,56 @@
 #
 # Usage:
 #   bash scripts/check-public-readiness.sh
+#   bash scripts/check-public-readiness.sh --history
+#   bash scripts/check-public-readiness.sh --history --strict-history
 #   bash scripts/check-public-readiness.sh --help
 #
+# The default mode scans `git ls-files` in the working tree at HEAD. --history
+# walks every commit reachable from `git rev-list --all`, deduplicates blobs by
+# object id, and applies the same rules and size/binary limits. Secret-class
+# findings are always fatal in history mode; privacy-class findings (home
+# paths, public IPv4, personal e-mail) are reported with counts but exit 0
+# unless --strict-history is also passed. --strict-history implies --history.
+#
 # Exit status:
-#   0  no blocked finding in the tracked working tree
-#   1  at least one blocked finding
+#   0  no blocked finding in the selected scope
+#   1  at least one blocked finding in the selected scope
 #   2  usage error, not a git repository, or python3 is unavailable
 #
-# The scan is a working-tree scan. A repository with public history should also
-# be checked with a history-aware scanner before its visibility is changed.
+# A repository with public history should be checked with --history before its
+# visibility is changed.
 
 set -euo pipefail
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 usage() {
-  sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
 }
 
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-  "")
-    ;;
-  *)
-    echo "check-public-readiness: unknown argument: $1 (try --help)" >&2
-    exit 2
-    ;;
-esac
+history=0
+strict_history=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --history)
+      history=1
+      ;;
+    --strict-history)
+      history=1
+      strict_history=1
+      ;;
+    *)
+      echo "check-public-readiness: unknown argument: $1 (try --help)" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
 command -v python3 >/dev/null 2>&1 || {
   echo "check-public-readiness: python3 is required" >&2
@@ -57,17 +77,25 @@ git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
   exit 2
 }
 
-exec python3 -I - "$root" <<'PY'
+mode=worktree
+[ "$history" -eq 1 ] && mode=history
+
+exec python3 -I - "$root" "$mode" "$strict_history" <<'PY'
 import ipaddress
 import os
 import re
 import subprocess
 import sys
+import time
 
 root = sys.argv[1]
+mode = sys.argv[2] if len(sys.argv) > 2 else "worktree"
+strict_history = len(sys.argv) > 3 and sys.argv[3] == "1"
 os.chdir(root)
 
 MAX_BYTES = 4 * 1024 * 1024
+MAX_SECRET_ROWS = 500
+MAX_PRIVACY_ROWS = 200
 
 # Documented placeholder and service accounts. None of these names identifies a
 # person. Keep this list narrow: an unrecognised home path is reported.
@@ -83,6 +111,7 @@ ALLOWED_HOME_SEGMENTS = {
     "owner": "conventional placeholder in UI mocks and tests",
     "phone": "acceptance fixture account",
     "projects": "documented relative home directory",
+    "stackspirit": "documented StackSpirit service account",
     "test": "placeholder test user",
     "user": "conventional placeholder",
     "vowp": "documented service account",
@@ -131,6 +160,11 @@ IPV4_RE = re.compile(
     r"(?<![\d.])((?:25[0-5]|2[0-4]\d|1?\d?\d)"
     r"(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3})(?![\d.])"
 )
+# Scalable Vector Graphics path data is a string of decimal coordinates such
+# as `2.94.86-.67.35`; without this exclusion the IPv4 rule reports the
+# coordinates as addresses. Only the `d` and `points` attribute values are
+# skipped, so an address elsewhere in an SVG or HTML line is still reported.
+SVG_PATH_ATTRIBUTE_RE = re.compile(r'\b(?:d|points)="([^"]*)"')
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 # Exact credential files. A .env.example is documentation, not a secret.
@@ -138,11 +172,48 @@ SECRET_NAMES = {".env", ".git-credentials", ".netrc", ".npmrc", ".pypirc"}
 SECRET_SUFFIXES = (".pem", ".p12", ".pfx", ".key")
 SECRET_PREFIXES = ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
 
+SECRET_RULES = {
+    "private_key", "provider_token", "github_token", "github_pat", "gitlab_token",
+    "aws_access_key", "google_api_key", "slack_token", "stripe_live_key",
+    "pypi_token", "npm_token", "huggingface_token", "secret_path",
+}
+PRIVACY_RULES = {"home_path", "ipv4", "email"}
+
+ORDER = [
+    "private_key", "provider_token", "github_token", "github_pat", "gitlab_token",
+    "aws_access_key", "google_api_key", "slack_token", "stripe_live_key",
+    "pypi_token", "npm_token", "huggingface_token", "secret_path", "ipv4",
+    "home_path", "email",
+]
+LABELS = {
+    "private_key": "private-key header",
+    "provider_token": "provider API token",
+    "github_token": "GitHub token",
+    "github_pat": "GitHub fine-grained token",
+    "gitlab_token": "GitLab token",
+    "aws_access_key": "AWS access key",
+    "google_api_key": "Google API key",
+    "slack_token": "Slack token",
+    "stripe_live_key": "Stripe live key",
+    "pypi_token": "PyPI token",
+    "npm_token": "npm token",
+    "huggingface_token": "Hugging Face token",
+    "secret_path": "tracked credential file",
+    "ipv4": "public IPv4 address",
+    "home_path": "personal /home or /Users path",
+    "email": "personal e-mail address",
+}
+
 
 def git(*args):
     result = subprocess.run(
         ["git", *args], check=True, capture_output=True, text=True
     )
+    return result.stdout
+
+
+def git_bytes(*args):
+    result = subprocess.run(["git", *args], check=True, capture_output=True)
     return result.stdout
 
 
@@ -179,6 +250,7 @@ def allowed_email(value):
         return True
     return (
         domain in ALLOWED_EMAIL_DOMAINS
+        or domain.endswith(".stackspirit.io")
         or domain.endswith(".invalid")
         or domain.endswith(".example")
         or domain.endswith(".test")
@@ -214,32 +286,23 @@ def read_text(path):
         return None
 
 
-files = [path for path in git("ls-files").splitlines() if path]
-if not files:
-    print("public-readiness: FAIL: no tracked files found", file=sys.stderr)
-    raise SystemExit(2)
+def decode_blob(data):
+    if len(data) > MAX_BYTES:
+        return None
+    if b"\0" in data[:8192]:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
-counts = {}
-findings = []
-scanned = 0
 
-for path in files:
-    # Never open a tracked credential file: its path is enough to report it.
-    if is_secret_path(path):
-        counts["secret_path"] = counts.get("secret_path", 0) + 1
-        findings.append((path, 0, "secret_path", path))
-        continue
-
-    text = read_text(path)
-    if text is None:
-        continue
-    scanned += 1
-
+def scan_text(text, counts, emit):
     for lineno, line in enumerate(text.splitlines(), 1):
         for rule, regex in TOKEN_RULES:
             for match in regex.finditer(line):
                 counts[rule] = counts.get(rule, 0) + 1
-                findings.append((path, lineno, rule, mask(match.group(0))))
+                emit(lineno, rule, mask(match.group(0)))
 
         for match in HOME_RE.finditer(line):
             family, name = match.group(1), match.group(2)
@@ -247,10 +310,16 @@ for path in files:
                 counts["home_path_allowed"] = counts.get("home_path_allowed", 0) + 1
                 continue
             counts["home_path"] = counts.get("home_path", 0) + 1
-            findings.append((path, lineno, "home_path", mask(match.group(0))))
+            emit(lineno, "home_path", mask(match.group(0)))
 
+        svg_spans = [
+            (span.start(1), span.end(1))
+            for span in SVG_PATH_ATTRIBUTE_RE.finditer(line)
+        ]
         for match in IPV4_RE.finditer(line):
             value = match.group(1)
+            if any(start <= match.start() < end for start, end in svg_spans):
+                continue
             try:
                 address = ipaddress.ip_address(value)
             except ValueError:
@@ -259,7 +328,7 @@ for path in files:
                 counts["ipv4_reserved"] = counts.get("ipv4_reserved", 0) + 1
                 continue
             counts["ipv4"] = counts.get("ipv4", 0) + 1
-            findings.append((path, lineno, "ipv4", mask(value)))
+            emit(lineno, "ipv4", mask(value))
 
         for match in EMAIL_RE.finditer(line):
             value = match.group(0)
@@ -267,56 +336,261 @@ for path in files:
                 counts["email_allowed"] = counts.get("email_allowed", 0) + 1
                 continue
             counts["email"] = counts.get("email", 0) + 1
-            findings.append((path, lineno, "email", mask(value)))
+            emit(lineno, "email", mask(value))
 
-# The scan file itself must not hide findings behind duplicate matches.
-findings.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
 
-print("public-readiness: repository <git top level>")
-print("public-readiness: scope: tracked working tree at HEAD")
-print(f"public-readiness: scanned {scanned} of {len(files)} tracked text files")
-print(
-    "public-readiness: allowed placeholders: "
-    f"{counts.get('home_path_allowed', 0)} home path(s), "
-    f"{counts.get('ipv4_reserved', 0)} reserved/private IP(s), "
-    f"{counts.get('email_allowed', 0)} reserved e-mail(s)"
-)
+def run_worktree():
+    files = [path for path in git("ls-files").splitlines() if path]
+    if not files:
+        print("public-readiness: FAIL: no tracked files found", file=sys.stderr)
+        return 2
 
-order = [
-    "private_key", "provider_token", "github_token", "github_pat", "gitlab_token",
-    "aws_access_key", "google_api_key", "slack_token", "stripe_live_key",
-    "pypi_token", "npm_token", "huggingface_token", "secret_path", "ipv4",
-    "home_path", "email",
-]
-labels = {
-    "private_key": "private-key header",
-    "provider_token": "provider API token",
-    "github_token": "GitHub token",
-    "github_pat": "GitHub fine-grained token",
-    "gitlab_token": "GitLab token",
-    "aws_access_key": "AWS access key",
-    "google_api_key": "Google API key",
-    "slack_token": "Slack token",
-    "stripe_live_key": "Stripe live key",
-    "pypi_token": "PyPI token",
-    "npm_token": "npm token",
-    "huggingface_token": "Hugging Face token",
-    "secret_path": "tracked credential file",
-    "ipv4": "public IPv4 address",
-    "home_path": "personal /home or /Users path",
-    "email": "personal e-mail address",
-}
+    counts = {}
+    findings = []
+    scanned = 0
 
-for rule in order:
-    if rule in counts:
-        print(f"public-readiness: {labels[rule]}: {counts[rule]} blocked")
+    for path in files:
+        # Never open a tracked credential file: its path is enough to report it.
+        if is_secret_path(path):
+            counts["secret_path"] = counts.get("secret_path", 0) + 1
+            findings.append((path, 0, "secret_path", path))
+            continue
 
-if findings:
-    print("public-readiness: findings (values masked):")
-    for path, lineno, rule, value in findings:
-        print(f"  {path}:{lineno}: {rule}: {value}")
-    print(f"public-readiness: FAIL: {len(findings)} blocked finding(s)")
-    raise SystemExit(1)
+        text = read_text(path)
+        if text is None:
+            continue
+        scanned += 1
 
-print("public-readiness: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found")
+        def emit(lineno, rule, value, path=path):
+            findings.append((path, lineno, rule, value))
+
+        scan_text(text, counts, emit)
+
+    # The scan file itself must not hide findings behind duplicate matches.
+    findings.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+
+    print("public-readiness: repository <git top level>")
+    print("public-readiness: scope: tracked working tree at HEAD")
+    print(f"public-readiness: scanned {scanned} of {len(files)} tracked text files")
+    print(
+        "public-readiness: allowed placeholders: "
+        f"{counts.get('home_path_allowed', 0)} home path(s), "
+        f"{counts.get('ipv4_reserved', 0)} reserved/private IP(s), "
+        f"{counts.get('email_allowed', 0)} reserved e-mail(s)"
+    )
+
+    for rule in ORDER:
+        if rule in counts:
+            print(f"public-readiness: {LABELS[rule]}: {counts[rule]} blocked")
+
+    if findings:
+        print("public-readiness: findings (values masked):")
+        for path, lineno, rule, value in findings:
+            print(f"  {path}:{lineno}: {rule}: {value}")
+        print(f"public-readiness: FAIL: {len(findings)} blocked finding(s)")
+        return 1
+
+    print("public-readiness: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found")
+    return 0
+
+
+def run_history():
+    commit_rows = []
+    for line in git("rev-list", "--all", "--timestamp").splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            commit_rows.append((int(parts[0]), parts[1]))
+        except ValueError:
+            continue
+    # Oldest first so the first occurrence of a blob is its earliest commit.
+    commit_rows.sort(key=lambda item: (item[0], item[1]))
+
+    counts = {}
+    secret_rows = []
+    privacy_rows = []
+    secret_total = 0
+    privacy_total = 0
+    secret_path_seen = set()
+    content_done = set()
+    all_blobs = set()
+    text_scanned = 0
+    skipped_large = 0
+    skipped_binary = 0
+    missing_blobs = 0
+    earliest_secret = {}
+
+    def record(commit_ts, commit, path, lineno, rule, value):
+        nonlocal secret_total, privacy_total
+        row = (commit_ts, commit, path, lineno, rule, value)
+        if rule in SECRET_RULES:
+            secret_total += 1
+            if rule not in earliest_secret:
+                earliest_secret[rule] = row
+            if len(secret_rows) < MAX_SECRET_ROWS:
+                secret_rows.append(row)
+        elif rule in PRIVACY_RULES:
+            privacy_total += 1
+            if len(privacy_rows) < MAX_PRIVACY_ROWS:
+                privacy_rows.append(row)
+
+    for commit_ts, commit in commit_rows:
+        try:
+            tree = git_bytes("ls-tree", "-r", "-z", "-l", commit)
+        except subprocess.CalledProcessError:
+            print(
+                f"public-readiness: history: warning: cannot read tree for {commit}",
+                file=sys.stderr,
+            )
+            continue
+
+        for record_bytes in tree.split(b"\0"):
+            if not record_bytes:
+                continue
+            try:
+                meta, path_bytes = record_bytes.split(b"\t", 1)
+                file_mode, object_type, object_id, size_text = meta.split()
+            except ValueError:
+                continue
+            if object_type != b"blob":
+                continue
+
+            path = path_bytes.decode("utf-8", "surrogateescape")
+            oid = object_id.decode("ascii", "replace")
+            all_blobs.add(oid)
+
+            # Credential paths are findings from the path alone; never open them.
+            if is_secret_path(path):
+                key = (path, oid)
+                if key not in secret_path_seen:
+                    secret_path_seen.add(key)
+                    counts["secret_path"] = counts.get("secret_path", 0) + 1
+                    record(commit_ts, commit, path, 0, "secret_path", path)
+                continue
+
+            if oid in content_done:
+                continue
+            content_done.add(oid)
+
+            try:
+                size = int(size_text)
+            except ValueError:
+                skipped_binary += 1
+                continue
+            if size > MAX_BYTES:
+                skipped_large += 1
+                continue
+
+            try:
+                data = git_bytes("cat-file", "blob", oid)
+            except subprocess.CalledProcessError:
+                # The object may have disappeared mid-scan; never fail on it.
+                missing_blobs += 1
+                continue
+            if data is None:
+                missing_blobs += 1
+                continue
+
+            text = decode_blob(data)
+            if text is None:
+                skipped_binary += 1
+                continue
+            text_scanned += 1
+
+            def emit(lineno, rule, value, commit_ts=commit_ts, commit=commit, path=path):
+                record(commit_ts, commit, path, lineno, rule, value)
+
+            scan_text(text, counts, emit)
+
+    secret_rows.sort(key=lambda item: (item[0], item[2], item[3], item[4], item[5]))
+    privacy_rows.sort(key=lambda item: (item[0], item[2], item[3], item[4], item[5]))
+
+    print("public-readiness: repository <git top level>")
+    print("public-readiness: scope: all commits reachable from git rev-list --all")
+    print(f"public-readiness: history: commits walked: {len(commit_rows)}")
+    print(
+        "public-readiness: history: unique blobs: "
+        f"{len(all_blobs)} ({text_scanned} text scanned, "
+        f"{skipped_large} over size cap, {skipped_binary} binary/undecodable, "
+        f"{missing_blobs} disappeared or unreadable)"
+    )
+    print(
+        "public-readiness: history: allowed placeholders: "
+        f"{counts.get('home_path_allowed', 0)} home path(s), "
+        f"{counts.get('ipv4_reserved', 0)} reserved/private IP(s), "
+        f"{counts.get('email_allowed', 0)} reserved e-mail(s)"
+    )
+    print(f"public-readiness: history: secret-class findings: {secret_total}")
+    print(f"public-readiness: history: privacy-class findings: {privacy_total}")
+    print(
+        "public-readiness: history: rule counts: "
+        + " ".join(f"{rule}={counts.get(rule, 0)}" for rule in ORDER)
+    )
+
+    if earliest_secret:
+        print("public-readiness: history: earliest commit per secret class:")
+        for rule in ORDER:
+            if rule in earliest_secret:
+                commit_ts, commit, path, lineno, _, _ = earliest_secret[rule]
+                when = time.strftime("%Y-%m-%d", time.gmtime(commit_ts))
+                print(
+                    f"  {rule}: {commit[:12]} ({when}, {path}:{lineno})"
+                )
+    else:
+        print("public-readiness: history: earliest secret-class finding: none")
+
+    if secret_rows:
+        print("public-readiness: history: secret-class findings (values masked):")
+        for commit_ts, commit, path, lineno, rule, value in secret_rows:
+            print(f"  {commit[:12]} {path}:{lineno}: {rule}: {value}")
+        if secret_total > len(secret_rows):
+            print(
+                "  ... "
+                f"{secret_total - len(secret_rows)} more secret-class row(s) not shown"
+            )
+
+    if privacy_rows:
+        print(
+            "public-readiness: history: privacy-class findings "
+            f"(values masked, showing {len(privacy_rows)} of {privacy_total}):"
+        )
+        for commit_ts, commit, path, lineno, rule, value in privacy_rows:
+            print(f"  {commit[:12]} {path}:{lineno}: {rule}: {value}")
+        if privacy_total > len(privacy_rows):
+            print(
+                "  ... "
+                f"{privacy_total - len(privacy_rows)} more privacy-class row(s) not shown"
+            )
+
+    if secret_total:
+        print(
+            "public-readiness: history: FAIL: secret-class finding(s); "
+            "do not publish this history"
+        )
+        exit_code = 1
+    elif strict_history and privacy_total:
+        print(
+            "public-readiness: history: FAIL: privacy-class finding(s) "
+            "with --strict-history"
+        )
+        exit_code = 1
+    elif privacy_total:
+        print(
+            "public-readiness: history: PASS: no secret-class finding; "
+            f"{privacy_total} privacy-class finding(s) reported but not fatal "
+            "(use --strict-history to make them fatal)"
+        )
+        exit_code = 0
+    else:
+        print("public-readiness: history: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found in history")
+        exit_code = 0
+
+    print(f"public-readiness: history: exit status: {exit_code}")
+    return exit_code
+
+
+if mode == "history":
+    raise SystemExit(run_history())
+raise SystemExit(run_worktree())
 PY
