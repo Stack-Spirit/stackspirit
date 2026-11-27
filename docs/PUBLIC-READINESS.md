@@ -26,7 +26,7 @@ repository and its history stay private, and the public repository starts with a
 At commit `68b81cd` the candidate commit `880e483` scans **clean: 0 blocked findings, exit 0**
 (1717 blobs, 1 over the size cap and 51 binary/undecodable files skipped by the same limits as the
 working-tree scan). The exact `--rev public-main` run is recorded in
-[Candidate public commit](#candidate-public-commit-job-ss-149-2026-11-27) under §1. Pushing is the
+[Candidate public commit](#candidate-public-commit-job-ss-149-public-history-candidate-2026-11-27) under §1. Pushing is the
 owner's action; this job pushed, tagged, and published nothing, so the publication checkbox stays
 unchecked.
 
