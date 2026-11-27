@@ -2650,7 +2650,7 @@ code {
   }
 }
 
-@media (max-width: 1020px) {
+@media (max-width: 1080px) {
   .header-inner {
     flex-wrap: wrap;
     gap: 0.35rem 1rem;

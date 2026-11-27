@@ -8,7 +8,7 @@ Requires the Python Playwright package and Chromium:
     python3 apps/site/scripts/verify-layout.py
 
 It starts the dependency-free preview server on a random loopback port, then
-checks both 390x844 (mobile) and 1280x800 (desktop):
+checks 390x844 (mobile), 1024x768 (compact desktop) and 1280x800 (desktop):
 
   * no horizontal document overflow
   * one h1, landmarks, labelled tabs and an accessible switch
@@ -533,7 +533,7 @@ def main() -> int:
         with sync_playwright() as playwright:
             browser = launch_browser(playwright)
             try:
-                for width, height in [(390, 844), (1280, 800)]:
+                for width, height in [(390, 844), (1024, 768), (1280, 800)]:
                     context, page, requests, errors = open_page(browser, base, width, height)
                     try:
                         check_page(page, checks, width, requests, errors, base)

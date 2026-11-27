@@ -774,7 +774,7 @@ await check("image assets have the expected dimensions", async () => {
 
 await check("responsive CSS keeps mobile and desktop breakpoints", async () => {
   const css = await read("styles.css");
-  assertIncludes(css, "@media (max-width: 1020px)");
+  assertIncludes(css, "@media (max-width: 1080px)");
   assertIncludes(css, "@media (max-width: 980px)");
   assertIncludes(css, "@media (max-width: 760px)");
   assertIncludes(css, "@media (max-width: 520px)");
