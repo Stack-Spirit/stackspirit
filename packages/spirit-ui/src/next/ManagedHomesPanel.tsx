@@ -4,8 +4,13 @@ import { useCloudAccount } from "../cloud/store";
 import type { ManagedPlan, ProvisioningStatus } from "../cloud/types";
 import { formatClock } from "../domain/format";
 import {
+  backupMonthlyUsd,
   formatMonthly,
+  formatMonthlyUsd,
+  formatUsd,
   isProvisioningLive,
+  planMonthlyUsd,
+  planSetupFeeUsd,
   planSpecs,
   provisioningLabel,
   provisioningProgress,
@@ -21,6 +26,8 @@ export interface ManagedHomesPanelProps {
    */
   autoLoad?: boolean;
 }
+
+type PlanCurrency = "EUR" | "USD";
 
 /**
  * Managed Always-On Home plans and live provisioning status.
@@ -46,15 +53,17 @@ export function ManagedHomesPanel({ autoLoad = false }: ManagedHomesPanelProps) 
   const refreshProvisioning = useCloudAccount((state) => state.refreshProvisioning);
 
   const [expanded, setExpanded] = useState(autoLoad);
+  const [currency, setCurrency] = useState<PlanCurrency>("EUR");
+  const isExpanded = autoLoad || expanded;
   const signedIn = phase === "signed_in";
 
   useEffect(() => {
-    if (!expanded || plansStatus !== "idle") return;
+    if (!isExpanded || plansStatus !== "idle") return;
     void loadPlans();
-  }, [expanded, plansStatus, loadPlans]);
+  }, [isExpanded, plansStatus, loadPlans]);
 
   useEffect(() => {
-    if (!expanded || !signedIn || !selectedMachineId) return;
+    if (!isExpanded || !signedIn || !selectedMachineId) return;
     if (provisioningStatus === "idle") {
       void refreshProvisioning(selectedMachineId);
       return;
@@ -65,7 +74,7 @@ export function ManagedHomesPanel({ autoLoad = false }: ManagedHomesPanelProps) 
     }, 8_000);
     return () => clearInterval(timer);
   }, [
-    expanded,
+    isExpanded,
     signedIn,
     selectedMachineId,
     provisioningStatus,
@@ -75,8 +84,13 @@ export function ManagedHomesPanel({ autoLoad = false }: ManagedHomesPanelProps) 
 
   const selectedMachine =
     machines.find((machine) => machine.id === selectedMachineId) ?? null;
+  const usdAvailable = Boolean(
+    plans &&
+      (plans.plans.some((plan) => planMonthlyUsd(plan) !== null) ||
+        backupMonthlyUsd(plans.backups) !== null),
+  );
 
-  if (!expanded) {
+  if (!isExpanded) {
     return (
       <section
         className="nx-cloud nx-cloud--plans"
@@ -118,8 +132,35 @@ export function ManagedHomesPanel({ autoLoad = false }: ManagedHomesPanelProps) 
             The software stays free and MIT; cancel the machine anytime.
           </p>
         </div>
-        <span className="nx-chip nx-chip--muted">Monthly · EUR</span>
+        <div className="nx-cloud__currency">
+          <div className="nx-segment nx-segment--tiny" role="group" aria-label="Price currency">
+            <button
+              type="button"
+              aria-pressed={currency === "EUR"}
+              onClick={() => setCurrency("EUR")}
+              data-testid="currency-eur"
+            >
+              EUR
+            </button>
+            <button
+              type="button"
+              aria-pressed={currency === "USD"}
+              onClick={() => setCurrency("USD")}
+              data-testid="currency-usd"
+            >
+              USD
+            </button>
+          </div>
+          <span className="nx-chip nx-chip--muted">Monthly · {currency}</span>
+        </div>
       </div>
+
+      {currency === "USD" && plans && !usdAvailable ? (
+        <p className="nx-cloud__meta" role="status" data-testid="currency-fallback">
+          USD prices are not published for this catalog. Showing EUR instead; StackSpirit
+          never guesses a currency conversion.
+        </p>
+      ) : null}
 
       {plansStatus === "loading" && !plans ? (
         <p className="nx-cloud__meta" role="status" data-testid="plans-loading">
@@ -148,7 +189,7 @@ export function ManagedHomesPanel({ autoLoad = false }: ManagedHomesPanelProps) 
         <>
           <ul className="nx-cloud__plans" data-testid="managed-plans" aria-label="Managed Home plans">
             {plans.plans.map((plan) => (
-              <PlanCard key={plan.id} plan={plan} />
+              <PlanCard key={plan.id} plan={plan} currency={currency} />
             ))}
           </ul>
 
@@ -172,9 +213,11 @@ export function ManagedHomesPanel({ autoLoad = false }: ManagedHomesPanelProps) 
                 <small>
                   Off by default. Encrypts ~/.stackspirit data, sessions and configs to
                   Cloudflare R2, off the machine provider.{" "}
-                  {plans.backups.monthly_eur === null
-                    ? "Priced separately at checkout."
-                    : `${formatMonthly(plans.backups.monthly_eur)}.`}
+                  {currency === "USD" && backupMonthlyUsd(plans.backups) !== null
+                    ? `${formatMonthlyUsd(backupMonthlyUsd(plans.backups))}.`
+                    : plans.backups.monthly_eur === null
+                      ? "Priced separately at checkout."
+                      : `${formatMonthly(plans.backups.monthly_eur)}.`}
                 </small>
               </span>
             </span>
@@ -228,14 +271,25 @@ export function ManagedHomesPanel({ autoLoad = false }: ManagedHomesPanelProps) 
   );
 }
 
-function PlanCard({ plan }: { plan: ManagedPlan }) {
-  const setup = setupFeeLabel(plan);
+function PlanCard({ plan, currency }: { plan: ManagedPlan; currency: PlanCurrency }) {
+  const usd = planMonthlyUsd(plan);
+  const setupUsd = planSetupFeeUsd(plan);
+  const showingUsd = currency === "USD" && usd !== null;
+  const setup = showingUsd && setupUsd !== null
+    ? setupUsd === 0
+      ? null
+      : `One-time setup fee ${formatUsd(setupUsd)}`
+    : setupFeeLabel(plan);
   return (
     <li className="nx-cloud__plan" data-testid={`plan-${plan.id}`}>
       <div className="nx-cloud__plan-head">
         <strong>{plan.name}</strong>
-        <span className="nx-cloud__price" data-testid={`plan-price-${plan.id}`}>
-          {formatMonthly(plan.monthly_eur)}
+        <span
+          className="nx-cloud__price"
+          data-testid={`plan-price-${plan.id}`}
+          data-currency={showingUsd ? "USD" : "EUR"}
+        >
+          {showingUsd ? formatMonthlyUsd(usd) : formatMonthly(plan.monthly_eur)}
         </span>
       </div>
       <span className="nx-cloud__meta">{planSpecs(plan)}</span>

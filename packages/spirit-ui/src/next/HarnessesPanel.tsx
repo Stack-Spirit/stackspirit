@@ -3,6 +3,7 @@ import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 
 import { toSpiritError, type SpiritError } from "../bridge/errors";
 import type { HarnessesSurface, SpiritBridge } from "../bridge/SpiritBridge";
 import type {
+  EngineStatus,
   HarnessAuthMode,
   HarnessBinaryState,
   HarnessConnectStarted,
@@ -12,7 +13,10 @@ import type {
   HarnessProtocol,
   HarnessReadiness,
   HarnessTarget,
+  KeyStatus,
+  ModelChoice,
 } from "../bridge/wire";
+import { engineProviders, providerLabel, providerOptions } from "../domain/engine";
 
 // The panel consumes the bridge DTOs; it does not define them. Re-exported here so the
 // existing panel tests and any callers keep their imports while every type has one home
@@ -36,6 +40,8 @@ export type { HarnessesSurface } from "../bridge/SpiritBridge";
 /** The bridge shape this panel needs; it stays a subset of `SpiritBridge`. */
 export type HarnessesBridge = Pick<SpiritBridge, "kind" | "preview"> & {
   harnesses?: HarnessesSurface;
+  /** Provider keys are managed through the engine; absent on a read-only bridge. */
+  engine?: SpiritBridge["engine"];
 };
 
 export interface HarnessesPanelProps {
@@ -125,6 +131,26 @@ function readinessLabel(readiness: HarnessReadiness, binary: HarnessBinaryState)
   }
 }
 
+function upsertKey(statuses: KeyStatus[], next: KeyStatus): KeyStatus[] {
+  const rest = statuses.filter((status) => status.provider !== next.provider);
+  return [...rest, next].sort((left, right) => left.provider.localeCompare(right.provider));
+}
+
+function providerKeyLabel(status: KeyStatus): string {
+  if (status.state === "saved") {
+    return status.last_checked_at !== null ? "Verified" : "Saved";
+  }
+  if (status.state === "invalid") return "Invalid key";
+  if (status.state === "unverified") return "Unverified";
+  return "Not connected";
+}
+
+function providerKeyTone(status: KeyStatus): string {
+  if (status.state === "saved" && status.last_checked_at !== null) return "nx-chip--server";
+  if (status.state === "invalid") return "nx-chip--warn";
+  return "nx-chip--muted";
+}
+
 function validateForm(form: FormState): SpiritError | null {
   const id = form.id.trim();
   if (!ID_PATTERN.test(id)) {
@@ -199,6 +225,365 @@ function ProbeStatus({ entry }: { entry: ProbeEntry | undefined }) {
       {probe.version ? <span className="nx-form__hint"> · {probe.version}</span> : null}
       <span className="nx-form__hint"> {probe.auth_detail}</span>
     </span>
+  );
+}
+
+/**
+ * The provider keys OpenCode uses, nested inside the default OpenCode harness card.
+ *
+ * OpenCode is the overarching harness; DeepSeek, OpenRouter, Anthropic, OpenAI and
+ * the rest are providers inside it. A key is write-only: it goes through
+ * `engine.storeKey`, the draft is cleared immediately, and no notice or error ever
+ * echoes it. Without an engine surface the card says so instead of pretending.
+ */
+function OpenCodeProviders({ engine }: { engine?: SpiritBridge["engine"] }) {
+  const [status, setStatus] = useState<EngineStatus | null>(null);
+  const [keys, setKeys] = useState<KeyStatus[]>([]);
+  const [models, setModels] = useState<ModelChoice[]>([]);
+  const [loading, setLoading] = useState(Boolean(engine));
+  const [loadError, setLoadError] = useState<SpiritError | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [removeId, setRemoveId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<SpiritError | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
+
+  useEffect(() => {
+    if (!engine) return;
+    let cancelled = false;
+    void (async () => {
+      setLoading(true);
+      setLoadError(null);
+      try {
+        const [nextStatus, nextKeys, nextModels] = await Promise.all([
+          engine.status(),
+          engine.keyStatus().catch(() => [] as KeyStatus[]),
+          engine.models().catch(() => [] as ModelChoice[]),
+        ]);
+        if (cancelled) return;
+        setStatus(nextStatus);
+        setKeys(nextKeys);
+        setModels(nextModels);
+      } catch (caught) {
+        if (!cancelled) setLoadError(toSpiritError(caught));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [engine, reloadToken]);
+
+  const options = providerOptions(models, keys, engineProviders(status));
+  const runtimeConnected = new Set(
+    engineProviders(status)
+      .filter((provider) => provider.connected === true)
+      .map((provider) => provider.id),
+  );
+
+  function statusFor(provider: string): KeyStatus | null {
+    return (
+      keys.find(
+        (candidate) => candidate.provider === provider && candidate.state !== "missing",
+      ) ?? null
+    );
+  }
+
+  async function save(provider: string): Promise<void> {
+    if (!engine) return;
+    const label = providerLabel(provider);
+    const secret = draft.trim();
+    setDraft("");
+    if (!secret) {
+      setError(invalidInput("Enter a provider key first."));
+      return;
+    }
+    setBusy(provider);
+    setError(null);
+    setNotice(null);
+    try {
+      await engine.storeKey(provider, secret);
+      let verified: KeyStatus;
+      try {
+        verified = await engine.verifyKey(provider);
+      } catch {
+        verified = { provider, state: "unverified", last_checked_at: null };
+      }
+      setKeys((current) => upsertKey(current, verified));
+      setEditing(null);
+      setNotice(
+        verified.state === "saved"
+          ? `${label} connected and verified inside OpenCode.`
+          : verified.state === "invalid"
+            ? `${label} rejected this key. It is saved; verify it again or replace it.`
+            : `${label} key saved. The engine could not verify it yet; use Verify key to retry.`,
+      );
+      setReloadToken((token) => token + 1);
+    } catch (caught) {
+      const mapped = toSpiritError(caught);
+      setError({ ...mapped, message: mapped.message.replaceAll(secret, "•••") });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function verify(provider: string): Promise<void> {
+    if (!engine) return;
+    const label = providerLabel(provider);
+    setBusy(provider);
+    setError(null);
+    setNotice(null);
+    try {
+      const checked = await engine.verifyKey(provider);
+      setKeys((current) => upsertKey(current, checked));
+      setNotice(
+        checked.state === "saved"
+          ? `${label} key verified.`
+          : checked.state === "invalid"
+            ? `${label} rejected this key. Replace or remove it.`
+            : `${label} is saved, but the engine could not confirm it yet.`,
+      );
+      setReloadToken((token) => token + 1);
+    } catch (caught) {
+      setError(toSpiritError(caught));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function remove(provider: string): Promise<void> {
+    if (!engine) return;
+    setBusy(provider);
+    setError(null);
+    setNotice(null);
+    try {
+      const removed = await engine.deleteKey(provider);
+      setKeys((current) => upsertKey(current, removed));
+      setRemoveId(null);
+      setNotice(`${providerLabel(provider)} key removed from OpenCode.`);
+      setReloadToken((token) => token + 1);
+    } catch (caught) {
+      setError(toSpiritError(caught));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function startEditing(provider: string): void {
+    setEditing(provider);
+    setDraft("");
+    setError(null);
+    setNotice(null);
+  }
+
+  return (
+    <div className="nx-harness__providers" data-testid="harness-opencode-providers">
+      <div className="nx-block__head">
+        <h4>Model providers</h4>
+        <span className="nx-chip nx-chip--tiny nx-chip--server">Inside OpenCode</span>
+      </div>
+      <p className="nx-form__hint">
+        OpenCode is the default harness. Add or manage the provider keys it uses — DeepSeek,
+        OpenRouter, Anthropic API, OpenAI API, Google and more. Keys stay in this Mac&apos;s
+        private provider-key file and are never sent to your server.
+      </p>
+
+      {!engine ? (
+        <div data-testid="harness-opencode-providers-unavailable">
+          <p className="nx-form__hint">
+            Provider keys are managed by the running engine in the desktop app. This bridge has
+            no engine surface, so StackSpirit does not pretend to add or verify a key here.
+          </p>
+          <div className="nx-harness__provider-chips">
+            {providerOptions([], [], []).map((provider) => (
+              <span className="nx-chip nx-chip--tiny nx-chip--muted" key={provider.id}>
+                {provider.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : loading ? (
+        <p className="nx-form__hint" role="status">
+          Reading OpenCode providers…
+        </p>
+      ) : loadError ? (
+        <p className="nx-form__error" role="alert">
+          {loadError.message}
+          {loadError.hint ? <span className="nx-form__hint"> {loadError.hint}</span> : null}
+        </p>
+      ) : (
+        <>
+          {status ? (
+            <p className="nx-form__hint" data-testid="harness-opencode-engine-state">
+              Engine {status.state.state}
+              {status.selected_model ? ` · current model ${status.selected_model.label}` : ""}
+            </p>
+          ) : null}
+          <ul className="nx-provider__list" aria-label="OpenCode model providers">
+            {options.map((provider) => {
+              const saved = statusFor(provider.id);
+              const connected = saved !== null || runtimeConnected.has(provider.id);
+              const isBusy = busy === provider.id;
+              const removing = removeId === provider.id;
+              return (
+                <li
+                  className="nx-provider-row"
+                  key={provider.id}
+                  data-testid={`opencode-provider-${provider.id}`}
+                >
+                  <div className="nx-provider-row__head">
+                    <div className="nx-provider-row__name">
+                      <strong>{provider.label}</strong>
+                      <span
+                        className={
+                          connected
+                            ? "nx-chip nx-chip--tiny nx-chip--server"
+                            : "nx-chip nx-chip--tiny nx-chip--muted"
+                        }
+                      >
+                        {connected ? "Connected" : "Not connected"}
+                      </span>
+                      {saved ? (
+                        <span className={`nx-chip nx-chip--tiny ${providerKeyTone(saved)}`}>
+                          {providerKeyLabel(saved)}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="nx-provider-row__actions">
+                      {saved ? (
+                        <>
+                          <button
+                            type="button"
+                            className="nx-btn nx-btn--quiet nx-btn--sm"
+                            onClick={() => void verify(provider.id)}
+                            disabled={isBusy}
+                            aria-label={`Verify ${provider.label} key`}
+                          >
+                            {isBusy ? "Verifying…" : "Verify key"}
+                          </button>
+                          <button
+                            type="button"
+                            className="nx-btn nx-btn--quiet nx-btn--sm"
+                            onClick={() =>
+                              editing === provider.id
+                                ? setEditing(null)
+                                : startEditing(provider.id)
+                            }
+                            disabled={isBusy}
+                            aria-expanded={editing === provider.id}
+                            aria-label={`Replace ${provider.label} key`}
+                          >
+                            Replace key
+                          </button>
+                          {removing ? (
+                            <>
+                              <button
+                                type="button"
+                                className="nx-btn nx-btn--quiet nx-btn--sm"
+                                onClick={() => void remove(provider.id)}
+                                disabled={isBusy}
+                              >
+                                {isBusy ? "Removing…" : "Confirm remove"}
+                              </button>
+                              <button
+                                type="button"
+                                className="nx-btn nx-btn--quiet nx-btn--sm"
+                                onClick={() => setRemoveId(null)}
+                                disabled={isBusy}
+                              >
+                                Cancel
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              className="nx-btn nx-btn--quiet nx-btn--sm"
+                              onClick={() => setRemoveId(provider.id)}
+                              disabled={isBusy}
+                              aria-label={`Remove ${provider.label} key`}
+                            >
+                              Remove key
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="nx-btn nx-btn--sm"
+                          onClick={() =>
+                            editing === provider.id
+                              ? setEditing(null)
+                              : startEditing(provider.id)
+                          }
+                          disabled={isBusy}
+                          aria-expanded={editing === provider.id}
+                          aria-label={`Connect ${provider.label}`}
+                        >
+                          {editing === provider.id ? "Cancel" : "Connect"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {editing === provider.id ? (
+                    <form
+                      className="nx-provider-form"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void save(provider.id);
+                      }}
+                    >
+                      <label className="nx-field">
+                        <span>API key for {provider.label}</span>
+                        <input
+                          type="password"
+                          value={draft}
+                          onChange={(event) => setDraft(event.target.value)}
+                          aria-label={`API key for ${provider.label}`}
+                          autoComplete="new-password"
+                          spellCheck={false}
+                          placeholder="Paste the provider key"
+                        />
+                      </label>
+                      <div className="nx-provider-form__actions">
+                        <button type="submit" className="nx-btn nx-btn--sm" disabled={isBusy}>
+                          {isBusy ? "Saving…" : "Save key"}
+                        </button>
+                        <button
+                          type="button"
+                          className="nx-btn nx-btn--quiet nx-btn--sm"
+                          onClick={() => setEditing(null)}
+                          disabled={isBusy}
+                        >
+                          Cancel
+                        </button>
+                        <span className="nx-form__hint">
+                          Stored locally; OpenCode uses it for {provider.label}.
+                        </span>
+                      </div>
+                    </form>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
+
+      {notice ? (
+        <p className="nx-form__hint" role="status" data-testid="harness-opencode-provider-notice">
+          {notice}
+        </p>
+      ) : null}
+      {error ? (
+        <p className="nx-form__error" role="alert">
+          {error.message}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -388,6 +773,10 @@ export function HarnessesPanel({
 
   const builtins = list?.harnesses.filter((manifest) => manifest.builtin) ?? [];
   const custom = list?.harnesses.filter((manifest) => !manifest.builtin) ?? [];
+  const defaultHarness = builtins.find((manifest) => manifest.id === "opencode") ?? null;
+  const oneClickHarnesses = defaultHarness
+    ? builtins.filter((manifest) => manifest.id !== "opencode")
+    : [];
 
   function renderCard(manifest: HarnessManifest) {
     const local = probes[probeKey(manifest.id, "local")];
@@ -422,6 +811,14 @@ export function HarnessesPanel({
             </div>
           </div>
           <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 6 }}>
+            {manifest.id === "opencode" ? (
+              <span
+                className="nx-chip nx-chip--tiny nx-chip--server"
+                data-testid="harness-opencode-default"
+              >
+                Default harness
+              </span>
+            ) : null}
             <span className="nx-chip nx-chip--tiny">{PROTOCOL_LABELS[manifest.protocol]}</span>
             <span
               className={`nx-chip nx-chip--tiny ${
@@ -455,6 +852,8 @@ export function HarnessesPanel({
         <p className="nx-form__hint" data-testid={`harness-${manifest.id}-tos`}>
           {manifest.tos_note}
         </p>
+
+        {manifest.id === "opencode" ? <OpenCodeProviders engine={bridge.engine} /> : null}
 
         <dl className="nx-form" style={{ gap: 6, margin: 0 }}>
           <div>
@@ -585,9 +984,10 @@ export function HarnessesPanel({
       </div>
 
       <p className="nx-form__lede">
-        Choose the coding harness StackSpirit runs. Built-ins stay read-only; add your own
-        with a strict local manifest. A harness is either an Embedded Chat transport or a
-        Worker-Only CLI, and its note says whether it uses your API key or a subscription.
+        OpenCode is the default overarching harness, and its provider keys (DeepSeek,
+        OpenRouter, Anthropic, OpenAI and more) live inside its card. Claude Code, Codex,
+        Gemini CLI, Antigravity, Cursor CLI, Aider and Goose are one-click additions; add
+        your own with a strict local manifest.
       </p>
 
       {!surface ? (
@@ -652,7 +1052,25 @@ export function HarnessesPanel({
         </p>
       ) : null}
 
-      {builtins.length > 0 ? (
+      {defaultHarness ? (
+        <section aria-label="Default harness">
+          <h3 style={{ margin: "4px 0", fontSize: 13 }}>Default harness · OpenCode</h3>
+          <ul className="nx-block" style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {renderCard(defaultHarness)}
+          </ul>
+        </section>
+      ) : null}
+
+      {oneClickHarnesses.length > 0 ? (
+        <section aria-label="One-click harnesses">
+          <h3 style={{ margin: "4px 0", fontSize: 13 }}>One-click connect</h3>
+          <ul className="nx-block" style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {oneClickHarnesses.map(renderCard)}
+          </ul>
+        </section>
+      ) : null}
+
+      {!defaultHarness && builtins.length > 0 ? (
         <section aria-label="Built-in harnesses">
           <h3 style={{ margin: "4px 0", fontSize: 13 }}>Built-in</h3>
           <ul className="nx-block" style={{ listStyle: "none", padding: 0, margin: 0 }}>

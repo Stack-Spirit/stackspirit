@@ -1,5 +1,6 @@
 import { useState, type HTMLAttributes, type ReactNode } from "react";
 
+import { useCloudAccount } from "../cloud/store";
 import { useConnection, useFleet, useFleetStore, useHosts, usePreview } from "../state/fleetStore";
 import { clusterPooled } from "./cluster";
 import { useCluster } from "./clusterStore";
@@ -9,7 +10,6 @@ import { Menu, MenuItem } from "./Menu";
 import type { NextView } from "./shellUi";
 import { SpiritMark } from "./SpiritMark";
 import { openInbox, projectSummaries, type ProjectSummary } from "./summary";
-import type { ThemePreference } from "./themePreference";
 
 export type { NextView } from "./shellUi";
 
@@ -20,8 +20,6 @@ export interface SidebarProps {
   onAddProject: () => void;
   /** Opens the cluster form when at least two servers are saved. */
   onFormCluster: () => void;
-  theme: ThemePreference;
-  onTheme: (theme: ThemePreference) => void;
   resizeHandle: HTMLAttributes<HTMLDivElement>;
   resizing: boolean;
   /** Opens the raw VOWP document (diagnostics). */
@@ -40,8 +38,6 @@ export function Sidebar({
   onAddServer,
   onAddProject,
   onFormCluster,
-  theme,
-  onTheme,
   resizeHandle,
   resizing,
   onOpenRaw,
@@ -49,6 +45,9 @@ export function Sidebar({
   const fleet = useFleet();
   const connection = useConnection();
   const preview = usePreview();
+  const account = useCloudAccount((state) => state.account);
+  const phase = useCloudAccount((state) => state.phase);
+  const accountLabel = account?.email ?? (phase === "signed_in" ? "Account" : "Sign in");
   const connected = connection.state === "connected" || connection.state === "stale";
   const projects = projectSummaries(fleet);
   const globalInbox = openInbox(fleet).length;
@@ -145,60 +144,59 @@ export function Sidebar({
       <span className="nx-side__fade" aria-hidden="true" />
 
       <div className="nx-side__foot">
-        <Menu
-          label="Settings"
-          placement="above"
-          trigger={(props) => (
-            <button type="button" className="nx-settings-trigger" {...props} data-testid="settings-trigger">
-              <span className="nx-row-item__icon" aria-hidden="true">
-                <GearIcon />
-              </span>
-              <span className="nx-row-item__text">Settings</span>
-            </button>
-          )}
-        >
-          {(close) => (
-            <>
-              <MenuItem
-                icon={<PlusIcon />}
-                onSelect={() => {
-                  close();
-                  onAddServer();
-                }}
-              >
-                Add server
-              </MenuItem>
-              <div className="nx-menu__group" role="group" aria-label="Theme">
-                <span className="nx-menu__icon" aria-hidden="true">
-                  <ThemeIcon />
+        <div className="nx-side__foot-row">
+          <Menu
+            label="Settings"
+            placement="above"
+            trigger={(props) => (
+              <button type="button" className="nx-settings-trigger" {...props} data-testid="settings-trigger">
+                <span className="nx-row-item__icon" aria-hidden="true">
+                  <GearIcon />
                 </span>
-                <span className="nx-menu__text">Theme</span>
-                <span className="nx-segment nx-segment--tiny">
-                  {(["system", "light", "dark"] as const).map((value) => (
-                    <button
-                      key={value}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={theme === value}
-                      onClick={() => onTheme(value)}
-                    >
-                      {value === "system" ? "Auto" : value === "light" ? "Light" : "Dark"}
-                    </button>
-                  ))}
-                </span>
-              </div>
-              <MenuItem
-                icon={<GearIcon />}
-                onSelect={() => {
-                  close();
-                  onNavigate({ kind: "settings" });
-                }}
-              >
-                All settings
-              </MenuItem>
-            </>
-          )}
-        </Menu>
+                <span className="nx-row-item__text">Settings</span>
+              </button>
+            )}
+          >
+            {(close) => (
+              <>
+                <MenuItem
+                  icon={<PlusIcon />}
+                  onSelect={() => {
+                    close();
+                    onAddServer();
+                  }}
+                >
+                  Add server
+                </MenuItem>
+                <MenuItem
+                  icon={<GearIcon />}
+                  onSelect={() => {
+                    close();
+                    onNavigate({ kind: "settings" });
+                  }}
+                >
+                  All settings
+                </MenuItem>
+              </>
+            )}
+          </Menu>
+          <button
+            type="button"
+            className="nx-settings-trigger nx-account-trigger"
+            title={
+              account?.email
+                ? `StackSpirit Account: ${account.email}`
+                : "Sign in to StackSpirit"
+            }
+            onClick={() => onNavigate({ kind: "settings" })}
+            data-testid="account-trigger"
+          >
+            <span className="nx-row-item__icon" aria-hidden="true">
+              <AccountIcon />
+            </span>
+            <span className="nx-row-item__text">{accountLabel}</span>
+          </button>
+        </div>
       </div>
 
       <div className="nx-resizer nx-resizer--side" aria-label="Resize sidebar" {...resizeHandle} />
@@ -589,11 +587,11 @@ function GearIcon() {
   );
 }
 
-function ThemeIcon() {
+function AccountIcon() {
   return (
     <Icon>
-      <circle cx="8" cy="8" r="5.5" />
-      <path d="M8 2.5v11a5.5 5.5 0 0 0 0-11Z" fill="currentColor" stroke="none" />
+      <circle cx="8" cy="5.5" r="2.6" />
+      <path d="M3.2 13.2c.5-2.4 2.4-3.9 4.8-3.9s4.3 1.5 4.8 3.9" />
     </Icon>
   );
 }

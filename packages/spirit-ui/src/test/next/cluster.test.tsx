@@ -200,8 +200,6 @@ function sidebar() {
       onAddServer={() => undefined}
       onAddProject={() => undefined}
       onFormCluster={() => undefined}
-      theme="system"
-      onTheme={() => undefined}
       resizeHandle={{}}
       resizing={false}
       onOpenRaw={() => undefined}

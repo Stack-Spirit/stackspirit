@@ -153,18 +153,32 @@ async function sourceFiles(root: string): Promise<string[]> {
 }
 
 describe("browser security boundary", () => {
-  it("contains no Authorization header, bearer literal, or token storage", async () => {
+  it("keeps the bearer header in the account client and never stores the token", async () => {
     const files = await sourceFiles(join(process.cwd(), "src"));
     expect(files.length).toBeGreaterThan(10);
+    const authClient = join(process.cwd(), "src/auth/client.ts");
     const problems: string[] = [];
     for (const file of files) {
       const text = await readFile(file, "utf8");
-      if (/Authorization/i.test(text)) problems.push(`${file}: Authorization`);
-      if (/Bearer\s+[A-Za-z0-9]/i.test(text)) problems.push(`${file}: bearer value`);
+      if (/Authorization/i.test(text) && file !== authClient) {
+        problems.push(`${file}: Authorization outside the account client`);
+      }
+      if (/Bearer\s+[A-Za-z0-9._~-]{12,}/i.test(text)) problems.push(`${file}: bearer value`);
       if (/VOWP_API_TOKEN\s*=/.test(text)) problems.push(`${file}: token assignment`);
       if (/localStorage/.test(text)) problems.push(`${file}: localStorage`);
     }
     expect(problems).toEqual([]);
+  });
+
+  it("keeps the Web session token in memory, never in browser storage", async () => {
+    const files = await sourceFiles(join(process.cwd(), "src"));
+    const hits: string[] = [];
+    for (const file of files) {
+      const text = await readFile(file, "utf8");
+      if (/auth_token/.test(text)) hits.push(file);
+    }
+    expect(hits).toContain(join(process.cwd(), "src/auth/session.ts"));
+    expect(hits.every((file) => file.endsWith("auth/session.ts"))).toBe(true);
   });
 
   it("uses sessionStorage only for the daemon base address", async () => {

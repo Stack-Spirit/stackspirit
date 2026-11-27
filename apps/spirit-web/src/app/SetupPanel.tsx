@@ -1,18 +1,28 @@
 import { useState, type FormEvent } from "react";
 
-import { Button, Panel } from "@stackspirit/ui";
+import { Button, ManagedHomesPanel, Panel } from "@stackspirit/ui";
+import type { SpiritErrorDto } from "@stackspirit/ui";
 
 import { SAME_ORIGIN_REQUIRED } from "../copy";
 import { parseBaseUrl } from "../bridge/baseUrl";
 import { setupRedirectUrl } from "../bridge/create";
+import type { WebCloudRuntime } from "../cloud/runtime";
 import { SpiritMark } from "../shared/next";
-import type { SpiritErrorDto } from "@stackspirit/ui";
+import { WebAuthPanel } from "./WebAuthPanel";
 
-export function SetupPanel({ error }: { error: SpiritErrorDto | null }) {
+export interface SetupPanelProps {
+  error: SpiritErrorDto | null;
+  /** The optional account runtime wired by `main.tsx` on the landing route. */
+  runtime?: WebCloudRuntime | null;
+}
+
+export function SetupPanel({ error, runtime = null }: SetupPanelProps) {
   const [value, setValue] = useState(() =>
     typeof window === "undefined" ? "" : window.location.origin,
   );
   const [localError, setLocalError] = useState<string | null>(error?.message ?? null);
+  const [localOpen, setLocalOpen] = useState(false);
+  const [plansOpen, setPlansOpen] = useState(false);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -36,61 +46,84 @@ export function SetupPanel({ error }: { error: SpiritErrorDto | null }) {
   }
 
   return (
-    <main className="web-boot" id="main-canvas">
+    <main className="web-boot web-landing" id="main-canvas">
       <div className="web-brand">
         <SpiritMark size={36} />
         <div>
           <strong>StackSpirit</strong>
-          <span>Web cockpit · read-only</span>
+          <span>Web cockpit · account or local daemon</span>
         </div>
       </div>
-      <Panel title="Connect to the StackSpirit daemon" tone="warn">
-        <p>
-          This Web build talks to one loopback daemon through a same-origin reverse proxy or
-          the Vite development proxy. There is no fixed port and no mock fallback.
-        </p>
-        <form className="web-setup-form" onSubmit={submit}>
-          <label className="field">
-            <span className="field__label">Daemon address</span>
-            <input
-              className="input"
-              value={value}
-              onChange={(event) => setValue(event.target.value)}
-              placeholder="http://127.0.0.1:5174 (the dev-server origin)"
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <span className="field__hint">
-              An absolute http(s) URL. Same origin as this page; no userinfo, query, or
-              fragment.
-            </span>
-          </label>
-          <Button type="submit" variant="primary">
-            Use this address
-          </Button>
-        </form>
-        {localError ? (
-          <p className="notice notice--danger" role="alert" data-testid="setup-error">
-            {localError}
-          </p>
-        ) : null}
-        <p className="muted small">
-          Set <span className="mono">VITE_VOWP_DAEMON_URL</span> at build time, or open this
-          page with <span className="mono">?daemon=</span> and the same-origin proxy origin.
-          The address is stored in session storage and removed from the address bar.
-        </p>
-      </Panel>
 
-      <Panel title="Or use a StackSpirit Account">
-        <p>
-          Signing in is optional. It lets this browser reach one of your enrolled Always-On
-          Homes through the encrypted StackSpirit relay instead of a local daemon. Local and
-          SSH server mode needs no account.
-        </p>
-        <a className="btn btn--secondary btn--sm" href="/cloud">
-          Always-On Homes
-        </a>
-      </Panel>
+      <WebAuthPanel
+        client={runtime?.auth ?? null}
+        onOpenPlans={() => setPlansOpen(true)}
+        homesHref="/cloud"
+      />
+
+      <section
+        className="web-landing__plans"
+        id="managed-homes"
+        aria-label="Managed Homes plans"
+        data-testid="landing-managed-homes"
+      >
+        <ManagedHomesPanel autoLoad={plansOpen} />
+      </section>
+
+      <div className="web-local">
+        <button
+          type="button"
+          className="web-local__toggle"
+          aria-expanded={localOpen}
+          onClick={() => setLocalOpen((open) => !open)}
+          data-testid="local-daemon-toggle"
+        >
+          <span>Or connect to a local daemon without an account</span>
+          <span className="web-local__chevron" aria-hidden="true">
+            {localOpen ? "−" : "+"}
+          </span>
+        </button>
+        {localOpen ? (
+          <Panel title="Connect to the StackSpirit daemon" tone="warn">
+            <p>
+              This Web build talks to one loopback daemon through a same-origin reverse
+              proxy or the Vite development proxy. There is no fixed port and no mock
+              fallback.
+            </p>
+            <form className="web-setup-form" onSubmit={submit}>
+              <label className="field">
+                <span className="field__label">Daemon address</span>
+                <input
+                  className="input"
+                  value={value}
+                  onChange={(event) => setValue(event.target.value)}
+                  placeholder="http://127.0.0.1:5174 (the dev-server origin)"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <span className="field__hint">
+                  An absolute http(s) URL. Same origin as this page; no userinfo, query, or
+                  fragment.
+                </span>
+              </label>
+              <Button type="submit" variant="primary">
+                Use this address
+              </Button>
+            </form>
+            {localError ? (
+              <p className="notice notice--danger" role="alert" data-testid="setup-error">
+                {localError}
+              </p>
+            ) : null}
+            <p className="muted small">
+              Set <span className="mono">VITE_VOWP_DAEMON_URL</span> at build time, or open this
+              page with <span className="mono">?daemon=</span> and the same-origin proxy
+              origin. The address is stored in session storage and removed from the address
+              bar.
+            </p>
+          </Panel>
+        ) : null}
+      </div>
     </main>
   );
 }

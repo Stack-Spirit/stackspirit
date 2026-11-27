@@ -1,6 +1,7 @@
 /** Small pure formatters shared by the cloud panels and their tests. */
 
 import type {
+  BackupPlan,
   CloudMachine,
   MachinePresence,
   ManagedPlan,
@@ -13,8 +14,63 @@ export function formatEuro(amount: number | null): string {
   return `€${amount.toFixed(2)}`;
 }
 
+export function formatUsd(amount: number | null): string {
+  if (amount === null || !Number.isFinite(amount)) return "price unavailable";
+  return `$${amount.toFixed(2)}`;
+}
+
 export function formatMonthly(amount: number | null): string {
   return amount === null ? "Price unavailable" : `${formatEuro(amount)}/mo`;
+}
+
+export function formatMonthlyUsd(amount: number | null): string {
+  return amount === null ? "Price unavailable" : `${formatUsd(amount)}/mo`;
+}
+
+function numeric(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, value);
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return Math.max(0, parsed);
+  }
+  return null;
+}
+
+function nestedNumeric(value: unknown, unit: "usd" | "eur"): number | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return numeric(record[unit] ?? record[unit.toUpperCase()]);
+}
+
+/**
+ * The Web client reports `/v1/plans` currency fields it receives. The shared
+ * `ManagedPlan` type predates the USD field, so readers stay structural and the
+ * panel falls back to EUR rather than guessing a conversion.
+ */
+export function planMonthlyUsd(plan: ManagedPlan): number | null {
+  const extra = plan as ManagedPlan & {
+    monthly_usd?: unknown;
+    prices?: unknown;
+    monthly?: unknown;
+  };
+  return (
+    numeric(extra.monthly_usd) ??
+    nestedNumeric(extra.prices, "usd") ??
+    nestedNumeric(extra.monthly, "usd")
+  );
+}
+
+export function planSetupFeeUsd(plan: ManagedPlan): number | null {
+  const extra = plan as ManagedPlan & {
+    setup_fee_usd?: unknown;
+    setup_fee?: unknown;
+  };
+  return numeric(extra.setup_fee_usd) ?? nestedNumeric(extra.setup_fee, "usd");
+}
+
+export function backupMonthlyUsd(backup: BackupPlan): number | null {
+  const extra = backup as BackupPlan & { monthly_usd?: unknown; prices?: unknown };
+  return numeric(extra.monthly_usd) ?? nestedNumeric(extra.prices, "usd");
 }
 
 export function planSpecs(plan: ManagedPlan): string {

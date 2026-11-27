@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import { MockBridge } from "../../bridge/MockBridge";
 import type {
   HarnessListView,
   HarnessManifest,
@@ -362,6 +363,38 @@ describe("HarnessesPanel", () => {
         "Check failed: SSH authentication failed",
       ),
     );
+  });
+
+  it("nests provider management inside the default OpenCode card", async () => {
+    const user = userEvent.setup();
+    const fake = fakeHarnesses({ initial: [manifest({ id: "opencode" })] });
+    const mock = new MockBridge("empty");
+    const desktop = {
+      ...mock,
+      kind: "tauri" as const,
+      preview: false,
+      harnesses: fake.surface,
+    } as unknown as HarnessesBridge;
+    render(<HarnessesPanel bridge={desktop} />);
+
+    const opencode = await screen.findByTestId("harness-opencode");
+    expect(within(opencode).getByTestId("harness-opencode-default")).toHaveTextContent(
+      "Default harness",
+    );
+    expect(within(opencode).getByTestId("harness-opencode-providers")).toBeInTheDocument();
+    const row = await within(opencode).findByTestId("opencode-provider-deepseek");
+    expect(row).toHaveTextContent("DeepSeek");
+
+    const secret = ["sk", "harnessOnly1234567890"].join("_");
+    await user.click(within(row).getByRole("button", { name: "Connect DeepSeek" }));
+    await user.type(within(row).getByLabelText("API key for DeepSeek"), secret);
+    await user.click(within(row).getByRole("button", { name: "Save key" }));
+
+    expect(
+      await within(opencode).findByTestId("harness-opencode-provider-notice"),
+    ).toHaveTextContent(/DeepSeek (connected|key saved)/);
+    expect(document.body.innerHTML).not.toContain(secret);
+    mock.dispose();
   });
 
   it("says honestly when the bridge has no harness surface", async () => {

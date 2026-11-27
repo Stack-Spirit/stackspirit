@@ -11,7 +11,7 @@ import "../../../packages/spirit-ui/src/next/theme.css";
 import "../../../packages/spirit-ui/src/views/fleet/fleet.css";
 
 import { createBridge } from "./bridge/create";
-import { createWebCloudRuntime } from "./cloud/runtime";
+import { createWebCloudRuntime, type WebCloudRuntime } from "./cloud/runtime";
 import { CloudApp } from "./app/CloudApp";
 import { DesktopOnlyBoot } from "./app/DesktopOnlyPage";
 import { SetupPanel } from "./app/SetupPanel";
@@ -52,6 +52,15 @@ function BootError({ error }: { error: SpiritErrorDto }) {
   );
 }
 
+/** Account sign-in is optional and inert until the owner uses it. */
+function optionalSetupRuntime(): WebCloudRuntime | null {
+  try {
+    return createWebCloudRuntime();
+  } catch {
+    return null;
+  }
+}
+
 const initialPath = pathFor(window.location.pathname);
 const cloudPath =
   window.location.pathname === "/cloud" ||
@@ -87,10 +96,10 @@ if (cloudPath) {
   if (boot.bridge) {
     root.render(<WebApp bridge={boot.bridge} />);
   } else if (boot.setup) {
-    root.render(<SetupPanel error={boot.error} />);
+    root.render(<SetupPanel error={boot.error} runtime={optionalSetupRuntime()} />);
   } else if (boot.error) {
     root.render(<BootError error={boot.error} />);
   } else {
-    root.render(<SetupPanel error={null} />);
+    root.render(<SetupPanel error={null} runtime={optionalSetupRuntime()} />);
   }
 }

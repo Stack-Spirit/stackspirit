@@ -1020,6 +1020,216 @@
 }
 
 /* ======================================================================
+   Account-first landing and Always-On Homes sign-in
+   ====================================================================== */
+
+.web-landing {
+  width: min(46rem, 100%);
+}
+
+.web-auth__head {
+  display: grid;
+  gap: 5px;
+}
+
+.web-auth__head h2 {
+  margin: 0;
+  color: var(--nx-text);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.web-auth__head p {
+  margin: 0;
+  color: var(--nx-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.web-auth__oauth {
+  display: grid;
+  gap: 8px;
+}
+
+.web-auth__oauth-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 38px;
+  text-decoration: none;
+}
+
+.web-auth__oauth-glyph {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.web-auth__divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--nx-faint);
+  font-size: 12px;
+}
+
+.web-auth__divider::before,
+.web-auth__divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--nx-line);
+}
+
+.web-auth__mode {
+  justify-self: start;
+}
+
+.web-auth__form {
+  display: grid;
+  gap: 12px;
+}
+
+.web-auth__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.web-auth__code {
+  max-width: 12rem;
+  font-size: 18px;
+  letter-spacing: 0.18em;
+}
+
+.web-auth__account,
+.web-auth__homes {
+  display: grid;
+  gap: 12px;
+}
+
+.web-auth__homes {
+  justify-items: start;
+}
+
+.web-onboard {
+  display: grid;
+  gap: 10px;
+}
+
+.web-onboard h4,
+.web-onboard h5 {
+  margin: 0;
+  color: var(--nx-text);
+  font-weight: 600;
+}
+
+.web-onboard h4 {
+  font-size: 15px;
+}
+
+.web-onboard h5 {
+  font-size: 14px;
+}
+
+.web-onboard__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.web-onboard__card {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius);
+  background: var(--nx-raised);
+}
+
+.web-onboard__card p {
+  margin: 0;
+  color: var(--nx-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.web-onboard__form,
+.web-onboard__token {
+  display: grid;
+  gap: 8px;
+}
+
+.web-onboard__command,
+.web-onboard__secret {
+  display: block;
+  overflow-wrap: anywhere;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--nx-line);
+  border-radius: var(--nx-radius-sm);
+  background: var(--nx-panel);
+  color: var(--nx-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.web-onboard__secret {
+  border-style: dashed;
+  border-color: var(--nx-line-strong);
+  letter-spacing: 0.04em;
+}
+
+.web-local {
+  display: grid;
+  gap: 10px;
+}
+
+.web-local__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 2px;
+  border: 0;
+  border-top: 1px dashed var(--nx-line);
+  background: transparent;
+  color: var(--nx-muted);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.web-local__toggle:hover {
+  color: var(--nx-text);
+}
+
+.web-local__toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.web-local__chevron {
+  flex: none;
+  color: var(--nx-faint);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.web-landing__plans {
+  display: block;
+}
+
+/* ======================================================================
    Optional Always-On Homes / Cloud Relay route
    ====================================================================== */
 

@@ -1,17 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 
-import {
-  CloudAccountPanel,
-  ManagedHomesPanel,
-  useCloudAccount,
-  type CloudMachine,
-} from "@stackspirit/ui";
+import { ManagedHomesPanel, useCloudAccount, type CloudMachine } from "@stackspirit/ui";
 
 import { createRelayBridge } from "../bridge/relayBridge";
 import type { HttpSseBridge } from "../bridge/HttpSseBridge";
 import type { WebCloudRuntime } from "../cloud/runtime";
 import { SpiritMark } from "../shared/next";
 import { WebApp } from "./WebApp";
+import { WebAuthPanel } from "./WebAuthPanel";
 
 /**
  * The explicit Always-On Homes route (`/cloud`).
@@ -21,12 +17,13 @@ import { WebApp } from "./WebApp";
  * page contracts do not fork between local and remote mode.
  */
 export function CloudApp({ runtime }: { runtime: WebCloudRuntime }) {
-  const phase = useCloudAccount((state) => state.phase);
   const relayStatus = useCloudAccount((state) => state.relayStatus);
   const selectedMachineId = useCloudAccount((state) => state.selectedMachineId);
   const machines = useCloudAccount((state) => state.machines);
   const [bridge, setBridge] = useState<HttpSseBridge | null>(null);
   const [bridgeError, setBridgeError] = useState<string | null>(null);
+  const [plansOpen, setPlansOpen] = useState(false);
+  const [localOpen, setLocalOpen] = useState(false);
   const bridgeRef = useRef<HttpSseBridge | null>(null);
 
   useEffect(() => {
@@ -98,29 +95,45 @@ export function CloudApp({ runtime }: { runtime: WebCloudRuntime }) {
   }
 
   const secureMachine = machines.find((machine) => machine.id === selectedMachineId) ?? null;
+
+  function openPlans(): void {
+    setPlansOpen(true);
+    window.setTimeout(() => {
+      document.getElementById("managed-homes")?.scrollIntoView?.({ block: "start" });
+    }, 0);
+  }
+
   return (
     <main className="web-boot web-cloud" id="main-canvas" data-testid="cloud-app">
       <div className="web-brand">
         <SpiritMark size={36} />
         <div>
           <strong>StackSpirit</strong>
-          <span>Always-On Homes · optional account</span>
+          <span>Always-On Homes · encrypted relay</span>
         </div>
       </div>
 
-      <section className="panel" aria-label="Cloud Relay">
+      <section className="panel" aria-label="StackSpirit Account">
         <header className="panel__header">
-          <h1 className="panel__title">Get an Always-On Home</h1>
+          <h1 className="panel__title">Sign in to StackSpirit</h1>
         </header>
         <div className="panel__body web-cloud__body">
           <p className="muted">
-            This page is optional. The local Web cockpit needs no account and no cloud
-            connection. Sign in here only to reach one of your enrolled Always-On Homes
-            through <span className="mono">relay.stackspirit.io</span>.
+            One account reaches every Always-On Machine you enroll through the encrypted
+            relay. Sign in with Google, GitHub or email; or keep using a local daemon below.
+            Nothing on this page is required for local server mode.
           </p>
 
-          <CloudAccountPanel />
-          <ManagedHomesPanel autoLoad />
+          <WebAuthPanel client={runtime.auth} onOpenPlans={openPlans} />
+
+          <section
+            className="web-landing__plans"
+            id="managed-homes"
+            aria-label="Managed Homes plans"
+            data-testid="cloud-managed-homes"
+          >
+            <ManagedHomesPanel autoLoad={plansOpen} />
+          </section>
 
           {relayStatus?.state === "secure" ? (
             <p className="notice" role="status" data-testid="cloud-opening">
@@ -133,15 +146,31 @@ export function CloudApp({ runtime }: { runtime: WebCloudRuntime }) {
               {bridgeError}
             </p>
           ) : null}
-          {phase === "local" ? (
-            <p className="muted small">
-              Nothing above is required.{" "}
-              <a className="nx-link" href="/">
-                Continue with a local daemon
-              </a>
-              .
-            </p>
-          ) : null}
+
+          <div className="web-local">
+            <button
+              type="button"
+              className="web-local__toggle"
+              aria-expanded={localOpen}
+              onClick={() => setLocalOpen((open) => !open)}
+              data-testid="local-daemon-toggle"
+            >
+              <span>Or connect to a local daemon without an account</span>
+              <span className="web-local__chevron" aria-hidden="true">
+                {localOpen ? "−" : "+"}
+              </span>
+            </button>
+            {localOpen ? (
+              <p className="muted small" data-testid="local-daemon-details">
+                The local Web cockpit needs no account and no cloud connection.{" "}
+                <a className="nx-link" href="/">
+                  Continue with a local daemon
+                </a>
+                . Account sign-in is only for reaching an enrolled Always-On Machine through{" "}
+                <span className="mono">relay.stackspirit.io</span>.
+              </p>
+            ) : null}
+          </div>
         </div>
       </section>
     </main>
