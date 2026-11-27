@@ -336,12 +336,13 @@ project** is live, not preview: it runs `vowp project add` (`ss-99`, `6fc6d8d`; 
      VOWP `0.4.0` with no local orchestrator record, so it honestly returns
      `chat_not_configured`; Local chat is not live here. The §9.1b owner run in the
      checklist is still outstanding.
-   - **Server `global`/`project`** — still gated. VOWP `0.4.0` has no
-     `vowp orchestrator endpoint`, so Server chat returns the typed `chat_gated` gate
-     until VOWP `0.5` ships the endpoint. The owner chose that endpoint (decision **A**,
-     recorded with `ss-50` on 2026-11-19) and did **not** approve the app-owned SSH
-     forward; the `chat_gated` behavior is unchanged. The transport chip stays
-     read-only; the session **Host** control (step 6) moves the orchestrator.
+   - **Server `global`/`project`** — still gated. The app transport does not open SSH, so
+     Server chat returns the typed `chat_gated` gate
+     (`crates/spirit-core/src/engine/chat/local.rs`, `validate_start`) even where VOWP
+     reports an endpoint. The owner chose that endpoint (decision **A**, recorded with
+     `ss-50` on 2026-11-19) and did **not** approve the app-owned SSH forward; the
+     `chat_gated` behavior is unchanged. The transport chip stays read-only; the session
+     **Host** control (step 6) moves the orchestrator.
    The contract is [`docs/ORCHESTRATOR-CHAT.md`](ORCHESTRATOR-CHAT.md) §2–§7 and
    §9; the owner checklist is
    [`scripts/verify-orchestrator-chat.mjs`](../scripts/verify-orchestrator-chat.mjs), and
@@ -433,7 +434,8 @@ project** is live, not preview: it runs `vowp project add` (`ss-99`, `6fc6d8d`; 
 
 Running the app against the real Mac orchestrator found problems that fake-backed tests missed
 (the shell still asked for a **Server** location although only **Local** chat is live). Next, in
-order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md`:
+order, with the VOWP side tracked in `runtime/docs/design/v0.5.1/scope.md` (the bundled runtime
+copy of the VOWP plan):
 
 1. **Set up with AI respects an existing profile — landed (`ss-70`).** With a saved server,
    **Chat with the setup assistant** and the sidebar's **Setup assistant** open the setup chat
@@ -443,13 +445,30 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
    the card's explicit **Add another server** action. The no-profile welcome and secure-card path
    is unchanged, the honest engine error still wins when the engine is not ready, and component
    plus Meadow e2e coverage (axe WCAG 2.2 AA in light and dark) records both entry points.
-2. **Server chat transport options** (document only): what a home-hosted orchestrator's endpoint
-   allows, versus an app-owned SSH forward, versus keeping Server chat gated. The owner decides.
-3. **Session ownership in the UI** (after VOWP v0.5.1 slice 3): show which surface holds the
-   session (OpenCode, StackSpirit, CLI), take over explicitly, and make the previous writer
-   read-only. Until then do not type into the same orchestrator from two windows.
-4. **Use the VOWP-reported native session id** (after VOWP v0.5.1 slice 2) and drop the
-   "newest host session" heuristic.
+2. **Server chat transport options** — the decision note landed (`ss-71`, `09dd32b`,
+   [`docs/SERVER-CHAT-OPTIONS.md`](SERVER-CHAT-OPTIONS.md)); it lays out what a home-hosted
+   orchestrator's endpoint allows, an app-owned SSH forward, and keeping Server chat gated.
+   The owner decision remains **A** (§3), so Server chat stays gated; revisit only if the
+   owner asks.
+3. **Session ownership in the UI — landed (`ss-92`, `9a1031c`; follow-up fixes `1eee71f`,
+   `504987b`, `1c9f315`; `ss-95`, `4411dbf`).** The runtime endpoint carries `owner`/`access`
+   (`runtime/crates/vowp-protocol/src/surface.rs`), and StackSpirit maps the home snapshot's
+   `SessionOwner` into `FleetView.session_owners` (`crates/spirit-core/src/view/fleet.rs`).
+   The chat's Meadow ownership banner names the holder and its activity; **Take over** is
+   explicit (`vowp --json session takeover --kind chat --holder stackspirit --node
+   <local node>`) and asks for an extra confirmation while a turn is running. If VOWP lacks
+   the command the banner keeps Take over disabled and shows a typed error. The loopback
+   engine proxy is still deferred (owner decision 2026-11-20), so ownership is recorded and
+   cooperative and a direct engine writer is not fenced: do not type into the same
+   orchestrator from two windows.
+4. **Use the VOWP-reported native session id — landed (`ss-61`, `66563cd`; `ss-62`,
+   `0237770`).** `vowp agent orchestrator endpoint` now reports `native_session_id` (runtime
+   slice 2 is done in `runtime/docs/design/v0.5.1/scope.md`), and
+   `LocalChatProvider::open_orchestrator` (`crates/spirit-core/src/engine/chat/local.rs`)
+   attaches to it whenever it is present. `discover_native_session` (`GET /api/session`,
+   newest `time.updated`) runs only when the field is `null`, so the old heuristic remains
+   as the explicit fallback rather than the default; the `chat_endpoint` tests cover both
+   paths.
 5. **Owner style advice** to be turned into a UI job when supplied.
 6. **Live owner smoke test** stays an owner step: the real endpoint lives on the owner's Mac, so a
    server-side worker cannot exercise it.
@@ -470,7 +489,7 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
    with axe WCAG 2.2 AA in light and dark. The text-field focus indicator is that border
    step plus the caret, not a 3:1 ring.
 9. **BYOK keychain fix, searchable model picker with Manage models, and VPS Xvfb verification
-   — `ss-86` and `ss-87` landed; `ss-88` planned (`ss-85` diagnosis).** Root-cause analysis in
+   — `ss-86`, `ss-87` and `ss-88` landed (`ss-85` diagnosis).** Root-cause analysis in
    `docs/ORCHESTRATOR-CHAT.md` found that root `Cargo.toml` declared `keyring = "3"` without
    platform features (`apple-native`, `windows-native`, `linux-native`), silently compiling
    the non-persistent mock store so saved provider keys disappeared on `verify_key` and
@@ -492,9 +511,14 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
    `opencode.log` errors and zero key leaks. It found one product defect, now fixed in this job: the desktop binary
    **orphaned the sidecar on `SIGTERM`**; `src-tauri/src/lib.rs` now stops the engine on
    `SIGTERM`/`SIGINT` and on `RunEvent::ExitRequested`/`Exit`, with the regression test
-   `src-tauri/tests/engine_shutdown.rs`. `node scripts/verify-byok-xvfb.mjs` exits 0. Still
-   open (follow-up `ss-91`): the picker's scroll region fails axe `scrollable-region-focusable`
-   with a long list, and the chat header overlaps the tall picker at 1280×720.
+   `src-tauri/tests/engine_shutdown.rs`. `node scripts/verify-byok-xvfb.mjs` exits 0.
+   **The picker follow-up also landed (`e3f4a25`; follow-ups `5d09668`, `4dc9b0a`):** the
+   list is a labelled, focusable scroll region (`tabIndex={0}`,
+   `data-testid="model-picker-scroll"`), the search header is a flex sibling above it, and
+   the popover is capped to the chat header, so a long list passes axe
+   `scrollable-region-focusable` and does not overlap the header at 1280×720. Verified by
+   `packages/spirit-ui/src/test/next/composer.test.tsx` and the `Long model list is
+   keyboard-scrollable with no header overlap` Playwright case in light and dark (2/2).
 10. **Private provider keys, project views, Inbox and one-click orchestrator — `ss-107`,
     `ss-108b`, `ss-109`, `ss-110` landed (2026-11-22).**
     - **`ss-107` (`456036a`):** live VPS `refresh_capacity` on connect, poll and refresh, bound
@@ -517,8 +541,9 @@ order, with the VOWP side tracked in `vowp-private` `docs/design/v0.5.1/scope.md
       `Connect a provider` is hidden on gate errors.
     - **Honest limits:** `ss-110` is the local bundled OpenCode fallback (private workspace,
       using connected OpenCode/BYOK models). The VPS `vowp orchestrator new` plus
-      `surface pair` path is separate and still pending, and the owner's Mac live D6
-      readiness check has not been run; no live Mac verification is claimed here.
+      `surface pair` path landed later in §5.2 (`ss-116`–`ss-119`, `ss-122b`); it is not
+      claimed live here, and the owner's Mac live D6 readiness check has not been run, so
+      no live Mac verification is claimed.
 
 ### 5.2 Chat UX landed (ss-116..ss-118, verified by ss-119, 2026-11-23)
 
