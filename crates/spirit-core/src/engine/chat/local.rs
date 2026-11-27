@@ -26,7 +26,7 @@ use zeroize::Zeroizing;
 
 use crate::engine::chat::endpoint::{
     ChatEndpointResolver, EndpointAccessWire, LoopbackAuth, LoopbackHost, ResolvedEndpoint,
-    SessionOwnerWire, VowpEndpointResolver, parse_workspace_path,
+    SessionOwnerWire, VowpEndpointResolver,
 };
 use crate::engine::chat::model::{
     ChatAccess, ChatCloseReason, ChatEvent, ChatLogPage, ChatLogQuery, ChatMessage,
@@ -306,12 +306,6 @@ impl fmt::Debug for KnownOrchestratorSession {
             )
             .finish()
     }
-}
-
-/// One discovered native session and the workspace that owns it. Core-only.
-struct DiscoveredSession {
-    id: String,
-    workspace: PathBuf,
 }
 
 /// The local chat provider for the bundled StackSpirit Engine.
@@ -824,22 +818,17 @@ impl LocalChatProvider {
         session: &ChatSessionId,
         resolved: ResolvedEndpoint,
     ) -> Result<ChatSessionView, SpiritError> {
-        let reported_native = resolved.native_session_id.clone();
+        let native = resolved.native_session_id.clone().ok_or_else(|| {
+            chat_not_configured_error(
+                name,
+                "did not report its OpenCode session id; VOWP 0.5.1 or newer is required",
+            )
+        })?;
         let vowp_session_id = resolved.session_id.clone();
         let ownership = resolved.owner.as_ref().map(chat_ownership_view);
         let access = ChatAccess::from(resolved.access);
         let mut endpoint = ChatEndpoint::orchestrator(resolved);
         endpoint.api_prefix = self.inner.detect_api_prefix(&endpoint).await;
-        let native = match reported_native {
-            Some(native) => native,
-            None => {
-                let discovered = self.inner.discover_native_session(&endpoint, name).await?;
-                if endpoint.directory.is_none() {
-                    endpoint.directory = Some(discovered.workspace);
-                }
-                discovered.id
-            }
-        };
         match self.inner.get_native_session(&endpoint, &native).await {
             Ok(()) => {}
             Err(error) if error.code == SpiritErrorCode::NotFound => {
@@ -1777,40 +1766,6 @@ impl Inner {
         expected_session_id: Option<&str>,
     ) -> Result<ResolvedEndpoint, SpiritError> {
         self.resolver.resolve(name, expected_session_id).await
-    }
-
-    /// Lists the host's OpenCode sessions and returns the newest one.
-    ///
-    /// This is the only path that discovers a native id. It never creates a session,
-    /// never guesses when the list is empty or unreadable, and names only the
-    /// orchestrator and the failure class in errors. The URL, credential, native ids and
-    /// workspace path stay core-only.
-    async fn discover_native_session(
-        &self,
-        endpoint: &ChatEndpoint,
-        name: &str,
-    ) -> Result<DiscoveredSession, SpiritError> {
-        let response = self
-            .request(
-                "GET",
-                endpoint.clone(),
-                "/api/session".to_owned(),
-                None,
-                SESSION_TIMEOUT,
-            )
-            .await
-            .map_err(|_| chat_not_configured_error(name, "is not reachable"))?;
-        if matches!(response.status, 401 | 403) {
-            return Err(chat_auth_error(name));
-        }
-        if !(200..300).contains(&response.status) {
-            return Err(chat_not_configured_error(
-                name,
-                "did not list its OpenCode sessions",
-            ));
-        }
-        let expected_workspace = endpoint.directory.as_deref();
-        parse_discovered_session(&response.body, expected_workspace, name)
     }
 
     async fn check_health(&self, port: u16) -> Result<(), SpiritError> {
@@ -3918,121 +3873,6 @@ fn parse_assistant_response(body: &[u8], now: Timestamp) -> AssistantOutcome {
     }
 }
 
-/// Parses the OpenCode `/api/session` answer and chooses the newest usable session.
-///
-/// The accepted shape is `{"data":[{"id":...,"time":{"updated":<ms>},...}]}`. A known
-/// orchestrator workspace keeps only its sessions. Without one, every usable entry must
-/// report the same `location.directory`; a mixed or missing workspace is a typed
-/// `chat_not_configured` rather than a guess.
-fn parse_discovered_session(
-    body: &[u8],
-    expected_workspace: Option<&Path>,
-    name: &str,
-) -> Result<DiscoveredSession, SpiritError> {
-    let document = serde_json::from_slice::<Value>(body).map_err(|_| {
-        chat_not_configured_error(name, "did not return a readable OpenCode session list")
-    })?;
-    let Some(entries) = document.get("data").and_then(Value::as_array) else {
-        return Err(chat_not_configured_error(
-            name,
-            "did not return the expected OpenCode session list",
-        ));
-    };
-    if entries.is_empty() {
-        return Err(chat_not_configured_error(
-            name,
-            "has no OpenCode session to continue",
-        ));
-    }
-    let mut newest: Option<(i64, String, PathBuf)> = None;
-    let mut inferred: Option<PathBuf> = None;
-    for entry in entries {
-        let reported = entry_workspace(entry);
-        let workspace = match reported {
-            Some(value) if !value.is_empty() => match parse_workspace_path(value) {
-                Some(workspace) => Some(workspace),
-                None => {
-                    return Err(chat_not_configured_error(
-                        name,
-                        "reported an unreadable OpenCode workspace",
-                    ));
-                }
-            },
-            _ => None,
-        };
-        if let Some(expected) = expected_workspace {
-            // A reported workspace outside the orchestrator's own directory is another
-            // host's conversation; never rank it.
-            if workspace
-                .as_deref()
-                .is_some_and(|workspace| workspace != expected)
-            {
-                continue;
-            }
-            let Some(updated) = entry_updated(entry) else {
-                return Err(malformed_session_list(name));
-            };
-            let id = entry_id(entry).ok_or_else(|| malformed_session_list(name))?;
-            if newest.as_ref().is_none_or(|(best, _, _)| updated > *best) {
-                newest = Some((updated, id, expected.to_path_buf()));
-            }
-            continue;
-        }
-        let Some(workspace) = workspace else {
-            return Err(chat_not_configured_error(
-                name,
-                "has no single OpenCode workspace to continue",
-            ));
-        };
-        match &inferred {
-            None => inferred = Some(workspace.clone()),
-            Some(existing) if existing == &workspace => {}
-            Some(_) => {
-                return Err(chat_not_configured_error(
-                    name,
-                    "has no single OpenCode workspace to continue",
-                ));
-            }
-        }
-        let Some(updated) = entry_updated(entry) else {
-            return Err(malformed_session_list(name));
-        };
-        let id = entry_id(entry).ok_or_else(|| malformed_session_list(name))?;
-        if newest.as_ref().is_none_or(|(best, _, _)| updated > *best) {
-            newest = Some((updated, id, workspace));
-        }
-    }
-    newest
-        .map(|(_, id, workspace)| DiscoveredSession { id, workspace })
-        .ok_or_else(|| {
-            chat_not_configured_error(name, "has no OpenCode session in its workspace to continue")
-        })
-}
-
-fn entry_id(entry: &Value) -> Option<String> {
-    let id = entry.get("id").and_then(Value::as_str)?;
-    safe_native_id(id).ok()
-}
-
-fn entry_updated(entry: &Value) -> Option<i64> {
-    entry
-        .get("time")
-        .and_then(|time| time.get("updated"))
-        .and_then(Value::as_i64)
-}
-
-fn entry_workspace(entry: &Value) -> Option<&str> {
-    entry
-        .get("location")
-        .and_then(|location| location.get("directory"))
-        .and_then(Value::as_str)
-        .or_else(|| entry.get("directory").and_then(Value::as_str))
-}
-
-fn malformed_session_list(name: &str) -> SpiritError {
-    chat_not_configured_error(name, "returned an unreadable OpenCode session list")
-}
-
 fn parse_native_sessions(body: &[u8]) -> Vec<NativeSession> {
     let Ok(document) = serde_json::from_slice::<Value>(body) else {
         return Vec::new();
@@ -4309,7 +4149,7 @@ fn chat_gated_error(detail: &str) -> SpiritError {
         .with_hint("Server and project chat wait for VOWP 0.5's orchestrator endpoint.")
 }
 
-/// A typed Local-orchestrator discovery failure. It names the orchestrator and the
+/// A typed Local-orchestrator configuration failure. It names the orchestrator and the
 /// failure class only; no URL, port, credential, native id or workspace path appears.
 fn chat_not_configured_error(name: &str, detail: &str) -> SpiritError {
     SpiritError::new(
@@ -4320,18 +4160,6 @@ fn chat_not_configured_error(name: &str, detail: &str) -> SpiritError {
         ),
     )
     .with_hint("Start or resume the orchestrator in VOWP, open its conversation there, then retry.")
-}
-
-/// The reported VOWP credential was rejected by the local app.
-fn chat_auth_error(name: &str) -> SpiritError {
-    SpiritError::new(
-        SpiritErrorCode::Auth,
-        format!(
-            "chat_auth: the {} orchestrator rejected the endpoint credential",
-            safe_orchestrator_name(name)
-        ),
-    )
-    .with_hint("Restart the orchestrator in VOWP so it refreshes its local credential, then retry.")
 }
 
 fn safe_orchestrator_name(name: &str) -> &str {

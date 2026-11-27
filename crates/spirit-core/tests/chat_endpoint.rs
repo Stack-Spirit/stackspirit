@@ -30,7 +30,6 @@ use spirit_core::error::{SpiritError, SpiritErrorCode};
 const NATIVE: &str = "ses_mirrored_fake_1";
 const HOME_SESSION: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const WORKSPACE: &str = "/fake/orchestrator/workspace";
-const OTHER_WORKSPACE: &str = "/fake/other/workspace";
 
 fn secret() -> String {
     ["not", "a", "real", "credential"].join("-")
@@ -209,20 +208,6 @@ impl FakeServer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .list = list;
-    }
-
-    fn set_list_body(&self, body: Value) {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .list_body = Some(body);
-    }
-
-    fn set_list_status(&self, status: u16) {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .list_status = status;
     }
 
     fn add_log(&self, id: &str, messages: Vec<Value>) {
@@ -1020,20 +1005,13 @@ fn no_session_creates(requests: &[RequestRecord]) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_null_native_id_continues_the_newest_host_session() {
+async fn a_null_native_id_is_chat_not_configured_and_never_attaches_a_host_session() {
     let credential = secret();
     let expected_auth = format!(
         "Basic {}",
         base64(format!("opencode:{credential}").as_bytes())
     );
-    let server = FakeServer::new(Some(expected_auth.clone()));
-    server.add_log(
-        "ses_older_fake",
-        vec![json!({
-            "info": {"id": "msg_older", "role": "assistant", "time": {"created": 1000}},
-            "parts": [{"type": "text", "text": "The older conversation"}],
-        })],
-    );
+    let server = FakeServer::new(Some(expected_auth));
     server.add_log(
         "ses_newest_fake",
         vec![json!({
@@ -1041,10 +1019,11 @@ async fn a_null_native_id_continues_the_newest_host_session() {
             "parts": [{"type": "text", "text": "The owner's existing conversation"}],
         })],
     );
-    server.set_list(vec![
-        session_entry("ses_older_fake", 1000, Some(WORKSPACE)),
-        session_entry("ses_newest_fake", 5000, Some(WORKSPACE)),
-    ]);
+    server.set_list(vec![session_entry(
+        "ses_newest_fake",
+        5000,
+        Some(WORKSPACE),
+    )]);
     let workspace = tempfile::tempdir().unwrap();
     let vowp_dir = tempfile::tempdir().unwrap();
     let url = format!("http://127.0.0.1:{}", server.port());
@@ -1062,88 +1041,46 @@ async fn a_null_native_id_continues_the_newest_host_session() {
     write_endpoint_vowp(vowp_dir.path(), &document);
     let provider = provider_with_vowp(Arc::new(PanicEngine), workspace.path(), vowp_dir.path());
 
-    let view = provider.start(&global_input()).await.unwrap();
-    assert_eq!(view.state, ChatSessionState::Ready);
-    assert!(view.attached);
-    assert_safe_view(
-        &serde_json::to_value(&view).unwrap(),
+    let error = provider.start(&global_input()).await.unwrap_err();
+    assert_eq!(error.code, SpiritErrorCode::Gate);
+    assert!(error.message.contains("chat_not_configured"));
+    assert!(
+        error.message.contains("VOWP 0.5.1 or newer"),
+        "the typed failure must name the VOWP version requirement: {error}"
+    );
+    assert_safe_error(
+        &error,
         &[
             &credential,
-            "ses_older_fake",
             "ses_newest_fake",
             HOME_SESSION,
             WORKSPACE,
+            &server.port().to_string(),
         ],
     );
 
     let requests = server.requests();
-    let list = requests
-        .iter()
-        .find(|request| request.method == "GET" && request.path == "/api/session")
-        .expect("a null native id must list the host sessions");
-    assert_eq!(
-        list.headers.get("authorization"),
-        Some(&expected_auth),
-        "the discovery request must use the reported Basic credential"
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.path.starts_with("/session/")),
+        "a null native id must not attach or read any host session"
     );
     assert!(
-        !list.headers.contains_key("x-opencode-directory"),
-        "VOWP reported no workspace, so the list request must not invent one"
+        !requests
+            .iter()
+            .any(|request| request.path == "/api/session"),
+        "a null native id must not list host sessions"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.path.ends_with("/message")),
+        "a null native id must not read any host session log"
     );
     assert!(
         no_session_creates(&requests),
-        "discovery must never create a native session"
-    );
-    let get = requests
-        .iter()
-        .find(|request| request.method == "GET" && request.path == "/session/ses_newest_fake")
-        .expect("the newest session must be checked");
-    assert_eq!(
-        get.headers.get("x-opencode-directory").map(String::as_str),
-        Some(WORKSPACE),
-        "the discovered workspace must scope the attach path"
-    );
-    let log = requests
-        .iter()
-        .find(|request| {
-            request.method == "GET" && request.path == "/session/ses_newest_fake/message"
-        })
-        .expect("the newest session's log must be read");
-    assert_eq!(
-        log.headers.get("x-opencode-directory").map(String::as_str),
-        Some(WORKSPACE)
-    );
-    assert!(
-        !requests.iter().any(|request| {
-            request.method == "GET" && request.path == "/session/ses_older_fake/message"
-        }),
-        "the older session must not be read"
-    );
-
-    let page = provider
-        .log(
-            &ChatSessionId::Global,
-            &ChatLogQuery {
-                cursor: None,
-                limit: Some(50),
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(page.messages.len(), 1);
-    assert_eq!(
-        page.messages[0].joined_text(),
-        "The owner's existing conversation"
-    );
-    assert_safe_view(
-        &serde_json::to_value(&page).unwrap(),
-        &[
-            &credential,
-            "ses_older_fake",
-            "ses_newest_fake",
-            HOME_SESSION,
-            WORKSPACE,
-        ],
+        "a null native id must never create a native session"
     );
 }
 
@@ -1206,26 +1143,8 @@ async fn a_reported_native_id_wins_and_never_lists() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reported_workspace_scopes_discovery_and_is_sent() {
+async fn a_reported_workspace_scopes_the_attach_and_log_paths() {
     let server = FakeServer::new(None);
-    server.add_log(
-        "ses_orchestrator_fake",
-        vec![json!({
-            "info": {"id": "msg_orchestrator", "role": "assistant", "time": {"created": 1000}},
-            "parts": [{"type": "text", "text": "The orchestrator conversation"}],
-        })],
-    );
-    server.add_log(
-        "ses_other_fake",
-        vec![json!({
-            "info": {"id": "msg_other", "role": "assistant", "time": {"created": 9000}},
-            "parts": [{"type": "text", "text": "Another directory's conversation"}],
-        })],
-    );
-    server.set_list(vec![
-        session_entry("ses_other_fake", 9000, Some(OTHER_WORKSPACE)),
-        session_entry("ses_orchestrator_fake", 1000, Some(WORKSPACE)),
-    ]);
     let workspace = tempfile::tempdir().unwrap();
     let vowp_dir = tempfile::tempdir().unwrap();
     let url = format!("http://127.0.0.1:{}", server.port());
@@ -1235,7 +1154,7 @@ async fn a_reported_workspace_scopes_discovery_and_is_sent() {
             "opencode",
             "running",
             Some(&url),
-            None,
+            Some(NATIVE),
             HOME_SESSION,
         ),
         WORKSPACE,
@@ -1245,230 +1164,42 @@ async fn a_reported_workspace_scopes_discovery_and_is_sent() {
 
     provider.start(&global_input()).await.unwrap();
     let requests = server.requests();
-    let list = requests
+    let attach = requests
         .iter()
-        .find(|request| request.method == "GET" && request.path == "/api/session")
-        .expect("the discovery list");
+        .find(|request| request.method == "GET" && request.path == format!("/session/{NATIVE}"))
+        .expect("the reported native session must be checked");
     assert_eq!(
-        list.headers.get("x-opencode-directory").map(String::as_str),
+        attach
+            .headers
+            .get("x-opencode-directory")
+            .map(String::as_str),
         Some(WORKSPACE),
-        "a reported workspace must be sent on the discovery request"
+        "a reported workspace must scope the attach request"
     );
-    assert!(
-        requests
-            .iter()
-            .any(|request| request.method == "GET"
-                && request.path == "/session/ses_orchestrator_fake"),
-        "only the session in the orchestrator workspace may be chosen"
+    let log = requests
+        .iter()
+        .find(|request| {
+            request.method == "GET" && request.path == format!("/session/{NATIVE}/message")
+        })
+        .expect("the reported native session log must be read");
+    assert_eq!(
+        log.headers.get("x-opencode-directory").map(String::as_str),
+        Some(WORKSPACE),
+        "a reported workspace must scope the log request"
     );
     assert!(
         !requests
             .iter()
-            .any(|request| request.method == "GET" && request.path == "/session/ses_other_fake"),
-        "a session in another workspace must be ignored"
+            .any(|request| request.path == "/session/ses_other_fake"),
+        "no other workspace's session may be read"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.path == "/api/session"),
+        "a reported native id must never list host sessions"
     );
     assert!(no_session_creates(&requests));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn empty_or_malformed_session_lists_are_chat_not_configured() {
-    let workspace = tempfile::tempdir().unwrap();
-    for (label, list, body, status) in [
-        ("empty", Some(Vec::new()), None, None),
-        (
-            "not an array",
-            None,
-            Some(json!({"data": "not-a-list"})),
-            None,
-        ),
-        ("no data", None, Some(json!({"sessions": []})), None),
-        (
-            "entry without an id",
-            Some(vec![
-                json!({"time": {"updated": 1000}, "location": {"directory": WORKSPACE}}),
-            ]),
-            None,
-            None,
-        ),
-        (
-            "entry without updated",
-            Some(vec![
-                json!({"id": "ses_missing_time", "location": {"directory": WORKSPACE}}),
-            ]),
-            None,
-            None,
-        ),
-        ("server refused the list", None, None, Some(500)),
-    ] {
-        let server = FakeServer::new(None);
-        if let Some(list) = list {
-            server.set_list(list);
-        }
-        if let Some(body) = body {
-            server.set_list_body(body);
-        }
-        if let Some(status) = status {
-            server.set_list_status(status);
-        }
-        let vowp_dir = tempfile::tempdir().unwrap();
-        let url = format!("http://127.0.0.1:{}", server.port());
-        let document = endpoint_document(
-            "global",
-            "opencode",
-            "running",
-            Some(&url),
-            None,
-            HOME_SESSION,
-        );
-        write_endpoint_vowp(vowp_dir.path(), &document);
-        let provider = provider_with_vowp(Arc::new(PanicEngine), workspace.path(), vowp_dir.path());
-        let error = provider.start(&global_input()).await.unwrap_err();
-        assert_eq!(error.code, SpiritErrorCode::Gate, "{label}");
-        assert!(
-            error.message.contains("chat_not_configured"),
-            "{label}: {error}"
-        );
-        assert_safe_error(
-            &error,
-            &[
-                HOME_SESSION,
-                "ses_missing_time",
-                WORKSPACE,
-                &server.port().to_string(),
-            ],
-        );
-        assert!(
-            no_session_creates(&server.requests()),
-            "{label}: a bad list must never create a session"
-        );
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_or_mixed_workspaces_are_chat_not_configured() {
-    let credential = secret();
-    let expected_auth = format!(
-        "Basic {}",
-        base64(format!("opencode:{credential}").as_bytes())
-    );
-    let workspace = tempfile::tempdir().unwrap();
-    for (label, list) in [
-        (
-            "missing",
-            vec![json!({
-                "id": "ses_no_workspace",
-                "time": {"created": 1000, "updated": 1000},
-            })],
-        ),
-        (
-            "mixed",
-            vec![
-                session_entry("ses_workspace_a", 1000, Some(WORKSPACE)),
-                session_entry("ses_workspace_b", 2000, Some(OTHER_WORKSPACE)),
-            ],
-        ),
-    ] {
-        let server = FakeServer::new(Some(expected_auth.clone()));
-        server.set_list(list);
-        let vowp_dir = tempfile::tempdir().unwrap();
-        let url = format!("http://127.0.0.1:{}", server.port());
-        let document = with_auth(
-            endpoint_document(
-                "global",
-                "opencode",
-                "running",
-                Some(&url),
-                None,
-                HOME_SESSION,
-            ),
-            &credential,
-        );
-        write_endpoint_vowp(vowp_dir.path(), &document);
-        let provider = provider_with_vowp(Arc::new(PanicEngine), workspace.path(), vowp_dir.path());
-        let error = provider.start(&global_input()).await.unwrap_err();
-        assert_eq!(error.code, SpiritErrorCode::Gate, "{label}");
-        assert!(
-            error.message.contains("chat_not_configured"),
-            "{label}: {error}"
-        );
-        assert_safe_error(
-            &error,
-            &[
-                &credential,
-                HOME_SESSION,
-                "ses_no_workspace",
-                "ses_workspace_a",
-                "ses_workspace_b",
-                WORKSPACE,
-                OTHER_WORKSPACE,
-                &server.port().to_string(),
-            ],
-        );
-        assert!(
-            no_session_creates(&server.requests()),
-            "{label}: no session may be created"
-        );
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_rejected_discovery_credential_is_a_safe_chat_auth_error() {
-    let credential = secret();
-    let expected_auth = format!(
-        "Basic {}",
-        base64("opencode:a-different-credential".as_bytes())
-    );
-    let server = FakeServer::new(Some(expected_auth));
-    let workspace = tempfile::tempdir().unwrap();
-    let vowp_dir = tempfile::tempdir().unwrap();
-    let url = format!("http://127.0.0.1:{}", server.port());
-    let document = with_auth(
-        endpoint_document(
-            "global",
-            "opencode",
-            "running",
-            Some(&url),
-            None,
-            HOME_SESSION,
-        ),
-        &credential,
-    );
-    write_endpoint_vowp(vowp_dir.path(), &document);
-    let provider = provider_with_vowp(Arc::new(PanicEngine), workspace.path(), vowp_dir.path());
-
-    let error = provider.start(&global_input()).await.unwrap_err();
-    assert_eq!(error.code, SpiritErrorCode::Auth);
-    assert!(error.message.contains("chat_auth"));
-    assert_safe_error(
-        &error,
-        &[
-            &credential,
-            HOME_SESSION,
-            WORKSPACE,
-            &server.port().to_string(),
-        ],
-    );
-    assert!(no_session_creates(&server.requests()));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_unreachable_discovery_endpoint_is_chat_not_configured() {
-    let workspace = tempfile::tempdir().unwrap();
-    let vowp_dir = tempfile::tempdir().unwrap();
-    let document = endpoint_document(
-        "global",
-        "opencode",
-        "running",
-        Some("http://127.0.0.1:1"),
-        None,
-        HOME_SESSION,
-    );
-    write_endpoint_vowp(vowp_dir.path(), &document);
-    let provider = provider_with_vowp(Arc::new(PanicEngine), workspace.path(), vowp_dir.path());
-    let error = provider.start(&global_input()).await.unwrap_err();
-    assert_eq!(error.code, SpiritErrorCode::Gate);
-    assert!(error.message.contains("chat_not_configured"));
-    assert_safe_error(&error, &[HOME_SESSION, "127.0.0.1:1"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1655,6 +1386,14 @@ async fn opencode_2x_api_prefix_is_detected_and_applied_to_every_call() {
         .unwrap();
     let _ = collect_until_done(&mut receiver, Duration::from_secs(5)).await;
     let paths: Vec<String> = server.requests().into_iter().map(|r| r.path).collect();
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| path.as_str() == "/api/session")
+            .count(),
+        1,
+        "the API-prefix probe is the only allowed session-list read: {paths:?}"
+    );
     assert!(
         paths.contains(&format!("/api/session/{NATIVE}/message")),
         "{paths:?}"
