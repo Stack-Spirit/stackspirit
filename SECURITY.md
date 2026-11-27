@@ -96,11 +96,180 @@ crate. Its boundary:
 - This was exercised with fake-`vowp` tests here; no live Mac add run was performed from
   this Linux host.
 
+### Web/PWA account session
+
+- The optional account route is `/cloud`; the `/` daemon cockpit still needs no account and
+  sends no `Authorization` header to the daemon.
+- The OAuth callback arrives as `#auth_token=<token>`. `consumeAuthTokenFragment` reads it
+  once in the auth panel's first-render state initializer, validates the opaque bearer
+  pattern and calls `history.replaceState` with only the path and query, so the fragment is
+  removed from the address bar and history before any view renders. A malformed
+  `auth_token` is scrubbed the same way and is not stored.
+- A valid token lives in `apps/spirit-web/src/auth/session.ts` module memory only, for the
+  lifetime of the page. It is never written to `localStorage`, `sessionStorage`, a cookie,
+  a log, an error message or a rendered field. The auth panel receives the parsed value in
+  memory to load the account; it does not display it. Sign-out and cloud-runtime disposal
+  clear it.
+- The token is attached only as `Authorization: Bearer` to explicit StackSpirit API
+  requests. Those requests use `credentials: "omit"`, `redirect: "error"` and
+  `cache: "no-store"`. The account token is never sent to the local daemon or used for
+  `/api/v1` reads.
+- The older no-browser-token rule still holds for the daemon `VOWP_API_TOKEN`, provider
+  keys and SSH material: the no-account cockpit holds none of them. The account bearer
+  token is a separate cloud credential used only against the StackSpirit API.
+- The one-time machine-enrollment token is a different credential. The onboarding card
+  deliberately renders it once, with its expiry, so the owner can paste it into
+  `relay enroll`; it is not the account session token.
+- Limits: memory-only keeps the token out of browser storage and history, but any script
+  running in the page origin, a browser extension, or a person with the open browser
+  profile can read page memory while the session lives. A reload or PWA restart loses the
+  session and the owner signs in again. See [`docs/WEB.md`](docs/WEB.md) §11.2.
+
+### Cloud account and relay
+
+- The account client is opt-in: constructing it makes no request and no socket, and
+  account-free local and SSH mode works without signing in. Nothing calls the cloud until
+  the owner starts sign-in or opens the plan catalogue.
+- The Web `WebCloudClient` and the shared desktop `StackSpiritCloudClient` keep the access
+  token and the pending device authorization in memory only and do not persist an access or
+  refresh token. Device sign-in polls `/v1/auth/device/token` with the `device_code` only in
+  the request body. The account, machine, plan and provisioning read models carry no bearer
+  token, device code, relay ticket or provider key; the pending device view shows the user
+  code and verification URL, not the polling code. None of the bearer token, refresh token,
+  device code, relay ticket or provider key appears in a StackSpirit log, an error message
+  or a rendered field.
+- `spirit-core` also implements the refresh path. `CloudSession` wraps access and refresh
+  tokens in `Zeroizing`, its `Debug` prints `[redacted]`, and `CloudRequest` /
+  `CloudResponse` `Debug` prints header names and body lengths only. An opted-in
+  `JsonCloudSessionStore` writes `<app-data>/cloud-session.json` atomically at mode `0600`
+  in a mode-`0700` directory, refuses to read a symlink or a file wider than `0600`, and
+  stores the access and refresh tokens as plain JSON. That file is not encrypted at rest.
+  The current desktop cloud runtime uses the shared in-memory client, so it does not create
+  that file.
+- A relay ticket is short-lived (the client clamps it to 30–300 seconds) and scoped. Its
+  request carries only public key material (a P-256 JWK), a public nonce, the client kind,
+  a TTL and the requested scopes. The ticket is a credential held in client memory; it is
+  not put in the WebSocket URL, logged or rendered. The client sends it in `client.hello`
+  over WSS.
+- After the relay hello, the channel is encrypted end to end: ephemeral P-256 ECDH,
+  HKDF-SHA256, AES-256-GCM, and verification of the machine's Ed25519 signature. Relay
+  HTTP request and response frames are sealed before they cross the relay; the initial
+  hello carries the ticket and public handshake fields, not an SSH or provider credential.
+  If the browser lacks the required WebCrypto primitives the relay fails closed; there is
+  no plaintext fallback.
+- Limits: the account API sees the account e-mail, machine names, presence and ticket
+  requests. The relay sees connection and routing metadata and the ticket. End-to-end
+  encryption protects relayed frame contents from the relay, not from a compromised
+  browser, account or machine endpoint. Account e-mail and machine labels are personal
+  metadata. This is not an anonymity or traffic-analysis-resistance claim. See
+  [`docs/STRATEGY.md`](docs/STRATEGY.md) §4, [`docs/WEB.md`](docs/WEB.md) §11.5–§11.6 and
+  the [`0.6.1` release note](runtime/docs/release/0.6.1.md); the optional account and relay
+  shipped in [`0.6.0`](runtime/docs/release/0.6.0.md).
+
+### Local MCP server
+
+- `stackspirit mcp` is a local stdio server: newline-delimited JSON-RPC 2.0 over stdin and
+  stdout. It opens no network port. The no-flag read-only server lists six read tools and
+  answers every write tool with JSON-RPC `-32601`; the full server needs
+  `--session`, `--surface` and `--token-file`, and the local agent proxy uses
+  `--agent-socket` and `--surface`. This local stdio server is the shipped MCP surface;
+  there is no hosted MCP endpoint in this tree.
+- Session and fleet writes check the lease token. A moved session's old surface gets a
+  `refused` failure with the takeover notice, and the write is not retried; read tools keep
+  working after a lease loss.
+- `fleet_dashboard` and the `ui://stackspirit/fleet-status` MCP Apps resource are
+  zero-secret: they render the Home name, supervisor state, counts, host gauges, project
+  names, job cards, brake details and cluster counts. They do not read or render a token,
+  lease, secret name or value, SSH target or project path. Every dynamic HTML field is
+  escaped; Markdown table and fence metacharacters are escaped or removed. The resource is
+  self-contained HTML with inline CSS, no script and no remote fetch.
+- The local agent proxy answers `initialize`, `server/discover`, `ping` and `tools/list`
+  locally and forwards `tools/call` over the private agent socket. It never opens a store, reads a secret or
+  prints an argument value, token or absolute local path. It keeps the fleet read tools and
+  the session tools the Home executor can run, but hides `fleet_dashboard`, the tunnel and
+  `secret_request` tools and the CLI-only control tools. It has no `resources` capability,
+  so no MCP Apps widget is served through the proxy.
+- Limits: the server inherits the OS account and process boundary. Anything that can run
+  the CLI as that account, or attach to its stdio, can call the tools that server exposes.
+  The full server's lease token gates session writes; it is not an OS sandbox. Tool results
+  can contain fleet, project and session metadata and event text; the server does not read
+  VOWP's secret-store values into them. See [`docs/MCP.md`](docs/MCP.md) and the
+  [`0.6.1` release note](runtime/docs/release/0.6.1.md).
+
+### Harness registry and one-click connect
+
+- Owner-defined manifests live in `~/.stackspirit/harnesses/<id>.toml`. The file is written
+  atomically with a mode-`0700` directory and a mode-`0600` file. The schema has no
+  credential field, unknown fields are rejected, and free-text fields reject obvious
+  secret material such as a private-key block or a provider key prefix. The registry stores
+  no secret value.
+- A probe asks only two safe questions, with an 8-second timeout: does `<binary> --version`
+  answer, and does the harness's own non-interactive status command report a stored
+  sign-in? StackSpirit runs only `opencode auth list`, `claude auth status` or
+  `codex login status`; any other harness reports `unknown`. It never reads a credential
+  file. The version line is control-character-stripped, redacted and capped at 120
+  characters; auth details and warnings are fixed copy or redacted text. Probe results are
+  path-free.
+- The connect plan shows the install command but never runs it. An `auth_cmd` is parsed as
+  shell-free argv; quotes and shell control operators are rejected, not interpreted. When
+  a sign-in command exists, the desktop host spawns that child, reads the first `http(s)`
+  URL it prints and opens it; otherwise it opens the harness documentation. The opener
+  refuses anything except `https://` and loopback `http://127.0.0.1:`,
+  `http://localhost:` or `http://[::1]:` URLs.
+- A Home VPS sign-in that needs an OAuth callback gets a temporary
+  `ssh -N -L 127.0.0.1:<port>:127.0.0.1:<port>` forward with the same app-private
+  `known_hosts`, strict host-key checking, `BatchMode=yes`, identity selection and
+  `ExitOnForwardFailure=yes` as every other remote command. Both the forward and the
+  sign-in child are kept in host state and torn down when the sign-in finishes or the app
+  exits. A second connect for the same harness and target is refused as a `conflict`.
+- API-key and subscription sign-in are different products. The panel shows the vendor's
+  consumer-terms note for a subscription; StackSpirit does not accept those terms for the
+  owner, choose an auth mode, or turn a subscription login into an API key.
+- Limits: Connect starts the harness's own sign-in, so the harness may store credentials in
+  its own store; StackSpirit neither reads nor manages them. The loopback forward is
+  reachable by local processes while it runs. A compromised OS account can read the
+  harness's store or run its binary directly. See [`docs/HARNESSES.md`](docs/HARNESSES.md)
+  and the [`0.6.1` release note](runtime/docs/release/0.6.1.md).
+
+### Encrypted R2 backups
+
+- `stackspirit backup push --recipient age1...` (or `STACKSPIRIT_BACKUP_RECIPIENT`) writes
+  the normal verified home snapshot into a private mode-`0700` temporary directory, packs a
+  path-safe archive, encrypts it locally with `age` to the public x25519 recipient, and
+  uploads only the ciphertext to the per-machine R2 route. The upload carries a SHA-256
+  header and is capped at 64 MiB. API authentication is the account session token in the
+  `Authorization` header; the token is not placed in the URL or the archive. The add-on is
+  off by default.
+- Restore downloads the ciphertext, verifies its reported size, SHA-256 and `age` header,
+  decrypts it locally with the private identity, and extracts the path-safe archive. The
+  identity must be a regular mode-`0600` file, not a symlink and at most 16 KiB. The
+  archiver skips symlinks; the extractor rejects absolute or parent-relative paths,
+  duplicate paths, unsafe modes and trailing data, and verifies every file hash. The core
+  restore then verifies file hashes and row counts before swapping the fresh home into
+  place.
+- The private identity is never uploaded or printed. The plaintext snapshot exists only in
+  the private temporary work directory while the command runs, and that directory is
+  removed when the command ends. R2 sees the ciphertext object name, size and timestamp
+  and the machine id; it does not receive the plaintext or the age identity.
+- Limits: anyone with the age identity and a downloaded ciphertext can decrypt it, so
+  identity compromise defeats backup confidentiality. A process running as the same OS
+  account can read the plaintext temporary snapshot while a push runs. R2 and the cloud
+  operator can withhold or delete objects. The runtime CLI's `<home>/cloud-session.json`
+  is also mode `0600` and is not encrypted at rest. See
+  [`runtime/docs/release/0.6.0.md`](runtime/docs/release/0.6.0.md) and the
+  [`0.6.1` release note](runtime/docs/release/0.6.1.md).
+
 ### What the AI sees
 
 The StackSpirit bridge, renderer, error types and tests carry secret **metadata** only:
 name, last four characters, timestamps and a reported storage mode. The AI never receives a
 full secret value through StackSpirit.
+
+The MCP dashboard and widget, harness probes, and cloud account and machine read models
+follow the same rule: status, counts, names and public metadata, not a token, lease, secret
+value, SSH private key or provider key. The full MCP server can return fleet data, session
+events and a session lease, and `secret_request` returns a one-time paste URL; none of those
+paths returns the secret-store value.
 
 That is a statement about StackSpirit's code path, not a guarantee about a server it does
 not control. On a basic-mode VOWP server, a harness or agent running as the runtime user can
@@ -147,16 +316,21 @@ implementation, the prompt-gated set path above is available.
 - Requiring an explicitly verified SSH host key before a profile is used.
 - Making server-secret storage explicit: a connected host, a first-use warning, an explicit
   acknowledgement and a visible list/revoke path.
+- Keeping account bearer and refresh tokens, device codes, relay tickets, harness
+  credentials and backup identities out of logs, errors and rendered read models.
+- Keeping the MCP dashboard and widget zero-secret and read-only, and uploading only age
+  ciphertext for an encrypted backup.
 - Reporting unknown or unsupported states honestly instead of guessing.
 
 ### A compromised Mac
 
 An attacker with the owner's macOS/Linux account (or admin access) can read the OS keychain
 entries available to that account (such as the SSH key passphrase), read the `0600`
-provider-key file, use the app-owned SSH key, run `ssh` or `vowp` directly,
-read StackSpirit's local data, and ask the app to perform actions. StackSpirit does not
-defend against a compromised Mac. OS account separation, disk encryption and a locked
-screen are the boundary.
+provider-key and cloud-session files, read a signed-in browser's in-memory account token,
+use the app-owned SSH key and the harness sign-ins, run `ssh` or `vowp` directly, read
+StackSpirit's local data, and ask the app to perform actions. StackSpirit does not defend
+against a compromised Mac. OS account separation, disk encryption and a locked screen are
+the boundary.
 
 ### A compromised server
 
@@ -211,12 +385,45 @@ available in `spirit-core` as an opt-in; the desktop app does not use it by defa
 keys previously saved to the Keychain are not automatically migrated, so they may need to be
 re-entered and the old Keychain entries removed by the owner.
 
+### Web account and cloud sessions
+
+The Web account token is memory-only: that keeps it out of browser storage and history, not
+out of page memory. A script in the page origin, a browser extension, a person at an open
+profile or a compromised browser can read it while the session lives. A reload drops it, so
+there is no persistent browser token to revoke; the server-side token lifetime still
+applies. The core `cloud-session.json` store, when a host opts into it, is a plain
+mode-`0600` file: any process running as the same OS account can read its access and
+refresh tokens, and the file is not encrypted at rest.
+
+The account API sees the account e-mail, machine names, presence and ticket requests; the
+relay sees connection and routing metadata and the ticket. The relayed HTTP request and
+response frames are end-to-end encrypted, but that protects the frame contents from the
+relay, not from a compromised browser, account or machine endpoint. The one-time enrollment
+token is deliberately shown once and is sensitive until it expires.
+
+### MCP, harness and backup boundaries
+
+The local MCP server has no authentication beyond the OS process and pipe that start it. A
+process running as the same OS account can call the tools that server exposes; the full
+server's lease token gates session writes but is not an OS sandbox against that account.
+Harness probes read only binary and auth status, but Connect starts the harness's own
+sign-in, whose credential store StackSpirit does not manage. The temporary loopback forward
+is reachable by local processes while it runs.
+
+Backup confidentiality depends on the age identity. Anyone who has the identity and a
+downloaded ciphertext can decrypt it; a process running as the same OS account can read the
+plaintext temporary snapshot while a push runs. R2 and the cloud operator see object names,
+sizes, timestamps and the machine id, and can withhold or delete objects.
+
 ### Metadata and traffic
 
 Host labels, provider names, secret names, timestamps and storage modes are metadata, not
-values, but they can still be sensitive. SSH protects traffic in transit. Provider API
-traffic is protected by the provider's own transport, not by StackSpirit. VOWP and the
-server may keep their own logs and backups; StackSpirit does not control them.
+values, but they can still be sensitive. Account e-mail, machine names and presence, relay
+ticket metadata and backup object names, sizes and timestamps are also metadata. SSH and
+the relay's TLS protect traffic in transit; relayed HTTP frames are additionally encrypted
+end to end. Provider API traffic is protected by the provider's own transport, not by
+StackSpirit. VOWP, the cloud API, the relay and R2 may keep their own logs and backups;
+StackSpirit does not control them.
 
 ### No liability promise
 
@@ -241,13 +448,17 @@ details, a real secret, a live hostname or a token.
 
 ## Supported versions
 
-- **StackSpirit:** the current `main` branch and the latest `0.1.x` pre-release. This is
-  pre-release software; security fixes land on `main` and in the next release. Older
+- **StackSpirit desktop:** the current `main` branch and the latest `0.1.x` pre-release.
+  This is pre-release software; security fixes land on `main` and in the next release. Older
   pre-release builds are not supported.
+- **StackSpirit runtime and CLI:** the `0.6.x` line; the current release is `0.6.1`
+  ([release note](runtime/docs/release/0.6.1.md)). This document describes the `0.6.1`
+  behaviour of the local MCP server, harness registry and encrypted R2 backups.
 - **VOWP:** `0.4.0` is the tested server contract for the host-key, onboarding and
   `vowp secret ls/set/rm` behaviour described here. A later `0.4.x` release is expected to
   work but is not guaranteed until it is tested. Older VOWP builds that lack the JSON
   `vowp secret` commands are not supported for the Server secrets card.
-- **Surfaces:** the desktop app is the supported surface for server secrets. The read-only
-  Web shell does not expose the secret store. The preview/mock bridge never stores a secret;
-  it reports that the desktop host is required.
+- **Surfaces:** the desktop app is the supported surface for server secrets and harness
+  connect. The no-account Web cockpit and the account/relay cockpit do not expose the server
+  secret store. The local MCP server is stdio-only. The preview/mock bridge never stores a
+  secret; it reports that the desktop host is required.
