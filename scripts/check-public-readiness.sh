@@ -19,6 +19,7 @@
 #   bash scripts/check-public-readiness.sh
 #   bash scripts/check-public-readiness.sh --history
 #   bash scripts/check-public-readiness.sh --history --strict-history
+#   bash scripts/check-public-readiness.sh --rev <commit>
 #   bash scripts/check-public-readiness.sh --help
 #
 # The default mode scans `git ls-files` in the working tree at HEAD. --history
@@ -28,13 +29,18 @@
 # paths, public IPv4, personal e-mail) are reported with counts but exit 0
 # unless --strict-history is also passed. --strict-history implies --history.
 #
+# --rev <commit> scans the tree of one commit, not the working tree. Every
+# finding class is fatal there, because that tree is what a public branch would
+# publish. --rev is mutually exclusive with --history and --strict-history.
+#
 # Exit status:
 #   0  no blocked finding in the selected scope
 #   1  at least one blocked finding in the selected scope
 #   2  usage error, not a git repository, or python3 is unavailable
 #
 # A repository with public history should be checked with --history before its
-# visibility is changed.
+# visibility is changed. A candidate public commit should be checked with
+# --rev before it is pushed.
 
 set -euo pipefail
 
@@ -46,6 +52,7 @@ usage() {
 
 history=0
 strict_history=0
+rev=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -60,6 +67,17 @@ while [ "$#" -gt 0 ]; do
       history=1
       strict_history=1
       ;;
+    --rev)
+      [ "$#" -ge 2 ] || {
+        echo "check-public-readiness: --rev requires a commit" >&2
+        exit 2
+      }
+      rev=$2
+      shift
+      ;;
+    --rev=*)
+      rev=${1#*=}
+      ;;
     *)
       echo "check-public-readiness: unknown argument: $1 (try --help)" >&2
       exit 2
@@ -67,6 +85,18 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ -n "$rev" ] && [ "$history" -eq 1 ]; then
+  echo "check-public-readiness: --rev cannot be combined with --history or --strict-history" >&2
+  exit 2
+fi
+if [ -n "$rev" ]; then
+  if ! rev_commit=$(git -C "$root" rev-parse --verify --quiet "$rev^{commit}" 2>/dev/null); then
+    echo "check-public-readiness: not a commit: $rev" >&2
+    exit 2
+  fi
+  rev=$rev_commit
+fi
 
 command -v python3 >/dev/null 2>&1 || {
   echo "check-public-readiness: python3 is required" >&2
@@ -79,8 +109,9 @@ git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
 
 mode=worktree
 [ "$history" -eq 1 ] && mode=history
+[ -n "$rev" ] && mode=rev
 
-exec python3 -I - "$root" "$mode" "$strict_history" <<'PY'
+exec python3 -I - "$root" "$mode" "$strict_history" "$rev" <<'PY'
 import ipaddress
 import os
 import re
@@ -91,6 +122,7 @@ import time
 root = sys.argv[1]
 mode = sys.argv[2] if len(sys.argv) > 2 else "worktree"
 strict_history = len(sys.argv) > 3 and sys.argv[3] == "1"
+rev = sys.argv[4] if len(sys.argv) > 4 else ""
 os.chdir(root)
 
 MAX_BYTES = 4 * 1024 * 1024
@@ -394,6 +426,112 @@ def run_worktree():
     return 0
 
 
+def run_rev(commit):
+    full = git("rev-parse", "--verify", commit + "^{commit}").strip()
+    tree_id = git("rev-parse", "--verify", full + "^{tree}").strip()
+
+    counts = {}
+    findings = []
+    entries = 0
+    blobs = 0
+    scanned = 0
+    skipped_large = 0
+    skipped_binary = 0
+    unreadable = 0
+
+    try:
+        tree = git_bytes("ls-tree", "-r", "-z", "-l", full)
+    except subprocess.CalledProcessError:
+        print(
+            f"public-readiness: FAIL: cannot read the tree of {full}",
+            file=sys.stderr,
+        )
+        return 2
+
+    for record_bytes in tree.split(b"\0"):
+        if not record_bytes:
+            continue
+        try:
+            meta, path_bytes = record_bytes.split(b"\t", 1)
+            file_mode, object_type, object_id, size_text = meta.split()
+        except ValueError:
+            continue
+        entries += 1
+        if object_type != b"blob":
+            continue
+        blobs += 1
+
+        path = path_bytes.decode("utf-8", "surrogateescape")
+        oid = object_id.decode("ascii", "replace")
+
+        # Credential paths are findings from the path alone; never open them.
+        if is_secret_path(path):
+            counts["secret_path"] = counts.get("secret_path", 0) + 1
+            findings.append((path, 0, "secret_path", path))
+            continue
+
+        try:
+            size = int(size_text)
+        except ValueError:
+            skipped_binary += 1
+            continue
+        if size > MAX_BYTES:
+            skipped_large += 1
+            continue
+
+        try:
+            data = git_bytes("cat-file", "blob", oid)
+        except subprocess.CalledProcessError:
+            unreadable += 1
+            continue
+
+        text = decode_blob(data)
+        if text is None:
+            skipped_binary += 1
+            continue
+        scanned += 1
+
+        def emit(lineno, rule, value, path=path):
+            findings.append((path, lineno, rule, value))
+
+        scan_text(text, counts, emit)
+
+    findings.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+
+    print("public-readiness: repository <git top level>")
+    print("public-readiness: scope: tree of one commit")
+    print(f"public-readiness: revision: {full}")
+    print(f"public-readiness: tree: {tree_id} ({entries} entries, {blobs} blobs)")
+    print(
+        f"public-readiness: scanned {scanned} of {blobs} blobs in "
+        f"{full[:12]} ({skipped_large} over size cap, "
+        f"{skipped_binary} binary/undecodable, {unreadable} unreadable)"
+    )
+    print(
+        "public-readiness: allowed placeholders: "
+        f"{counts.get('home_path_allowed', 0)} home path(s), "
+        f"{counts.get('ipv4_reserved', 0)} reserved/private IP(s), "
+        f"{counts.get('email_allowed', 0)} reserved e-mail(s)"
+    )
+
+    for rule in ORDER:
+        if rule in counts:
+            print(f"public-readiness: {LABELS[rule]}: {counts[rule]} blocked")
+
+    if findings:
+        print("public-readiness: findings (values masked):")
+        for path, lineno, rule, value in findings:
+            print(f"  {path}:{lineno}: {rule}: {value}")
+        print(f"public-readiness: FAIL: {len(findings)} blocked finding(s)")
+        return 1
+
+    print(
+        "public-readiness: PASS: no secret, public IP, personal home path, "
+        "tracked .env or personal e-mail found in the commit tree"
+    )
+    return 0
+
+
 def run_history():
     commit_rows = []
     for line in git("rev-list", "--all", "--timestamp").splitlines():
@@ -592,5 +730,7 @@ def run_history():
 
 if mode == "history":
     raise SystemExit(run_history())
+if mode == "rev":
+    raise SystemExit(run_rev(rev))
 raise SystemExit(run_worktree())
 PY

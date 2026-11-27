@@ -2,8 +2,8 @@
 # Hermetic self-test for the history-aware public-readiness scan.
 #
 # Builds a throwaway git repository, commits synthetic fixtures, and checks the
-# scanner's history and working-tree modes. No network, no real secrets, and no
-# dependency outside git, bash and Python 3.
+# scanner's history, one-commit (--rev) and working-tree modes. No network, no
+# real secrets, and no dependency outside git, bash and Python 3.
 #
 # Usage:
 #   bash scripts/check-public-readiness-history.test.sh
@@ -22,6 +22,7 @@ scanner="$script_dir/check-public-readiness.sh"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ss-readiness-history.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 repo=
+repo_initial=
 
 # Keep the fixture independent of the caller's git configuration.
 export GIT_CONFIG_GLOBAL=/dev/null
@@ -53,7 +54,7 @@ new_repo() {
   git -C "$repo" config core.hooksPath /dev/null
   commit_number=0
   printf 'clean fixture\n' > "$repo/README.md"
-  commit_all "initial clean fixture" >/dev/null
+  repo_initial=$(commit_all "initial clean fixture")
 }
 
 output=
@@ -93,7 +94,21 @@ home_path="/home/$(printf 'realuser')"
 
 new_repo token-history
 
-# 1. A clean history passes.
+# 1. A clean commit tree passes --rev and prints the commit and blob counts.
+run_scan --rev "$repo_initial"
+assert_status 0
+assert_contains "scope: tree of one commit"
+assert_contains "revision: $repo_initial"
+assert_contains "tree: "
+assert_contains "PASS"
+assert_not_contains "scope: all commits"
+
+# 2. --rev is mutually exclusive with --history/--strict-history.
+run_scan --rev "$repo_initial" --history
+assert_status 2
+assert_contains "cannot be combined"
+
+# 3. A clean history passes.
 run_scan --history
 assert_status 0
 assert_contains "history: commits walked: 1"
@@ -102,7 +117,7 @@ assert_contains "history: privacy-class findings: 0"
 assert_contains "history: PASS"
 assert_contains "history: exit status: 0"
 
-# 2. A token added in one commit is reported at that commit, masked, and is
+# 4. A token added in one commit is reported at that commit, masked, and is
 #    fatal in --history mode.
 printf 'token=%s\n' "$token" > "$repo/token.txt"
 token_head=$(commit_all "add synthetic token fixture")
@@ -115,7 +130,16 @@ assert_contains "history: FAIL: secret-class finding(s)"
 assert_contains "history: exit status: 1"
 assert_not_contains "$token"
 
-# 3. Removing the token later does not erase it from the history report.
+# 5. The same token commit fails --rev even after the token leaves HEAD, and
+#    the finding row is masked.
+run_scan --rev "$token_head"
+assert_status 1
+assert_contains "revision: $token_head"
+assert_contains "token.txt:1: provider_token: sk-s***"
+assert_contains "FAIL: 1 blocked finding(s)"
+assert_not_contains "$token"
+
+# 6. Removing the token later does not erase it from the history report.
 git -C "$repo" rm -q token.txt
 commit_all "remove synthetic token fixture" >/dev/null
 run_scan --history
@@ -123,8 +147,12 @@ assert_status 1
 assert_contains "$token_short token.txt:1: provider_token: sk-s***"
 assert_not_contains "$token"
 
-# 4. The working-tree mode on the same fixture still passes: it only reads
-#    HEAD, which no longer has the token, and it does not emit history lines.
+# 7. The clean HEAD commit passes --rev; the working-tree mode on the same
+#    fixture also passes and does not emit history lines.
+run_scan --rev HEAD
+assert_status 0
+assert_contains "revision: "
+assert_contains "PASS"
 run_scan
 assert_status 0
 assert_contains "scope: tracked working tree at HEAD"
@@ -133,7 +161,7 @@ assert_not_contains "scope: all commits"
 
 new_repo privacy-history
 
-# 5. A personal home path is reported as privacy-class, passes plain
+# 8. A personal home path is reported as privacy-class, passes plain
 #    --history, and fails only with --strict-history.
 printf 'path=%s\n' "$home_path" > "$repo/home.txt"
 home_head=$(commit_all "add synthetic home path fixture")
@@ -152,11 +180,24 @@ assert_contains "$home_short home.txt:1: home_path: /hom***"
 assert_contains "history: exit status: 1"
 assert_not_contains "$home_path"
 
+# 9. The same home-path commit fails --rev, although plain --history passes:
+#    every finding class is fatal in the tree that would be published.
+run_scan --rev "$home_head"
+assert_status 1
+assert_contains "revision: $home_head"
+assert_contains "personal /home or /Users path: 1 blocked"
+assert_contains "home.txt:1: home_path: /hom***"
+assert_contains "FAIL: 1 blocked finding(s)"
+assert_not_contains "$home_path"
+
 # Remove the home path from HEAD; it remains in history.
 git -C "$repo" rm -q home.txt
 commit_all "remove synthetic home path fixture" >/dev/null
+run_scan --rev HEAD
+assert_status 0
+assert_contains "PASS"
 
-# 6. A tracked credential file in history is a secret_path finding.
+# 10. A tracked credential file in history is a secret_path finding.
 printf 'DEMO=ok\n' > "$repo/.env"
 env_head=$(commit_all "add tracked env fixture")
 env_short=${env_head:0:12}
@@ -165,7 +206,7 @@ assert_status 1
 assert_contains "$env_short .env:0: secret_path: .env"
 assert_contains "history: secret-class findings: 1"
 
-# 7. The working-tree mode keeps its current behaviour on the same fixture:
+# 11. The working-tree mode keeps its current behaviour on the same fixture:
 #    the tracked .env is still a blocked secret_path finding.
 run_scan
 assert_status 1
