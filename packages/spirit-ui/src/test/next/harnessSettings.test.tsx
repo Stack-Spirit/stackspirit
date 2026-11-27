@@ -307,7 +307,7 @@ describe("Settings → Advanced → Harnesses", () => {
     install(bridge, snapshot("connected", HOST_ID), [host()]);
     render(<SettingsView theme="system" onTheme={() => undefined} />);
 
-    await user.click(screen.getByRole("button", { name: "Show advanced settings" }));
+    await user.click(screen.getByRole("tab", { name: "Harnesses" }));
     const panel = await screen.findByTestId("harnesses-panel");
     const opencode = await within(panel).findByTestId("harness-opencode");
 
@@ -336,7 +336,7 @@ describe("Settings → Advanced → Harnesses", () => {
     install(preview, snapshot("disconnected", null), hosts);
     render(<SettingsView theme="system" onTheme={() => undefined} />);
 
-    await user.click(screen.getByRole("button", { name: "Show advanced settings" }));
+    await user.click(screen.getByRole("tab", { name: "Harnesses" }));
     const panel = await screen.findByTestId("harnesses-panel");
     const opencode = await within(panel).findByTestId("harness-opencode");
 
@@ -366,7 +366,7 @@ describe("Settings → Advanced → Harnesses", () => {
     install(bridge, snapshot("connected", HOST_ID), [host()]);
     render(<SettingsView theme="system" onTheme={() => undefined} />);
 
-    await user.click(screen.getByRole("button", { name: "Show advanced settings" }));
+    await user.click(screen.getByRole("tab", { name: "Harnesses" }));
     const panel = await screen.findByTestId("harnesses-panel");
     await within(panel).findByTestId("harness-opencode");
     const results = await axe.run(panel, {

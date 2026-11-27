@@ -87,7 +87,7 @@ function renderSettings(options: FakeOptions = {}) {
     hostsLoaded: true,
     selectedHostId: hosts[0]?.id ?? null,
   });
-  return { bridge, ...render(<SettingsView theme="system" onTheme={() => undefined} />) };
+  return { bridge, ...render(<SettingsView theme="system" onTheme={() => undefined} initialSection="server" />) };
 }
 
 afterEach(() => {

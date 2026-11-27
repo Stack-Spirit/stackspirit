@@ -71,16 +71,16 @@ describe("free-limit retry recovery", () => {
     expect(useConversations.getState().views.setup?.model?.id).toBe("opencode/big-pickle");
   });
 
-  it("Connect a provider opens Settings with the Engine advanced section", async () => {
+  it("Connect a provider opens Settings on the Harnesses tab", async () => {
     const { user } = await openFreeLimit();
     await user.click(screen.getByRole("button", { name: "Connect a provider" }));
-    expect(await screen.findByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Hide advanced settings" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { name: "StackSpirit Engine", level: 2 }),
-    ).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "Settings" });
+    expect(within(dialog).getByRole("tab", { name: "Harnesses" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(await within(dialog).findByTestId("harnesses-panel")).toBeInTheDocument();
+    expect(await within(dialog).findByTestId("harness-opencode")).toBeInTheDocument();
   });
 
   it("Stop retrying returns to Ready and the next send is accepted", async () => {

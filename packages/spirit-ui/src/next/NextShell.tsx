@@ -19,7 +19,9 @@ import { WorkerSessionView } from "./WorkerSessionView";
 import { FormClusterDialog } from "./FormClusterDialog";
 import { PromoteBackupDialog } from "./PromoteBackupDialog";
 import { ServerPage } from "./ServerPage";
+import { SettingsModal } from "./SettingsModal";
 import { SettingsView } from "./SettingsView";
+import type { SettingsSectionId } from "./settingsSections";
 import { useShellUi, type NextView } from "./shellUi";
 import { Sidebar } from "./Sidebar";
 import { SpiritMark } from "./SpiritMark";
@@ -96,11 +98,16 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   const [view, setView] = useState<NextView>({ kind: "session", session: "global" });
   const [setupChosen, setSetupChosen] = useState(false);
   const [adding, setAdding] = useState(false);
-  // "Set up a model" in the composer opens Settings with the Engine card visible;
-  // opening Settings normally keeps it folded.
-  const [settingsEngine, setSettingsEngine] = useState(false);
+  // Settings is a centered popup, not a main view: the shell and the open conversation
+  // keep their place behind it. The section is remembered across opens.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId>("general");
+  const openSettings = (section: SettingsSectionId = "general") => {
+    setSettingsSection(section);
+    setSettingsOpen(true);
+    setNavOpen(false);
+  };
   const navigate = (next: NextView) => {
-    if (next.kind === "settings") setSettingsEngine(false);
     setView(next);
     setNavOpen(false);
   };
@@ -149,8 +156,18 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
   }
 
   const addServerDialog = adding ? <AddHostWizard title="Add a server" onClose={() => setAdding(false)} /> : null;
+  const settingsDialog = (
+    <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+      <SettingsView
+        theme={theme}
+        onTheme={setTheme}
+        onOpenRaw={() => setRawOpen(true)}
+        initialSection={settingsSection}
+      />
+    </SettingsModal>
+  );
 
-  if (hosts.length === 0 && !setupChosen && view.kind !== "settings") {
+  if (hosts.length === 0 && !setupChosen) {
     return (
       <>
         <Welcome
@@ -161,6 +178,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
           }}
         />
         {addServerDialog}
+        {settingsDialog}
       </>
     );
   }
@@ -193,16 +211,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
         : null;
 
   let main;
-  if (view.kind === "settings") {
-    main = (
-      <SettingsView
-        theme={theme}
-        onTheme={setTheme}
-        onOpenRaw={() => setRawOpen(true)}
-        initialAdvanced={settingsEngine}
-      />
-    );
-  } else if (view.kind === "server" && serverLabel) {
+  if (view.kind === "server" && serverLabel) {
     main = (
       <ServerPage
         serverLabel={serverLabel}
@@ -250,8 +259,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
         savedServer={setupServer}
         onOpenWorkers={openWorkers}
         onOpenEngineSettings={() => {
-          setSettingsEngine(true);
-          setView({ kind: "settings" });
+          openSettings("harnesses");
         }}
       />
     );
@@ -321,6 +329,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
           });
         }}
         onFormCluster={() => setClusterFormOpen(true)}
+        onOpenSettings={openSettings}
         resizeHandle={side.handleProps}
         resizing={side.dragging}
         onOpenRaw={() => setRawOpen(true)}
@@ -350,6 +359,7 @@ export function NextShell({ bridge }: { bridge: SpiritBridge }) {
         ) : null}
       </div>
       {addServerDialog}
+      {settingsDialog}
       {clusterFormOpen ? (
         <FormClusterDialog
           hosts={hosts}

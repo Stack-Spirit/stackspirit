@@ -234,8 +234,12 @@ describe("Meadow composer", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
 
     await user.click(setup);
-    expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Hide advanced settings" })).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "Settings" });
+    expect(within(dialog).getByRole("tab", { name: "Harnesses" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(await within(dialog).findByTestId("harnesses-panel")).toBeInTheDocument();
   });
 });
 

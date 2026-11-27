@@ -518,16 +518,14 @@ describe("Settings server secrets", () => {
     expect(document.body.textContent).not.toContain(SECRET_VALUE);
   });
 
-  it("appears in Settings under the advanced section", async () => {
+  it("appears in Settings under Server & Machines", async () => {
     const user = userEvent.setup();
     const { bridge } = fakeBridge({ connection: disconnected() });
     install(bridge, disconnected());
     render(<SettingsView theme="system" onTheme={() => undefined} />);
 
     expect(screen.queryByTestId("server-secrets")).not.toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: "Show advanced settings" }),
-    );
+    await user.click(screen.getByRole("tab", { name: "Server & Machines" }));
 
     expect(screen.getByTestId("server-secrets")).toBeInTheDocument();
     expect(

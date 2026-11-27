@@ -431,23 +431,39 @@ describe("NextShell", () => {
     expect(card).toHaveTextContent(/GiB free/);
   });
 
-  it("puts the account button beside Settings and keeps Theme inside Settings", async () => {
+  it("opens Settings as a centered modal from the sidebar and keeps Theme inside General", async () => {
     const { user } = await renderConnected();
     const account = screen.getByTestId("account-trigger");
     expect(account).toHaveTextContent("Sign in");
 
-    await user.click(screen.getByTestId("settings-trigger"));
-    const menu = screen.getByRole("menu", { name: "Settings" });
-    expect(within(menu).getByRole("menuitem", { name: "Add server" })).toBeInTheDocument();
-    expect(within(menu).getByRole("menuitem", { name: "All settings" })).toBeInTheDocument();
-    expect(within(menu).queryByRole("group", { name: "Theme" })).not.toBeInTheDocument();
-
-    await user.click(within(menu).getByRole("menuitem", { name: "All settings" }));
-    expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("settings-trigger"));
+    const dialog = await screen.findByRole("dialog", { name: "Settings" });
+    expect(dialog).toHaveClass("nx-settings-modal");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "General" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(screen.getByRole("group", { name: "Theme" })).toBeInTheDocument();
     await user.click(within(screen.getByRole("group", { name: "Theme" })).getByRole("button", { name: "Dark" }));
     expect(document.documentElement.dataset.theme).toBe("dark");
+
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("opens the Account rail item from the sidebar account button", async () => {
+    const { user } = await renderConnected();
+    await user.click(screen.getByTestId("account-trigger"));
+    expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Account" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByTestId("settings-pane-account")).toBeInTheDocument();
   });
 
   it("shows the signed-in email in the sidebar account button", async () => {

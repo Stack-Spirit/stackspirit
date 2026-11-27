@@ -5,7 +5,6 @@ import type { ChatPanelTarget, SessionId } from "../bridge/wire";
 /** What fills the main area, to the right of the sidebar. */
 export type NextView =
   | { kind: "session"; session: SessionId }
-  | { kind: "settings" }
   /** Full page: server health, node map of projects, project rows. */
   | { kind: "server" }
   /** Full page: one project's workers and jobs as a node map and rows. */

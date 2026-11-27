@@ -8,6 +8,7 @@ import type { SessionId } from "./conversations";
 import { useServerHealth } from "./health";
 import { Menu, MenuItem } from "./Menu";
 import type { NextView } from "./shellUi";
+import type { SettingsSectionId } from "./settingsSections";
 import { SpiritMark } from "./SpiritMark";
 import { openInbox, projectSummaries, type ProjectSummary } from "./summary";
 
@@ -20,6 +21,8 @@ export interface SidebarProps {
   onAddProject: () => void;
   /** Opens the cluster form when at least two servers are saved. */
   onFormCluster: () => void;
+  /** Opens the centered Settings modal, optionally on a specific rail item. */
+  onOpenSettings: (section?: SettingsSectionId) => void;
   resizeHandle: HTMLAttributes<HTMLDivElement>;
   resizing: boolean;
   /** Opens the raw VOWP document (diagnostics). */
@@ -38,6 +41,7 @@ export function Sidebar({
   onAddServer,
   onAddProject,
   onFormCluster,
+  onOpenSettings,
   resizeHandle,
   resizing,
   onOpenRaw,
@@ -145,41 +149,6 @@ export function Sidebar({
 
       <div className="nx-side__foot">
         <div className="nx-side__foot-row">
-          <Menu
-            label="Settings"
-            placement="above"
-            trigger={(props) => (
-              <button type="button" className="nx-settings-trigger" {...props} data-testid="settings-trigger">
-                <span className="nx-row-item__icon" aria-hidden="true">
-                  <GearIcon />
-                </span>
-                <span className="nx-row-item__text">Settings</span>
-              </button>
-            )}
-          >
-            {(close) => (
-              <>
-                <MenuItem
-                  icon={<PlusIcon />}
-                  onSelect={() => {
-                    close();
-                    onAddServer();
-                  }}
-                >
-                  Add server
-                </MenuItem>
-                <MenuItem
-                  icon={<GearIcon />}
-                  onSelect={() => {
-                    close();
-                    onNavigate({ kind: "settings" });
-                  }}
-                >
-                  All settings
-                </MenuItem>
-              </>
-            )}
-          </Menu>
           <button
             type="button"
             className="nx-settings-trigger nx-account-trigger"
@@ -188,13 +157,24 @@ export function Sidebar({
                 ? `StackSpirit Account: ${account.email}`
                 : "Sign in to StackSpirit"
             }
-            onClick={() => onNavigate({ kind: "settings" })}
+            onClick={() => onOpenSettings("account")}
             data-testid="account-trigger"
           >
             <span className="nx-row-item__icon" aria-hidden="true">
               <AccountIcon />
             </span>
             <span className="nx-row-item__text">{accountLabel}</span>
+          </button>
+          <button
+            type="button"
+            className="nx-settings-trigger"
+            onClick={() => onOpenSettings("general")}
+            data-testid="settings-trigger"
+          >
+            <span className="nx-row-item__icon" aria-hidden="true">
+              <GearIcon />
+            </span>
+            <span className="nx-row-item__text">Settings</span>
           </button>
         </div>
       </div>

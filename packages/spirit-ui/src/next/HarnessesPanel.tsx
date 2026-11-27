@@ -249,6 +249,10 @@ function OpenCodeProviders({ engine }: { engine?: SpiritBridge["engine"] }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<SpiritError | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  // The provider list is a bounded scroll region inside OpenCode. It stays expanded by
+  // default but can be folded so every other harness remains visible in the modal.
+  const [providersOpen, setProvidersOpen] = useState(true);
+  const providerListId = useId();
 
   useEffect(() => {
     if (!engine) return;
@@ -381,8 +385,25 @@ function OpenCodeProviders({ engine }: { engine?: SpiritBridge["engine"] }) {
 
   return (
     <div className="nx-harness__providers" data-testid="harness-opencode-providers">
-      <div className="nx-block__head">
-        <h4>Model providers</h4>
+      <div className="nx-harness__providers-head">
+        <button
+          type="button"
+          className="nx-harness__providers-toggle"
+          aria-expanded={providersOpen}
+          aria-controls={providerListId}
+          onClick={() => setProvidersOpen((open) => !open)}
+          data-testid="harness-opencode-providers-toggle"
+        >
+          <span
+            className={`nx-harness__chevron${providersOpen ? " nx-harness__chevron--open" : ""}`}
+            aria-hidden="true"
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16">
+              <path d="M6 4.5 10 8l-4 3.5Z" fill="currentColor" />
+            </svg>
+          </span>
+          <span>Providers</span>
+        </button>
         <span className="nx-chip nx-chip--tiny nx-chip--server">Inside OpenCode</span>
       </div>
       <p className="nx-form__hint">
@@ -391,7 +412,16 @@ function OpenCodeProviders({ engine }: { engine?: SpiritBridge["engine"] }) {
         private provider-key file and are never sent to your server.
       </p>
 
-      {!engine ? (
+      {providersOpen ? (
+        <div
+          id={providerListId}
+          className="nx-harness__provider-scroll"
+          data-testid="harness-opencode-provider-scroll"
+          role="region"
+          aria-label="OpenCode provider list"
+          tabIndex={0}
+        >
+          {!engine ? (
         <div data-testid="harness-opencode-providers-unavailable">
           <p className="nx-form__hint">
             Provider keys are managed by the running engine in the desktop app. This bridge has
@@ -572,6 +602,8 @@ function OpenCodeProviders({ engine }: { engine?: SpiritBridge["engine"] }) {
           </ul>
         </>
       )}
+        </div>
+      ) : null}
 
       {notice ? (
         <p className="nx-form__hint" role="status" data-testid="harness-opencode-provider-notice">
@@ -618,6 +650,7 @@ export function HarnessesPanel({
   const [formNotice, setFormNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const alive = useRef(true);
   const ids = {
@@ -1093,14 +1126,29 @@ export function HarnessesPanel({
         </section>
       ) : null}
 
-      <section className="nx-card" aria-label="Add your own harness">
-        <h3 style={{ margin: 0, fontSize: 14 }}>Add your own harness</h3>
-        <p className="nx-form__hint">
-          Saved as <code>~/.stackspirit/harnesses/&lt;id&gt;.toml</code>. The manifest has no
-          key or token field; unknown fields such as <code>api_key</code> are rejected.
-          StackSpirit only stores the command lines and display notes.
-        </p>
-        <form className="nx-form" onSubmit={(event) => void submit(event)}>
+      <section className="nx-card" aria-label="Add your own harness" data-testid="harness-add-custom-card">
+        <div className="nx-block__head">
+          <div>
+            <h3 style={{ margin: 0, fontSize: 14 }}>Add your own harness</h3>
+            <p className="nx-form__hint">
+              Saved as <code>~/.stackspirit/harnesses/&lt;id&gt;.toml</code>. The manifest has no
+              key or token field; unknown fields such as <code>api_key</code> are rejected.
+              StackSpirit only stores the command lines and display notes.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="nx-btn nx-btn--quiet nx-btn--sm nx-harness__add"
+            aria-expanded={addOpen}
+            onClick={() => setAddOpen((open) => !open)}
+            data-testid="harness-add-custom"
+          >
+            <span aria-hidden="true">+</span>{" "}
+            {addOpen ? "Close" : "Add custom harness"}
+          </button>
+        </div>
+        {addOpen ? (
+          <form className="nx-form" onSubmit={(event) => void submit(event)}>
           <div className="nx-form__grid">
             <label className="nx-field" htmlFor={ids.id}>
               ID
@@ -1268,7 +1316,7 @@ export function HarnessesPanel({
             </p>
           ) : null}
 
-          <div>
+          <div className="nx-settings__actions">
             <button
               type="submit"
               className="nx-btn"
@@ -1277,8 +1325,17 @@ export function HarnessesPanel({
             >
               {saving ? "Saving…" : "Add harness"}
             </button>
+            <button
+              type="button"
+              className="nx-btn nx-btn--quiet"
+              onClick={() => setAddOpen(false)}
+              disabled={saving}
+            >
+              Cancel
+            </button>
           </div>
         </form>
+        ) : null}
       </section>
     </div>
   );

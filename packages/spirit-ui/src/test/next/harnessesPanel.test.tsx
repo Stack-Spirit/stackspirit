@@ -258,6 +258,7 @@ describe("HarnessesPanel", () => {
   });
 
   it("disables Connect in a non-desktop bridge and labels it desktop-only", async () => {
+    const user = userEvent.setup();
     const fake = fakeHarnesses();
     render(<HarnessesPanel bridge={bridge(fake.surface, "http-sse")} />);
 
@@ -266,6 +267,7 @@ describe("HarnessesPanel", () => {
     expect(
       within(opencode).getByRole("button", { name: "Connect on this Mac" }),
     ).toBeDisabled();
+    await user.click(screen.getByTestId("harness-add-custom"));
     expect(screen.getByRole("button", { name: "Add harness" })).toBeDisabled();
   });
 
@@ -305,6 +307,7 @@ describe("HarnessesPanel", () => {
     render(<HarnessesPanel bridge={bridge(fake.surface)} />);
     await screen.findByTestId("harness-opencode");
 
+    await user.click(screen.getByTestId("harness-add-custom"));
     await user.type(screen.getByLabelText("ID"), "my-harness");
     await user.type(screen.getByLabelText("Binary"), "my-harness");
     await user.type(screen.getByLabelText("Name"), "My Harness");
@@ -419,6 +422,39 @@ describe("HarnessesPanel", () => {
       await within(opencode).findByTestId("harness-opencode-provider-notice"),
     ).toHaveTextContent(/DeepSeek (connected|key saved)/);
     expect(document.body.innerHTML).not.toContain(secret);
+    mock.dispose();
+  });
+
+  it("collapses the OpenCode providers inside a bounded scroll region", async () => {
+    const user = userEvent.setup();
+    const fake = fakeHarnesses({ initial: [manifest({ id: "opencode" })] });
+    const mock = new MockBridge("empty");
+    const desktop = {
+      ...mock,
+      kind: "tauri" as const,
+      preview: false,
+      harnesses: fake.surface,
+    } as unknown as HarnessesBridge;
+    render(<HarnessesPanel bridge={desktop} />);
+
+    const opencode = await screen.findByTestId("harness-opencode");
+    const toggle = within(opencode).getByTestId("harness-opencode-providers-toggle");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const scroll = within(opencode).getByTestId("harness-opencode-provider-scroll");
+    expect(scroll).toHaveClass("nx-harness__provider-scroll");
+    expect(scroll).toHaveAttribute("tabindex", "0");
+    expect(await within(scroll).findByTestId("opencode-provider-deepseek")).toBeInTheDocument();
+
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(
+      within(opencode).queryByTestId("harness-opencode-provider-scroll"),
+    ).not.toBeInTheDocument();
+
+    await user.click(toggle);
+    expect(
+      within(opencode).getByTestId("harness-opencode-provider-scroll"),
+    ).toBeInTheDocument();
     mock.dispose();
   });
 
