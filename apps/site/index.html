@@ -75,14 +75,12 @@
       <div class="scroll-path__mascot" id="scroll-path-mascot">
         <span class="scroll-path__shadow" aria-hidden="true"></span>
         <span class="scroll-path__flip">
-          <img
+          <canvas
             class="scroll-path__sprite"
-            src="/assets/mascot-thick-walk-128.png"
-            alt=""
-            width="56"
-            height="89"
-            decoding="async"
-          />
+            width="44"
+            height="68"
+            aria-hidden="true"
+          ></canvas>
         </span>
       </div>
     </div>
@@ -90,22 +88,22 @@
     <header class="site-header">
       <div class="container header-inner">
         <a class="brand" href="/" aria-label="StackSpirit home">
-          <img
-            class="brand__mark"
-            src="/assets/stackspirit-mark-128.png"
-            alt=""
-            width="34"
-            height="34"
-          />
+          <canvas
+            class="brand__canvas"
+            data-pixel-icon
+            data-scale="2"
+            width="32"
+            height="32"
+            aria-hidden="true"
+          ></canvas>
           <span class="brand__name">StackSpirit</span>
         </a>
 
         <nav class="site-nav" aria-label="Primary">
           <a href="#why">Why</a>
           <a href="#quickstart">Quickstart</a>
-          <a href="#cockpit">Cockpit</a>
-          <a href="#harnesses">Harnesses</a>
-          <a href="#homes">Homes</a>
+          <a href="/harnesses">Harnesses</a>
+          <a href="/homes">Homes</a>
           <a href="#faq">FAQ</a>
         </nav>
 
@@ -336,6 +334,31 @@
               Web apps.
             </figcaption>
           </figure>
+        </div>
+
+        <div class="hero-road" id="hero-road" aria-hidden="true">
+          <svg
+            class="hero-road__svg"
+            viewBox="0 0 1440 96"
+            preserveAspectRatio="none"
+            focusable="false"
+          >
+            <path
+              class="hero-road__line"
+              id="hero-road-path"
+              d="M -60 72 C 180 86, 360 44, 620 62 C 880 80, 1080 34, 1300 54 C 1380 62, 1440 48, 1500 44"
+            />
+          </svg>
+          <div class="hero-road__walker" id="hero-road-walker">
+            <span class="hero-road__shadow"></span>
+            <canvas
+              class="hero-road__sprite"
+              id="hero-road-canvas"
+              width="44"
+              height="68"
+              aria-hidden="true"
+            ></canvas>
+          </div>
         </div>
       </section>
 
@@ -628,15 +651,14 @@
             <span class="hand-note__pin" aria-hidden="true"></span>
             <p>Built for the quiet hours, when the good ideas compile.</p>
             <span class="hand-note__sign">— the meadow, probably</span>
-            <img
+            <canvas
               class="hand-note__mascot"
-              src="/assets/mascot-thick-256.png"
-              alt=""
-              width="64"
-              height="102"
-              loading="lazy"
-              decoding="async"
-            />
+              data-pixel-idle
+              data-scale="2"
+              width="44"
+              height="68"
+              aria-hidden="true"
+            ></canvas>
           </aside>
         </div>
       </section>
@@ -902,7 +924,7 @@
             </a>
           </div>
           <p class="quickstart__fallback">
-            No Linux box yet? <a href="#homes">The managed path is underneath.</a> The free software
+            No Linux box yet? <a href="/homes">The managed path is underneath.</a> The free software
             still stays free.
           </p>
         </div>
@@ -1071,141 +1093,18 @@
 
       <section class="section section--tint" id="harnesses" aria-labelledby="harnesses-title">
         <div class="container">
-          <header class="section__head section__head--split">
-            <div>
-              <p class="kicker"><span class="kicker__index">04</span> Harness matrix</p>
-              <h2 id="harnesses-title">Bring the harness you already trust.</h2>
+          <div class="gateway-card">
+            <div class="gateway-card__copy">
+              <p class="kicker"><span class="kicker__index">04</span> Harnesses &amp; Providers</p>
+              <h2 id="harnesses-title">OpenCode by default. Any coding CLI underneath.</h2>
               <p class="section__lede">
-                StackSpirit does not compete with your agent. It gives every harness the same
-                always-on Home, durable workspace and shared state — so you can switch tools
-                without moving machines.
+                Connect OpenCode providers (DeepSeek, OpenRouter, Anthropic API, OpenAI API, Ollama), plus Claude Code, Codex, Gemini CLI, Antigravity, Cursor CLI, Aider, Goose, or your own custom CLI via a simple TOML manifest — with one-click Desktop Connect and zero manual SSH tunnels.
               </p>
             </div>
-            <p class="technical-label" aria-hidden="true">
-              08 entries<br />01 default<br />byo cli ok
-            </p>
-          </header>
-
-          <div
-            class="matrix-scroll"
-            role="region"
-            aria-label="Harness matrix, scrolls horizontally on small screens"
-            tabindex="0"
-          >
-            <table class="harness-matrix">
-              <caption class="visually-hidden">
-                Harnesses that can run on a StackSpirit Home, with their default entry point and
-                notes.
-              </caption>
-              <thead>
-                <tr>
-                  <th scope="col">Harness</th>
-                  <th scope="col">Entry</th>
-                  <th scope="col">Lane</th>
-                  <th scope="col">Notes</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr class="harness-row harness-row--default">
-                  <th scope="row">
-                    <span class="harness__mark" aria-hidden="true">OC</span>
-                    <span class="harness__name"
-                      ><strong>OpenCode</strong><small>default engine</small></span
-                    >
-                  </th>
-                  <td><code>opencode</code></td>
-                  <td><span class="tag tag--default">bundled</span></td>
-                  <td>Included with the desktop app. No extra harness install.</td>
-                </tr>
-                <tr class="harness-row">
-                  <th scope="row">
-                    <span class="harness__mark" aria-hidden="true">CC</span>
-                    <span class="harness__name"><strong>Claude Code</strong><small>terminal</small></span>
-                  </th>
-                  <td><code>claude</code></td>
-                  <td><span class="tag tag--ready">ssh + mcp</span></td>
-                  <td>Persistent sessions and project state on the Home.</td>
-                </tr>
-                <tr class="harness-row">
-                  <th scope="row">
-                    <span class="harness__mark" aria-hidden="true">CX</span>
-                    <span class="harness__name"><strong>Codex</strong><small>terminal</small></span>
-                  </th>
-                  <td><code>codex</code></td>
-                  <td><span class="tag tag--ready">ssh + mcp</span></td>
-                  <td>Queue work that keeps moving after you step away.</td>
-                </tr>
-                <tr class="harness-row">
-                  <th scope="row">
-                    <span class="harness__mark" aria-hidden="true">GM</span>
-                    <span class="harness__name"><strong>Gemini CLI</strong><small>terminal</small></span>
-                  </th>
-                  <td><code>gemini</code></td>
-                  <td><span class="tag tag--ready">ssh</span></td>
-                  <td>Run against the Home&rsquo;s persistent workspace.</td>
-                </tr>
-                <tr class="harness-row">
-                  <th scope="row">
-                    <span class="harness__mark" aria-hidden="true">CU</span>
-                    <span class="harness__name"><strong>Cursor CLI</strong><small>terminal</small></span>
-                  </th>
-                  <td><code>cursor-agent</code></td>
-                  <td><span class="tag tag--ready">ssh</span></td>
-                  <td>Keep CLI sessions on the machine that never sleeps.</td>
-                </tr>
-                <tr class="harness-row">
-                  <th scope="row">
-                    <span class="harness__mark" aria-hidden="true">AI</span>
-                    <span class="harness__name"><strong>Aider</strong><small>git-native</small></span>
-                  </th>
-                  <td><code>aider</code></td>
-                  <td><span class="tag tag--ready">git + ssh</span></td>
-                  <td>Let the Home own the repo, the branch and the long run.</td>
-                </tr>
-                <tr class="harness-row">
-                  <th scope="row">
-                    <span class="harness__mark" aria-hidden="true">GO</span>
-                    <span class="harness__name"><strong>Goose</strong><small>mcp-native</small></span>
-                  </th>
-                  <td><code>goose</code></td>
-                  <td><span class="tag tag--ready">mcp</span></td>
-                  <td>Reach the same Home through a typed MCP surface.</td>
-                </tr>
-                <tr class="harness-row">
-                  <th scope="row">
-                    <span class="harness__mark" aria-hidden="true">&gt;_</span>
-                    <span class="harness__name"
-                      ><strong>Custom CLI</strong><small>your own</small></span
-                    >
-                  </th>
-                  <td><code>any command</code></td>
-                  <td><span class="tag tag--ready">ssh + mcp</span></td>
-                  <td>If it runs in a terminal, it can run in a Home.</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="harness-foot">
-            <p class="fineprint">
-              OpenCode is bundled and is the default engine. Other harnesses run as bring-your-own
-              CLI tools on the Home; their adapters are not native StackSpirit integrations.
-              Harness names and marks belong to their respective owners. StackSpirit is an
-              independent project and is not affiliated with or endorsed by them.
-            </p>
-            <a class="text-link" href="mailto:syver@stackspirit.io?subject=Harness%20request">
-              Request a harness
-              <svg class="icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-                <path
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M5 12h14m-5-5 5 5-5 5"
-                />
-              </svg>
-            </a>
+            <div class="gateway-card__actions">
+              <a class="btn btn--primary btn--lg" href="/harnesses">Explore all harnesses &rarr;</a>
+              <span class="gateway-card__meta">8 built-in presets · custom CLI form</span>
+            </div>
           </div>
         </div>
       </section>
@@ -1372,165 +1271,20 @@
 
       <section class="section section--homes" id="homes" aria-labelledby="homes-title">
         <div class="container">
-          <header class="section__head section__head--split">
-            <div class="homes__head">
+          <div class="gateway-card gateway-card--dark">
+            <div class="gateway-card__copy">
               <p class="kicker"><span class="kicker__index">06</span> Managed Always-On Homes</p>
-              <h2 id="homes-title">
-                Don't have a Linux box yet? Spin up a pre-configured home in 60 seconds.
-              </h2>
+              <h2 id="homes-title">Don&rsquo;t have a Linux box yet? Spin up a pre-configured home in 60 seconds.</h2>
               <p class="section__lede">
-                The software is still free. A Managed Home is optional hardware: a dedicated Contabo
-                VPS, provisioned and connected for you. The price is Contabo&rsquo;s regular monthly
-                rate plus 20%.
+                StackSpirit software is MIT open source and free forever on your own VPS, spare laptop, or home server. Prefer turnkey hardware? Dedicated Contabo Linux Homes start at <strong>&euro;6.60/mo ($7.20/mo)</strong> excl. VAT, with optional client-side encrypted R2 backups.
               </p>
             </div>
-            <ul class="badge-stack" aria-label="Plan facts">
-              <li class="badge">No free trial</li>
-              <li class="badge badge--soft">Monthly · EUR</li>
-              <li class="badge badge--soft">Cancel anytime</li>
-            </ul>
-          </header>
-
-          <p class="homes__free-path">
-            Already have a box? The free path is above — <a href="#quickstart">install in a minute</a
-            >. No plan needed.
-          </p>
-
-          <div class="pricing" id="pricing" data-source="fallback">
-            <p class="visually-hidden" id="plans-status" role="status">
-              Standard published prices.
-            </p>
-
-            <ul class="plan-grid" id="plans-list" aria-label="Managed Always-On Home plans">
-              <li class="plan-card" data-plan="home-8">
-                <div class="plan-card__head">
-                  <h3>Home 8</h3>
-                  <p class="plan-card__price">€6.60<span>/mo</span></p>
-                </div>
-                <p class="plan-card__spec">4 vCPU · 8 GB RAM · 100 GB SSD</p>
-                <p class="plan-card__provider">Cloud VPS 4</p>
-                <p class="plan-card__setup">+ €7.80 one-time setup</p>
-                <a
-                  class="plan-card__cta"
-                  href="https://app.stackspirit.io/cloud"
-                  aria-label="View Home 8 in the Web App"
-                  >View Home 8</a
-                >
-              </li>
-              <li class="plan-card" data-plan="home-12">
-                <div class="plan-card__head">
-                  <h3>Home 12</h3>
-                  <p class="plan-card__price">€9<span>/mo</span></p>
-                </div>
-                <p class="plan-card__spec">6 vCPU · 12 GB RAM · 200 GB SSD</p>
-                <p class="plan-card__provider">Cloud VPS 6</p>
-                <p class="plan-card__setup plan-card__setup--none">No setup fee</p>
-                <a
-                  class="plan-card__cta"
-                  href="https://app.stackspirit.io/cloud"
-                  aria-label="View Home 12 in the Web App"
-                  >View Home 12</a
-                >
-              </li>
-              <li class="plan-card" data-plan="home-24">
-                <div class="plan-card__head">
-                  <h3>Home 24</h3>
-                  <p class="plan-card__price">€17<span>/mo</span></p>
-                </div>
-                <p class="plan-card__spec">8 vCPU · 24 GB RAM · 300 GB SSD</p>
-                <p class="plan-card__provider">Cloud VPS 8</p>
-                <p class="plan-card__setup plan-card__setup--none">No setup fee</p>
-                <a
-                  class="plan-card__cta"
-                  href="https://app.stackspirit.io/cloud"
-                  aria-label="View Home 24 in the Web App"
-                  >View Home 24</a
-                >
-              </li>
-              <li class="plan-card" data-plan="home-48">
-                <div class="plan-card__head">
-                  <h3>Home 48</h3>
-                  <p class="plan-card__price">€30<span>/mo</span></p>
-                </div>
-                <p class="plan-card__spec">12 vCPU · 48 GB RAM · 400 GB SSD</p>
-                <p class="plan-card__provider">Cloud VPS 12</p>
-                <p class="plan-card__setup plan-card__setup--none">No setup fee</p>
-                <a
-                  class="plan-card__cta"
-                  href="https://app.stackspirit.io/cloud"
-                  aria-label="View Home 48 in the Web App"
-                  >View Home 48</a
-                >
-              </li>
-              <li class="plan-card" data-plan="home-64">
-                <div class="plan-card__head">
-                  <h3>Home 64</h3>
-                  <p class="plan-card__price">€44<span>/mo</span></p>
-                </div>
-                <p class="plan-card__spec">16 vCPU · 64 GB RAM · 500 GB SSD</p>
-                <p class="plan-card__provider">Cloud VPS 16</p>
-                <p class="plan-card__setup plan-card__setup--none">No setup fee</p>
-                <a
-                  class="plan-card__cta"
-                  href="https://app.stackspirit.io/cloud"
-                  aria-label="View Home 64 in the Web App"
-                  >View Home 64</a
-                >
-              </li>
-            </ul>
-
-            <p class="pricing__note">
-              Prices are shown in euro and exclude VAT. Each Home is a dedicated machine;
-              provisioning starts after checkout with a verified payment method.
-            </p>
-
-            <p class="pricing__source" id="plans-source" hidden></p>
-          </div>
-
-          <div class="backup-card">
-            <div class="backup-card__copy">
-              <div class="backup-card__title">
-                <h3>Off-Site Encrypted R2 Backups</h3>
-                <span class="badge badge--warn" id="backup-recommended">Recommended</span>
-              </div>
-              <p id="backups-help">
-                Off by default. Encrypts your <code>~/.stackspirit</code> data, sessions and configs
-                to Cloudflare R2, off the machine provider.
-                <span id="backups-price">€3.50/mo if enabled.</span>
-              </p>
+            <div class="gateway-card__actions">
+              <a class="btn btn--sprout btn--lg" href="/homes">View Managed Homes &amp; Pricing &rarr;</a>
+              <a class="btn btn--outline-light" href="https://app.stackspirit.io/cloud">Open in Web App</a>
+              <span class="gateway-card__meta">EUR &amp; USD · No free trial · Cancel anytime</span>
             </div>
-            <label class="switch" for="backups">
-              <span class="switch__label">Enable backups</span>
-              <input
-                class="switch__input"
-                type="checkbox"
-                id="backups"
-                role="switch"
-                aria-describedby="backups-help"
-                aria-label="Enable off-site encrypted R2 backups"
-              />
-              <span class="switch__track" aria-hidden="true"
-                ><span class="switch__thumb"></span
-              ></span>
-            </label>
           </div>
-          <p class="backup-status" id="backups-status" role="status"></p>
-
-          <div class="homes__actions">
-            <a class="btn btn--primary btn--lg" href="https://app.stackspirit.io/cloud"
-              >See Always-On Homes in the Web App</a
-            >
-            <a class="btn btn--outline" href="mailto:syver@stackspirit.io">Ask a question</a>
-          </div>
-
-          <p class="fineprint">
-            Prices include the +20% StackSpirit markup over Contabo&rsquo;s regular monthly rate and
-            exclude VAT. There is no free trial: every Home is dedicated and provisioned with a
-            verified payment method. Backups are an optional add-on, off by default. Managed Homes
-            billing is handled by Stripe; see the <a href="/terms">Terms</a> and
-            <a href="/privacy">Privacy Policy</a>. Underlying provider specs are shown for
-            transparency.
-          </p>
         </div>
       </section>
 
@@ -1839,8 +1593,8 @@
             <li><a href="#why">Why StackSpirit</a></li>
             <li><a href="#quickstart">Quickstart</a></li>
             <li><a href="#cockpit">Cockpit</a></li>
-            <li><a href="#harnesses">Harnesses</a></li>
-            <li><a href="#homes">Always-On Homes</a></li>
+            <li><a href="/harnesses">Harnesses</a></li>
+            <li><a href="/homes">Always-On Homes</a></li>
           </ul>
         </nav>
 

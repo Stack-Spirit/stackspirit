@@ -1,10 +1,9 @@
 /**
  * StackSpirit marketing site behaviour.
  *
- * Progressive enhancement only: the page is complete without this module. The
- * script adds the quickstart tabs, copy buttons, and the live managed-Home
- * catalog fetch with a local fallback. It never loads a third-party script,
- * sets a cookie, or sends a request anywhere except the public plans endpoint.
+ * Progressive enhancement only: every page is complete without this module.
+ * Handles quickstart tabs, copy buttons, EUR/USD currency toggle, live
+ * managed-Home catalog fetch with local fallback, and the pixel-film craft.
  */
 
 import { initCraft } from "./craft.mjs";
@@ -12,7 +11,7 @@ import {
   FALLBACK_CATALOG,
   PLANS_URL,
   backupPriceLabel,
-  formatEuro,
+  formatMoney,
   formatMonthly,
   parseCatalog,
   planSpecs,
@@ -23,7 +22,8 @@ document.documentElement.classList.add("has-js");
 
 const PLANS_CTA = "https://app.stackspirit.io/cloud";
 const REQUEST_TIMEOUT_MS = 5_000;
-let currentBackups = FALLBACK_CATALOG.backups;
+let currentCatalog = FALLBACK_CATALOG;
+let currentCurrency = "eur";
 
 function byId(id) {
   return document.getElementById(id);
@@ -132,7 +132,7 @@ function initCopyButtons() {
   }
 }
 
-function planCard(plan) {
+function planCard(plan, currency) {
   const item = document.createElement("li");
   item.className = "plan-card";
   item.dataset.plan = plan.id;
@@ -143,9 +143,10 @@ function planCard(plan) {
   const name = document.createElement("h3");
   name.textContent = plan.name;
 
+  const amount = currency === "usd" ? plan.monthly_usd : plan.monthly_eur;
   const price = document.createElement("p");
   price.className = "plan-card__price";
-  price.append(document.createTextNode(formatEuro(plan.monthly_eur)));
+  price.append(document.createTextNode(formatMoney(amount, currency)));
   const suffix = document.createElement("span");
   suffix.textContent = "/mo";
   price.append(suffix);
@@ -157,7 +158,7 @@ function planCard(plan) {
   spec.textContent = planSpecs(plan);
 
   const setup = document.createElement("p");
-  const setupLabel = setupFeeLabel(plan);
+  const setupLabel = setupFeeLabel(plan, currency);
   setup.className = setupLabel
     ? "plan-card__setup"
     : "plan-card__setup plan-card__setup--none";
@@ -165,9 +166,9 @@ function planCard(plan) {
 
   const cta = document.createElement("a");
   cta.className = "plan-card__cta";
-  cta.href = PLANS_CTA;
+  cta.href = `${PLANS_CTA}?plan=${encodeURIComponent(plan.id)}&currency=${currency}`;
   cta.setAttribute("aria-label", `View ${plan.name} in the Web App`);
-  cta.textContent = `View ${plan.name}`;
+  cta.textContent = `Deploy ${plan.name}`;
 
   item.append(head, spec);
   if (plan.provider_spec) {
@@ -181,17 +182,23 @@ function planCard(plan) {
 }
 
 function updateBackups(backups) {
-  currentBackups = backups;
   const price = byId("backups-price");
-  if (price) price.textContent = backupPriceLabel(backups);
+  if (price) price.textContent = backupPriceLabel(backups, currentCurrency);
   const recommended = byId("backup-recommended");
   if (recommended) recommended.hidden = !backups.recommended;
+  const input = byId("backups");
+  const status = byId("backups-status");
+  if (input instanceof HTMLInputElement && input.checked && status) {
+    const amt = currentCurrency === "usd" ? backups.monthly_usd : backups.monthly_eur;
+    status.textContent = `Backups selected: ${formatMonthly(amt, currentCurrency)}. Confirm the add-on at checkout; you can turn it off again.`;
+  }
 }
 
 function renderCatalog(catalog) {
+  currentCatalog = catalog;
   const list = byId("plans-list");
   if (!list) return;
-  list.replaceChildren(...catalog.plans.map(planCard));
+  list.replaceChildren(...catalog.plans.map((p) => planCard(p, currentCurrency)));
   updateBackups(catalog.backups);
 }
 
@@ -238,10 +245,11 @@ async function fetchCatalog() {
 }
 
 async function loadPlans() {
+  if (!byId("plans-list")) return;
   try {
     const catalog = await fetchCatalog();
     renderCatalog(catalog);
-    setPricingSource("live", "Live prices from api.stackspirit.io.");
+    setPricingSource("live", "Live EUR & USD prices from api.stackspirit.io.");
   } catch {
     renderCatalog(FALLBACK_CATALOG);
     setPricingSource(
@@ -251,39 +259,50 @@ async function loadPlans() {
   }
 }
 
+function initCurrencyToggle() {
+  const buttons = Array.from(document.querySelectorAll("[data-currency]"));
+  if (buttons.length === 0) return;
+
+  function apply(curr) {
+    currentCurrency = curr === "usd" ? "usd" : "eur";
+    for (const btn of buttons) {
+      const active = btn.getAttribute("data-currency") === currentCurrency;
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+      btn.classList.toggle("is-active", active);
+    }
+    renderCatalog(currentCatalog);
+  }
+
+  for (const btn of buttons) {
+    btn.addEventListener("click", () => {
+      apply(btn.getAttribute("data-currency") ?? "eur");
+    });
+  }
+}
+
 function initBackups() {
   const input = byId("backups");
   const status = byId("backups-status");
   if (!(input instanceof HTMLInputElement) || !status) return;
 
-  // Off by default, regardless of anything the public catalog reports.
   input.checked = false;
   status.textContent = "";
 
   input.addEventListener("change", () => {
     if (input.checked) {
-      const price =
-        currentBackups.monthly_eur === null || currentBackups.monthly_eur === undefined
-          ? "priced separately at checkout"
-          : `${formatMonthly(currentBackups.monthly_eur)}`;
+      const amt = currentCurrency === "usd" ? currentCatalog.backups.monthly_usd : currentCatalog.backups.monthly_eur;
+      const price = amt === null || amt === undefined ? "priced separately at checkout" : formatMonthly(amt, currentCurrency);
       status.textContent = `Backups selected: ${price}. Confirm the add-on at checkout; you can turn it off again.`;
     } else {
-      status.textContent = "Backups are off.";
+      status.textContent = "Backups off. Your Home still stores local snapshots on disk.";
     }
   });
-}
-
-function initPricing() {
-  const list = byId("plans-list");
-  if (!list) return;
-  // The static HTML already renders the same fallback cards, so the page is
-  // useful before (and without) this fetch. Refresh quietly when it succeeds.
-  void loadPlans();
 }
 
 initYear();
 initTabs();
 initCopyButtons();
+initCurrencyToggle();
 initBackups();
-initPricing();
 initCraft();
+void loadPlans();

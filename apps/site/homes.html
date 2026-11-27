@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Managed Homes &amp; Pricing — StackSpirit</title>
+    <meta
+      name="description"
+      content="Don't have a Linux box yet? Spin up a pre-configured always-on StackSpirit Home in 60 seconds. Transparent EUR and USD pricing, no free trial, optional encrypted R2 backups."
+    />
+    <link rel="canonical" href="https://stackspirit.io/homes" />
+    <meta name="theme-color" content="#f5f7f0" />
+    <meta name="color-scheme" content="light" />
+    <link rel="icon" href="/assets/icon-32.svg" type="image/svg+xml" />
+    <link rel="icon" href="/assets/icon-32.png" sizes="32x32" type="image/png" />
+    <link rel="icon" href="/assets/icon-16.png" sizes="16x16" type="image/png" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.mjs"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="container header-inner">
+        <a class="brand" href="/" aria-label="StackSpirit home">
+          <canvas class="brand__canvas" data-pixel-icon data-scale="2" width="32" height="32" aria-hidden="true"></canvas>
+          <span class="brand__name">StackSpirit</span>
+        </a>
+
+        <nav class="site-nav" aria-label="Primary">
+          <a href="/#why">Why</a>
+          <a href="/#quickstart">Quickstart</a>
+          <a href="/harnesses">Harnesses</a>
+          <a href="/homes" aria-current="page">Homes</a>
+          <a href="/#faq">FAQ</a>
+        </nav>
+
+        <div class="header-actions">
+          <a
+            class="btn btn--ghost header-actions__github"
+            href="https://github.com/Stack-Spirit/stackspirit"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <span>GitHub</span>
+          </a>
+          <a class="btn btn--primary" href="https://app.stackspirit.io">Open Web App</a>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <section class="section section--homes" id="homes" aria-labelledby="homes-title">
+        <div class="container">
+          <header class="section__head section__head--split">
+            <div>
+              <p class="kicker"><span class="kicker__index">HOMES</span> Optional managed compute</p>
+              <h1 id="homes-title">Don&rsquo;t have a Linux box yet? Spin up a pre-configured home in 60 seconds.</h1>
+              <p class="section__lede">
+                StackSpirit software is MIT open source and free forever on your own VPS, spare laptop, or home server. Managed Homes are simply dedicated Contabo Linux servers pre-installed with StackSpirit + encrypted relay access — priced at regular cost +20%, excl. VAT.
+              </p>
+            </div>
+            <div class="currency-switch" role="group" aria-label="Display currency">
+              <button type="button" class="currency-switch__btn is-active" data-currency="eur" aria-pressed="true">EUR (€)</button>
+              <button type="button" class="currency-switch__btn" data-currency="usd" aria-pressed="false">USD ($)</button>
+            </div>
+          </header>
+
+          <div class="pricing" id="pricing" data-source="static">
+            <p class="pricing__note">
+              <strong>No free trial</strong> — real dedicated Linux hardware is provisioned immediately via Stripe Checkout (VAT/MVA calculated automatically at checkout). Cancel any time.
+            </p>
+            <p class="pricing__source" id="plans-source" hidden></p>
+            <span class="visually-hidden" id="plans-status" role="status" aria-live="polite"></span>
+
+            <ul class="plan-grid" id="plans-list" role="list">
+              <li class="plan-card" data-plan="home-8">
+                <div class="plan-card__head">
+                  <h3>Home 8</h3>
+                  <p class="plan-card__price">€6.60<span>/mo</span></p>
+                </div>
+                <p class="plan-card__spec">4 vCPU · 8 GB RAM · 100 GB SSD</p>
+                <p class="plan-card__provider">Cloud VPS 4</p>
+                <p class="plan-card__setup">+ €7.80 one-time setup</p>
+                <a class="plan-card__cta" href="https://app.stackspirit.io/cloud?plan=home-8&amp;currency=eur" aria-label="View Home 8 in the Web App">Deploy Home 8</a>
+              </li>
+
+              <li class="plan-card" data-plan="home-12">
+                <div class="plan-card__head">
+                  <h3>Home 12</h3>
+                  <p class="plan-card__price">€9<span>/mo</span></p>
+                </div>
+                <p class="plan-card__spec">6 vCPU · 12 GB RAM · 200 GB SSD</p>
+                <p class="plan-card__provider">Cloud VPS 6</p>
+                <p class="plan-card__setup plan-card__setup--none">No setup fee</p>
+                <a class="plan-card__cta" href="https://app.stackspirit.io/cloud?plan=home-12&amp;currency=eur" aria-label="View Home 12 in the Web App">Deploy Home 12</a>
+              </li>
+
+              <li class="plan-card" data-plan="home-24">
+                <div class="plan-card__head">
+                  <h3>Home 24</h3>
+                  <p class="plan-card__price">€16.80<span>/mo</span></p>
+                </div>
+                <p class="plan-card__spec">8 vCPU · 24 GB RAM · 300 GB SSD</p>
+                <p class="plan-card__provider">Cloud VPS 8</p>
+                <p class="plan-card__setup plan-card__setup--none">No setup fee</p>
+                <a class="plan-card__cta" href="https://app.stackspirit.io/cloud?plan=home-24&amp;currency=eur" aria-label="View Home 24 in the Web App">Deploy Home 24</a>
+              </li>
+
+              <li class="plan-card" data-plan="home-48">
+                <div class="plan-card__head">
+                  <h3>Home 48</h3>
+                  <p class="plan-card__price">€30<span>/mo</span></p>
+                </div>
+                <p class="plan-card__spec">12 vCPU · 48 GB RAM · 400 GB SSD</p>
+                <p class="plan-card__provider">Cloud VPS 12</p>
+                <p class="plan-card__setup plan-card__setup--none">No setup fee</p>
+                <a class="plan-card__cta" href="https://app.stackspirit.io/cloud?plan=home-48&amp;currency=eur" aria-label="View Home 48 in the Web App">Deploy Home 48</a>
+              </li>
+
+              <li class="plan-card" data-plan="home-64">
+                <div class="plan-card__head">
+                  <h3>Home 64</h3>
+                  <p class="plan-card__price">€44.40<span>/mo</span></p>
+                </div>
+                <p class="plan-card__spec">16 vCPU · 64 GB RAM · 500 GB SSD</p>
+                <p class="plan-card__provider">Cloud VPS 16</p>
+                <p class="plan-card__setup plan-card__setup--none">No setup fee</p>
+                <a class="plan-card__cta" href="https://app.stackspirit.io/cloud?plan=home-64&amp;currency=eur" aria-label="View Home 64 in the Web App">Deploy Home 64</a>
+              </li>
+            </ul>
+
+            <div class="backup-card">
+              <div class="backup-card__copy">
+                <div class="backup-card__title">
+                  <h3>Off-Site Encrypted R2 Backups</h3>
+                  <span class="badge badge--soft" id="backup-recommended">Recommended</span>
+                  <span class="badge badge--warn">Off by default</span>
+                </div>
+                <p id="backups-help">
+                  Client-side age-encrypted snapshots of your job database, sessions, and configs stored in Cloudflare R2. Keys never leave your machine.
+                  <strong id="backups-price">€3/mo if enabled.</strong>
+                </p>
+                <p class="backup-status" id="backups-status" role="status" aria-live="polite"></p>
+              </div>
+              <label class="switch" for="backups">
+                <input
+                  class="switch__input"
+                  id="backups"
+                  type="checkbox"
+                  role="switch"
+                  aria-describedby="backups-help"
+                />
+                <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+                <span class="switch__label">Include R2 backups</span>
+              </label>
+            </div>
+
+            <div class="homes__free-path">
+              <div>
+                <h3>Already have a VPS, Mac mini, or home Linux server?</h3>
+                <p>Skip managed hosting completely. Install the open-source runtime in 60 seconds and pay €0 for StackSpirit software.</p>
+              </div>
+              <div class="homes__actions">
+                <a class="btn btn--outline" href="/#quickstart">Install free on your own box</a>
+                <a class="btn btn--primary" href="https://app.stackspirit.io/cloud">Open Managed Homes in Web App</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container footer-bottom">
+        <p class="fineprint">&copy; <span id="year">2026</span> StackSpirit · MIT open source</p>
+        <nav class="footer-links" aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/harnesses">Harnesses</a>
+          <a href="/homes">Homes</a>
+          <a href="/privacy">Privacy</a>
+          <a href="/terms">Terms</a>
+          <a href="https://github.com/Stack-Spirit/stackspirit" target="_blank" rel="noopener noreferrer">GitHub</a>
+        </nav>
+      </div>
+    </footer>
+  </body>
+</html>

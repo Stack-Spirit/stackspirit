@@ -186,7 +186,11 @@ async function startPreviewServer() {
 }
 
 const indexHtml = await read("index.html");
+const homesHtml = await read("homes.html");
+const harnessesHtml = await read("harnesses.html");
 const text = textOf(indexHtml);
+const homesText = textOf(homesHtml);
+const harnessesText = textOf(harnessesHtml);
 const privacyHtml = await read("privacy.html");
 const privacyText = textOf(privacyHtml);
 const termsHtml = await read("terms.html");
@@ -205,11 +209,15 @@ const middleware = await import(
 await check("required site files exist", async () => {
   for (const file of [
     "index.html",
+    "homes.html",
+    "harnesses.html",
     "privacy.html",
     "terms.html",
+    "pixel-film.mjs",
     "styles.css",
     "app.mjs",
     "craft.mjs",
+    "pixel-film.mjs",
     "pricing-data.mjs",
     "404.html",
     "favicon.ico",
@@ -315,7 +323,7 @@ await check("free local and BYO-VPS install comes before Managed Homes", async (
   const homes = sectionHtml(indexHtml, "homes-title");
   assertIncludes(
     textOf(homes),
-    "Don't have a Linux box yet? Spin up a pre-configured home in 60 seconds.",
+    "Don’t have a Linux box yet? Spin up a pre-configured home in 60 seconds.",
     "managed homes prompt",
   );
   assert.ok(
@@ -374,8 +382,8 @@ await check("quickstart commands are exact", async () => {
 /* ---------- Custom craft ---------- */
 
 await check("hero and feature cards carry the pixel-shimmer canvas", async () => {
-  const canvases = indexHtml.match(/<canvas\b[^>]*>/g) ?? [];
-  assert.equal(canvases.length, 7, "expected seven canvases");
+  const canvases = indexHtml.match(/<canvas\b[^>]*data-shimmer[^>]*>/g) ?? [];
+  assert.equal(canvases.length, 7, "expected seven shimmer canvases");
   assert.equal((indexHtml.match(/data-shimmer-ambient/g) ?? []).length, 1);
   for (const canvas of canvases) {
     assertIncludes(canvas, "data-shimmer", "shimmer canvas marker");
@@ -395,7 +403,8 @@ await check("the scroll path has a curved SVG and a pixel mascot", async () => {
   assertIncludes(indexHtml, 'id="scroll-path-progress"');
   assertIncludes(indexHtml, 'id="scroll-path-mascot"');
   assertIncludes(indexHtml, 'class="scroll-path__sprite"');
-  assertIncludes(indexHtml, "/assets/mascot-thick-walk-128.png");
+  assertIncludes(indexHtml, "hero-road-canvas");
+  assertIncludes(await read("pixel-film.mjs"), "renderWalkerFrame");
   const path = indexHtml.match(/<path\b[^>]*id="scroll-path-line"[^>]*>/i)?.[0] ?? "";
   assert.ok(/\bd="[^"]*C/.test(path), "scroll path should be a curve");
   const craft = await read("craft.mjs");
@@ -416,17 +425,18 @@ await check("the harness matrix names every requested harness", async () => {
     "Claude Code",
     "Codex",
     "Gemini CLI",
+    "Antigravity",
     "Cursor CLI",
     "Aider",
     "Goose",
     "Custom CLI",
   ]) {
-    assertIncludes(text, harness, `harness ${harness}`);
+    assertIncludes(harnessesText, harness, `harness ${harness}`);
   }
-  assertIncludes(text, "default engine", "OpenCode default engine");
-  assertIncludes(text, "bring-your-own", "bring-your-own harness note");
-  assertIncludes(text, "not affiliated with or endorsed by them");
-  const rows = indexHtml.match(/<tr class="harness-row(?: [^"]*)?">/g) ?? [];
+  assertIncludes(harnessesText, "default engine", "OpenCode default engine");
+  assertIncludes(harnessesText, "bring-your-own", "bring-your-own harness note");
+  assertIncludes(harnessesText, "not affiliated with or endorsed by them");
+  const rows = harnessesHtml.match(/<tr class="harness-row(?: [^"]*)?">/g) ?? [];
   assert.equal(rows.length, 8, "expected eight harness rows");
 });
 
@@ -461,6 +471,8 @@ await check("privacy and terms pages are complete and linked", async () => {
   const hrefs = attributeValues(indexHtml, "href");
   assert.ok(hrefs.includes("/privacy"), "index footer should link /privacy");
   assert.ok(hrefs.includes("/terms"), "index footer should link /terms");
+  assertIncludes(sitemap, "<loc>https://stackspirit.io/homes</loc>");
+  assertIncludes(sitemap, "<loc>https://stackspirit.io/harnesses</loc>");
   assertIncludes(sitemap, "<loc>https://stackspirit.io/privacy</loc>");
   assertIncludes(sitemap, "<loc>https://stackspirit.io/terms</loc>");
 });
@@ -497,12 +509,12 @@ await check("fallback catalog is the published strategy data", () => {
   assert.equal(home8.disk_gb, 100);
   const home64 = catalog.plans.at(-1);
   assert.equal(home64.name, "Home 64");
-  assert.equal(home64.monthly_eur, 44);
+  assert.equal(home64.monthly_eur, 44.4);
   assert.equal(home64.setup_fee_eur, 0);
   assert.equal(home64.vcpu, 16);
   assert.equal(home64.ram_gb, 64);
   assert.equal(home64.disk_gb, 500);
-  assert.equal(catalog.backups.monthly_eur, 3.5);
+  assert.equal(catalog.backups.monthly_eur, 3);
   assert.equal(catalog.backups.recommended, true);
   assert.equal(catalog.backups.provider, "cloudflare-r2");
 });
@@ -524,12 +536,16 @@ await check("price formatting matches the brief", () => {
   );
   assert.equal(
     pricingData.backupPriceLabel(pricingData.FALLBACK_CATALOG.backups),
-    "€3.50/mo if enabled.",
+    "€3/mo if enabled.",
+  );
+  assert.equal(
+    pricingData.backupPriceLabel(pricingData.FALLBACK_CATALOG.backups, "usd"),
+    "$3.50/mo if enabled.",
   );
 });
 
 await check("the static fallback cards match the catalog", async () => {
-  const cards = indexHtml.match(/<li class="plan-card"[\s\S]*?<\/li>/g) ?? [];
+  const cards = homesHtml.match(/<li class="plan-card"[\s\S]*?<\/li>/g) ?? [];
   assert.equal(cards.length, 5, "expected five static plan cards");
   for (const plan of pricingData.FALLBACK_CATALOG.plans) {
     const cardText = textOf(cards.find((card) => card.includes(`data-plan="${plan.id}"`)) ?? "");
@@ -541,23 +557,23 @@ await check("the static fallback cards match the catalog", async () => {
     assertIncludes(cardText, setup ?? "No setup fee", `${plan.id} setup fee`);
   }
   // The brief asks for these exact published values.
-  assertIncludes(text, "€6.60");
-  assertIncludes(text, "€7.80");
-  assertIncludes(text, "€44");
+  assertIncludes(homesText, "€6.60");
+  assertIncludes(homesText, "€7.80");
+  assertIncludes(homesText, "€44.40");
 });
 
 await check("managed homes state no free trial and show the backup add-on", async () => {
-  assertIncludes(text, "No free trial");
-  assertIncludes(text, "Off-Site Encrypted R2 Backups");
-  assertIncludes(text, "Recommended");
-  assertIncludes(text, "off by default");
-  assertIncludes(text, "€3.50");
-  assertIncludes(indexHtml, 'role="switch"');
-  assertIncludes(indexHtml, 'for="backups"');
+  assertIncludes(homesText, "No free trial");
+  assertIncludes(homesText, "Off-Site Encrypted R2 Backups");
+  assertIncludes(homesText, "Recommended");
+  assertIncludes(homesText, "Off by default");
+  assertIncludes(homesText, "€3/mo");
+  assertIncludes(homesHtml, 'role="switch"');
+  assertIncludes(homesHtml, 'for="backups"');
 });
 
 await check("the backup switch is off by default", async () => {
-  const tags = indexHtml.match(/<input\b[^>]*id="backups"[^>]*>/g) ?? [];
+  const tags = homesHtml.match(/<input\b[^>]*id="backups"[^>]*>/g) ?? [];
   assert.equal(tags.length, 1, "expected one backups input");
   assertNotIncludes(tags[0], "checked", "backups switch");
   assert.ok(tags[0].includes('type="checkbox"'), "expected a checkbox");
@@ -625,7 +641,7 @@ await check("catalog parsing is strict and ignores server-side defaults", () => 
 
 await check("HTML has one h1, landmarks and a skip link", async () => {
   assert.equal((indexHtml.match(/<h1\b/g) ?? []).length, 1);
-  assert.ok((indexHtml.match(/<h2\b/g) ?? []).length >= 8);
+  assert.ok((indexHtml.match(/<h2\b/g) ?? []).length >= 6);
   assertIncludes(indexHtml, '<main id="main"');
   assertIncludes(indexHtml, '<a class="skip-link" href="#main">Skip to content</a>');
   assertIncludes(indexHtml, '<header class="site-header"');
@@ -660,7 +676,7 @@ await check("images, buttons and new-tab links are accessible", async () => {
       }
     }
   }
-  assert.equal((indexHtml.match(/role="switch"/g) ?? []).length, 1);
+  assert.equal((homesHtml.match(/role="switch"/g) ?? []).length, 1);
   assert.equal((indexHtml.match(/<details\b/g) ?? []).length, 8);
 });
 
@@ -679,12 +695,16 @@ await check("the page declares exactly one external module script", async () => 
 await check("no tracker, analytics or external font code", async () => {
   const files = [
     "index.html",
+    "homes.html",
+    "harnesses.html",
     "privacy.html",
     "terms.html",
+    "pixel-film.mjs",
     "404.html",
     "styles.css",
     "app.mjs",
     "craft.mjs",
+    "pixel-film.mjs",
     "pricing-data.mjs",
     "functions/_middleware.js",
     "robots.txt",
@@ -703,7 +723,7 @@ await check("no tracker, analytics or external font code", async () => {
 });
 
 await check("client code avoids unsafe HTML injection", async () => {
-  for (const file of ["app.mjs", "craft.mjs"]) {
+  for (const file of ["app.mjs", "craft.mjs", "pixel-film.mjs"]) {
     const source = await read(file);
     for (const banned of ["innerHTML", "insertAdjacentHTML", "outerHTML", "eval(", "new Function"]) {
       assertNotIncludes(source, banned, file);
@@ -747,6 +767,8 @@ await check("SEO basics and sitemap are present", async () => {
   assertIncludes(indexHtml, 'property="og:image" content="https://stackspirit.io/assets/og-image.png"');
   assertIncludes(indexHtml, 'name="twitter:card" content="summary_large_image"');
   assertIncludes(sitemap, "<loc>https://stackspirit.io/</loc>");
+  assertIncludes(sitemap, "<loc>https://stackspirit.io/homes</loc>");
+  assertIncludes(sitemap, "<loc>https://stackspirit.io/harnesses</loc>");
   assertIncludes(sitemap, "<loc>https://stackspirit.io/privacy</loc>");
   assertIncludes(sitemap, "<loc>https://stackspirit.io/terms</loc>");
   const robots = await read("robots.txt");
@@ -797,6 +819,7 @@ await check("JavaScript syntax checks pass", async () => {
   for (const file of [
     "app.mjs",
     "craft.mjs",
+    "pixel-film.mjs",
     "pricing-data.mjs",
     "scripts/serve.mjs",
     "scripts/verify.mjs",
@@ -837,6 +860,10 @@ await check("the local preview server serves the real static contract", async ()
     assert.equal(mascot.status, 200);
     assertIncludes(mascot.headers.get("content-type") ?? "", "image/png");
 
+    const homesPage = await fetch(`${server.base}/homes`);
+    assert.equal(homesPage.status, 200, "expected /homes to serve homes.html");
+    const harnessesPage = await fetch(`${server.base}/harnesses`);
+    assert.equal(harnessesPage.status, 200, "expected /harnesses to serve harnesses.html");
     const privacy = await fetch(`${server.base}/privacy`);
     assert.equal(privacy.status, 200, "expected /privacy to serve privacy.html");
     assertIncludes(privacy.headers.get("content-type") ?? "", "text/html");

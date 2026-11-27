@@ -1,21 +1,30 @@
 /**
  * Handmade interactions for the StackSpirit marketing site.
  *
- * Two progressive enhancements, both dependency-free:
+ * Four dependency-free progressive enhancements:
+ *   1. Authentic pixel-canvas shimmer (ExampleDesign/pixel-canvas): tight
+ *      Meadow pixel cells that ripple outward from the cursor on card hover.
+ *   2. Code-generated 8-frame pixel-film hero walker: the skinny deadpan
+ *      frog-eyed sprout spirit walks across a North Noir rolling Meadow curve
+ *      at the bottom of the hero, blinking and leaning into the hill slope.
+ *   3. Code-generated blinking spirit icons in the header and developer note.
+ *   4. Scroll-driven vertical Meadow path on the page edge with the same
+ *      code-generated skinny pixel walker tracking scroll progress.
  *
- *   1. A pixel-shimmer canvas behind the hero and each feature card. The hero
- *      gets a slow ambient field; cards get a still field plus a little sparkle
- *      under the pointer. Everything is drawn as flat Meadow-colour squares so
- *      it stays crisp and cheap.
- *   2. A scroll-driven curved SVG path with the thick pixel mascot walking
- *      down the page. The mascot position comes from the path's own geometry,
- *      so the curve, the page height and resizes all stay in sync.
- *
- * `prefers-reduced-motion: reduce` disables both animations: the canvas paints
- * one still field and the mascot sits at a fixed point on the path.
+ * `prefers-reduced-motion: reduce` disables animation cleanly.
  */
 
-const MEADOW = ["67,168,90", "205,237,176", "30,91,54"];
+import {
+  ICON_LOGICAL_H,
+  ICON_LOGICAL_W,
+  WALKER_LOGICAL_H,
+  WALKER_LOGICAL_W,
+  renderSproutIcon,
+  renderWalkerFrame,
+} from "./pixel-film.mjs";
+
+const PALETTE_CARD = ["#cdedb0", "#43a85a", "#2e7f48", "#1e5b36"];
+const PALETTE_HERO = ["#cdedb0", "#43a85a", "#1e5b36"];
 const MAX_DPR = 2;
 
 function clamp(value, min, max) {
@@ -26,37 +35,53 @@ function reducedMotionQuery() {
   return window.matchMedia("(prefers-reduced-motion: reduce)");
 }
 
-function hash(seed) {
-  let value = seed | 0;
-  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
-  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
-  return (value ^ (value >>> 16)) >>> 0;
+function isBlinking(timeMs) {
+  const cycle = timeMs % 3900;
+  return cycle > 3720 && cycle < 3860;
 }
 
-function fieldFor(cols, rows, seed) {
-  const dots = [];
-  for (let row = 0; row < rows; row += 1) {
-    for (let col = 0; col < cols; col += 1) {
-      const noise = hash(seed + col * 374761 + row * 668265);
-      if (noise % 100 > 26) continue;
-      dots.push({
-        col,
-        row,
-        tone: noise % MEADOW.length,
-        alpha: 0.1 + ((noise >>> 8) % 22) / 100,
-        phase: ((noise >>> 12) % 628) / 100,
-        speed: 0.4 + ((noise >>> 18) % 70) / 100,
-        size: 2 + ((noise >>> 22) % 2) * 2,
-      });
+class ShimmerPixel {
+  constructor(x, y, color, speed, maxSize) {
+    this.x = x;
+    this.y = y;
+    this.color = color;
+    this.speed = speed;
+    this.maxSize = maxSize;
+    this.minSize = 0.6;
+    this.size = 0;
+    this.delay = 0;
+    this.counter = 0;
+    this.reverse = false;
+    this.shimmering = false;
+    this.idle = true;
+  }
+
+  appear(step) {
+    this.idle = false;
+    if (this.counter < this.delay) {
+      this.counter += step;
+      return;
+    }
+    if (this.size >= this.maxSize) this.shimmering = true;
+    if (this.shimmering) {
+      if (this.size >= this.maxSize) this.reverse = true;
+      else if (this.size <= this.minSize) this.reverse = false;
+      this.size += this.reverse ? -this.speed * 0.45 : this.speed * 0.45;
+    } else {
+      this.size = Math.min(this.maxSize, this.size + this.speed);
     }
   }
-  return dots;
-}
 
-function drawPixel(ctx, x, y, size, tone, alpha) {
-  if (alpha <= 0.005) return;
-  ctx.fillStyle = `rgba(${MEADOW[tone]},${alpha.toFixed(3)})`;
-  ctx.fillRect(x, y, size, size);
+  disappear() {
+    this.shimmering = false;
+    this.counter = 0;
+    if (this.size <= 0.05) {
+      this.size = 0;
+      this.idle = true;
+      return;
+    }
+    this.size = Math.max(0, this.size - 0.24);
+  }
 }
 
 function initShimmer() {
@@ -73,206 +98,362 @@ function initShimmer() {
     frame = window.requestAnimationFrame(tick);
   };
 
-  function tick(time) {
-    frame = 0;
-    let active = false;
-
-    for (const item of items) {
-      if (!item.visible) continue;
-
-      let expired = false;
-      for (const [key, spark] of item.sparks) {
-        if (spark.until <= time) {
-          item.sparks.delete(key);
-          expired = true;
-        }
-      }
-
-      const busy = item.ambient || item.hovering || item.sparks.size > 0;
-      if (busy) {
-        active = true;
-        paint(item, time, true);
-      } else if (expired) {
-        // Leave the still field behind after the last spark fades, not the
-        // near-invisible frame where every spark had run out.
-        paint(item, 0, false);
-      }
-    }
-
-    if (active && !reduce && !document.hidden) {
-      frame = window.requestAnimationFrame(tick);
-    }
-  }
-
-  function paint(item, time, animated) {
-    const { ctx, canvas, dots, cell } = item;
-    const width = canvas.width / item.dpr;
-    const height = canvas.height / item.dpr;
-    ctx.clearRect(0, 0, width, height);
-
-    for (const dot of dots) {
-      const x = dot.col * cell + 1;
-      const y = dot.row * cell + 1;
-      let alpha = dot.alpha;
-      if (animated && item.ambient) {
-        alpha *= 0.55 + 0.45 * Math.sin(time * 0.001 * dot.speed + dot.phase);
-      }
-      if (animated && item.hovering) alpha *= 1.45;
-      drawPixel(ctx, x, y, dot.size, dot.tone, alpha);
-    }
-
-    if (item.sparks.size > 0) {
-      for (const spark of item.sparks.values()) {
-        const remaining = clamp((spark.until - time) / 520, 0, 1);
-        const x = spark.col * cell + 1;
-        const y = spark.row * cell + 1;
-        drawPixel(ctx, x, y, cell - 3, spark.tone, 0.18 + remaining * 0.55);
-        drawPixel(ctx, x + 2, y + 2, Math.max(2, cell - 8), spark.tone, 0.1 + remaining * 0.5);
-      }
-    }
-  }
-
-  function size(item) {
+  function buildPixels(item) {
     const rect = item.host.getBoundingClientRect();
     const width = Math.max(1, Math.round(rect.width));
     const height = Math.max(1, Math.round(rect.height));
     const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+
     item.canvas.width = Math.round(width * dpr);
     item.canvas.height = Math.round(height * dpr);
     item.canvas.style.width = `${width}px`;
     item.canvas.style.height = `${height}px`;
     item.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    item.dpr = dpr;
-    item.cols = Math.ceil(width / item.cell);
-    item.rows = Math.ceil(height / item.cell);
-    item.dots = fieldFor(item.cols, item.rows, item.seed);
-    paint(item, 0, false);
+    item.width = width;
+    item.height = height;
+
+    const gap = item.ambient ? 20 : 9;
+    const palette = item.ambient ? PALETTE_HERO : PALETTE_CARD;
+    const pixels = [];
+    let n = item.seed;
+    const nextRand = () => {
+      n = (Math.imul(n, 1664525) + 1013904223) >>> 0;
+      return n / 4294967296;
+    };
+
+    for (let x = gap * 0.5; x < width; x += gap) {
+      for (let y = gap * 0.5; y < height; y += gap) {
+        if (item.ambient) {
+          const nx = x / width;
+          const ny = y / height;
+          const edgeBias = Math.max(nx - 0.45, ny - 0.55);
+          if (edgeBias < 0 || nextRand() > edgeBias * 0.36) continue;
+        }
+        const color = palette[Math.floor(nextRand() * palette.length)];
+        const speed = 0.08 + nextRand() * 0.18;
+        const maxSize = item.ambient ? 2 + Math.floor(nextRand() * 2) : 1.5 + nextRand() * 1.8;
+        const px = new ShimmerPixel(Math.round(x), Math.round(y), color, speed, maxSize);
+        if (item.ambient) {
+          px.phase = nextRand() * Math.PI * 2;
+          px.size = maxSize * 0.65;
+        }
+        pixels.push(px);
+      }
+    }
+    item.pixels = pixels;
+    drawStatic(item);
+  }
+
+  function setRippleOrigin(item, ox, oy) {
+    for (const px of item.pixels) {
+      const dx = px.x - ox;
+      const dy = px.y - oy;
+      px.delay = Math.sqrt(dx * dx + dy * dy) * 0.55;
+      px.counter = 0;
+    }
+  }
+
+  function drawStatic(item) {
+    const { ctx, width, height, pixels, ambient } = item;
+    ctx.clearRect(0, 0, width, height);
+    if (!ambient) return;
+    ctx.globalAlpha = 0.2;
+    for (const px of pixels) {
+      ctx.fillStyle = px.color;
+      ctx.fillRect(px.x, px.y, px.maxSize, px.maxSize);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function tick(time) {
+    frame = 0;
+    let keepGoing = false;
+
+    for (const item of items) {
+      if (!item.visible) continue;
+      const { ctx, width, height, pixels, ambient } = item;
+
+      if (ambient) {
+        keepGoing = true;
+        ctx.clearRect(0, 0, width, height);
+        for (const px of pixels) {
+          const wave = 0.5 + 0.5 * Math.sin(time * 0.0011 + (px.phase || 0));
+          ctx.globalAlpha = 0.06 + wave * 0.22;
+          ctx.fillStyle = px.color;
+          ctx.fillRect(px.x, px.y, px.maxSize, px.maxSize);
+        }
+        ctx.globalAlpha = 1;
+        continue;
+      }
+
+      if (!item.active && !item.fading) continue;
+
+      ctx.clearRect(0, 0, width, height);
+      let anyAlive = false;
+      ctx.globalAlpha = 0.34;
+      for (const px of pixels) {
+        if (item.active) {
+          px.appear(12);
+          anyAlive = true;
+        } else {
+          px.disappear();
+          if (!px.idle) anyAlive = true;
+        }
+        if (px.size > 0.05) {
+          const off = (px.maxSize - px.size) * 0.5;
+          ctx.fillStyle = px.color;
+          ctx.fillRect(px.x + off, px.y + off, px.size, px.size);
+        }
+      }
+      ctx.globalAlpha = 1;
+      if (anyAlive) {
+        keepGoing = true;
+      } else {
+        item.fading = false;
+      }
+    }
+
+    if (keepGoing && !reduce && !document.hidden) {
+      frame = window.requestAnimationFrame(tick);
+    }
   }
 
   for (const [index, canvas] of canvases.entries()) {
     const host = canvas.parentElement;
     if (!host) continue;
+    const ctx = canvas.getContext("2d", { alpha: true });
+    if (!ctx) continue;
 
     const item = {
       canvas,
       host,
-      ctx: canvas.getContext("2d", { alpha: true }),
+      ctx,
       ambient: canvas.hasAttribute("data-shimmer-ambient"),
-      cell: host.classList.contains("hero") ? 16 : 12,
-      seed: 97 + index * 131,
-      dots: [],
-      sparks: new Map(),
-      cols: 0,
-      rows: 0,
-      dpr: Math.min(window.devicePixelRatio || 1, MAX_DPR),
-      hovering: false,
+      seed: 1337 + index * 997,
+      pixels: [],
+      width: 1,
+      height: 1,
+      active: false,
+      fading: false,
       visible: true,
-      cleanups: [],
     };
-    if (!item.ctx) continue;
     items.push(item);
 
     if ("ResizeObserver" in window) {
-      const observer = new ResizeObserver(() => size(item));
-      observer.observe(host);
-      item.cleanups.push(() => observer.disconnect());
+      new ResizeObserver(() => buildPixels(item)).observe(host);
     } else {
-      const onResize = () => size(item);
-      window.addEventListener("resize", onResize);
-      item.cleanups.push(() => window.removeEventListener("resize", onResize));
+      window.addEventListener("resize", () => buildPixels(item));
     }
 
     if ("IntersectionObserver" in window) {
-      const observer = new IntersectionObserver(
+      new IntersectionObserver(
         (entries) => {
           for (const entry of entries) {
             item.visible = entry.isIntersecting;
-            if (item.visible) {
-              schedule();
-            } else {
-              item.hovering = false;
-              item.sparks.clear();
-              paint(item, 0, false);
-            }
+            if (item.visible) schedule();
           }
         },
-        { rootMargin: "80px" },
-      );
-      observer.observe(host);
-      item.cleanups.push(() => observer.disconnect());
+        { rootMargin: "100px" },
+      ).observe(host);
     }
 
-    host.addEventListener("pointermove", (event) => {
-      if (reduce) return;
-      const rect = host.getBoundingClientRect();
-      const col = Math.floor((event.clientX - rect.left) / item.cell);
-      const row = Math.floor((event.clientY - rect.top) / item.cell);
-      if (col < 0 || row < 0 || col >= item.cols || row >= item.rows) return;
-      const until = performance.now() + 900;
-      for (let dy = -1; dy <= 1; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          const key = `${col + dx},${row + dy}`;
-          if (item.sparks.size > 90 && !item.sparks.has(key)) continue;
-          item.sparks.set(key, {
-            col: col + dx,
-            row: row + dy,
-            tone: (col + row + dx + dy + item.seed) % MEADOW.length,
-            until: until - Math.abs(dx) * 80 - Math.abs(dy) * 80,
-          });
-        }
-      }
-      item.hovering = true;
-      schedule();
-    });
+    if (!item.ambient) {
+      host.addEventListener("pointerenter", (event) => {
+        if (reduce) return;
+        const rect = host.getBoundingClientRect();
+        setRippleOrigin(item, event.clientX - rect.left, event.clientY - rect.top);
+        item.active = true;
+        item.fading = true;
+        schedule();
+      });
+      host.addEventListener("pointerleave", () => {
+        item.active = false;
+        item.fading = true;
+        schedule();
+      });
+    }
 
-    host.addEventListener("pointerleave", () => {
-      item.hovering = false;
-      schedule();
-    });
-
-    size(item);
+    buildPixels(item);
   }
 
-  const onVisibility = () => {
+  document.addEventListener("visibilitychange", () => {
     if (document.hidden && frame) {
       window.cancelAnimationFrame(frame);
       frame = 0;
     } else if (!document.hidden) {
       schedule();
     }
-  };
-  document.addEventListener("visibilitychange", onVisibility);
+  });
 
   const onMotionChange = () => {
     reduce = media.matches;
-    if (reduce) {
-      if (frame) window.cancelAnimationFrame(frame);
+    if (reduce && frame) {
+      window.cancelAnimationFrame(frame);
       frame = 0;
       for (const item of items) {
-        item.sparks.clear();
-        item.hovering = false;
-        paint(item, 0, false);
+        item.active = false;
+        item.fading = false;
+        drawStatic(item);
       }
-    } else {
+    } else if (!reduce) {
       schedule();
     }
   };
   if (typeof media.addEventListener === "function") {
     media.addEventListener("change", onMotionChange);
-  } else if (typeof media.addListener === "function") {
-    media.addListener(onMotionChange);
   }
 
   schedule();
 }
 
+/** Code-generated pixel icons (header mark & developer field-note idle buddy). */
+function initCodeSprites() {
+  const icons = Array.from(document.querySelectorAll("canvas[data-pixel-icon]"));
+  const idles = Array.from(document.querySelectorAll("canvas[data-pixel-idle]"));
+  if (icons.length === 0 && idles.length === 0) return;
+
+  const media = reducedMotionQuery();
+
+  for (const canvas of icons) {
+    const scale = Number(canvas.getAttribute("data-scale") || 2);
+    canvas.width = ICON_LOGICAL_W * scale;
+    canvas.height = ICON_LOGICAL_H * scale;
+  }
+  for (const canvas of idles) {
+    const scale = Number(canvas.getAttribute("data-scale") || 2);
+    canvas.width = WALKER_LOGICAL_W * scale;
+    canvas.height = WALKER_LOGICAL_H * scale;
+  }
+
+  function paintAll(now) {
+    const blink = !media.matches && isBlinking(now);
+    const sway = media.matches ? 0 : Math.floor(now / 950) % 3;
+    for (const canvas of icons) {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) continue;
+      const scale = Number(canvas.getAttribute("data-scale") || 2);
+      renderSproutIcon(ctx, { blink, sway, scale });
+    }
+    for (const canvas of idles) {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) continue;
+      const scale = Number(canvas.getAttribute("data-scale") || 2);
+      renderWalkerFrame(ctx, -1, { blink, scale });
+    }
+  }
+
+  paintAll(0);
+  if (media.matches) return;
+
+  let raf = 0;
+  let lastPaint = 0;
+  function tick(now) {
+    raf = 0;
+    if (document.hidden) return;
+    if (now - lastPaint >= 120) {
+      lastPaint = now;
+      paintAll(now);
+    }
+    raf = window.requestAnimationFrame(tick);
+  }
+  raf = window.requestAnimationFrame(tick);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && !media.matches && !raf) {
+      raf = window.requestAnimationFrame(tick);
+    }
+  });
+}
+
+/** North Noir-inspired hero road with our 8-frame code-generated skinny pixel walker. */
+function initHeroWalker() {
+  const wrap = document.getElementById("hero-road");
+  const path = document.getElementById("hero-road-path");
+  const walker = document.getElementById("hero-road-walker");
+  const canvas = document.getElementById("hero-road-canvas");
+  if (!wrap || !path || !walker || !canvas) return;
+
+  const scale = 2;
+  canvas.width = WALKER_LOGICAL_W * scale;
+  canvas.height = WALKER_LOGICAL_H * scale;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const media = reducedMotionQuery();
+  let raf = 0;
+  let total = 0;
+  let start = 0;
+  let lastFrameIdx = -99;
+  let lastBlink = false;
+  const DURATION_MS = 20000;
+  const FRAME_MS = 125; // 8 fps crisp pixel-film cadence
+
+  function place(progress, now) {
+    const rect = wrap.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    if (total === 0) total = path.getTotalLength();
+    const ctm = path.getScreenCTM();
+    if (!ctm || total === 0) return;
+
+    const dist = total * clamp(progress, 0, 1);
+    const pt = path.getPointAtLength(dist).matrixTransform(ctm);
+    const ahead = path.getPointAtLength(Math.min(total, dist + 6)).matrixTransform(ctm);
+    const slopeDeg = clamp((Math.atan2(ahead.y - pt.y, ahead.x - pt.x) * 180) / Math.PI, -8, 8);
+
+    const frameIdx = media.matches ? -1 : Math.floor(now / FRAME_MS) % 8;
+    const blink = !media.matches && isBlinking(now);
+    if (frameIdx !== lastFrameIdx || blink !== lastBlink) {
+      lastFrameIdx = frameIdx;
+      lastBlink = blink;
+      renderWalkerFrame(ctx, frameIdx, { blink, scale, facingLeft: false });
+    }
+
+    const w = walker.offsetWidth || WALKER_LOGICAL_W * scale;
+    const h = walker.offsetHeight || WALKER_LOGICAL_H * scale;
+    const x = pt.x - rect.left - w * 0.5;
+    const y = pt.y - rect.top - h + 4;
+    walker.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) rotate(${slopeDeg.toFixed(1)}deg)`;
+  }
+
+  function loop(now) {
+    raf = 0;
+    if (document.hidden || media.matches) return;
+    if (!start) start = now;
+    const progress = ((now - start) % DURATION_MS) / DURATION_MS;
+    place(progress, now);
+    raf = window.requestAnimationFrame(loop);
+  }
+
+  if (media.matches) {
+    place(0.62, 0);
+  } else {
+    raf = window.requestAnimationFrame(loop);
+  }
+
+  window.addEventListener("resize", () => {
+    total = 0;
+    if (media.matches) place(0.62, 0);
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && !media.matches && !raf) {
+      raf = window.requestAnimationFrame(loop);
+    }
+  });
+}
+
+/** Scroll-driven Meadow spine path with code-generated skinny pixel walker. */
 function initScrollPath() {
   const wrap = document.getElementById("scroll-path");
   const line = document.getElementById("scroll-path-line");
   const progress = document.getElementById("scroll-path-progress");
   const mascot = document.getElementById("scroll-path-mascot");
-  const sprite = mascot ? mascot.querySelector(".scroll-path__sprite") : null;
-  if (!wrap || !line || !progress || !mascot || !sprite) return;
+  const canvas = mascot ? mascot.querySelector("canvas.scroll-path__sprite") : null;
+  if (!wrap || !line || !progress || !mascot || !canvas) return;
+
+  const scale = 2;
+  canvas.width = WALKER_LOGICAL_W * scale;
+  canvas.height = WALKER_LOGICAL_H * scale;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
 
   const media = reducedMotionQuery();
   let frame = 0;
@@ -291,9 +472,9 @@ function initScrollPath() {
     const rect = wrap.getBoundingClientRect();
     if (rect.height === 0 || length === 0) return;
 
-    const anchor = window.innerHeight * 0.55;
+    const anchor = window.innerHeight * 0.5;
     const ratio = media.matches
-      ? 0.22
+      ? 0.18
       : clamp((anchor - rect.top) / rect.height, 0, 1);
 
     progress.style.strokeDasharray = `${length} ${length}`;
@@ -303,8 +484,8 @@ function initScrollPath() {
     if (!matrix) return;
     const point = line.getPointAtLength(length * ratio);
     const screen = point.matrixTransform(matrix);
-    const width = mascot.offsetWidth || 56;
-    const height = mascot.offsetHeight || 89;
+    const width = mascot.offsetWidth || WALKER_LOGICAL_W * scale;
+    const height = mascot.offsetHeight || WALKER_LOGICAL_H * scale;
     mascot.style.transform = `translate3d(${screen.x - rect.left - width / 2}px, ${
       screen.y - rect.top - height / 2
     }px, 0)`;
@@ -318,6 +499,9 @@ function initScrollPath() {
         mascot.classList.toggle("is-flipped", shouldFlip);
       }
     }
+
+    const walkStep = media.matches ? -1 : Math.floor(ratio * 48) % 8;
+    renderWalkerFrame(ctx, walkStep, { blink: false, scale, facingLeft: false });
   }
 
   function requestUpdate() {
@@ -331,8 +515,6 @@ function initScrollPath() {
 
   if (typeof media.addEventListener === "function") {
     media.addEventListener("change", requestUpdate);
-  } else if (typeof media.addListener === "function") {
-    media.addListener(requestUpdate);
   }
 
   requestUpdate();
@@ -340,5 +522,7 @@ function initScrollPath() {
 
 export function initCraft() {
   initShimmer();
+  initCodeSprites();
+  initHeroWalker();
   initScrollPath();
 }

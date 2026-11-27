@@ -1,19 +1,13 @@
 /**
- * Public managed-Home catalog helpers.
+ * Public managed-Home catalog helpers (EUR + USD).
  *
- * The marketing site asks `GET https://api.stackspirit.io/v1/plans` for the
- * published prices and falls back to these values when the catalog is
- * unreachable or malformed. The numbers match docs/STRATEGY.md §6: Contabo's
- * regular monthly rate plus the 20% StackSpirit markup. The optional off-site
- * encrypted R2 backups are always presented off by default.
- *
- * This module is intentionally dependency-free and importable by the
- * verification script under Node as well as by the browser.
+ * Fetches `GET https://api.stackspirit.io/v1/plans` and falls back to these
+ * published values when unreachable. Supports both the live Cloudflare Worker
+ * cent-based schema (EUR + USD) and the legacy euro-float schema.
  */
 
 export const PLANS_URL = "https://api.stackspirit.io/v1/plans";
 
-/** Prices in euro. Home 8 is the only tier with a one-time setup fee. */
 export const FALLBACK_CATALOG = Object.freeze({
   plans: Object.freeze([
     Object.freeze({
@@ -25,6 +19,8 @@ export const FALLBACK_CATALOG = Object.freeze({
       disk_kind: "SSD",
       monthly_eur: 6.6,
       setup_fee_eur: 7.8,
+      monthly_usd: 7.2,
+      setup_fee_usd: 8.4,
       currency: "EUR",
       provider_spec: "Cloud VPS 4",
     }),
@@ -37,6 +33,8 @@ export const FALLBACK_CATALOG = Object.freeze({
       disk_kind: "SSD",
       monthly_eur: 9,
       setup_fee_eur: 0,
+      monthly_usd: 9.8,
+      setup_fee_usd: 0,
       currency: "EUR",
       provider_spec: "Cloud VPS 6",
     }),
@@ -47,8 +45,10 @@ export const FALLBACK_CATALOG = Object.freeze({
       ram_gb: 24,
       disk_gb: 300,
       disk_kind: "SSD",
-      monthly_eur: 17,
+      monthly_eur: 16.8,
       setup_fee_eur: 0,
+      monthly_usd: 18.2,
+      setup_fee_usd: 0,
       currency: "EUR",
       provider_spec: "Cloud VPS 8",
     }),
@@ -61,6 +61,8 @@ export const FALLBACK_CATALOG = Object.freeze({
       disk_kind: "SSD",
       monthly_eur: 30,
       setup_fee_eur: 0,
+      monthly_usd: 32.5,
+      setup_fee_usd: 0,
       currency: "EUR",
       provider_spec: "Cloud VPS 12",
     }),
@@ -71,19 +73,23 @@ export const FALLBACK_CATALOG = Object.freeze({
       ram_gb: 64,
       disk_gb: 500,
       disk_kind: "SSD",
-      monthly_eur: 44,
+      monthly_eur: 44.4,
       setup_fee_eur: 0,
+      monthly_usd: 48,
+      setup_fee_usd: 0,
       currency: "EUR",
       provider_spec: "Cloud VPS 16",
     }),
   ]),
   backups: Object.freeze({
-    monthly_eur: 3.5,
+    monthly_eur: 3,
+    monthly_usd: 3.5,
     recommended: true,
     provider: "cloudflare-r2",
   }),
 });
 
+const FALLBACK_BY_ID = new Map(FALLBACK_CATALOG.plans.map((p) => [p.id, p]));
 const MAX_PLANS = 20;
 
 function isRecord(value) {
@@ -105,12 +111,6 @@ function optionalString(value, maxLength) {
   return value.trim();
 }
 
-/**
- * Validate and copy an API catalog. Anything unexpected rejects the whole
- * response so the site keeps its standard prices rather than rendering a
- * partially trusted catalog. Unknown fields (including the server's
- * `default_enabled`) are deliberately ignored.
- */
 export function parseCatalog(value) {
   if (!isRecord(value) || !Array.isArray(value.plans)) {
     throw new Error("invalid plan catalog");
@@ -123,7 +123,8 @@ export function parseCatalog(value) {
   const plans = value.plans.map((plan) => {
     if (!isRecord(plan)) throw new Error("invalid plan");
     if (!isBoundedString(plan.id, 64)) throw new Error("invalid plan id");
-    if (!isBoundedString(plan.name, 80)) throw new Error("invalid plan name");
+    const rawName = plan.name ?? plan.label;
+    if (!isBoundedString(rawName, 80)) throw new Error("invalid plan name");
     const id = plan.id.trim();
     if (seen.has(id)) throw new Error("duplicate plan id");
     seen.add(id);
@@ -136,65 +137,117 @@ export function parseCatalog(value) {
     if (!Number.isInteger(plan.disk_gb) || plan.disk_gb < 1 || plan.disk_gb > 1_000_000) {
       throw new Error("invalid disk");
     }
-    if (!isFiniteNumber(plan.monthly_eur, 0, 100_000)) throw new Error("invalid monthly price");
-    const setup = plan.setup_fee_eur;
-    if (
-      setup !== null &&
-      setup !== undefined &&
-      !isFiniteNumber(setup, 0, 100_000)
-    ) {
-      throw new Error("invalid setup fee");
-    }
-    if (plan.currency !== "EUR") throw new Error("unsupported currency");
+
+    const curr = String(plan.currency ?? "EUR").toUpperCase();
+    if (curr !== "EUR") throw new Error("unsupported currency");
+
+    const monthlyEur = isFiniteNumber(plan.monthly_eur, 0, 100_000)
+      ? plan.monthly_eur
+      : isFiniteNumber(plan.monthly_cents, 0, 10_000_000)
+        ? plan.monthly_cents / 100
+        : null;
+    if (monthlyEur === null) throw new Error("invalid monthly price");
+
+    const setupEur =
+      plan.setup_fee_eur !== undefined && plan.setup_fee_eur !== null
+        ? isFiniteNumber(plan.setup_fee_eur, 0, 100_000)
+          ? plan.setup_fee_eur
+          : (() => {
+              throw new Error("invalid setup fee");
+            })()
+        : plan.setup_fee_cents !== undefined && plan.setup_fee_cents !== null
+          ? isFiniteNumber(plan.setup_fee_cents, 0, 10_000_000)
+            ? plan.setup_fee_cents / 100
+            : (() => {
+                throw new Error("invalid setup fee");
+              })()
+          : 0;
+
+    const fb = FALLBACK_BY_ID.get(id);
+    const usdObj = isRecord(plan.prices) && isRecord(plan.prices.usd) ? plan.prices.usd : null;
+    const monthlyUsd = isFiniteNumber(plan.monthly_usd, 0, 100_000)
+      ? plan.monthly_usd
+      : isFiniteNumber(plan.monthly_usd_cents, 0, 10_000_000)
+        ? plan.monthly_usd_cents / 100
+        : usdObj && isFiniteNumber(usdObj.monthly_cents, 0, 10_000_000)
+          ? usdObj.monthly_cents / 100
+          : fb?.monthly_usd ?? Math.round(monthlyEur * 1.09 * 100) / 100;
+
+    const setupUsd = isFiniteNumber(plan.setup_fee_usd, 0, 100_000)
+      ? plan.setup_fee_usd
+      : isFiniteNumber(plan.setup_fee_usd_cents, 0, 10_000_000)
+        ? plan.setup_fee_usd_cents / 100
+        : usdObj && isFiniteNumber(usdObj.setup_fee_cents, 0, 10_000_000)
+          ? usdObj.setup_fee_cents / 100
+          : fb?.setup_fee_usd ?? (setupEur > 0 ? Math.round(setupEur * 1.09 * 100) / 100 : 0);
 
     return {
       id,
-      name: plan.name.trim(),
+      name: rawName.trim(),
       vcpu: plan.vcpu,
       ram_gb: plan.ram_gb,
       disk_gb: plan.disk_gb,
       disk_kind: optionalString(plan.disk_kind, 32),
-      monthly_eur: plan.monthly_eur,
-      setup_fee_eur: setup === undefined || setup === null ? null : setup,
+      monthly_eur: monthlyEur,
+      setup_fee_eur: setupEur,
+      monthly_usd: monthlyUsd,
+      setup_fee_usd: setupUsd,
       currency: "EUR",
-      provider_spec: optionalString(plan.provider_spec, 80),
+      provider_spec: optionalString(plan.provider_spec ?? plan.contabo_product, 80),
     };
   });
 
-  if (!isRecord(value.backups) || typeof value.backups.recommended !== "boolean") {
+  // Live API exposes addons[], legacy tests expose backups{}.
+  const rawBackup = isRecord(value.backups)
+    ? value.backups
+    : Array.isArray(value.addons)
+      ? value.addons.find((a) => isRecord(a) && a.id === "backup-r2")
+      : null;
+
+  if (!isRecord(rawBackup) || typeof rawBackup.recommended !== "boolean") {
     throw new Error("invalid backup plan");
   }
-  const backupMonthly = value.backups.monthly_eur;
-  if (
-    backupMonthly !== null &&
-    backupMonthly !== undefined &&
-    !isFiniteNumber(backupMonthly, 0, 100_000)
-  ) {
-    throw new Error("invalid backup price");
-  }
+  const backupEur = isFiniteNumber(rawBackup.monthly_eur, 0, 100_000)
+    ? rawBackup.monthly_eur
+    : isFiniteNumber(rawBackup.monthly_cents, 0, 10_000_000)
+      ? rawBackup.monthly_cents / 100
+      : null;
+  const backupUsdObj = isRecord(rawBackup.prices) && isRecord(rawBackup.prices.usd) ? rawBackup.prices.usd : null;
+  const backupUsd = isFiniteNumber(rawBackup.monthly_usd, 0, 100_000)
+    ? rawBackup.monthly_usd
+    : isFiniteNumber(rawBackup.monthly_usd_cents, 0, 10_000_000)
+      ? rawBackup.monthly_usd_cents / 100
+      : backupUsdObj && isFiniteNumber(backupUsdObj.monthly_cents, 0, 10_000_000)
+        ? backupUsdObj.monthly_cents / 100
+        : FALLBACK_CATALOG.backups.monthly_usd;
 
   return {
     plans,
     backups: {
-      monthly_eur: backupMonthly === undefined || backupMonthly === null ? null : backupMonthly,
-      recommended: value.backups.recommended,
-      provider: optionalString(value.backups.provider, 64),
+      monthly_eur: backupEur,
+      monthly_usd: backupUsd,
+      recommended: rawBackup.recommended,
+      provider: optionalString(rawBackup.provider, 64) ?? "cloudflare-r2",
     },
   };
 }
 
-/** `€6.60` for fractional prices, `€44` for whole-euro prices. */
-export function formatEuro(amount) {
+export function formatMoney(amount, currency = "eur") {
   if (typeof amount !== "number" || !Number.isFinite(amount)) return "Price unavailable";
   const hasCents = Math.round(amount * 100) % 100 !== 0;
-  return `€${amount.toFixed(hasCents ? 2 : 0)}`;
+  const symbol = currency === "usd" ? "$" : "€";
+  return `${symbol}${amount.toFixed(hasCents ? 2 : 0)}`;
 }
 
-export function formatMonthly(amount) {
+export function formatEuro(amount) {
+  return formatMoney(amount, "eur");
+}
+
+export function formatMonthly(amount, currency = "eur") {
   if (amount === null || amount === undefined || !Number.isFinite(amount)) {
     return "Price unavailable";
   }
-  return `${formatEuro(amount)}/mo`;
+  return `${formatMoney(amount, currency)}/mo`;
 }
 
 export function planSpecs(plan) {
@@ -204,15 +257,16 @@ export function planSpecs(plan) {
   return `${plan.vcpu} vCPU · ${plan.ram_gb} GB RAM · ${disk}`;
 }
 
-/** Null when the tier has no one-time setup fee. */
-export function setupFeeLabel(plan) {
-  if (plan.setup_fee_eur === null || plan.setup_fee_eur === 0) return null;
-  return `+ ${formatEuro(plan.setup_fee_eur)} one-time setup`;
+export function setupFeeLabel(plan, currency = "eur") {
+  const fee = currency === "usd" ? plan.setup_fee_usd : plan.setup_fee_eur;
+  if (fee === null || fee === undefined || fee === 0) return null;
+  return `+ ${formatMoney(fee, currency)} one-time setup`;
 }
 
-export function backupPriceLabel(backups) {
-  if (backups.monthly_eur === null || backups.monthly_eur === undefined) {
+export function backupPriceLabel(backups, currency = "eur") {
+  const amount = currency === "usd" ? backups.monthly_usd : backups.monthly_eur;
+  if (amount === null || amount === undefined) {
     return "Priced separately at checkout.";
   }
-  return `${formatMonthly(backups.monthly_eur)} if enabled.`;
+  return `${formatMonthly(amount, currency)} if enabled.`;
 }
