@@ -54,6 +54,7 @@ class BackendTests(unittest.TestCase):
         meta = backend._metadata("0.6.0")
         self.assertIn("Name: stackspirit\n", meta)
         self.assertIn("Metadata-Version: 2.4", meta)
+        self.assertIn("License-File: LICENSE\n", meta)
         self.assertNotIn("Private ::", meta)
         self.assertNotIn("stackspirit-engine", meta)
 
