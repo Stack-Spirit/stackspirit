@@ -134,8 +134,8 @@ assert_contains "history: FAIL: secret-class finding(s)"
 assert_contains "history: exit status: 1"
 assert_not_contains "$token"
 
-# 5. The same token commit fails --rev even after the token leaves HEAD, and
-#    the finding row is masked.
+# 5. The token commit fails --rev on its own tree, and the finding row is
+#    masked.
 run_scan --rev "$token_head"
 assert_status 1
 assert_contains "revision: $token_head"
@@ -143,12 +143,17 @@ assert_contains "token.txt:1: provider_token: sk-s***"
 assert_contains "FAIL: 1 blocked finding(s)"
 assert_not_contains "$token"
 
-# 6. Removing the token later does not erase it from the history report.
+# 6. Removing the token later does not erase it from the history report or
+#    from the --rev scan of the commit that introduced it.
 git -C "$repo" rm -q token.txt
 commit_all "remove synthetic token fixture" >/dev/null
 run_scan --history
 assert_status 1
 assert_contains "$token_short token.txt:1: provider_token: sk-s***"
+assert_not_contains "$token"
+run_scan --rev "$token_head"
+assert_status 1
+assert_contains "token.txt:1: provider_token: sk-s***"
 assert_not_contains "$token"
 
 # 7. The clean HEAD commit passes --rev; the working-tree mode on the same
