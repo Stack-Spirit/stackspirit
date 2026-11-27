@@ -1519,20 +1519,16 @@ fn mcp_proxy_serves_initialize_list_and_ping_without_a_home() {
     );
     assert_eq!(response(&values, 2)["result"], json!({}));
     let tool_list = response(&values, 3)["result"]["tools"].as_array().expect("tools array");
-    let dashboard = tool_list
-        .iter()
-        .find(|tool| tool["name"] == "fleet_dashboard")
-        .expect("fleet_dashboard is a read-only tool the proxy may forward");
-    assert!(
-        dashboard.get("_meta").is_none(),
-        "the proxy must not link to a resource it cannot read: {dashboard}"
-    );
     let tools = tool_list
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect::<Vec<_>>();
     assert!(tools.contains(&"fleet_status"), "read tools: {tools:?}");
     assert!(tools.contains(&"session_tail"), "read tools: {tools:?}");
+    assert!(
+        !tools.contains(&"fleet_dashboard"),
+        "the proxy must not advertise a tool the home executor cannot run: {tools:?}"
+    );
     for name in [
         "tunnel_open",
         "tunnel_close",
@@ -1638,6 +1634,7 @@ fn mcp_proxy_refuses_tunnel_and_secret_tools_without_touching_the_socket() {
     let listener = bind_fake_agent_socket(&socket);
     listener.set_nonblocking(true).expect("nonblocking listener");
     let refused = [
+        ("fleet_dashboard", json!({})),
         ("tunnel_open", json!({"name": "web", "remote_port": 8080})),
         ("tunnel_close", json!({"name": "web"})),
         ("secret_request", json!({"name": "TOKEN"})),
