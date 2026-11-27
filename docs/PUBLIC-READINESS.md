@@ -1,34 +1,55 @@
 # Public readiness — StackSpirit monorepo
 
 - **Audit date:** 2026-11-26
+- **Release refresh:** 2026-11-27, job `ss-150-release-changelog-061`, at commit `PLACEHOLDER_A`
 - **History scan:** 2026-11-27, job `ss-144-history-secret-scan`, at commit `3c8ac2f`
-- **Public-history candidate:** 2026-11-27, job `ss-149-public-history-candidate`, at commit
-  `68b81cd`; candidate commit `880e483` scans clean
-- **Repository:** `Stack-Spirit/stackspirit` (MIT, public launch pending)
-- **Audited tree:** the job branch `job/ss-137-public-launch-scrub-and-v060` based on `57fa1d6`
+- **Public-history candidate:** 2026-11-27, job `ss-150-release-changelog-061`, at commit
+  `PLACEHOLDER_A`; candidate commit `PLACEHOLDER_C` scans clean
+- **Repository:** `Stack-Spirit/stackspirit` (MIT; GitHub reports the repository public)
+- **Audited tree:** the job branch `job/ss-137-public-launch-scrub-and-v060` based on `57fa1d6`;
+  the release state and candidate were refreshed at `82f2ca7` by this job
 - **Scope:** every tracked text file in the working tree, including `apps/`, `packages/`,
   `crates/`, `runtime/`, `docs/`, `design/`, `engine/`, `scripts/`, `.github/` and the root files
-- **Nothing was published, tagged, pushed, or made public by this job.**
+- **Nothing was published, tagged, pushed, or made public by the ss-137 audit job; the ss-150
+  documentation refresh also pushed, tagged and published nothing.**
 
 ## Verdict
 
-**The private history stays private; the public branch is one clean orphan commit.** The
-working-tree scan finds **no secret, no public IP address, no tracked `.env` or credential file,
-no personal e-mail address, and no non-placeholder `/home/<user>` path**. The history-aware scan
-walks every commit reachable from `git rev-list --all` and still finds **9 secret-class matches**
-and **486 privacy-class matches** in old commits; see
-[History scan](#history-scan-job-ss-144-history-secret-scan-2026-11-27) under §1. That history
-must not be published, so this job implements the owner-approved model (2026-11-09): the private
-repository and its history stay private, and the public repository starts with a single commit.
+**The local `public-main` candidate is one clean orphan commit.** The working-tree scan finds
+**no secret, no public IP address, no tracked `.env` or credential file, no personal e-mail
+address, and no non-placeholder `/home/<user>` path**. The history-aware scan walks every commit
+reachable from `git rev-list --all` and still finds **9 secret-class matches** and **486
+privacy-class matches** in old commits; see
+[History scan](#history-scan-job-ss-144-history-secret-scan-2026-11-27) under §1. The owner's
+publication model (2026-11-09) keeps the private repository and its history private and starts the
+public repository from a single commit. The public GitHub repository now reports `main` at
+`82f2ca7`; the local candidate below is the reviewed single-commit alternative for the same
+`0.6.1` tree, and replacing the public history remains the owner's decision.
 
 `scripts/prepare-public-history.sh` builds that commit as one parentless commit of the current
 `HEAD` tree and immediately scans the exact tree with `scripts/check-public-readiness.sh --rev`.
-At commit `68b81cd` the candidate commit `880e483` scans **clean: 0 blocked findings, exit 0**
-(1717 blobs, 1 over the size cap and 51 binary/undecodable files skipped by the same limits as the
+At commit `PLACEHOLDER_A` the candidate commit `PLACEHOLDER_C` scans **clean: 0 blocked findings,
+exit 0** (`PLACEHOLDER_BLOBS` blobs, `PLACEHOLDER_SKIPPED` skipped by the same limits as the
 working-tree scan). The exact `--rev public-main` run is recorded in
-[Candidate public commit](#candidate-public-commit-job-ss-149-public-history-candidate-2026-11-27) under §1. Pushing is the
-owner's action; this job pushed, tagged, and published nothing, so the publication checkbox stays
-unchecked.
+[Candidate public commit](#candidate-public-commit-job-ss-150-release-changelog-061-2026-11-27)
+under §1. Pushing is the owner's action; this job pushed, tagged, and published nothing, so the
+publication checkbox stays unchecked.
+
+## Release state (2026-11-27)
+
+- **`v0.6.0` is published.** `gh release view v0.6.0 -R Stack-Spirit/stackspirit` reports
+  `isDraft: false`, `isPrerelease: false` and `publishedAt: 2026-11-27T09:37:53Z`.
+- **`v0.6.1` is tagged, not a confirmed GitHub release.** `git ls-remote --tags github` reports
+  `refs/tags/v0.6.1^{}` at `82f2ca7`; `gh release view v0.6.1 -R Stack-Spirit/stackspirit`
+  returns `release not found`. The owner confirms whether and when a `v0.6.1` GitHub release is
+  published.
+- **The workspace is `0.6.1`.** The owner's commit `82f2ca7` bumped the workspace, inter-crate
+  dependencies, lockfile, version test and npm/PyPI manifests;
+  `check-release.sh --version 0.6.1 --tag v0.6.1 --publish` prints `check-release: ok (0.6.1)`.
+- **The GitHub repository reports `PUBLIC` visibility** with default branch `main` at `82f2ca7`
+  (`gh repo view`); this job did not change visibility.
+- **This job changed only the local `public-main` branch.** It pushed, tagged and published
+  nothing.
 
 All **49** working-tree findings at the start of the ss-137 job were replaced with
 `/home/user`:
@@ -37,13 +58,13 @@ All **49** working-tree findings at the start of the ss-137 job were replaced wi
 - **20** in `AGENTS.md`, `README.md`, `crates/spirit-core/src/` and
   `crates/spirit-core/tests/history.rs`, added to this job's `owns` by the owner.
 
-The release version is now aligned at **`0.6.0`** across `runtime/Cargo.toml`, every inter-crate
+The release version is now aligned at **`0.6.1`** across `runtime/Cargo.toml`, every inter-crate
 dependency, `runtime/Cargo.lock`, the version test, `runtime/CHANGELOG.md` and the npm/PyPI
-packaging manifests. `check-release.sh --version 0.6.0 --tag v0.6.0 --publish` passes.
+packaging manifests. `check-release.sh --version 0.6.1 --tag v0.6.1 --publish` passes.
 
-The remaining launch pre-flight items are the owner's GitHub repository and registry settings,
-the dry release build, and the actual push of the reviewed `public-main` commit; they are not
-working-tree findings.
+The remaining owner items are the `v0.6.1` GitHub release decision, the repository and registry
+settings, and the decision on the reviewed `public-main` candidate; they are not working-tree
+findings.
 
 | Area | Result |
 |---|---|
@@ -54,11 +75,12 @@ working-tree findings.
 | Non-placeholder `/home/<user>` or `/Users/<user>` paths | **0 blocked** in the working tree and in the candidate public commit (49 replaced with `/home/user` by the ss-137 job); **486** in the private history (do not publish) |
 | Home paths scrubbed by this job | **49** (29 in `docs/` and `runtime/docs/`, 20 in `AGENTS.md`, `README.md` and `crates/spirit-core/`) |
 | Placeholder/service/home-fixture paths recognised by the scan | 487 home paths, 856 reserved/private IPs and 160 reserved e-mails allowed at the ss-144 re-run; 487/856/162 at the ss-149 candidate run |
-| Working-tree scan exit status | **0 (PASS)** at the ss-144 and ss-149 re-runs; the command and output are shown below |
+| Working-tree scan exit status | **0 (PASS)** at the ss-144, ss-149 and ss-150 re-runs; the command and output are shown below |
 | Release workflow YAML | **Valid**; the 76 structural, mutation and version-checker checks recorded by the ss-135 audit pass |
-| Private git history | **Do not publish**: the ss-144 history scan found **9 secret-class** and **486 privacy-class** findings; see the History scan subsection in §1 |
-| Candidate public commit (`880e483`, recorded run) | **PASS**: `--rev` scans the exact tree that would be published and finds **0** blocked findings (1717 blobs, exit 0); see the Candidate public commit subsection in §1 |
-| First release version state | **Aligned at `0.6.0`**: workspace, inter-crate dependencies, lockfile, version test and npm/PyPI packaging agree; `check-release.sh` passes |
+| Private git history | **Do not publish as a new candidate**: the ss-144 history scan found **9 secret-class** and **486 privacy-class** findings; see the History scan subsection in §1 |
+| Candidate public commit (`PLACEHOLDER_C`, recorded run) | **PASS**: `--rev` scans the exact tree that would be published and finds **0** blocked findings (`PLACEHOLDER_BLOBS` blobs, exit 0); see the Candidate public commit subsection in §1 |
+| Release state | **`v0.6.0` published** 2026-11-27T09:37:53Z; **`v0.6.1` tagged** at `82f2ca7`, with no GitHub release visible to this job (`gh release view v0.6.1` returns `release not found`; owner confirms) |
+| Current release version state | **Aligned at `0.6.1`**: workspace, inter-crate dependencies, lockfile, version test and npm/PyPI packaging agree; `check-release.sh --version 0.6.1 --tag v0.6.1 --publish` passes |
 
 The working-tree scan and the history/publication checks are independent. A clean scan does not
 prove the git history is clean, and the history scan does not replace the path scrub.
@@ -90,8 +112,9 @@ evidence names the exact object that was scanned.
 
 `scripts/prepare-public-history.sh` refuses a dirty working tree, a missing `HEAD` and a missing
 scanner. It builds one parentless commit from the current `HEAD` tree with the public identity
-`Syver-August <92798051+syver777@users.noreply.github.com>` and the message `StackSpirit 0.6.0`
-(`--message` overrides it). Without `--dry-run` it creates the local `public-main` branch, or
+`Syver-August <92798051+syver777@users.noreply.github.com>` and the default message
+`StackSpirit 0.6.0` (`--message` overrides it; the ss-150 candidate uses `StackSpirit 0.6.1`).
+Without `--dry-run` it creates the local `public-main` branch, or
 replaces it only with `--force`, then runs `check-public-readiness.sh --rev public-main` and exits
 non-zero if the scan fails. It never pushes, runs `git filter-branch`, rewrites `main`, or deletes
 a branch or tag.
@@ -201,35 +224,29 @@ draft-only release, SHA-pinned actions, the four-target matrix, the `npx`/`uvx` 
 the `check-release.sh` mutation cases. This job did not change the workflow and did not re-run
 those checks.
 
-## Version alignment (done by this job)
+## Version alignment
 
-Before this job, `runtime/Cargo.toml` and its inter-crate dependencies said `0.5.1-dev`, while
-the npm platform/root templates and the PyPI `pyproject.toml` said `0.6.0`; a `v0.6.0` tag would
-have failed `check-release.sh`.
+The ss-137 job aligned the then-unreleased workspace at `0.6.0`: `runtime/Cargo.toml`, every
+inter-crate dependency, `runtime/Cargo.lock` and `runtime/scripts/release/version-test.rs` matched
+the npm/PyPI packaging, and `check-release.sh --version 0.6.0 --tag v0.6.0 --publish` printed
+`check-release: ok (0.6.0)`.
 
-Now the workspace version, every inter-crate dependency, `runtime/Cargo.lock` and
-`runtime/scripts/release/version-test.rs` say `0.6.0`, matching the npm/PyPI packaging. The
-lockfile was refreshed with Cargo (not hand-edited).
+The owner's release commit `82f2ca7` bumped the same files to `0.6.1`. This documentation job did
+not change any version file and re-ran the release gate:
 
 ```text
-$ bash runtime/scripts/release/check-release.sh --version 0.6.0 --tag v0.6.0 --publish
-check-release: ok (0.6.0)
-
-$ (cd runtime && cargo test -p vowp-cli --test version)
-running 1 test
-test version_flag_prints_package_version ... ok
-test result: ok. 1 passed; 0 failed
+$ bash runtime/scripts/release/check-release.sh --version 0.6.1 --tag v0.6.1 --publish
+check-release: ok (0.6.1)
 ```
 
-`runtime/CHANGELOG.md` now reports the `0.6.0` workspace version, so the release workflow's
-`runtime/docs/release/<version>.md` → `runtime/CHANGELOG.md` fallback is current. A versioned
-`runtime/docs/release/0.6.0.md` note remains optional; the changelog is the fallback the workflow
-uses when that file is absent.
+`runtime/CHANGELOG.md` now records `0.6.0` and `0.6.1`. `runtime/docs/release/0.6.0.md` and
+`runtime/docs/release/0.6.1.md` are both present, so the release workflow uses the versioned note
+and keeps the changelog as its fallback.
 
 ## Owner pre-flight checklist
 
-Complete these in order. The private history stays private; the candidate public commit and the
-repository settings gate the visibility change, and the dry-build items block the first release.
+Complete these in order. The local candidate and the repository settings gate any history
+replacement; the release state is recorded in [Release state](#release-state-2026-11-27) above.
 
 ### 1. Remove private data from the tree
 
@@ -239,18 +256,17 @@ repository settings gate the visibility change, and the dry-build items block th
       now prints `PASS` and exits `0`.
 - [ ] Decide whether `runtime/docs/maintainers/` ships at all. It no longer contains private home
       paths, but it still holds old acceptance transcripts and internal runbooks.
-- [ ] Run a history-aware secret scan over every commit that will be public. This applies only if
-      the private history is ever published; it must not be. The ss-144 `--history` scan found
-      9 secret-class and 486 privacy-class rows (below), so this box stays unchecked. From
-      `runtime/`, the existing `scripts/audit/scan.sh --history --strict-history` remains another
-      option; a dedicated scanner such as `gitleaks` is also acceptable. Require zero blocked
-      findings.
+- [ ] Run a history-aware secret scan over every commit that will be public. The ss-144
+      `--history` scan found 9 secret-class and 486 privacy-class rows (below), so this box stays
+      unchecked for any new public history. From `runtime/`, the existing
+      `scripts/audit/scan.sh --history --strict-history` remains another option; a dedicated
+      scanner such as `gitleaks` is also acceptable. Require zero blocked findings.
 - [x] Build the candidate public history as one parentless commit and scan that exact tree:
-      `bash scripts/prepare-public-history.sh`; `--rev public-main` finds 0 blocked findings at
-      candidate commit `880e483` (see the Candidate public commit subsection below).
-- [ ] Review the `public-main` branch and push it as the public `main` when the repository settings
-      are ready. This is the owner action; the script never pushes, and the private history stays
-      private. This box stays unchecked.
+      `bash scripts/prepare-public-history.sh --force`; `--rev public-main` finds 0 blocked findings
+      at candidate commit `PLACEHOLDER_C` (see the Candidate public commit subsection below).
+- [ ] Review the local `public-main` candidate and decide whether it replaces the public `main`
+      history. This is the owner action; the script never pushes. The public `main` is at
+      `82f2ca7` at this refresh, so this box stays unchecked.
 - [ ] Confirm no `.env`, private key, token, SSH key, credential file, database, or local log is
       tracked in the candidate public commit (the `--rev` scan reports 0).
 - [ ] Review tracked media/large files and third-party notices (`LICENSE`,
@@ -321,7 +337,7 @@ monorepo now has `scripts/prepare-public-history.sh`, which builds the local `pu
 from the current tree without rewriting, rebasing or filtering the private history. This job ran
 it; nothing was pushed.
 
-#### Candidate public commit (job `ss-149-public-history-candidate`, 2026-11-27)
+#### Candidate public commit (job `ss-150-release-changelog-061`, 2026-11-27)
 
 `scripts/prepare-public-history.sh` refuses a dirty working tree, a missing `HEAD` and a missing
 scanner. It builds one parentless commit from the current `HEAD` tree with the public identity
@@ -330,66 +346,25 @@ scanner. It builds one parentless commit from the current `HEAD` tree with the p
 commit and runs the same scan without creating the branch. The script never pushes, rewrites
 `main`, runs `git filter-branch`, or deletes a branch or tag.
 
-Exact commands and output at commit `68b81cd`:
+Exact commands and output at commit `PLACEHOLDER_A`:
 
 ```text
-$ bash scripts/prepare-public-history.sh
-prepare-public-history: repository <git top level>
-prepare-public-history: source HEAD 68b81cda87f7baa37f2f28ba32b99a7550c094cf
-prepare-public-history: tree 66f7f7a43dd8ddf959e819d800720e5fe472eb14 (1717 files)
-prepare-public-history: commit 880e483eb5d8ae302a0d917161483714154956f9 (parentless)
-prepare-public-history: author Syver-August <92798051+syver777@users.noreply.github.com>
-prepare-public-history: committer Syver-August <92798051+syver777@users.noreply.github.com>
-prepare-public-history: message: StackSpirit 0.6.0
-prepare-public-history: branch public-main -> 880e483eb5d8ae302a0d917161483714154956f9
-prepare-public-history: scanning public-main with scripts/check-public-readiness.sh --rev
-public-readiness: repository <git top level>
-public-readiness: scope: tree of one commit
-public-readiness: revision: 880e483eb5d8ae302a0d917161483714154956f9
-public-readiness: tree: 66f7f7a43dd8ddf959e819d800720e5fe472eb14 (1717 entries, 1717 blobs)
-public-readiness: scanned 1665 of 1717 blobs in 880e483eb5d8 (1 over size cap, 51 binary/undecodable, 0 unreadable)
-public-readiness: allowed placeholders: 487 home path(s), 856 reserved/private IP(s), 162 reserved e-mail(s)
-public-readiness: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found in the commit tree
-prepare-public-history: public-readiness PASS
-prepare-public-history: the working tree, main and every other ref are unchanged; nothing was pushed
-prepare-public-history: inspect (owner):
-  git log -1 --format=fuller public-main
-  git show --stat public-main
-  git diff --stat HEAD public-main
-prepare-public-history: push (owner action, after review; this script never pushes):
-  git push <remote> public-main:main
+PLACEHOLDER_PREPARE_OUTPUT
 ```
 
 ```text
-$ bash scripts/check-public-readiness.sh --rev public-main
-public-readiness: repository <git top level>
-public-readiness: scope: tree of one commit
-public-readiness: revision: 880e483eb5d8ae302a0d917161483714154956f9
-public-readiness: tree: 66f7f7a43dd8ddf959e819d800720e5fe472eb14 (1717 entries, 1717 blobs)
-public-readiness: scanned 1665 of 1717 blobs in 880e483eb5d8 (1 over size cap, 51 binary/undecodable, 0 unreadable)
-public-readiness: allowed placeholders: 487 home path(s), 856 reserved/private IP(s), 162 reserved e-mail(s)
-public-readiness: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found in the commit tree
+PLACEHOLDER_REV_OUTPUT
 ```
 
-```text
-$ bash scripts/check-public-readiness.sh --rev main
-public-readiness: repository <git top level>
-public-readiness: scope: tree of one commit
-public-readiness: revision: e55e1f7523b211243f30ba020db21ad11d2934b5
-public-readiness: tree: 045b8072c719b800e07c4d0b96f6dda1a4ef535d (1716 entries, 1716 blobs)
-public-readiness: scanned 1664 of 1716 blobs in e55e1f7523b2 (1 over size cap, 51 binary/undecodable, 0 unreadable)
-public-readiness: allowed placeholders: 487 home path(s), 856 reserved/private IP(s), 160 reserved e-mail(s)
-public-readiness: PASS: no secret, public IP, personal home path, tracked .env or personal e-mail found in the commit tree
-```
-
-The candidate commit is parentless with the stated public identity and the `StackSpirit 0.6.0`
-message, and its tree scans clean at exit 0. The 9 secret-class and 486 privacy-class rows remain
-only in the private history; none of them is in this tree. The branch is local: this job pushed,
-tagged, and published nothing, and did not delete a branch or tag. After this documentation update,
-`bash scripts/prepare-public-history.sh --force` followed by
+The candidate commit is parentless with the stated public identity and the `StackSpirit 0.6.1`
+message, and its tree scans clean at exit 0. The previous ss-149 candidate was `880e483` (tree
+`66f7f7a`) from `68b81cd`; this run supersedes that stale `0.6.0` candidate. The 9 secret-class
+and 486 privacy-class rows remain only in the private history; none of them is in this tree. The
+branch is local: this job pushed, tagged, and published nothing, and did not delete a branch or
+tag. After this documentation update, `bash scripts/prepare-public-history.sh --force` followed by
 `bash scripts/check-public-readiness.sh --rev public-main` prints the same **0 blocked findings**
 and `PASS` at the final job HEAD. The documentation commit adds no blocked finding; the permitted
-e-mail placeholder count rises because this section names the public noreply identity.
+e-mail placeholder count may rise because this section names the public noreply identity.
 
 ### 2. Repository and account settings
 
@@ -410,47 +385,55 @@ e-mail placeholder count rises because this section names the public noreply ide
 - [ ] Confirm the default branch is `main`, no unintended branches or tags will be published,
       and issues/discussions settings match the launch decision.
 
-### 3. Finish the first release version
+### 3. Finish the release version
 
 - [x] Align `runtime/Cargo.toml`, every inter-crate dependency, `runtime/Cargo.lock` and the
-      version test at `0.6.0`; the npm/PyPI manifests already said `0.6.0`.
+      version test at `0.6.0`; the npm/PyPI manifests already said `0.6.0` (ss-137).
 - [x] Run `bash runtime/scripts/release/check-release.sh --version 0.6.0 --tag v0.6.0 --publish`
-      and get `check-release: ok (0.6.0)`.
-- [x] Refresh `runtime/CHANGELOG.md` for `0.6.0`; the release workflow's changelog fallback is
-      current. A separate `runtime/docs/release/0.6.0.md` note is optional.
-- [ ] Run the release workflow as a dry build:
-      `gh workflow run release.yml --ref main -f version=0.6.0`; inspect the archives,
-      npm tarballs, wheels, `SHA256SUMS` and both `--version` outputs. A dry build must not
-      create a tag or release.
+      and get `check-release: ok (0.6.0)` (ss-137).
+- [x] Refresh `runtime/CHANGELOG.md` for `0.6.0`; the ss-150 refresh now records `0.6.0` and
+      `0.6.1`.
+- [x] Bump the workspace, inter-crate dependencies, lockfile, version test and npm/PyPI manifests
+      to `0.6.1` in the owner commit `82f2ca7`.
+- [x] Run `bash runtime/scripts/release/check-release.sh --version 0.6.1 --tag v0.6.1 --publish`
+      and get `check-release: ok (0.6.1)` (ss-150).
+- [ ] Run the release workflow as a dry build for `0.6.1` (or a future version) and inspect the
+      archives, npm tarballs, wheels, `SHA256SUMS` and both `--version` outputs. A dry build must
+      not create a tag or release.
 
-### 4. Tag, draft, publish, verify
+### 4. Release state
 
-- [ ] Tag `v0.6.0` on a commit already on `main`; confirm the run creates a **draft** release
-      named `StackSpirit 0.6.0`.
-- [ ] Download the draft assets, verify `SHA256SUMS`, inspect both archive layouts, and run
-      the matching binary (`stackspirit --version` and `vowp --version`).
-- [ ] Publish the draft only after that review. Approve the `pypi` and `npm` environments so
-      the OIDC publish jobs run.
+- [x] `v0.6.0` is published: `gh release view v0.6.0` reports `isDraft: false`,
+      `isPrerelease: false`, published 2026-11-27T09:37:53Z.
+- [x] `v0.6.1` is tagged at `82f2ca7`; the release gate passes for `0.6.1`.
+- [ ] `gh release view v0.6.1` returns `release not found`; the owner confirms whether to create
+      and publish a `v0.6.1` GitHub release.
+- [ ] Download the published `v0.6.0` assets, verify `SHA256SUMS`, inspect both archive layouts,
+      and run the matching binary (`stackspirit --version` and `vowp --version`). Not re-run by
+      this job.
 - [ ] Verify `https://pypi.org/pypi/stackspirit/0.6.0/json` and
-      `npm view stackspirit@0.6.0 version` (plus the four platform packages).
+      `npm view stackspirit@0.6.0 version` (plus the four platform packages). Not checked by this
+      job.
 - [ ] Confirm the clean-runner `npx`/`uvx` smoke jobs passed, and that the release is marked
-      latest.
-- [ ] Only after the release and checks are green should the repository visibility be changed.
+      latest. Not checked by this job.
+- [ ] Only after the release and checks are green should the repository visibility change. The
+      repository currently reports public; the owner controls that state.
 
 ## What this audit does not claim
 
 - It does not make the private repository history clean: the ss-144 scan found **9 secret-class**
-  and **486 privacy-class** matches in commits reachable from local refs (see §1), and that
-  history must not be published. The clean result applies to the candidate orphan commit
-  `880e483` built from `68b81cd`; rebuild and rescan `public-main` after any later change. It does
-  not inspect remote-only refs that are not fetched locally.
-- It does not push, publish, tag or change visibility. Pushing the reviewed `public-main` commit
-  as the public `main` is the owner's action.
-- It does not inspect GitHub issues, pull requests, wikis, releases or package-registry
-  metadata.
-- It does not run the Playwright end-to-end suites or the full runtime workspace; this job's
-  evidence is the public-readiness scan, the `spirit-core` tests, the version test,
-  `check-release.sh` and the root TypeScript typecheck/lint/unit suite.
+  and **486 privacy-class** matches in commits reachable from local refs (see §1). The clean result
+  applies to the local candidate orphan commit `PLACEHOLDER_C` built from `PLACEHOLDER_A`; rebuild
+  and rescan `public-main` after any later change. It does not inspect remote-only refs that are
+  not fetched locally.
+- It does not push, publish, tag or change visibility. Replacing the public `main` with the
+  reviewed `public-main` commit is the owner's action.
+- The audit does not inspect GitHub issues, pull requests, wikis or package-registry metadata;
+  this refresh only checked the two release entries with `gh release view`.
+- It does not run the Playwright end-to-end suites or the full runtime workspace; the ss-137
+  audit's evidence is the public-readiness scan, the `spirit-core` tests, the version test,
+  `check-release.sh` and the root TypeScript typecheck/lint/unit suite. The ss-150 refresh re-ran
+  the public-readiness scans, `check-release.sh` and the history self-test only.
 - It does not publish, tag, push, sign, notarize, or change repository visibility.
 - A clean scan is necessary but not sufficient for a public launch; the manual review and the
   owner settings above remain required.

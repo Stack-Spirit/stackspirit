@@ -4,7 +4,8 @@ All notable changes to VOWP are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
-Release notes are in [`docs/release/0.6.0.md`](docs/release/0.6.0.md),
+Release notes are in [`docs/release/0.6.1.md`](docs/release/0.6.1.md),
+[`docs/release/0.6.0.md`](docs/release/0.6.0.md),
 [`docs/release/0.4.0.md`](docs/release/0.4.0.md),
 [`docs/release/0.3.0.md`](docs/release/0.3.0.md),
 [`docs/release/0.2.0.md`](docs/release/0.2.0.md) and
@@ -13,17 +14,47 @@ features deliberately left out of v0.4 are in [`docs/roadmap.md`](docs/roadmap.m
 
 ## [Unreleased]
 
-The six v0.5 slices are implemented and gated in the tree. The workspace version is now `0.6.0`;
-`0.5.0` is the private snapshot tag (`snapshot/0.5.0-private`), not a release. No release date has
-been cut and the latest public release remains 0.4.0 (2026-11-18). The user-facing release note is
+No unreleased changes. The workspace is `0.6.1`; `0.6.0` shipped on 2026-11-27 and `0.6.1` is the
+current patch, tagged at `82f2ca7`. `0.5.0` was the private snapshot tag
+(`snapshot/0.5.0-private`), not a public release. The user-facing release notes are
+[`docs/release/0.6.1.md`](docs/release/0.6.1.md) and
 [`docs/release/0.6.0.md`](docs/release/0.6.0.md).
+
+## [0.6.1] - 2026-11-27
+
+Patch release on top of [`0.6.0`](docs/release/0.6.0.md), tagged `v0.6.1` at `82f2ca7`. It fixes
+the PyPI PEP 639 wheel metadata and updates the package repository URLs to
+`Stack-Spirit/stackspirit`. The release note is [`docs/release/0.6.1.md`](docs/release/0.6.1.md).
+
+### Fixed
+
+- **PyPI wheel metadata:** use the PEP 639 relative `License-File: LICENSE` path and enable
+  verbose PyPI publish logging in `.github/workflows/release.yml`.
+- **Desktop UI:** show `waiting for verification` instead of `unknown` for reviewing jobs with no
+  active worker session.
+
+### Changed
+
+- **Packaging URLs:** point the npm and PyPI metadata at
+  `https://github.com/Stack-Spirit/stackspirit`.
+- **Public readiness:** add the history-aware secret/privacy scan and the release documentation
+  updates.
+
+## [0.6.0] - 2026-11-27
+
+The first public StackSpirit release and the first release of the consolidated monorepo: the
+always-on runtime, the `stackspirit` CLI and daemon (with the `vowp` compatibility alias), the
+desktop cockpit and the local agent nodes. `0.6.0` shipped on 2026-11-27; the six v0.5 slices are
+included. `0.5.0` was the private snapshot tag (`snapshot/0.5.0-private`), not a public release.
+The user-facing release note is [`docs/release/0.6.0.md`](docs/release/0.6.0.md).
 
 ### Changed
 
 - The release workflow now follows tag → draft → owner-publish → OIDC npm/PyPI publish, with
   pinned actions, restricted permissions, `release`/`npm`/`pypi` environments and install smoke
   tests; `scripts/release/check-release.sh` and `test-workflow.sh` are new. See
-  [`docs/release/publishing.md`](docs/release/publishing.md). Nothing has been published.
+  [`docs/release/publishing.md`](docs/release/publishing.md). The `0.6.0` release shipped through
+  this workflow.
 
 - Documentation, framework skills and templates now use the `stackspirit` command name in every
   instruction; `vowp` remains a supported alias with the same command tree. `.vowp/` paths and
@@ -32,8 +63,8 @@ been cut and the latest public release remains 0.4.0 (2026-11-18). The user-faci
 - `docs/reference/generate.py` and `docs/tests/check-commands.sh` accept `stackspirit` and
   `vowp` command examples.
 
-- The workspace, crate, packaging and version-test strings now report `0.6.0`, so
-  `vowp --version` prints `vowp 0.6.0` instead of `vowp 0.4.0`.
+- The workspace, crate, packaging and version-test strings reported `0.6.0` for this release, so
+  `vowp --version` printed `vowp 0.6.0` instead of `vowp 0.4.0`.
 
 ### Added
 
@@ -73,6 +104,12 @@ been cut and the latest public release remains 0.4.0 (2026-11-18). The user-faci
   `fleet status` and the snapshot carry an additive `cluster` card with
   `online_worker_nodes`, `target_workers`, `busy_workers`, CPU, memory and free disk. See
   [`docs/concepts/capacity.md`](docs/concepts/capacity.md#cluster-capacity).
+
+The release also includes the StackSpirit desktop cockpit, the primary `stackspirit` CLI surface
+(orchestrator move and endpoint, one-step project bootstrap, encrypted vault, on-demand retention
+and MCP), the optional account/relay and encrypted R2 backups, the ASIF 0.4 interchange carried
+from 0.4.0 and the pooled cluster view. The full surface list and the honest limits are in
+[`docs/release/0.6.0.md`](docs/release/0.6.0.md).
 
 ## [0.4.0] - 2026-11-18
 
@@ -526,7 +563,9 @@ generated CLI and JSON Schema reference (`docs/reference/`), the design spec
 (`docs/design/`), a docs command/link checker (`docs/tests/`) and the runnable
 `examples/hello-vowp` fake-adapter demo.
 
-[Unreleased]: https://github.com/syver777/vowp/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Stack-Spirit/stackspirit/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/Stack-Spirit/stackspirit/releases/tag/v0.6.1
+[0.6.0]: https://github.com/Stack-Spirit/stackspirit/releases/tag/v0.6.0
 [0.4.0]: https://github.com/syver777/vowp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/syver777/vowp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/syver777/vowp/releases/tag/v0.2.0
