@@ -7,7 +7,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Stack-Spirit/stackspirit.git",
-    "directory": "packaging/npm/platforms/linux-x64"
+    "directory": "runtime/packaging/npm/platforms/linux-x64"
   },
   "os": ["linux"],
   "cpu": ["x64"],

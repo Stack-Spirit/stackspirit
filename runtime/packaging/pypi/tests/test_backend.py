@@ -56,6 +56,13 @@ class BackendTests(unittest.TestCase):
         self.assertIn("Metadata-Version: 2.4", meta)
         self.assertNotIn("Private ::", meta)
         self.assertNotIn("stackspirit-engine", meta)
+        self.assertIn("Project-URL: Homepage, https://stackspirit.io", meta)
+        self.assertIn(
+            "Project-URL: Repository, https://github.com/Stack-Spirit/stackspirit", meta
+        )
+        self.assertIn(
+            "Project-URL: Issues, https://github.com/Stack-Spirit/stackspirit/issues", meta
+        )
 
     def test_wheel_tag_matches_the_target(self):
         for tag, triple in TRIPLES.items():

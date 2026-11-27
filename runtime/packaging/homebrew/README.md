@@ -8,7 +8,7 @@ repository does not create or push a tap.
 ## Create the tap (owner action)
 
 Create a public GitHub repository named `homebrew-vowp` under the same account
-as the main repository (`syver777/homebrew-vowp`). These are owner actions;
+as the main repository (`Stack-Spirit/homebrew-vowp`). These are owner actions;
 Homebrew is not installed in the build container, so the `brew` commands below
 were not run here.
 
@@ -36,12 +36,12 @@ release's formula, and will not install the current release.
 Users then install with:
 
 ```sh
-brew tap syver777/vowp
+brew tap Stack-Spirit/vowp
 brew install vowp
 ```
 
-The tap repository name must be `homebrew-vowp`; `brew tap syver777/vowp`
-resolves it to `github.com/syver777/homebrew-vowp`.
+The tap repository name must be `homebrew-vowp`; `brew tap Stack-Spirit/vowp`
+resolves it to `github.com/Stack-Spirit/homebrew-vowp`.
 
 ## Update for a release
 
@@ -53,7 +53,7 @@ packaging/homebrew/update.sh 0.5.1-dev
 ```
 
 With no second argument the script downloads
-`https://github.com/syver777/vowp/releases/download/v0.5.1-dev/SHA256SUMS`. To use a
+`https://github.com/Stack-Spirit/stackspirit/releases/download/v0.5.1-dev/SHA256SUMS`. To use a
 local file, or to write a copy of the formula instead of editing `vowp.rb`:
 
 ```sh
@@ -75,9 +75,9 @@ there; do not commit the unfilled template.
 
 ## Private StackSpirit formula
 
-`stackspirit.rb` is the private counterpart: formula `stackspirit` (never
-`stackspirit-engine`), archives `stackspirit-<version>-<target>.tar.gz` from
-the private `Stack-Spirit/stackspirit-engine` releases, and it installs
+`stackspirit.rb` is the private counterpart: formula `stackspirit`, archives
+`stackspirit-<version>-<target>.tar.gz` from the `Stack-Spirit/stackspirit`
+releases, and it installs
 `stackspirit`, `vowp`, `stackspirit-daemon` and `vowp-daemon`. Its test runs
 both `stackspirit --version` and `vowp --version`. Nothing is published or
 tapped from this repository.

@@ -28,8 +28,9 @@ TAGS = tuple(TARGET_TAGS.values())
 MAX_WHEEL_BYTES = 64 * 1024 * 1024
 ZIP_DATE = (1980, 1, 1, 0, 0, 0)
 URLS = {
-    "Homepage": "https://github.com/syver777/vowp",
-    "Repository": "https://github.com/syver777/vowp",
+    "Homepage": "https://stackspirit.io",
+    "Repository": "https://github.com/Stack-Spirit/stackspirit",
+    "Issues": "https://github.com/Stack-Spirit/stackspirit/issues",
 }
 ENTRY_POINTS = (
     "[console_scripts]\n"

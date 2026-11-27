@@ -8,7 +8,7 @@
 # for it: pass a SHA256SUMS path or set STACKSPIRIT_RELEASE_BASE_URL.
 #
 # With no SHA256SUMS path, the file is downloaded from
-# https://github.com/syver777/vowp/releases/download/v<version>/SHA256SUMS
+# https://github.com/Stack-Spirit/stackspirit/releases/download/v<version>/SHA256SUMS
 # (override the base with VOWP_RELEASE_BASE_URL). The formula path defaults to
 # vowp.rb next to this script. Nothing is published; commit the tap separately.
 
@@ -16,7 +16,7 @@ set -eu
 
 PROGRAM=update.sh
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-DEFAULT_RELEASE_BASE_URL=https://github.com/syver777/vowp/releases/download
+DEFAULT_RELEASE_BASE_URL=https://github.com/Stack-Spirit/stackspirit/releases/download
 FORMULA=
 PRODUCT=vowp
 CHECKSUMS=
@@ -28,8 +28,10 @@ Usage: update.sh [--product vowp|stackspirit] <version> [SHA256SUMS] [formula]
 
 Fill the Homebrew formula with the version and the four archive SHA256 hashes
 from a release SHA256SUMS file. When SHA256SUMS is omitted it is downloaded
-from the GitHub release for <version>. The formula defaults to vowp.rb next to
-this script.
+from
+https://github.com/Stack-Spirit/stackspirit/releases/download/v<version>/SHA256SUMS
+by default (override with VOWP_RELEASE_BASE_URL). The formula defaults to
+vowp.rb next to this script.
 
 Environment:
   VOWP_RELEASE_BASE_URL          release download base URL (vowp)

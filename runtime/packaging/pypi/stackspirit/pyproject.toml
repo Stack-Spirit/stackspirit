@@ -8,3 +8,8 @@ name = "stackspirit"
 version = "0.6.0"
 requires-python = ">=3.9"
 license = "MIT"
+
+[project.urls]
+Homepage = "https://stackspirit.io"
+Repository = "https://github.com/Stack-Spirit/stackspirit"
+Issues = "https://github.com/Stack-Spirit/stackspirit/issues"

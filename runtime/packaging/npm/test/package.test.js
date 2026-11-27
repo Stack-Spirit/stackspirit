@@ -54,6 +54,16 @@ test("root package graph matches the design", () => {
   assert.deepEqual(rootManifest.files, ["bin/", "lib/", "README.md", "LICENSE"]);
 });
 
+test("package manifests describe the real repository path", () => {
+  assert.equal(rootManifest.repository.url, "git+https://github.com/Stack-Spirit/stackspirit.git");
+  assert.equal(rootManifest.repository.directory, "runtime/packaging/npm/stackspirit");
+  for (const key of f.KEYS) {
+    const manifest = platform(key);
+    assert.equal(manifest.repository.url, rootManifest.repository.url);
+    assert.equal(manifest.repository.directory, `runtime/packaging/npm/platforms/${key}`);
+  }
+});
+
 test("platform_packages_are_os_and_cpu_scoped", () => {
   const seen = new Set();
   for (const key of f.KEYS) {
