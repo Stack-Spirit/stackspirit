@@ -108,7 +108,7 @@ def _metadata(pyver):
         "Summary: StackSpirit: local-first supervisor for AI coding agents",
         "Author: Syver-August Meyer",
         "License-Expression: MIT",
-        "License-File: licenses/LICENSE",
+        "License-File: LICENSE",
         "Requires-Python: >=3.9",
         "Classifier: Development Status :: 4 - Beta",
         "Classifier: Environment :: Console",

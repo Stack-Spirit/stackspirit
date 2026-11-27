@@ -6,7 +6,7 @@ bundle is generated from `cargo metadata --format-version 1 --locked` by
 The release workflow checks it is current and copies it into every archive as
 `THIRD-PARTY-LICENSES.md`.
 
-The locked dependency expressions use the allowed licence identifiers `MIT`, `MIT-0`, `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Unicode-3.0`, `Zlib`.
+The locked dependency expressions use the allowed licence identifiers `MIT`, `MIT-0`, `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `BSD-2-Clause`, `BSD-3-Clause`, `CDLA-Permissive-2.0`, `ISC`, `Unicode-3.0`, `Zlib`.
 
 The full texts below cover every licence identifier used by this locked
 tree and the other reviewed texts in the audit's allowed set. A locked
@@ -18,8 +18,11 @@ makes the generator fail instead of shipping an incomplete bundle.
 | Package | Version | Licence | Repository |
 |---|---|---|---|
 | `aead` | 0.5.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
+| `aead` | 0.6.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | `aes` | 0.8.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-ciphers |
+| `aes` | 0.9.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-ciphers |
 | `aes-gcm` | 0.10.3 | Apache-2.0 OR MIT | https://github.com/RustCrypto/AEADs |
+| `aes-gcm` | 0.11.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/AEADs |
 | `age` | 0.12.1 | MIT OR Apache-2.0 | https://github.com/str4d/rage |
 | `age-core` | 0.12.0 | MIT OR Apache-2.0 | https://github.com/str4d/rage |
 | `ahash` | 0.8.12 | MIT OR Apache-2.0 | https://github.com/tkaitchuck/ahash |
@@ -43,7 +46,9 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `axum` | 0.8.9 | MIT | https://github.com/tokio-rs/axum |
 | `axum-core` | 0.5.6 | MIT | https://github.com/tokio-rs/axum |
 | `base16ct` | 0.2.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats/tree/master/base16ct |
+| `base16ct` | 1.0.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | `base64` | 0.22.1 | MIT OR Apache-2.0 | https://github.com/marshallpierce/rust-base64 |
+| `base64` | 0.23.1 | MIT OR Apache-2.0 | https://github.com/marshallpierce/rust-base64 |
 | `base64ct` | 1.8.3 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | `basic-toml` | 0.1.10 | MIT OR Apache-2.0 | https://github.com/dtolnay/basic-toml |
 | `bech32` | 0.11.1 | MIT | https://github.com/rust-bitcoin/rust-bech32 |
@@ -64,28 +69,35 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `chacha20poly1305` | 0.10.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/AEADs/tree/master/chacha20poly1305 |
 | `chrono` | 0.4.45 | MIT OR Apache-2.0 | https://github.com/chronotope/chrono |
 | `cipher` | 0.4.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
+| `cipher` | 0.5.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | `clap` | 4.6.7 | MIT OR Apache-2.0 | https://github.com/clap-rs/clap |
 | `clap_builder` | 4.6.7 | MIT OR Apache-2.0 | https://github.com/clap-rs/clap |
 | `clap_derive` | 4.6.7 | MIT OR Apache-2.0 | https://github.com/clap-rs/clap |
 | `clap_lex` | 1.1.1 | MIT OR Apache-2.0 | https://github.com/clap-rs/clap |
 | `cmake` | 0.1.58 | MIT OR Apache-2.0 | https://github.com/rust-lang/cmake-rs |
+| `cmov` | 0.5.4 | Apache-2.0 OR MIT | https://github.com/RustCrypto/utils |
 | `colorchoice` | 1.0.5 | MIT OR Apache-2.0 | https://github.com/rust-cli/anstyle.git |
 | `const-oid` | 0.10.2 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | `const-oid` | 0.9.6 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats/tree/master/const-oid |
 | `cookie-factory` | 0.3.3 | MIT | https://github.com/rust-bakery/cookie-factory |
 | `core-foundation` | 0.10.1 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | `core-foundation-sys` | 0.8.7 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
+| `cpubits` | 0.1.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | `cpufeatures` | 0.2.17 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | `cpufeatures` | 0.3.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | `cron` | 0.17.0 | MIT OR Apache-2.0 | https://github.com/zslayton/cron |
 | `crypto-bigint` | 0.5.5 | Apache-2.0 OR MIT | https://github.com/RustCrypto/crypto-bigint |
+| `crypto-bigint` | 0.7.11 | Apache-2.0 OR MIT | https://github.com/RustCrypto/crypto-bigint |
 | `crypto-common` | 0.1.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | `crypto-common` | 0.2.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
+| `ctr` | 0.10.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-modes |
 | `ctr` | 0.9.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-modes |
+| `ctutils` | 0.4.8 | Apache-2.0 OR MIT | https://github.com/RustCrypto/utils |
 | `curve25519-dalek` | 4.1.3 | BSD-3-Clause | https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek |
 | `curve25519-dalek-derive` | 0.1.1 | MIT/Apache-2.0 | https://github.com/dalek-cryptography/curve25519-dalek |
 | `data-encoding` | 2.11.1 | MIT | https://github.com/ia0/data-encoding |
 | `der` | 0.7.10 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats/tree/master/der |
+| `der` | 0.8.3 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | `der-parser` | 10.0.0 | MIT OR Apache-2.0 | https://github.com/rusticata/der-parser.git |
 | `deranged` | 0.5.9 | MIT OR Apache-2.0 | https://github.com/jhpratt/deranged |
 | `diff` | 0.1.13 | MIT OR Apache-2.0 | https://github.com/utkarshkukreti/diff.rs |
@@ -94,9 +106,11 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `displaydoc` | 0.2.7 | MIT OR Apache-2.0 | https://github.com/yaahc/displaydoc |
 | `dunce` | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 | https://gitlab.com/kornelski/dunce |
 | `dyn-clone` | 1.0.20 | MIT OR Apache-2.0 | https://github.com/dtolnay/dyn-clone |
+| `ecdsa` | 0.17.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/signatures |
 | `ed25519` | 2.2.3 | Apache-2.0 OR MIT | https://github.com/RustCrypto/signatures/tree/master/ed25519 |
 | `ed25519-dalek` | 2.2.0 | BSD-3-Clause | https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek |
 | `elliptic-curve` | 0.13.8 | Apache-2.0 OR MIT | https://github.com/RustCrypto/traits/tree/master/elliptic-curve |
+| `elliptic-curve` | 0.14.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/traits |
 | `email_address` | 0.2.9 | MIT | https://github.com/johnstonskj/rust-email_address.git |
 | `equivalent` | 1.0.3 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/equivalent |
 | `errno` | 0.3.14 | MIT OR Apache-2.0 | https://github.com/lambda-fairy/rust-errno |
@@ -105,6 +119,7 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `fancy-regex` | 0.20.2 | MIT | https://github.com/fancy-regex/fancy-regex |
 | `fastrand` | 2.5.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/fastrand |
 | `ff` | 0.13.1 | MIT/Apache-2.0 | https://github.com/zkcrypto/ff |
+| `ff` | 0.14.0 | MIT/Apache-2.0 | https://github.com/zkcrypto/ff |
 | `fiat-crypto` | 0.2.9 | MIT OR Apache-2.0 OR BSD-1-Clause | https://github.com/mit-plv/fiat-crypto |
 | `find-crate` | 0.6.3 | Apache-2.0 OR MIT | https://github.com/taiki-e/find-crate |
 | `find-msvc-tools` | 0.1.15 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
@@ -132,15 +147,19 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `getrandom` | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | `getrandom` | 0.4.3 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | `ghash` | 0.5.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/universal-hashes |
+| `ghash` | 0.6.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/universal-hashes |
 | `globset` | 0.4.19 | Unlicense OR MIT | https://github.com/BurntSushi/ripgrep/tree/master/crates/globset |
 | `group` | 0.13.0 | MIT/Apache-2.0 | https://github.com/zkcrypto/group |
+| `group` | 0.14.0 | MIT/Apache-2.0 | https://github.com/zkcrypto/group |
 | `hashbrown` | 0.16.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | `hashbrown` | 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | `hashlink` | 0.12.2 | MIT OR Apache-2.0 | https://github.com/djc/hashlink |
 | `heck` | 0.5.0 | MIT OR Apache-2.0 | https://github.com/withoutboats/heck |
 | `hex` | 0.4.3 | MIT OR Apache-2.0 | https://github.com/KokaKiwi/rust-hex |
 | `hkdf` | 0.12.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/KDFs/ |
+| `hkdf` | 0.13.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/KDFs/ |
 | `hmac` | 0.12.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/MACs |
+| `hmac` | 0.13.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/MACs |
 | `hpke` | 0.12.0 | MIT/Apache-2.0 | https://github.com/rozbb/rust-hpke |
 | `http` | 1.5.0 | MIT OR Apache-2.0 | https://github.com/hyperium/http |
 | `http-body` | 1.1.0 | MIT | https://github.com/hyperium/http-body |
@@ -159,6 +178,7 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `iana-time-zone-haiku` | 0.1.2 | MIT OR Apache-2.0 | https://github.com/strawlab/iana-time-zone |
 | `indexmap` | 2.14.2 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/indexmap |
 | `inout` | 0.1.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
+| `inout` | 0.2.6 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | `intl-memoizer` | 0.5.3 | Apache-2.0 OR MIT | https://github.com/projectfluent/fluent-rs |
 | `intl_pluralrules` | 7.0.2 | Apache-2.0/MIT | https://github.com/zbraniecki/pluralrules |
 | `io_tee` | 0.1.1 | MIT OR Apache-2.0 | https://github.com/TheOnlyMrCat/io_tee |
@@ -203,10 +223,12 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `openssl-probe` | 0.2.2 | MIT OR Apache-2.0 | https://github.com/rustls/openssl-probe |
 | `outref` | 0.5.2 | MIT | https://github.com/Nugine/outref |
 | `p256` | 0.13.2 | Apache-2.0 OR MIT | https://github.com/RustCrypto/elliptic-curves/tree/master/p256 |
+| `p256` | 0.14.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/elliptic-curves |
 | `parking_lot` | 0.12.5 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | `parking_lot_core` | 0.9.12 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | `pbkdf2` | 0.12.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/password-hashes/tree/master/pbkdf2 |
 | `pem` | 3.0.6 | MIT | https://github.com/jcreekmore/pem-rs.git |
+| `pem-rfc7468` | 1.0.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | `percent-encoding` | 2.3.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ |
 | `phf` | 0.11.3 | MIT | https://github.com/rust-phf/rust-phf |
 | `phf_generator` | 0.11.3 | MIT | https://github.com/rust-phf/rust-phf |
@@ -216,13 +238,17 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `pin-project-internal` | 1.1.13 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project |
 | `pin-project-lite` | 0.2.17 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project-lite |
 | `pkcs8` | 0.10.2 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats/tree/master/pkcs8 |
+| `pkcs8` | 0.11.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | `pkg-config` | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/pkg-config-rs |
 | `poly1305` | 0.8.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/universal-hashes |
 | `polyval` | 0.6.2 | Apache-2.0 OR MIT | https://github.com/RustCrypto/universal-hashes |
+| `polyval` | 0.7.3 | Apache-2.0 OR MIT | https://github.com/RustCrypto/universal-hashes |
 | `powerfmt` | 0.2.1 | MIT OR Apache-2.0 | https://github.com/jhpratt/powerfmt |
 | `ppv-lite86` | 0.2.21 | MIT OR Apache-2.0 | https://github.com/cryptocorrosion/cryptocorrosion |
 | `pretty_assertions` | 1.4.1 | MIT OR Apache-2.0 | https://github.com/rust-pretty-assertions/rust-pretty-assertions |
+| `primefield` | 0.14.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/elliptic-curves |
 | `primeorder` | 0.13.6 | Apache-2.0 OR MIT | https://github.com/RustCrypto/elliptic-curves/tree/master/primeorder |
+| `primeorder` | 0.14.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/elliptic-curves |
 | `proc-macro-error-attr3` | 3.1.1 | MIT OR Apache-2.0 | https://github.com/gamma0987/proc-macro-error3 |
 | `proc-macro-error3` | 3.1.1 | MIT OR Apache-2.0 | https://github.com/gamma0987/proc-macro-error3 |
 | `proc-macro2` | 1.0.107 | MIT OR Apache-2.0 | https://github.com/dtolnay/proc-macro2 |
@@ -248,6 +274,7 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `regex` | 1.13.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | `regex-automata` | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | `regex-syntax` | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
+| `rfc6979` | 0.6.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/signatures |
 | `ring` | 0.17.14 | Apache-2.0 AND ISC | https://github.com/briansmith/ring |
 | `rsqlite-vfs` | 0.1.1 | MIT |  |
 | `rusqlite` | 0.40.2 | MIT | https://github.com/rusqlite/rusqlite |
@@ -273,6 +300,7 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `scopeguard` | 1.2.0 | MIT OR Apache-2.0 | https://github.com/bluss/scopeguard |
 | `scrypt` | 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/password-hashes/tree/master/scrypt |
 | `sec1` | 0.7.3 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats/tree/master/sec1 |
+| `sec1` | 0.8.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | `secrecy` | 0.10.3 | Apache-2.0 OR MIT | https://github.com/iqlusioninc/crates/tree/main/secrecy |
 | `security-framework` | 3.7.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
 | `security-framework-sys` | 2.17.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
@@ -287,6 +315,7 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `serde_spanned` | 1.1.3 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | `serde_urlencoded` | 0.7.1 | MIT/Apache-2.0 | https://github.com/nox/serde_urlencoded |
 | `serde_yaml_ng` | 0.10.0 | MIT | https://github.com/acatton/serde-yaml-ng |
+| `serdect` | 0.4.3 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | `sha1` | 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | `sha2` | 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
@@ -295,11 +324,13 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `signal-hook` | 0.4.6 | MIT OR Apache-2.0 | https://github.com/vorner/signal-hook |
 | `signal-hook-registry` | 1.4.8 | MIT OR Apache-2.0 | https://github.com/vorner/signal-hook |
 | `signature` | 2.2.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/traits/tree/master/signature |
+| `signature` | 3.0.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/traits |
 | `siphasher` | 1.0.4 | MIT OR Apache-2.0 | https://github.com/jedisct1/rust-siphash |
 | `slab` | 0.4.12 | MIT | https://github.com/tokio-rs/slab |
 | `smallvec` | 1.16.5 | MIT OR Apache-2.0 | https://github.com/servo/rust-smallvec |
 | `socket2` | 0.6.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/socket2 |
 | `spki` | 0.7.3 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats/tree/master/spki |
+| `spki` | 0.8.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | `sqlite-wasm-rs` | 0.5.5 | MIT | https://github.com/Spxg/sqlite-wasm-rs |
 | `strsim` | 0.11.1 | MIT | https://github.com/rapidfuzz/strsim-rs |
 | `strum` | 0.28.0 | MIT | https://github.com/Peternator7/strum |
@@ -341,8 +372,12 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `unicode-general-category` | 1.1.0 | Apache-2.0 | https://github.com/yeslogic/unicode-general-category |
 | `unicode-ident` | 1.0.27 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/dtolnay/unicode-ident |
 | `universal-hash` | 0.5.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
+| `universal-hash` | 0.6.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | `unsafe-libyaml` | 0.2.11 | MIT | https://github.com/dtolnay/unsafe-libyaml |
 | `untrusted` | 0.9.0 | ISC | https://github.com/briansmith/untrusted |
+| `ureq` | 3.5.2 | MIT OR Apache-2.0 | https://github.com/algesten/ureq |
+| `ureq-proto` | 0.7.1 | MIT OR Apache-2.0 | https://github.com/algesten/ureq-proto |
+| `utf8-zero` | 0.8.1 | MIT OR Apache-2.0 | https://github.com/algesten/utf8-zero |
 | `utf8parse` | 0.2.2 | Apache-2.0 OR MIT | https://github.com/alacritty/vte |
 | `uuid-simd` | 0.8.0 | MIT | https://github.com/Nugine/simd |
 | `vcpkg` | 0.2.15 | MIT/Apache-2.0 | https://github.com/mcgoo/vcpkg-rs |
@@ -358,6 +393,7 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `wasm-bindgen-macro-support` | 0.2.130 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support |
 | `wasm-bindgen-shared` | 0.2.130 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared |
 | `web-time` | 1.1.0 | MIT OR Apache-2.0 | https://github.com/daxpedda/web-time |
+| `webpki-roots` | 1.0.12 | CDLA-Permissive-2.0 | https://github.com/rustls/webpki-roots |
 | `winapi-util` | 0.1.11 | Unlicense OR MIT | https://github.com/BurntSushi/winapi-util |
 | `windows-core` | 0.62.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | `windows-implement` | 0.60.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
@@ -379,6 +415,7 @@ makes the generator fail instead of shipping an incomplete bundle.
 | `winnow` | 0.7.15 | MIT | https://github.com/winnow-rs/winnow |
 | `winnow` | 1.0.5 | MIT | https://github.com/winnow-rs/winnow |
 | `wit-bindgen` | 0.46.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/wit-bindgen |
+| `wnaf` | 0.14.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/elliptic-curves |
 | `x25519-dalek` | 2.0.1 | BSD-3-Clause | https://github.com/dalek-cryptography/curve25519-dalek/tree/main/x25519-dalek |
 | `x509-parser` | 0.18.1 | MIT OR Apache-2.0 | https://github.com/rusticata/x509-parser.git |
 | `yansi` | 1.0.1 | MIT OR Apache-2.0 | https://github.com/SergioBenitez/yansi |
@@ -918,6 +955,74 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+### Community Data License Agreement - Permissive, Version 2.0
+
+SPDX identifier: `CDLA-Permissive-2.0`
+
+```text
+# Community Data License Agreement - Permissive - Version 2.0
+
+This is the Community Data License Agreement - Permissive, Version
+2.0 (the "agreement"). Data Provider(s) and Data Recipient(s) agree
+as follows:
+
+## 1. Provision of the Data
+
+1.1. A Data Recipient may use, modify, and share the Data made
+available by Data Provider(s) under this agreement if that Data
+Recipient follows the terms of this agreement.
+
+1.2. This agreement does not impose any restriction on a Data
+Recipient's use, modification, or sharing of any portions of the
+Data that are in the public domain or that may be used, modified,
+or shared under any other legal exception or limitation.
+
+## 2. Conditions for Sharing Data
+
+2.1. A Data Recipient may share Data, with or without modifications, so
+long as the Data Recipient makes available the text of this agreement
+with the shared Data.
+
+## 3. No Restrictions on Results
+
+3.1. This agreement does not impose any restriction or obligations
+with respect to the use, modification, or sharing of Results.
+
+## 4. No Warranty; Limitation of Liability
+
+4.1. All Data Recipients receive the Data subject to the following
+terms:
+
+THE DATA IS PROVIDED ON AN "AS IS" BASIS, WITHOUT REPRESENTATIONS,
+WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED
+INCLUDING, WITHOUT LIMITATION, ANY WARRANTIES OR CONDITIONS OF TITLE,
+NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+
+NO DATA PROVIDER SHALL HAVE ANY LIABILITY FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING
+WITHOUT LIMITATION LOST PROFITS), HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE DATA OR RESULTS,
+EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+## 5. Definitions
+
+5.1. "Data" means the material received by a Data Recipient under
+this agreement.
+
+5.2. "Data Provider" means any person who is the source of Data
+provided under this agreement and in reliance on a Data Recipient's
+agreement to its terms.
+
+5.3. "Data Recipient" means any person who receives Data directly
+or indirectly from a Data Provider and agrees to the terms of this
+agreement.
+
+5.4. "Results" means any outcome obtained by computational analysis
+of Data, including for example machine learning models and models'
+insights.
+```
+
 ### ISC License
 
 SPDX identifier: `ISC`
@@ -1026,6 +1131,13 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2019 The RustCrypto Project Developers Copyright (c) 2019 MobileCoin, LLC
 
+### `aead` 0.6.1
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/RustCrypto/traits
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2019-2026 The RustCrypto Project Developers Copyright (c) 2019 MobileCoin, LLC
+
 ### `aes` 0.8.4
 
 - Licence: MIT OR Apache-2.0
@@ -1033,12 +1145,26 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2018 Artyom Pavlov
 
+### `aes` 0.9.2
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/RustCrypto/block-ciphers
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2018-2024 The RustCrypto Project Developers Copyright (c) 2018 Artyom Pavlov
+
 ### `aes-gcm` 0.10.3
 
 - Licence: Apache-2.0 OR MIT
 - Repository: https://github.com/RustCrypto/AEADs
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2019 The RustCrypto Project Developers
+
+### `aes-gcm` 0.11.1
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/AEADs
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2019-2026 The RustCrypto Project Developers
 
 ### `age` 0.12.1
 
@@ -1216,12 +1342,26 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com) Copyright (c) 2022 The RustCrypto Project Developers
 
+### `base16ct` 1.0.0
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/formats
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com) Copyright (c) 2022-2025 The RustCrypto Project Developers
+
 ### `base64` 0.22.1
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/marshallpierce/rust-base64
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2015 Alice Maz
+
+### `base64` 0.23.1
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/marshallpierce/rust-base64
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2025 Alice Maz, Marshall Pierce
 
 ### `base64ct` 1.8.3
 
@@ -1364,6 +1504,13 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2016-2020 RustCrypto Developers
 
+### `cipher` 0.5.2
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/RustCrypto/traits
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2016-2025 RustCrypto Developers
+
 ### `clap` 4.6.7
 
 - Licence: MIT OR Apache-2.0
@@ -1402,6 +1549,13 @@ repository and licence expression are recorded above.
 - Repository: https://github.com/rust-lang/cmake-rs
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2014 Alex Crichton
+
+### `cmov` 0.5.4
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/utils
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2022-2026 The RustCrypto Project Developers
 
 ### `colorchoice` 1.0.5
 
@@ -1445,6 +1599,13 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2012-2013 Mozilla Foundation
 
+### `cpubits` 0.1.1
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/RustCrypto/utils
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2023-2026 The RustCrypto Project Developers
+
 ### `cpufeatures` 0.2.17
 
 - Licence: MIT OR Apache-2.0
@@ -1473,6 +1634,13 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2021 The RustCrypto Project Developers
 
+### `crypto-bigint` 0.7.11
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/crypto-bigint
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2021-2026 The RustCrypto Project Developers
+
 ### `crypto-common` 0.1.7
 
 - Licence: MIT OR Apache-2.0
@@ -1487,12 +1655,26 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2021-2026 RustCrypto Developers
 
+### `ctr` 0.10.1
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/RustCrypto/block-modes
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2018-2022 RustCrypto Developers Copyright (c) 2018 Artyom Pavlov
+
 ### `ctr` 0.9.2
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/RustCrypto/block-modes
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2018-2022 RustCrypto Developers Copyright (c) 2018 Artyom Pavlov
+
+### `ctutils` 0.4.8
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/utils
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2025-2026 The RustCrypto Project Developers
 
 ### `curve25519-dalek` 4.1.3
 
@@ -1522,6 +1704,13 @@ repository and licence expression are recorded above.
 - Repository: https://github.com/RustCrypto/formats/tree/master/der
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2020-2023 The RustCrypto Project Developers
+
+### `der` 0.8.3
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/formats
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2020-2026 The RustCrypto Project Developers
 
 ### `der-parser` 10.0.0
 
@@ -1580,6 +1769,14 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright: no separate copyright notice in the shipped licence files
 
+### `ecdsa` 0.17.0
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/signatures
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright 2018-2022 RustCrypto Developers
+- Copyright (c) 2018-2026 RustCrypto Developers
+
 ### `ed25519` 2.2.3
 
 - Licence: Apache-2.0 OR MIT
@@ -1601,6 +1798,13 @@ repository and licence expression are recorded above.
 - Repository: https://github.com/RustCrypto/traits/tree/master/elliptic-curve
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2020-2022 RustCrypto Developers
+
+### `elliptic-curve` 0.14.1
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/traits
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2020-2026 RustCrypto Developers
 
 ### `email_address` 0.2.9
 
@@ -1652,6 +1856,13 @@ repository and licence expression are recorded above.
 - Copyright: no separate copyright notice in the shipped licence files
 
 ### `ff` 0.13.1
+
+- Licence: MIT/Apache-2.0
+- Repository: https://github.com/zkcrypto/ff
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2017 Sean Bowe
+
+### `ff` 0.14.0
 
 - Licence: MIT/Apache-2.0
 - Repository: https://github.com/zkcrypto/ff
@@ -1849,6 +2060,13 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2019 RustCrypto Developers
 
+### `ghash` 0.6.0
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/universal-hashes
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2019-2026 The RustCrypto Project Developers
+
 ### `globset` 0.4.19
 
 - Licence: Unlicense OR MIT
@@ -1857,6 +2075,13 @@ repository and licence expression are recorded above.
 - Copyright (c) 2015 Andrew Gallant
 
 ### `group` 0.13.0
+
+- Licence: MIT/Apache-2.0
+- Repository: https://github.com/zkcrypto/group
+- Licence files: COPYRIGHT, LICENSE-APACHE, LICENSE-MIT
+- Copyright: no separate copyright notice in the shipped licence files
+
+### `group` 0.14.0
 
 - Licence: MIT/Apache-2.0
 - Repository: https://github.com/zkcrypto/group
@@ -1905,7 +2130,21 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2015-2018 Vlad Filippov Copyright (c) 2018-2021 RustCrypto Developers
 
+### `hkdf` 0.13.0
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/RustCrypto/KDFs/
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2015-2018 Vlad Filippov Copyright (c) 2018-2021 RustCrypto Developers
+
 ### `hmac` 0.12.1
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/RustCrypto/MACs
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2017 Artyom Pavlov
+
+### `hmac` 0.13.0
 
 - Licence: MIT OR Apache-2.0
 - Repository: https://github.com/RustCrypto/MACs
@@ -2045,6 +2284,13 @@ repository and licence expression are recorded above.
 - Repository: https://github.com/RustCrypto/utils
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2022 The RustCrypto Project Developers Copyright (c) 2022 Artyom Pavlov
+
+### `inout` 0.2.6
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/RustCrypto/utils
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2022-2025 The RustCrypto Project Developers Copyright (c) 2022 Artyom Pavlov
 
 ### `intl-memoizer` 0.5.3
 
@@ -2360,6 +2606,13 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2020-2023 RustCrypto Developers
 
+### `p256` 0.14.0
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/elliptic-curves
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2020-2026 RustCrypto Developers
+
 ### `parking_lot` 0.12.5
 
 - Licence: MIT OR Apache-2.0
@@ -2387,6 +2640,13 @@ repository and licence expression are recorded above.
 - Repository: https://github.com/jcreekmore/pem-rs.git
 - Licence files: LICENSE.md
 - Copyright (c) 2016 Jonathan Creekmore
+
+### `pem-rfc7468` 1.0.0
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/formats
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2021-2025 The RustCrypto Project Developers
 
 ### `percent-encoding` 2.3.2
 
@@ -2451,6 +2711,13 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2020-2023 The RustCrypto Project Developers
 
+### `pkcs8` 0.11.0
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/formats
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2020-2026 The RustCrypto Project Developers
+
 ### `pkg-config` 0.3.34
 
 - Licence: MIT OR Apache-2.0
@@ -2471,6 +2738,13 @@ repository and licence expression are recorded above.
 - Repository: https://github.com/RustCrypto/universal-hashes
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2019-2023 RustCrypto Developers
+
+### `polyval` 0.7.3
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/universal-hashes
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2019-2026 The RustCrypto Project Developers
 
 ### `powerfmt` 0.2.1
 
@@ -2495,10 +2769,24 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2016 rust-derive-builder contributors
 
+### `primefield` 0.14.0
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/elliptic-curves
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2024-2026 RustCrypto Developers
+
 ### `primeorder` 0.13.6
 
 - Licence: Apache-2.0 OR MIT
 - Repository: https://github.com/RustCrypto/elliptic-curves/tree/master/primeorder
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2020-2023 RustCrypto Developers
+
+### `primeorder` 0.14.0
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/elliptic-curves
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2020-2023 RustCrypto Developers
 
@@ -2678,6 +2966,14 @@ repository and licence expression are recorded above.
 - Repository: https://github.com/rust-lang/regex
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2014 The Rust Project Developers
+
+### `rfc6979` 0.6.0
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/signatures
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright 2018-2022 RustCrypto Developers
+- Copyright (c) 2018-2026 RustCrypto Developers
 
 ### `ring` 0.17.14
 
@@ -2860,6 +3156,13 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2021-2022 The RustCrypto Project Developers
 
+### `sec1` 0.8.1
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/formats
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2021-2026 The RustCrypto Project Developers
+
 ### `secrecy` 0.10.3
 
 - Licence: Apache-2.0 OR MIT
@@ -2959,6 +3262,13 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE
 - Copyright 2024 Antoine Catton Copyright 2016-2024 David Tolnay
 
+### `serdect` 0.4.3
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/formats
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2022-2025 The RustCrypto Project Developers
+
 ### `sha1` 0.11.0
 
 - Licence: MIT OR Apache-2.0
@@ -3016,6 +3326,13 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2018-2023 RustCrypto Developers
 
+### `signature` 3.0.0
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/traits
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2018-2026 RustCrypto Developers
+
 ### `siphasher` 1.0.4
 
 - Licence: MIT OR Apache-2.0
@@ -3050,6 +3367,13 @@ repository and licence expression are recorded above.
 - Repository: https://github.com/RustCrypto/formats/tree/master/spki
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2021-2023 The RustCrypto Project Developers
+
+### `spki` 0.8.1
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/formats
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2021-2026 The RustCrypto Project Developers
 
 ### `sqlite-wasm-rs` 0.5.5
 
@@ -3344,6 +3668,13 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright (c) 2019-2020 RustCrypto Developers
 
+### `universal-hash` 0.6.1
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/RustCrypto/traits
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2019-2025 RustCrypto Developers
+
 ### `unsafe-libyaml` 0.2.11
 
 - Licence: MIT
@@ -3357,6 +3688,27 @@ repository and licence expression are recorded above.
 - Repository: https://github.com/briansmith/untrusted
 - Licence files: LICENSE.txt
 - // Copyright 2015-2016 Brian Smith. // // Permission to use, copy, modify, and/or distribute this software for any // purpose with or without fee is hereby granted, provided that the above // copyright notice and this permission notice appear in all copies. // // THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHORS DISCLAIM ALL WARRANTIES // WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF // MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR // ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES // WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN // ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+### `ureq` 3.5.2
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/algesten/ureq
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2019 Martin Algesten
+
+### `ureq-proto` 0.7.1
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/algesten/ureq-proto
+- Licence files: LICENSE-APACHE.txt, LICENSE-MIT.txt
+- Copyright 2022 Martin Algesten
+
+### `utf8-zero` 0.8.1
+
+- Licence: MIT OR Apache-2.0
+- Repository: https://github.com/algesten/utf8-zero
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `utf8parse` 0.2.2
 
@@ -3464,6 +3816,13 @@ repository and licence expression are recorded above.
 - Licence files: LICENSE-APACHE, LICENSE-MIT
 - Copyright 2023 dAxpeDDa
 - Copyright (c) 2023 dAxpeDDa
+
+### `webpki-roots` 1.0.12
+
+- Licence: CDLA-Permissive-2.0
+- Repository: https://github.com/rustls/webpki-roots
+- Licence files: LICENSE
+- Copyright: no separate copyright notice in the shipped licence files
 
 ### `winapi-util` 0.1.11
 
@@ -3611,6 +3970,13 @@ repository and licence expression are recorded above.
 - Repository: https://github.com/bytecodealliance/wit-bindgen
 - Licence files: LICENSE-APACHE, LICENSE-Apache-2.0_WITH_LLVM-exception, LICENSE-MIT
 - Copyright: no separate copyright notice in the shipped licence files
+
+### `wnaf` 0.14.1
+
+- Licence: Apache-2.0 OR MIT
+- Repository: https://github.com/RustCrypto/elliptic-curves
+- Licence files: LICENSE-APACHE, LICENSE-MIT
+- Copyright (c) 2026 RustCrypto Developers Copyright (c) 2018-2025 `group` crate developers
 
 ### `x25519-dalek` 2.0.1
 
