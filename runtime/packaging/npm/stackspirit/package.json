@@ -1,6 +1,6 @@
 {
   "name": "stackspirit",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "StackSpirit: local-first supervisor for AI coding agents",
   "license": "MIT",
   "homepage": "https://stackspirit.io",
@@ -19,10 +19,10 @@
   },
   "files": ["bin/", "lib/", "README.md", "LICENSE"],
   "optionalDependencies": {
-    "@stackspirit/linux-x64": "0.6.0",
-    "@stackspirit/linux-arm64": "0.6.0",
-    "@stackspirit/darwin-x64": "0.6.0",
-    "@stackspirit/darwin-arm64": "0.6.0"
+    "@stackspirit/linux-x64": "0.6.1",
+    "@stackspirit/linux-arm64": "0.6.1",
+    "@stackspirit/darwin-x64": "0.6.1",
+    "@stackspirit/darwin-arm64": "0.6.1"
   },
   "publishConfig": { "access": "public" },
   "scripts": { "test": "node --test test/*.test.js" }

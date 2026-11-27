@@ -22,5 +22,5 @@ fn version_flag_prints_package_version() {
         String::from_utf8_lossy(&output.stdout).trim(),
         format!("vowp {}", env!("CARGO_PKG_VERSION"))
     );
-    assert_eq!(env!("CARGO_PKG_VERSION"), "0.6.0");
+    assert_eq!(env!("CARGO_PKG_VERSION"), "0.6.1");
 }

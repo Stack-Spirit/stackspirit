@@ -1,6 +1,6 @@
 {
   "name": "@stackspirit/linux-arm64",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "StackSpirit prebuilt binaries for linux/arm64 (glibc)",
   "license": "MIT",
   "homepage": "https://stackspirit.io",
