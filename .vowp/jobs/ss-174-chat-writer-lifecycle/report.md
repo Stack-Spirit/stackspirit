@@ -2,19 +2,8 @@
 job: ss-174-chat-writer-lifecycle
 status: done
 branch: job/ss-174-chat-writer-lifecycle
-commits:
-  - "694f12a0025675d785ca114896ba09ddd5cb1549"
-  - "226056eaa6ceb74103a5606f8eed100f74ae79ea"
-tests:
-  - "node scripts/fetch-engine.mjs"
-  - "scripts/cargo-gate.sh fmt --all -- --check"
-  - "scripts/cargo-gate.sh clippy --workspace --all-targets -- -D warnings"
-  - "scripts/cargo-gate.sh test -p spirit-core"
-  - "scripts/cargo-gate.sh check -p spirit-desktop"
-  - "npm run typecheck"
-  - "npm run lint"
-  - "npm test -w @stackspirit/ui"
-  - "npx playwright test e2e/chat-takeover.spec.ts --project=chromium"
+commits: ["226056e", "694f12a"]
+tests: "all brief gates pass: fetch-engine, cargo fmt --check, cargo clippy --workspace --all-targets -- -D warnings, cargo test -p spirit-core; also cargo check -p spirit-desktop, npm run typecheck, npm run lint, npm test -w @stackspirit/ui (582 passed) and Playwright chat-takeover.spec.ts (3 passed)"
 questions_for_owner: []
 ---
 
