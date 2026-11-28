@@ -1861,11 +1861,16 @@ today's behaviour exactly: no chip, no notice, composer enabled.
   composing is unchanged.
 
 This is cooperative metadata, not enforcement. StackSpirit does not fence the other
-writer or imply that it was stopped. Full takeover and direct-engine writer fencing
-remain open (HANDOFF §5.1 item 3); the existing worker-session ownership banner and its
-Take over command are a separate surface. Explicit chat takeover is designed in
-[`SESSION-TAKEOVER.md`](SESSION-TAKEOVER.md); it is design only and nothing in this
-section changes.
+writer or imply that it was stopped. Explicit chat takeover is implemented for an
+eligible co-located home-hosted session behind the `ChatWriterView` eligibility gate
+(`ss-170` core, `ss-171` bridge, `ss-173` UI, `ss-174` lifecycle); the UI offers
+Take over when the probe reports `writer.state === "available"` and Release while
+this app holds the lease, and the composer opens only while the state is `held`. A
+node-hosted session stays read-only with a safe reason and no action. Direct-engine
+writer fencing and VOWP node-side attach remain open (HANDOFF §5.1 item 3); the
+existing worker-session ownership banner and its Take over command are a separate
+surface. The full contract is in [`SESSION-TAKEOVER.md`](SESSION-TAKEOVER.md); the
+ownership chip and read-only notice semantics above do not change.
 
 ## 5. Security
 

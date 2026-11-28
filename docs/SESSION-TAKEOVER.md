@@ -1012,8 +1012,10 @@ fixed checklist and must not perform a real takeover on its own.
 
 ## 8. What this design deliberately does not do
 
-- It does not implement, claim or enable takeover; the current read-only half is
-  unchanged and the composer remains the only gate.
+- It does not take over a node-hosted, remote-home or stopped orchestrator. Those
+  sessions stay read-only with a safe reason and no action, and the composer stays
+  disabled. Only an eligible co-located home-hosted session can take over, after
+  the owner's explicit confirmation.
 - It does not add a loopback engine proxy or hard writer fencing. A direct-engine
   writer is still possible until that slice lands.
 - It does not add a node-side attach or an SSH attach. A node-hosted Local session
