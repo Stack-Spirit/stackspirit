@@ -3,7 +3,12 @@ import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import type { MockScenario, SpiritBridge } from "@stackspirit/ui";
+import {
+  resetCloudAccount,
+  useCloudAccount,
+  type MockScenario,
+  type SpiritBridge,
+} from "@stackspirit/ui";
 
 import { WebMockBridge } from "../bridge/WebMockBridge";
 import {
@@ -27,6 +32,7 @@ async function renderApp(scenario: MockScenario = "fresh") {
 }
 
 beforeEach(() => {
+  resetCloudAccount();
   window.history.replaceState(null, "", "/");
 });
 
@@ -225,6 +231,55 @@ describe("Web read-only shell", () => {
     expect(screen.getByTestId("stale-banner").textContent).toMatch(
       /no data from the daemon/i,
     );
+  });
+
+  it("shows the persistent Account menu on the cockpit even with zero machines", async () => {
+    useCloudAccount.setState({
+      phase: "signed_in",
+      account: { id: "acct_1", email: "owner@example.com", name: "Owner" },
+      machines: [],
+      machinesStatus: "ready",
+      machinesError: null,
+      selectedMachineId: null,
+      provisioning: null,
+    });
+    const user = userEvent.setup();
+    await renderApp();
+
+    const button = screen.getByTestId("web-account-button");
+    expect(button).toHaveTextContent("Account");
+    expect(button).toHaveTextContent("owner@example.com");
+    expect(button).toHaveAttribute("aria-haspopup", "menu");
+
+    await user.click(button);
+    const menu = screen.getByTestId("web-account-menu");
+    expect(menu).toHaveTextContent("Account details");
+    expect(menu).toHaveTextContent("Managed Homes");
+    expect(menu).toHaveTextContent("Sign out");
+
+    const menuAxe = await axe.run(document.body, {
+      runOnly: { type: "tag", values: WCAG_TAGS },
+    });
+    expect(menuAxe.violations).toEqual([]);
+
+    await user.click(screen.getByTestId("web-account-managed-homes"));
+    const homes = await screen.findByRole("dialog", { name: "Managed Homes" });
+    expect(
+      await within(homes).findByText(/Managed Home plans are not available in this build/i),
+    ).toBeInTheDocument();
+    await user.click(within(homes).getByRole("button", { name: "Close drawer" }));
+
+    await user.click(screen.getByTestId("web-account-button"));
+    await user.click(screen.getByTestId("web-account-details"));
+    const details = await screen.findByRole("dialog", { name: "Account details" });
+    expect(within(details).getAllByText("owner@example.com").length).toBeGreaterThan(0);
+    expect(within(details).getByTestId("cloud-account-panel")).toBeInTheDocument();
+    await user.click(within(details).getByRole("button", { name: "Close drawer" }));
+
+    await user.click(screen.getByTestId("web-account-button"));
+    await user.click(screen.getByTestId("web-account-sign-out"));
+    expect(screen.getByTestId("web-account-sign-in")).toHaveAttribute("href", "/cloud");
+    expect(screen.queryByTestId("web-account-button")).not.toBeInTheDocument();
   });
 
   it("has no WCAG 2.2 AA axe violations", async () => {

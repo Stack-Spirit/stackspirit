@@ -11,6 +11,11 @@ import {
 
 import type { WebAuthClient } from "../auth/client";
 import { consumeAuthTokenFragment } from "../auth/session";
+import { WebAccountMenu } from "./AccountMenu";
+import {
+  AGENT_SETUP_PROMPT,
+  DESKTOP_RELEASES_URL,
+} from "./onboarding";
 
 export interface WebAuthPanelProps {
   /** The Web account client; null keeps the honest build-unavailable copy. */
@@ -72,13 +77,175 @@ function errorCopy(error: unknown): { message: string; hint: string | null } {
 }
 
 /**
+ * Copies the setup prompt with the async Clipboard API and falls back to a
+ * hidden textarea when the browser blocks it (for example on plain HTTP).
+ * Nothing secret is ever put in the prompt.
+ */
+async function writeClipboard(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the selection fallback.
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const copied = document.execCommand("copy");
+    document.body.removeChild(area);
+    return copied;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The quiet manual enrollment disclosure. It lives in a child component so the
+ * one-time ssm_ token is discarded by unmounting as soon as the signed-in
+ * onboarding card goes away (sign-out or a different account) instead of being
+ * cleared by an effect.
+ */
+function ManualSetup({
+  client,
+  refreshMachines,
+}: {
+  client: WebAuthClient | null;
+  refreshMachines: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [token, setToken] = useState<string | null>(null);
+  const [expires, setExpires] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<{ message: string; hint: string | null } | null>(null);
+
+  async function createToken(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!client) {
+      setError({
+        message: "StackSpirit Account is not available in this build.",
+        hint: null,
+      });
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await client.createEnrollmentToken(name);
+      setToken(created.token);
+      setExpires(created.expires_at);
+    } catch (caught) {
+      setError(errorCopy(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        className="web-onboard__manual-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        data-testid="onboard-manual-toggle"
+      >
+        <span>Manual terminal setup</span>
+        <span className="web-local__chevron" aria-hidden="true">
+          {open ? "−" : "+"}
+        </span>
+      </button>
+
+      {open ? (
+        <div className="web-onboard__manual" data-testid="onboard-manual">
+          <p className="nx-cloud__meta">
+            Prefer a terminal? Sign in on the machine you will enroll, create a one-time{" "}
+            <span className="mono">ssm_</span> token here, and paste it when the CLI asks. The
+            token is shown once and is never sent to the cloud in a URL.
+          </p>
+          <p className="nx-cloud__meta">On that machine, run:</p>
+          <code className="web-onboard__command">npx -y stackspirit login</code>
+          <code className="web-onboard__command">
+            {`stackspirit relay enroll --token-file - --name "${name || "my-machine"}"`}
+          </code>
+          {token ? (
+            <div className="web-onboard__token" data-testid="onboard-enrollment">
+              <p>
+                Paste this one-time token into <strong>{name || "your machine"}</strong> when
+                the CLI asks:
+              </p>
+              <code className="web-onboard__secret" data-testid="web-enroll-token">
+                {token}
+              </code>
+              <p className="nx-cloud__meta">
+                Do not share it. It expires{" "}
+                {expires ? new Date(expires).toLocaleString() : "soon"}.
+              </p>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => void refreshMachines()}
+                data-testid="onboard-refresh-machines"
+              >
+                I ran it — refresh machines
+              </Button>
+            </div>
+          ) : (
+            <form
+              className="web-onboard__form"
+              onSubmit={(event) => void createToken(event)}
+            >
+              <label className="field">
+                <span className="field__label">Machine name (optional)</span>
+                <input
+                  className="input"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="home-server"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </label>
+              <Button
+                type="submit"
+                size="sm"
+                variant="secondary"
+                loading={busy}
+                data-testid="onboard-create-token"
+              >
+                Create one-time token
+              </Button>
+            </form>
+          )}
+          {error ? (
+            <p className="nx-cloud__error" role="alert" data-testid="onboard-enroll-error">
+              {error.message}
+              {error.hint ? <span> {error.hint}</span> : null}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/**
  * The account-first StackSpirit sign-in card for the Web/PWA landing and `/cloud`
  * screens.
  *
  * Google and GitHub are one GET away; email sign-up asks for the six-digit code
  * from the API and email sign-in is a password login. A signed-in account with no
- * enrolled machines gets the two-choice onboarding: link an existing VPS or open
- * the Managed Homes plans. The token only lives in `auth/session.ts` memory.
+ * enrolled machines gets the agent-first three-path onboarding: connect with a
+ * coding agent, use the Desktop Setup Assistant, or open the Managed Homes plans.
+ * The browser never asks for an SSH private key. The token only lives in
+ * `auth/session.ts` memory.
  */
 export function WebAuthPanel({ client, onOpenPlans, homesHref }: WebAuthPanelProps) {
   const phase = useCloudAccount((state) => state.phase);
@@ -88,7 +255,6 @@ export function WebAuthPanel({ client, onOpenPlans, homesHref }: WebAuthPanelPro
   const machinesError = useCloudAccount((state) => state.machinesError);
   const notice = useCloudAccount((state) => state.notice);
   const storeError = useCloudAccount((state) => state.error);
-  const signOut = useCloudAccount((state) => state.signOut);
   const refreshMachines = useCloudAccount((state) => state.refreshMachines);
 
   // Read (and scrub) the OAuth callback before the first render can show it.
@@ -113,13 +279,7 @@ export function WebAuthPanel({ client, onOpenPlans, homesHref }: WebAuthPanelPro
   });
   const [errorHint, setErrorHint] = useState<string | null>(null);
   const [localNotice, setLocalNotice] = useState<string | null>(null);
-  const [enrollName, setEnrollName] = useState("");
-  const [enrollToken, setEnrollToken] = useState<string | null>(null);
-  const [enrollExpires, setEnrollExpires] = useState<string | null>(null);
-  const [enrollBusy, setEnrollBusy] = useState(false);
-  const [enrollError, setEnrollError] = useState<{ message: string; hint: string | null } | null>(
-    null,
-  );
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const hydratedToken = useRef<string | null>(null);
 
   useEffect(() => {
@@ -227,20 +387,9 @@ export function WebAuthPanel({ client, onOpenPlans, homesHref }: WebAuthPanelPro
     }
   }
 
-  async function createEnrollmentToken(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    if (!client) return;
-    setEnrollBusy(true);
-    setEnrollError(null);
-    try {
-      const token = await client.createEnrollmentToken(enrollName);
-      setEnrollToken(token.token);
-      setEnrollExpires(token.expires_at);
-    } catch (caught) {
-      setEnrollError(errorCopy(caught));
-    } finally {
-      setEnrollBusy(false);
-    }
+  async function copySetupPrompt(): Promise<void> {
+    const copied = await writeClipboard(AGENT_SETUP_PROMPT);
+    setCopyState(copied ? "copied" : "failed");
   }
 
   function toggleMode(next: AuthMode): void {
@@ -259,7 +408,11 @@ export function WebAuthPanel({ client, onOpenPlans, homesHref }: WebAuthPanelPro
         {hasMachines && !homesHref ? (
           <CloudAccountPanel />
         ) : (
-          <div className="web-auth__account" data-testid="web-auth-account">
+          <div
+            className="web-auth__account"
+            data-testid="web-auth-account"
+            key={account?.id ?? "signed-in"}
+          >
             <div className="nx-cloud__title">
               <div>
                 <h3>{account?.name ?? account?.email ?? "StackSpirit Account"}</h3>
@@ -268,20 +421,7 @@ export function WebAuthPanel({ client, onOpenPlans, homesHref }: WebAuthPanelPro
                   <span className="nx-chip nx-chip--server">Signed in</span>
                 </p>
               </div>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setEnrollToken(null);
-                  setEnrollExpires(null);
-                  setEnrollName("");
-                  setEnrollError(null);
-                  signOut();
-                }}
-                data-testid="web-auth-sign-out"
-              >
-                Sign out
-              </Button>
+              <WebAccountMenu onOpenManagedHomes={onOpenPlans} />
             </div>
 
             {machinesStatus === "loading" ? (
@@ -316,94 +456,113 @@ export function WebAuthPanel({ client, onOpenPlans, homesHref }: WebAuthPanelPro
                 <div>
                   <h4>Finish setting up StackSpirit</h4>
                   <p className="nx-cloud__meta">
-                    Your account has no enrolled Always-On Machine yet. Pick one of these
-                    two paths; local and SSH server mode keeps working either way.
+                    Your account has no enrolled Always-On Machine yet. Connect any always-on
+                    machine you can SSH to: VPS, Mac mini, home Linux server, or spare laptop.
+                    Local and SSH server mode keeps working either way.
                   </p>
                 </div>
                 <div className="web-onboard__grid">
-                  <article className="web-onboard__card" data-testid="onboard-connect-machine">
-                    <h5>Connect your existing Always-On Machine</h5>
+                  <article
+                    className="web-onboard__card web-onboard__card--recommended"
+                    data-testid="onboard-coding-agent"
+                  >
+                    <div className="web-onboard__card-head">
+                      <h5>Connect with your coding agent</h5>
+                      <span className="web-onboard__tag">Recommended for existing machines</span>
+                    </div>
                     <p>
-                      Link a VPS you already own to this account. StackSpirit creates a
-                      one-time enrollment token; the machine keeps its own relay key and
-                      any signed-in device can then reach it through the encrypted relay.
+                      Paste one prompt into OpenCode, Claude Code, Cursor or Codex. The agent
+                      asks for the SSH host of your always-on machine, installs StackSpirit
+                      there, and enrolls it so it appears under{" "}
+                      <span className="mono">stackspirit machines ls</span>.
                     </p>
-                    {enrollToken ? (
-                      <div className="web-onboard__token" data-testid="onboard-enrollment">
-                        <p>
-                          Run this on <strong>{enrollName || "your VPS"}</strong> and paste the
-                          token when it asks:
-                        </p>
-                        <code className="web-onboard__command">
-                          stackspirit relay enroll --token-file - --name &quot;
-                          {enrollName || "my-vps"}&quot;
-                        </code>
-                        <p className="nx-cloud__meta">One-time enrollment token:</p>
-                        <code className="web-onboard__secret" data-testid="web-enroll-token">
-                          {enrollToken}
-                        </code>
-                        <p className="nx-cloud__meta">
-                          Shown once. Do not share it. It expires{" "}
-                          {enrollExpires ? new Date(enrollExpires).toLocaleString() : "soon"}.
-                        </p>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => void refreshMachines()}
-                          data-testid="onboard-refresh-machines"
-                        >
-                          I ran it — refresh machines
-                        </Button>
-                      </div>
-                    ) : (
-                      <form className="web-onboard__form" onSubmit={(event) => void createEnrollmentToken(event)}>
-                        <label className="field">
-                          <span className="field__label">Machine name</span>
-                          <input
-                            className="input"
-                            value={enrollName}
-                            onChange={(event) => setEnrollName(event.target.value)}
-                            placeholder="my-vps"
-                            autoComplete="off"
-                            spellCheck={false}
-                          />
-                        </label>
-                        <Button
-                          type="submit"
-                          size="sm"
-                          variant="secondary"
-                          loading={enrollBusy}
-                          data-testid="onboard-create-token"
-                        >
-                          Create enrollment token
-                        </Button>
-                      </form>
-                    )}
-                    {enrollError ? (
-                      <p className="nx-cloud__error" role="alert" data-testid="onboard-enroll-error">
-                        {enrollError.message}
-                        {enrollError.hint ? <span> {enrollError.hint}</span> : null}
-                      </p>
-                    ) : null}
+                    <div className="web-onboard__actions">
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        onClick={() => void copySetupPrompt()}
+                        data-testid="onboard-copy-prompt"
+                      >
+                        {copyState === "copied" ? "Copied" : "Copy setup prompt"}
+                      </Button>
+                      {copyState === "copied" ? (
+                        <span className="nx-cloud__meta" role="status">
+                          Prompt copied.
+                        </span>
+                      ) : null}
+                      {copyState === "failed" ? (
+                        <span className="nx-cloud__meta" role="status">
+                          Copying was blocked. Select the prompt below instead.
+                        </span>
+                      ) : null}
+                    </div>
+                    <pre
+                      className="web-onboard__command web-onboard__prompt"
+                      data-testid="onboard-setup-prompt"
+                    >
+                      {AGENT_SETUP_PROMPT}
+                    </pre>
+                    <p className="nx-cloud__meta">
+                      The prompt never asks for an SSH private key. The browser never receives
+                      one.
+                    </p>
+
+                    <ManualSetup client={client} refreshMachines={refreshMachines} />
+                  </article>
+
+                  <article className="web-onboard__card" data-testid="onboard-desktop-app">
+                    <h5>Use the StackSpirit Desktop App</h5>
+                    <p>
+                      The Desktop app includes a local Setup Assistant with OpenCode free
+                      models. It connects your machine without touching a terminal and keeps
+                      SSH keys on your own device.
+                    </p>
+                    <a
+                      className="btn btn--primary btn--sm web-onboard__desktop"
+                      href={DESKTOP_RELEASES_URL}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      data-testid="onboard-desktop-download"
+                    >
+                      Download StackSpirit Desktop
+                    </a>
+                    <p className="nx-cloud__meta">
+                      Opens the latest macOS, Windows or Linux release on GitHub.
+                    </p>
                   </article>
 
                   <article className="web-onboard__card" data-testid="onboard-managed-home">
                     <h5>Need an Always-On Machine?</h5>
                     <p>
                       Choose a turnkey managed Contabo machine with StackSpirit installed.
-                      Every published tier and the optional encrypted R2 backup add-on are
-                      shown with EUR and USD pricing when the API publishes them.
+                      Plans are shown in EUR and USD, and a new Managed Home is provisioned
+                      and enrolled to this account automatically in about 60 seconds.
                     </p>
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      onClick={onOpenPlans}
-                      data-testid="onboard-open-plans"
-                    >
-                      See Managed Homes plans
-                    </Button>
+                    {onOpenPlans ? (
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        onClick={onOpenPlans}
+                        data-testid="onboard-open-plans"
+                      >
+                        See Managed Homes plans
+                      </Button>
+                    ) : (
+                      <a
+                        className="btn btn--secondary btn--sm"
+                        href="#managed-homes"
+                        data-testid="onboard-open-plans"
+                      >
+                        See Managed Homes plans
+                      </a>
+                    )}
                   </article>
                 </div>
+                <p className="web-onboard__note" data-testid="onboard-secrets-note">
+                  <strong>Harnesses &amp; provider keys live on your Always-On Machine</strong>{" "}
+                  — never in StackSpirit Cloud. Once a machine is connected, you can add
+                  OpenCode API keys and device-code harnesses right here in the Web App.
+                </p>
               </div>
             )}
           </div>

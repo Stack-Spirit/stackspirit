@@ -6,6 +6,7 @@ import {
   Button,
   Drawer,
   EmptyState,
+  ManagedHomesPanel,
   Panel,
   formatAge,
   formatClock,
@@ -15,6 +16,7 @@ import {
 import { READ_ONLY_NOTICE } from "../copy";
 import { webErrorTitle } from "../bridge/errors";
 import { SpiritMark } from "../shared/next";
+import { WebAccountMenu } from "./AccountMenu";
 import { CapacityPanel, SupervisorCard } from "./CapacityPanel";
 import { DesktopOnlyPage } from "./DesktopOnlyPage";
 import { FleetStructure } from "./FleetStructure";
@@ -85,6 +87,7 @@ export function WebApp({ bridge }: { bridge: SpiritBridge }) {
   const [path, setPath] = useState<WebPath>(() => pathFor(window.location.pathname));
   const [inboxOpen, setInboxOpen] = useState(false);
   const [capacityOpen, setCapacityOpen] = useState(false);
+  const [managedHomesOpen, setManagedHomesOpen] = useState(false);
   const [selectedJobKey, setSelectedJobKey] = useState<string | null>(null);
 
   useEffect(() => {
@@ -199,6 +202,10 @@ export function WebApp({ bridge }: { bridge: SpiritBridge }) {
         >
           Capacity
         </Button>
+        <WebAccountMenu
+          showSignIn
+          onOpenManagedHomes={() => setManagedHomesOpen(true)}
+        />
       </header>
 
       <div className="app-body">
@@ -463,6 +470,12 @@ export function WebApp({ bridge }: { bridge: SpiritBridge }) {
               body="There is no board snapshot yet; the Web build shows no zeroes or guessed target."
             />
           )}
+        </Drawer>
+      ) : null}
+
+      {managedHomesOpen ? (
+        <Drawer open title="Managed Homes" onClose={() => setManagedHomesOpen(false)}>
+          <ManagedHomesPanel autoLoad />
         </Drawer>
       ) : null}
     </div>

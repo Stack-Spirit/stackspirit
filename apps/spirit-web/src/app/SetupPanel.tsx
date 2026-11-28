@@ -78,7 +78,7 @@ export function SetupPanel({ error, runtime = null }: SetupPanelProps) {
           onClick={() => setLocalOpen((open) => !open)}
           data-testid="local-daemon-toggle"
         >
-          <span>Or connect to a local daemon without an account</span>
+          <span>Self-hosting? Connect to a local daemon without an account</span>
           <span className="web-local__chevron" aria-hidden="true">
             {localOpen ? "−" : "+"}
           </span>

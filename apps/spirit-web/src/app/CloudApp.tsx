@@ -28,6 +28,12 @@ export function CloudApp({ runtime }: { runtime: WebCloudRuntime }) {
 
   useEffect(() => {
     let active = true;
+    const teardown = (message: string) => {
+      bridgeRef.current?.dispose();
+      bridgeRef.current = null;
+      setBridge(null);
+      setBridgeError(message);
+    };
     const apply = (status: ReturnType<typeof useCloudAccount.getState>["relayStatus"]) => {
       if (!active) return;
       if (status?.state === "secure" && !bridgeRef.current) {
@@ -46,15 +52,22 @@ export function CloudApp({ runtime }: { runtime: WebCloudRuntime }) {
         return;
       }
       if (status?.state === "failed" && bridgeRef.current) {
-        bridgeRef.current.dispose();
-        bridgeRef.current = null;
-        setBridge(null);
-        setBridgeError(
+        teardown(
           status.error?.message ?? "The relay connection was lost before the cockpit loaded.",
         );
       }
     };
-    const unsubscribe = useCloudAccount.subscribe((state) => apply(state.relayStatus));
+    const unsubscribe = useCloudAccount.subscribe((state) => {
+      apply(state.relayStatus);
+      // Signing out closes the relay in the shared store. Drop the cockpit
+      // bridge too, so the page returns to the signed-out Always-On Homes view
+      // instead of leaving a dead relay view mounted.
+      if (state.phase !== "signed_in" && bridgeRef.current) {
+        teardown(
+          "Signed out. The encrypted relay cockpit is closed; local server mode is unchanged.",
+        );
+      }
+    });
     // The store is an external system: create the bridge from its subscription,
     // never from a render or a synchronous effect body.
     queueMicrotask(() => apply(useCloudAccount.getState().relayStatus));
@@ -155,7 +168,7 @@ export function CloudApp({ runtime }: { runtime: WebCloudRuntime }) {
               onClick={() => setLocalOpen((open) => !open)}
               data-testid="local-daemon-toggle"
             >
-              <span>Or connect to a local daemon without an account</span>
+              <span>Self-hosting? Connect to a local daemon without an account</span>
               <span className="web-local__chevron" aria-hidden="true">
                 {localOpen ? "−" : "+"}
               </span>
