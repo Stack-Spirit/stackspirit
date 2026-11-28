@@ -996,8 +996,27 @@ token, native id or real hostname.
 | No token appears in the app log, a snapshot, the DOM or an error card | An end-to-end scan with a canary is not possible on the real grant; use a debug build that wraps the child and checks captured output. |
 
 The existing `scripts/verify-orchestrator-chat.mjs` remains the OpenCode/streaming
-checklist. A future `scripts/verify-session-takeover.mjs --check` should print a
-fixed checklist and must not perform a real takeover on its own.
+checklist. `scripts/verify-session-takeover.mjs` is the takeover equivalent:
+
+```text
+node scripts/verify-session-takeover.mjs --check
+node scripts/verify-session-takeover.mjs --checklist
+node scripts/verify-session-takeover.mjs --help
+```
+
+`--check` runs repository-only static checks for the shipped writer core, the
+hermetic fake-`vowp` tests and fixtures, the Tauri commands and registration, the
+bridge wire types and optional methods, the gated Take over UI and the takeover
+e2e spec, then prints the fixed checklist above. `--checklist` prints the checklist
+alone; `--help` prints usage. The script is inert: it never imports
+`node:child_process`, spawns `vowp`, the app, an engine or a shell, opens a socket,
+or reads `.env`, the keychain, `~/.vowp*`, app data, tokens or server profiles. It
+only reads repository files. Exit codes are 0 when every static check passes or the
+checklist/help is printed, 1 when a required repository file or symbol is missing,
+and 2 on a usage error.
+
+The checks above remain unrun. Passing `--check` is not owner evidence and does not
+make takeover live on a node-hosted deployment.
 
 ### 7.6 CI rules
 
