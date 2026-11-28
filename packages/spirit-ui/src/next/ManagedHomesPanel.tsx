@@ -17,6 +17,7 @@ import {
   provisioningTone,
   setupFeeLabel,
 } from "./cloudFormat";
+import { PaygComputePanel, type PaygComputeApi } from "./PaygComputePanel";
 
 export interface ManagedHomesPanelProps {
   /**
@@ -25,9 +26,16 @@ export interface ManagedHomesPanelProps {
    * opening local settings never makes a cloud request.
    */
   autoLoad?: boolean;
+  /**
+   * Optional host-supplied Pay-As-You-Go API. A host wires its credits client
+   * here; tests inject a fake without touching the monthly plan catalog.
+   */
+  paygApi?: PaygComputeApi;
 }
 
 type PlanCurrency = "EUR" | "USD";
+type ManagedTab = "monthly" | "payg";
+const PANEL_STYLE = { display: "grid" as const, gap: 14 };
 
 /**
  * Managed Always-On Home plans and live provisioning status.
@@ -37,7 +45,10 @@ type PlanCurrency = "EUR" | "USD";
  * by default and carry a clear Recommended badge, matching
  * `docs/STRATEGY.md` §6.
  */
-export function ManagedHomesPanel({ autoLoad = false }: ManagedHomesPanelProps) {
+export function ManagedHomesPanel({
+  autoLoad = false,
+  paygApi,
+}: ManagedHomesPanelProps) {
   const phase = useCloudAccount((state) => state.phase);
   const selectedMachineId = useCloudAccount((state) => state.selectedMachineId);
   const machines = useCloudAccount((state) => state.machines);
@@ -54,6 +65,7 @@ export function ManagedHomesPanel({ autoLoad = false }: ManagedHomesPanelProps) 
 
   const [expanded, setExpanded] = useState(autoLoad);
   const [currency, setCurrency] = useState<PlanCurrency>("EUR");
+  const [tab, setTab] = useState<ManagedTab>("monthly");
   const isExpanded = autoLoad || expanded;
   const signedIn = phase === "signed_in";
 
@@ -122,14 +134,15 @@ export function ManagedHomesPanel({ autoLoad = false }: ManagedHomesPanelProps) 
     <section
       className="nx-cloud nx-cloud--plans"
       data-testid="managed-homes-panel"
-      aria-label="Get an Always-On Home"
+      aria-label={tab === "monthly" ? "Get an Always-On Home" : "Pay-As-You-Go compute"}
     >
       <div className="nx-cloud__title">
         <div>
-          <h3>Get an Always-On Home</h3>
+          <h3>{tab === "monthly" ? "Get an Always-On Home" : "Pay-As-You-Go Compute"}</h3>
           <p>
-            Turnkey Contabo machines at Contabo&apos;s regular monthly rate plus 20%.
-            The software stays free and MIT; cancel the machine anytime.
+            {tab === "monthly"
+              ? "Turnkey Contabo machines at Contabo's regular monthly rate plus 20%. The software stays free and MIT; cancel the machine anytime."
+              : "Hetzner machines billed by the hour from prepaid Compute Credits. No monthly commitment; stop and delete a machine and billing stops immediately."}
           </p>
         </div>
         <div className="nx-cloud__currency">
@@ -151,122 +164,181 @@ export function ManagedHomesPanel({ autoLoad = false }: ManagedHomesPanelProps) 
               USD
             </button>
           </div>
-          <span className="nx-chip nx-chip--muted">Monthly · {currency}</span>
+          <span className="nx-chip nx-chip--muted">
+            {tab === "monthly" ? "Monthly" : "Hourly"} · {currency}
+          </span>
         </div>
       </div>
 
-      {currency === "USD" && plans && !usdAvailable ? (
-        <p className="nx-cloud__meta" role="status" data-testid="currency-fallback">
-          USD prices are not published for this catalog. Showing EUR instead; StackSpirit
-          never guesses a currency conversion.
-        </p>
-      ) : null}
+      <div className="nx-tabs" role="tablist" aria-label="Managed compute billing">
+        <button
+          type="button"
+          role="tab"
+          id="managed-homes-tab-monthly"
+          aria-selected={tab === "monthly"}
+          aria-controls="managed-homes-monthly"
+          onClick={() => setTab("monthly")}
+          data-testid="managed-homes-tab-monthly"
+        >
+          Always-On Monthly
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="managed-homes-tab-payg"
+          aria-selected={tab === "payg"}
+          aria-controls="managed-homes-payg"
+          onClick={() => setTab("payg")}
+          data-testid="managed-homes-tab-payg"
+        >
+          Pay-As-You-Go (Hourly)
+        </button>
+      </div>
 
-      {plansStatus === "loading" && !plans ? (
-        <p className="nx-cloud__meta" role="status" data-testid="plans-loading">
-          Loading the published plans…
-        </p>
-      ) : plansStatus === "error" ? (
-        <div className="nx-cloud__error" role="alert" data-testid="plans-error">
-          <p>
-            {plansError?.message ??
-              "Managed Home plans are unavailable right now. StackSpirit never guesses a price."}
-            {plansError?.hint ? <span> {plansError.hint}</span> : null}
-          </p>
-          <button
-            type="button"
-            className="nx-btn nx-btn--quiet nx-btn--sm"
-            onClick={() => void loadPlans()}
-          >
-            Retry
-          </button>
-        </div>
-      ) : !plans || plans.plans.length === 0 ? (
-        <p className="nx-cloud__empty" data-testid="plans-empty">
-          No managed plans are published right now. Local and SSH servers are unaffected.
-        </p>
-      ) : (
-        <>
-          <ul className="nx-cloud__plans" data-testid="managed-plans" aria-label="Managed Home plans">
-            {plans.plans.map((plan) => (
-              <PlanCard key={plan.id} plan={plan} currency={currency} />
-            ))}
-          </ul>
-
-          <label className="nx-cloud__backup" htmlFor="managed-home-backups">
-            <span className="nx-cloud__backup-main">
-              <input
-                id="managed-home-backups"
-                type="checkbox"
-                role="switch"
-                checked={backupsEnabled}
-                onChange={(event) => setBackupsEnabled(event.currentTarget.checked)}
-                data-testid="backup-toggle"
-              />
-              <span>
-                <strong>Off-Site Encrypted R2 Backups</strong>
-                {plans.backups.recommended ? (
-                  <span className="nx-chip nx-chip--warn" data-testid="backup-recommended">
-                    Recommended
-                  </span>
-                ) : null}
-                <small>
-                  Off by default. Encrypts ~/.stackspirit data, sessions and configs to
-                  Cloudflare R2, off the machine provider.{" "}
-                  {currency === "USD" && backupMonthlyUsd(plans.backups) !== null
-                    ? `${formatMonthlyUsd(backupMonthlyUsd(plans.backups))}.`
-                    : plans.backups.monthly_eur === null
-                      ? "Priced separately at checkout."
-                      : `${formatMonthly(plans.backups.monthly_eur)}.`}
-                </small>
-              </span>
-            </span>
-          </label>
-        </>
-      )}
-
-      <div className="nx-cloud__provisioning" data-testid="provisioning-status">
-        <div className="nx-cloud__provisioning-head">
-          <h4>Provisioning</h4>
-          {provisioning ? (
-            <span
-              className={`nx-chip nx-chip--${
-                provisioningTone(provisioning.phase) === "ok"
-                  ? "server"
-                  : provisioningTone(provisioning.phase)
-              }`}
-              data-testid="provisioning-phase"
-            >
-              {provisioningLabel(provisioning.phase)}
-            </span>
+      {tab === "monthly" ? (
+        <div
+          role="tabpanel"
+          id="managed-homes-monthly"
+          aria-labelledby="managed-homes-tab-monthly"
+          data-testid="managed-homes-monthly"
+          style={PANEL_STYLE}
+        >
+          {currency === "USD" && plans && !usdAvailable ? (
+            <p className="nx-cloud__meta" role="status" data-testid="currency-fallback">
+              USD prices are not published for this catalog. Showing EUR instead; StackSpirit
+              never guesses a currency conversion.
+            </p>
           ) : null}
+
+          {plansStatus === "loading" && !plans ? (
+            <p className="nx-cloud__meta" role="status" data-testid="plans-loading">
+              Loading the published plans…
+            </p>
+          ) : plansStatus === "error" ? (
+            <div className="nx-cloud__error" role="alert" data-testid="plans-error">
+              <p>
+                {plansError?.message ??
+                  "Managed Home plans are unavailable right now. StackSpirit never guesses a price."}
+                {plansError?.hint ? <span> {plansError.hint}</span> : null}
+              </p>
+              <button
+                type="button"
+                className="nx-btn nx-btn--quiet nx-btn--sm"
+                onClick={() => void loadPlans()}
+              >
+                Retry
+              </button>
+            </div>
+          ) : !plans || plans.plans.length === 0 ? (
+            <p className="nx-cloud__empty" data-testid="plans-empty">
+              No managed plans are published right now. Local and SSH servers are unaffected.
+            </p>
+          ) : (
+            <>
+              <ul
+                className="nx-cloud__plans"
+                data-testid="managed-plans"
+                aria-label="Managed Home plans"
+              >
+                {plans.plans.map((plan) => (
+                  <PlanCard key={plan.id} plan={plan} currency={currency} />
+                ))}
+              </ul>
+
+              <label className="nx-cloud__backup" htmlFor="managed-home-backups">
+                <span className="nx-cloud__backup-main">
+                  <input
+                    id="managed-home-backups"
+                    type="checkbox"
+                    role="switch"
+                    checked={backupsEnabled}
+                    onChange={(event) => setBackupsEnabled(event.currentTarget.checked)}
+                    data-testid="backup-toggle"
+                  />
+                  <span>
+                    <strong>Off-Site Encrypted R2 Backups</strong>
+                    {plans.backups.recommended ? (
+                      <span className="nx-chip nx-chip--warn" data-testid="backup-recommended">
+                        Recommended
+                      </span>
+                    ) : null}
+                    <small>
+                      Off by default. Encrypts ~/.stackspirit data, sessions and configs to
+                      Cloudflare R2, off the machine provider.{" "}
+                      {currency === "USD" && backupMonthlyUsd(plans.backups) !== null
+                        ? `${formatMonthlyUsd(backupMonthlyUsd(plans.backups))}.`
+                        : plans.backups.monthly_eur === null
+                          ? "Priced separately at checkout."
+                          : `${formatMonthly(plans.backups.monthly_eur)}.`}
+                    </small>
+                  </span>
+                </span>
+              </label>
+            </>
+          )}
+
+          <div className="nx-cloud__provisioning" data-testid="provisioning-status">
+            <div className="nx-cloud__provisioning-head">
+              <h4>Provisioning</h4>
+              {provisioning ? (
+                <span
+                  className={`nx-chip nx-chip--${
+                    provisioningTone(provisioning.phase) === "ok"
+                      ? "server"
+                      : provisioningTone(provisioning.phase)
+                  }`}
+                  data-testid="provisioning-phase"
+                >
+                  {provisioningLabel(provisioning.phase)}
+                </span>
+              ) : null}
+            </div>
+            {!signedIn ? (
+              <p className="nx-cloud__meta">
+                Sign in to StackSpirit to see live provisioning status. Local mode stays
+                available without an account.
+              </p>
+            ) : !selectedMachine ? (
+              <p className="nx-cloud__meta">
+                Select an Always-On Home above to see its provisioning status.
+              </p>
+            ) : provisioningStatus === "loading" && !provisioning ? (
+              <p className="nx-cloud__meta" role="status">
+                Checking provisioning status…
+              </p>
+            ) : provisioningStatus === "error" ? (
+              <p className="nx-cloud__error" role="alert" data-testid="provisioning-error">
+                {provisioningError?.message ?? "Provisioning status could not be read."}
+              </p>
+            ) : provisioning ? (
+              <ProvisioningBody
+                provisioning={provisioning}
+                machineName={selectedMachine.name}
+              />
+            ) : (
+              <p className="nx-cloud__meta" data-testid="provisioning-none">
+                No provisioning record for {selectedMachine.name} yet. A managed Home shows
+                its cloud-init progress here once checkout starts it.
+              </p>
+            )}
+          </div>
         </div>
-        {!signedIn ? (
-          <p className="nx-cloud__meta">
-            Sign in to StackSpirit to see live provisioning status. Local mode stays
-            available without an account.
-          </p>
-        ) : !selectedMachine ? (
-          <p className="nx-cloud__meta">
-            Select an Always-On Home above to see its provisioning status.
-          </p>
-        ) : provisioningStatus === "loading" && !provisioning ? (
-          <p className="nx-cloud__meta" role="status">
-            Checking provisioning status…
-          </p>
-        ) : provisioningStatus === "error" ? (
-          <p className="nx-cloud__error" role="alert" data-testid="provisioning-error">
-            {provisioningError?.message ?? "Provisioning status could not be read."}
-          </p>
-        ) : provisioning ? (
-          <ProvisioningBody provisioning={provisioning} machineName={selectedMachine.name} />
-        ) : (
-          <p className="nx-cloud__meta" data-testid="provisioning-none">
-            No provisioning record for {selectedMachine.name} yet. A managed Home shows
-            its cloud-init progress here once checkout starts it.
-          </p>
-        )}
-      </div>
+      ) : (
+        <div
+          role="tabpanel"
+          id="managed-homes-payg"
+          aria-labelledby="managed-homes-tab-payg"
+          data-testid="managed-homes-payg"
+        >
+          <PaygComputePanel
+            embedded
+            api={paygApi}
+            currency={currency}
+            onCurrencyChange={setCurrency}
+            signedIn={signedIn}
+          />
+        </div>
+      )}
     </section>
   );
 }
