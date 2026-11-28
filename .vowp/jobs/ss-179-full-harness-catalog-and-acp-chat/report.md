@@ -2,7 +2,7 @@
 job: ss-179-full-harness-catalog-and-acp-chat
 status: done
 branch: job/ss-179-full-harness-catalog-and-acp-chat
-commits: ["4ccd53f"]
+commits: ["4ccd53f", "afeb4db"]
 tests: "cargo fmt --all -- --check; cargo clippy -p spirit-core --all-targets -- -D warnings; cargo test -p spirit-core (all suites pass, including 14 harnesses integration tests and 5 ACP mock-process tests); npm run typecheck -w @stackspirit/ui; npm run lint -w @stackspirit/ui; npm test -w @stackspirit/ui (63 files, 584 tests); bash scripts/check-public-readiness.sh; node scripts/check-doc-links.mjs"
 questions_for_owner: []
 ---
@@ -48,7 +48,8 @@ not embedded-chat surfaces. Their consumer OAuth sign-in stays in their own CLI.
   `reject_always` / cancel mapping, and `session/cancel`.
 - Typed prompt/update/permission DTOs; unknown update kinds stay `Unknown` instead of
   being guessed as text. Missing permission options cancel rather than auto-approve.
-- Bounded 1 MiB lines, 30 s request/read deadline and 10-minute prompt deadline. Raw
+- Bounded 1 MiB lines, 30 s request/read deadline and 10-minute prompt deadline. A
+  timed-out prompt reaps the child instead of reusing a desynchronized stream. Raw
   payloads are not echoed in errors.
 - `initialize` keeps only safe auth-method ids; no credential file is read and no
   provider OAuth token is extracted, stored or logged.
