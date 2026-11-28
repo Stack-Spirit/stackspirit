@@ -20,6 +20,7 @@ pub mod host;
 pub mod service;
 pub mod ssh;
 pub mod time;
+pub mod tools;
 pub mod view;
 pub mod vowp;
 pub mod wire;
@@ -63,6 +64,11 @@ pub use host::{
 };
 pub use service::{KeyStatus, SpiritCore, SpiritService};
 pub use time::{Clock, SystemClock, Timestamp};
+pub use tools::{
+    CliSpec, McpSpec, McpTransport, ToolCategory, ToolConnectionState, ToolConnections, ToolEntry,
+    ToolFilter, ToolListView, ToolRegistry, ToolStatus, ToolSurface, ToolTarget, builtin_tools,
+    default_tool_dir,
+};
 pub use view::{
     CapacityView, FleetView, JobLanes, LocalAgentView, LocalOrchestratorView, LocalSessionState,
     LocalSurfaceView,
