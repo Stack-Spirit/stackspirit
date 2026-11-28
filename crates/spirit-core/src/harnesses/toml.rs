@@ -31,6 +31,14 @@ pub(crate) fn manifest_to_toml(manifest: &HarnessManifest) -> String {
     push_string(&mut out, "binary", &manifest.binary);
     push_string(&mut out, "install_cmd", &manifest.install_cmd);
     push_string(&mut out, "auth_cmd", &manifest.auth_cmd);
+    if !manifest.chat_argv.is_empty() {
+        let argv = manifest
+            .chat_argv
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        push_string_array(&mut out, "chat_argv", &argv);
+    }
     push_string(&mut out, "protocol", manifest.protocol.as_str());
     push_string(&mut out, "surface", manifest.surface.as_str());
     push_bool(
@@ -101,6 +109,7 @@ pub(crate) fn manifest_from_toml(input: &str) -> Result<HarnessManifest, SpiritE
                     | "binary"
                     | "install_cmd"
                     | "auth_cmd"
+                    | "chat_argv"
                     | "protocol"
                     | "surface"
                     | "supports_embedded_chat"
@@ -122,6 +131,7 @@ pub(crate) fn manifest_from_toml(input: &str) -> Result<HarnessManifest, SpiritE
     let binary = take_string(&mut table, "binary")?;
     let install_cmd = take_string(&mut table, "install_cmd")?;
     let auth_cmd = take_string(&mut table, "auth_cmd")?;
+    let chat_argv = take_optional_string_array(&mut table, "chat_argv")?.unwrap_or_default();
     let protocol = HarnessProtocol::parse(&take_string(&mut table, "protocol")?)?;
     let supports_embedded_chat = take_bool(&mut table, "supports_embedded_chat")?;
     // Older custom files predate `surface`; derive it from the legacy boolean instead
@@ -156,6 +166,7 @@ pub(crate) fn manifest_from_toml(input: &str) -> Result<HarnessManifest, SpiritE
         binary,
         install_cmd,
         auth_cmd,
+        chat_argv,
         protocol,
         surface,
         supports_embedded_chat,
@@ -209,6 +220,20 @@ fn take_string_array(table: &mut TomlTable, key: &str) -> Result<Vec<String>, Sp
             "must be an array of quoted strings",
         )),
         None => Err(SpiritError::invalid_input(key, "is required")),
+    }
+}
+
+fn take_optional_string_array(
+    table: &mut TomlTable,
+    key: &str,
+) -> Result<Option<Vec<String>>, SpiritError> {
+    match table.remove(key) {
+        Some(TomlValue::StringArray(value)) => Ok(Some(value)),
+        Some(_) => Err(SpiritError::invalid_input(
+            key,
+            "must be an array of quoted strings",
+        )),
+        None => Ok(None),
     }
 }
 

@@ -228,6 +228,10 @@ pub struct HarnessManifest {
     /// Shell-free argv line that starts the harness sign-in, or an empty string when the
     /// harness signs in inside its own terminal.
     pub auth_cmd: String,
+    /// Shell-free argv (after `binary`) that starts the embedded-chat session, for example
+    /// `["acp"]`. Empty is an honest "launch not configured": it is never guessed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chat_argv: Vec<String>,
     /// Transport/protocol family.
     pub protocol: HarnessProtocol,
     /// The explicit capability split: orchestrator + workers, or workers only.
@@ -322,6 +326,7 @@ impl HarnessManifest {
         if !self.auth_cmd.trim().is_empty() {
             crate::harnesses::probe::parse_auth_argv(&self.auth_cmd)?;
         }
+        self.validate_chat_argv()?;
         validate_text("tos_note", &self.tos_note, 1, 2000)?;
         validate_docs_url(&self.docs_url)?;
         if self.oauth_callback_port == Some(0) {
@@ -357,6 +362,49 @@ impl HarnessManifest {
         Ok(())
     }
 
+    fn validate_chat_argv(&self) -> Result<(), SpiritError> {
+        if self.chat_argv.is_empty() {
+            return Ok(());
+        }
+        if self.surface != HarnessSurface::OrchestratorAndWorkers
+            || self.protocol == HarnessProtocol::CliPty
+        {
+            return Err(SpiritError::invalid_input(
+                "chat_argv",
+                "only an orchestrator harness can declare a chat launch argv",
+            ));
+        }
+        if self.chat_argv.len() > MAX_CHAT_ARGV_COUNT {
+            return Err(SpiritError::invalid_input(
+                "chat_argv",
+                format!("must have at most {MAX_CHAT_ARGV_COUNT} arguments"),
+            ));
+        }
+        for arg in &self.chat_argv {
+            if arg.is_empty() || arg.chars().count() > MAX_CHAT_ARGV_LEN {
+                return Err(SpiritError::invalid_input(
+                    "chat_argv",
+                    format!("each argument must be 1-{MAX_CHAT_ARGV_LEN} characters"),
+                ));
+            }
+            if arg.chars().any(|c| {
+                c.is_control()
+                    || c.is_whitespace()
+                    || matches!(
+                        c,
+                        ';' | '|' | '&' | '$' | '`' | '>' | '<' | '\'' | '"' | '\\' | '(' | ')'
+                    )
+            }) {
+                return Err(SpiritError::invalid_input(
+                    "chat_argv",
+                    "arguments must be shell-free: no whitespace, quotes, operators or control characters",
+                ));
+            }
+            reject_secret_material("chat_argv", arg)?;
+        }
+        Ok(())
+    }
+
     /// True when this manifest can back the embedded chat.
     ///
     /// The surface is authoritative; `supports_embedded_chat` is its legacy mirror.
@@ -377,6 +425,10 @@ impl HarnessManifest {
         self.auth_modes.contains(&HarnessAuthMode::Subscription)
     }
 }
+
+/// Caps for a manifest `chat_argv`.
+const MAX_CHAT_ARGV_COUNT: usize = 16;
+const MAX_CHAT_ARGV_LEN: usize = 128;
 
 fn validate_text(field: &str, value: &str, min: usize, max: usize) -> Result<(), SpiritError> {
     let count = value.chars().count();
@@ -490,6 +542,8 @@ struct BuiltinPreset {
     binary: &'static str,
     install_cmd: &'static str,
     auth_cmd: &'static str,
+    /// Documented chat launch argv; empty means "launch not configured", never a guess.
+    chat_argv: &'static [&'static str],
     protocol: HarnessProtocol,
     surface: HarnessSurface,
     auth_modes: &'static [HarnessAuthMode],
@@ -505,6 +559,11 @@ fn preset(value: BuiltinPreset) -> HarnessManifest {
         binary: value.binary.to_owned(),
         install_cmd: value.install_cmd.to_owned(),
         auth_cmd: value.auth_cmd.to_owned(),
+        chat_argv: value
+            .chat_argv
+            .iter()
+            .map(|arg| (*arg).to_owned())
+            .collect(),
         protocol: value.protocol,
         surface: value.surface,
         supports_embedded_chat: value.surface.accepts_embedded_chat(),
@@ -548,6 +607,8 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
     use HarnessProtocol::{Acp, CliPty, CodexJson, OpencodeHttp, StreamJson};
     use HarnessSurface::{OrchestratorAndWorkers, WorkersOnlyTerminal};
 
+    // `chat_argv` is the documented ACP/chat launch argument list after `binary`. An empty
+    // list is an honest "launch not configured"; do not guess a flag for a preset.
     vec![
         // Orchestrator + Workers (embedded chat via OpenCode or official ACP /
         // Codex app-server). OpenCode stays the pinned default.
@@ -557,6 +618,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "opencode",
             install_cmd: "curl -fsSL https://opencode.ai/install | bash",
             auth_cmd: "opencode auth login",
+            chat_argv: &[],
             protocol: OpencodeHttp,
             surface: OrchestratorAndWorkers,
             auth_modes: API_KEY,
@@ -572,6 +634,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "agent",
             install_cmd: "curl https://cursor.com/install -fsS | bash",
             auth_cmd: "agent login",
+            chat_argv: &["acp"],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: SUBSCRIPTION,
@@ -585,6 +648,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "copilot",
             install_cmd: "npm install -g @github/copilot",
             auth_cmd: "copilot login",
+            chat_argv: &["--acp"],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: SUBSCRIPTION,
@@ -598,6 +662,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "auggie",
             install_cmd: "npm install -g @augmentcode/auggie",
             auth_cmd: "auggie login",
+            chat_argv: &["--acp"],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: SUBSCRIPTION,
@@ -611,6 +676,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "kiro-cli",
             install_cmd: "curl -fsSL https://cli.kiro.dev/install | bash",
             auth_cmd: "kiro-cli login",
+            chat_argv: &["acp"],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: SUBSCRIPTION,
@@ -624,6 +690,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "goose",
             install_cmd: "curl -fsSL https://block.github.io/goose/install.sh | bash",
             auth_cmd: "goose configure",
+            chat_argv: &["acp"],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: API_KEY,
@@ -637,6 +704,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "codex",
             install_cmd: "npm install -g @openai/codex",
             auth_cmd: "codex login",
+            chat_argv: &[],
             protocol: CodexJson,
             surface: OrchestratorAndWorkers,
             auth_modes: API_KEY_OR_SUBSCRIPTION,
@@ -654,6 +722,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "cline",
             install_cmd: "npm install -g cline",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: API_KEY,
@@ -667,6 +736,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "kilocode",
             install_cmd: "npm install -g @kilocode/cli",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: API_KEY,
@@ -680,6 +750,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "qwen",
             install_cmd: "npm install -g @qwen-code/qwen-code",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: API_KEY_OR_SUBSCRIPTION,
@@ -695,6 +766,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "vibe",
             install_cmd: "pip install mistral-vibe",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: API_KEY,
@@ -708,6 +780,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "kimi",
             install_cmd: "pip install kimi-cli",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: SUBSCRIPTION,
@@ -721,6 +794,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "minimax",
             install_cmd: "npm install -g @minimax-ai/cli",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: API_KEY,
@@ -734,6 +808,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "glm",
             install_cmd: "npm install -g glm-agent",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: API_KEY,
@@ -747,6 +822,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "pi",
             install_cmd: "npm install -g pi-acp",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: API_KEY,
@@ -760,6 +836,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "devin",
             install_cmd: "npm install -g devin",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: SUBSCRIPTION,
@@ -773,6 +850,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "droid",
             install_cmd: "curl -fsSL https://app.factory.ai/cli | sh",
             auth_cmd: "droid login",
+            chat_argv: &[],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: SUBSCRIPTION,
@@ -786,6 +864,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "grok",
             install_cmd: "npm install -g @xai/grok-cli",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: SUBSCRIPTION,
@@ -799,6 +878,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "junie",
             install_cmd: "npm install -g @jetbrains/junie",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: Acp,
             surface: OrchestratorAndWorkers,
             auth_modes: SUBSCRIPTION,
@@ -814,6 +894,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "claude",
             install_cmd: "npm install -g @anthropic-ai/claude-code",
             auth_cmd: "claude auth login",
+            chat_argv: &[],
             protocol: StreamJson,
             surface: WorkersOnlyTerminal,
             auth_modes: API_KEY_OR_SUBSCRIPTION,
@@ -832,6 +913,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "gemini",
             install_cmd: "npm install -g @google/gemini-cli",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: Acp,
             surface: WorkersOnlyTerminal,
             auth_modes: API_KEY_OR_SUBSCRIPTION,
@@ -849,6 +931,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "antigravity",
             install_cmd: "Download Google Antigravity from https://antigravity.google",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: CliPty,
             surface: WorkersOnlyTerminal,
             auth_modes: SUBSCRIPTION,
@@ -866,6 +949,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "aider",
             install_cmd: "python -m pip install aider-install && aider-install",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: CliPty,
             surface: WorkersOnlyTerminal,
             auth_modes: API_KEY,
@@ -881,6 +965,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "crush",
             install_cmd: "go install github.com/charmbracelet/crush@latest",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: CliPty,
             surface: WorkersOnlyTerminal,
             auth_modes: API_KEY,
@@ -894,6 +979,7 @@ pub fn builtin_harnesses() -> Vec<HarnessManifest> {
             binary: "amp",
             install_cmd: "npm install -g @sourcegraph/amp",
             auth_cmd: "",
+            chat_argv: &[],
             protocol: CliPty,
             surface: WorkersOnlyTerminal,
             auth_modes: SUBSCRIPTION,
