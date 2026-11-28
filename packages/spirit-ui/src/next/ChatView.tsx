@@ -531,9 +531,9 @@ function ReadOnlyNotice({ owner }: { owner: ChatOwnershipView | null }) {
 function writerReasonCopy(writer: ChatWriterView): string {
   switch (writer.reason) {
     case "node_hosted":
-      return "Take over isn't available because this orchestrator runs on a node. VOWP can only attach a home-hosted orchestrator, so this window stays read-only.";
+      return "Take over isn't available because this orchestrator runs on a node. VOWP can only take over a home-hosted orchestrator, so this window stays read-only.";
     case "vowp_too_old":
-      return "Take over needs a newer VOWP with orchestrator attach. This window stays read-only.";
+      return "Take over needs a newer VOWP that supports session takeover. This window stays read-only.";
     case "not_home":
       return "Take over needs StackSpirit on the same computer as the VOWP home; this chat is not configured for takeover here. This window stays read-only.";
     case "orchestrator_stopped":
@@ -574,7 +574,7 @@ function writerErrorCopy(error: SpiritError): string {
   }
   switch (error.code) {
     case "preview_unavailable":
-      return "Session takeover needs the desktop host. Preview mode never holds a writer lease.";
+      return "Session takeover needs the desktop host. Preview mode never makes this window the writer.";
     case "chat_read_only":
       return "This window is read-only.";
     case "gate":
@@ -602,7 +602,7 @@ function describeTakeOver(owner: ChatOwnershipView | null): ReactNode {
   if (!owner) {
     return (
       <>
-        <p>No one is writing in this session. Taking over attaches this window as the writer.</p>
+        <p>No one is writing in this session. Taking over makes this window the writer.</p>
         <p>A window that connects to the orchestrator directly may keep working until it notices.</p>
       </>
     );
@@ -613,7 +613,7 @@ function describeTakeOver(owner: ChatOwnershipView | null): ReactNode {
     <>
       <p>
         {stale
-          ? `The previous writer left. Taking over replaces a stale lease so this window can write.`
+          ? `The previous writer left. Taking over lets this window write again.`
           : `${chatOwnerWriter(owner)} is writing in this session.${activity ? ` (${activityLabel(activity)})` : ""} Taking over makes the other app read-only.`}
       </p>
       {!stale && activity === "running" ? (
@@ -1490,7 +1490,7 @@ export function ChatView({
         : "Runs on this Mac and mirrors turns to the home log."
       : chipLocation === "server"
         ? "Runs on the server. Works while this Mac is closed."
-        : "No chat transport is attached.";
+        : "No chat transport is connected.";
 
   return (
     <section className="nx-main" aria-label={sessionTitle(session)}>

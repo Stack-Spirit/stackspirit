@@ -231,7 +231,7 @@ describe("chat writer takeover", () => {
       name: "Take over this session?",
     });
     expect(dialog).toHaveTextContent(
-      "No one is writing in this session. Taking over attaches this window as the writer.",
+      "No one is writing in this session. Taking over makes this window the writer.",
     );
     await user.click(within(dialog).getByRole("button", { name: "Take over" }));
 
