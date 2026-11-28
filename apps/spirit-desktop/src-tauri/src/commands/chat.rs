@@ -1,33 +1,148 @@
 //! Chat command adapters for the bundled StackSpirit Engine.
 //!
-//! Every rule (session map, state machine, HTTP/SSE transport, event pump, log paging
-//! and the typed error map) lives in `spirit_core::engine::chat`. These commands only
-//! resolve the one `LocalChatProvider` from [`AppState`] and forward the safe request.
-//! No reply contains an endpoint URL, port, credential, native session id, workspace or
-//! binary path; none is logged here.
+//! Every rule (session map, state machine, HTTP/SSE transport, event pump, log paging,
+//! the harness gate and the typed error map) lives in `spirit_core::engine::chat`. These
+//! commands only resolve the one `LocalChatProvider` from [`AppState`] and forward the
+//! safe request. No reply contains an endpoint URL, port, credential, native session id,
+//! workspace, binary path or settings path; none is logged here.
 //!
 //! `global` and `project:<name>` stay gated in core until VOWP's orchestrator endpoint
 //! resolves; these adapters only hand the ensured VOWP universal session to core.
+//!
+//! `chat_start` dispatches through the harness router, so an app-owned `setup` start is
+//! checked against the persisted default before the delegate can create a session. The
+//! settings commands expose only a registry id and the typed gate.
 
+use serde::{Deserialize, Serialize};
 use spirit_core::engine::chat::{
-    ChatLogPage, ChatLogQuery, ChatPermissionDecision, ChatSendInput, ChatSendReceipt,
-    ChatSessionId, ChatSessionLocation, ChatSessionView, ChatStartInput, ChatWriterError,
-    LocalChatProvider,
+    CHAT_PREFERENCES_VERSION, ChatLogPage, ChatLogQuery, ChatPermissionDecision, ChatPreferences,
+    ChatSendInput, ChatSendReceipt, ChatSessionId, ChatSessionLocation, ChatSessionView,
+    ChatStartInput, ChatTransport, ChatWriterError, HarnessChatGate, LocalChatProvider,
+    gate_for_manifest,
 };
 use spirit_core::error::{SpiritError, SpiritErrorCode};
+use spirit_core::harnesses::HarnessManifest;
 use tauri::State;
 
 use crate::error::CommandResult;
 use crate::state::AppState;
 
 /// Ensures the engine and creates or resumes the native session, idempotently.
+///
+/// This is the only session-creation path: the router gates an app-owned `setup` start
+/// through the persisted harness default and records the per-session capture. VOWP
+/// `global`/`project` starts bypass the default in core.
 #[tauri::command]
 pub async fn chat_start(
     state: State<'_, AppState>,
     input: ChatStartInput,
 ) -> CommandResult<ChatSessionView> {
-    let chat = state.chat();
-    chat.start(&input).await
+    let chat = state.chat_harness();
+    chat.start(input).await
+}
+
+/// The safe default-harness read model for Settings.
+///
+/// It carries the persisted registry id and the tagged gate. It never carries a
+/// settings path, endpoint, port, token, native id or user-facing prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatHarnessSettingsView {
+    /// The stored id, or `None` when unset or unreadable. With a `ready` gate, `None`
+    /// is the documented OpenCode default.
+    pub default_harness_id: Option<String>,
+    /// The same preflight the next app-owned setup start uses.
+    pub gate: HarnessChatGate,
+}
+
+/// The id payload for `chat_set_default_harness`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatSetDefaultHarnessInput {
+    /// A validated registry id such as `opencode` or `goose`.
+    pub harness_id: String,
+}
+
+/// Reads the persisted default harness and its typed gate.
+///
+/// A corrupt or future `chat.json` yields `default_harness_id: None` with the
+/// `chat_settings_unreadable` gate. The file is never rewritten here.
+#[tauri::command]
+pub fn chat_harness_settings(state: State<'_, AppState>) -> CommandResult<ChatHarnessSettingsView> {
+    Ok(chat_harness_settings_view(state.inner()))
+}
+
+/// Saves the default harness used by new app-owned setup conversations.
+///
+/// Only `ready` and `harness_not_wired` selections are accepted. A non-OpenCode live
+/// transport does not exist yet, so `harness_not_wired` is selectable for planning and
+/// is still refused by `chat_start`. Missing, worker-only and unsupported-protocol ids
+/// are typed refusals. A corrupt or future settings file is never overwritten.
+#[tauri::command]
+pub async fn chat_set_default_harness(
+    state: State<'_, AppState>,
+    input: ChatSetDefaultHarnessInput,
+) -> CommandResult<ChatHarnessSettingsView> {
+    HarnessManifest::validate_id(&input.harness_id)?;
+
+    let registry = state.chat_registry();
+    let manifest = match registry.get(&input.harness_id) {
+        Ok(Some(manifest)) => manifest,
+        // A skipped custom file is unresolvable by design; it gets the same
+        // `harness_missing` gate as an unknown id, with no parser or path detail.
+        Ok(None) | Err(_) => return Err(harness_missing_error()),
+    };
+
+    match gate_for_manifest(&manifest) {
+        HarnessChatGate::Ready { .. } | HarnessChatGate::HarnessNotWired { .. } => {}
+        gate @ (HarnessChatGate::HarnessWorkerOnly { .. }
+        | HarnessChatGate::HarnessProtocolUnsupported { .. }) => {
+            return Err(harness_gate_error(&gate));
+        }
+        // `gate_for_manifest` cannot produce these, but never save an unusable id if
+        // that ever changes.
+        _ => return Err(harness_missing_error()),
+    }
+
+    let preferences = state.chat_preferences();
+    // Refuse to overwrite a corrupt or future file instead of silently resetting it.
+    preferences.load().map_err(|problem| problem.spirit())?;
+    preferences.save(&ChatPreferences {
+        version: CHAT_PREFERENCES_VERSION,
+        default_harness_id: Some(input.harness_id),
+    })?;
+
+    // Close any old adapter's children before the new one is registered, so a switch
+    // cannot orphan a child process.
+    state.chat_harness().remove_adapter().await;
+    state.install_harness_adapter();
+
+    Ok(chat_harness_settings_view(state.inner()))
+}
+
+/// Builds the safe settings view from the one persisted store.
+fn chat_harness_settings_view(state: &AppState) -> ChatHarnessSettingsView {
+    match state.chat_preferences().load() {
+        Ok(preferences) => ChatHarnessSettingsView {
+            default_harness_id: preferences.default_harness_id,
+            gate: state.chat_harness().gate(),
+        },
+        Err(problem) => ChatHarnessSettingsView {
+            default_harness_id: None,
+            gate: HarnessChatGate::ChatSettingsUnreadable { problem },
+        },
+    }
+}
+
+/// The stable typed refusal for an id that no registry entry resolves.
+fn harness_missing_error() -> SpiritError {
+    SpiritError::new(SpiritErrorCode::NotFound, "harness_missing")
+        .with_hint("Choose a harness that is registered on this Mac, or use OpenCode.")
+}
+
+/// The stable typed refusal for a gate that cannot back the embedded chat.
+fn harness_gate_error(gate: &HarnessChatGate) -> SpiritError {
+    SpiritError::new(SpiritErrorCode::Gate, gate.reason())
+        .with_hint("Choose OpenCode or another embedded-chat harness in Settings.")
 }
 
 /// One-click Start for a project orchestrator. Core attaches VOWP's local endpoint or
@@ -52,7 +167,7 @@ pub async fn chat_attach(
     state: State<'_, AppState>,
     session: ChatSessionId,
 ) -> CommandResult<ChatSessionView> {
-    let chat = state.chat();
+    let chat = state.chat_harness();
     chat.attach(&session).await
 }
 
@@ -63,7 +178,7 @@ pub async fn chat_send(
     state: State<'_, AppState>,
     input: ChatSendInput,
 ) -> CommandResult<ChatSendReceipt> {
-    let chat = state.chat();
+    let chat = state.chat_harness();
     chat.send_turn(
         &input.session,
         &input.text,
@@ -81,7 +196,7 @@ pub async fn chat_set_model(
     session: ChatSessionId,
     model_id: String,
 ) -> CommandResult<ChatSessionView> {
-    let chat = state.chat();
+    let chat = state.chat_harness();
     chat.set_model(&session, &model_id).await
 }
 
@@ -91,7 +206,7 @@ pub async fn chat_stop(
     state: State<'_, AppState>,
     session: ChatSessionId,
 ) -> CommandResult<ChatSessionView> {
-    let chat = state.chat();
+    let chat = state.chat_harness();
     chat.stop(&session).await
 }
 
@@ -102,7 +217,7 @@ pub async fn chat_log(
     session: ChatSessionId,
     query: Option<ChatLogQuery>,
 ) -> CommandResult<ChatLogPage> {
-    let chat = state.chat();
+    let chat = state.chat_harness();
     let query = query.unwrap_or_default();
     chat.log(&session, &query).await
 }
@@ -209,8 +324,10 @@ fn chat_gated_writer_error() -> SpiritError {
 mod tests {
     use super::*;
     use spirit_core::engine::chat::{
-        ChatAccess, ChatOwnershipView, ChatWriterReason, ChatWriterState, ChatWriterView,
+        ChatAccess, ChatOwnershipView, ChatSettingsError, ChatWriterReason, ChatWriterState,
+        ChatWriterView,
     };
+    use spirit_core::harnesses::HarnessProtocol;
 
     /// The command boundary must keep the same safe shape as the core view.
     #[test]
@@ -281,6 +398,81 @@ mod tests {
                 "can_take_over": false,
                 "can_release": false,
                 "reason": "lease_lost",
+            })
+        );
+    }
+
+    #[test]
+    fn settings_view_serializes_the_tagged_gate_without_unsafe_fields() {
+        let fresh = ChatHarnessSettingsView {
+            default_harness_id: None,
+            gate: HarnessChatGate::Ready {
+                harness_id: "opencode".to_owned(),
+                protocol: HarnessProtocol::OpencodeHttp,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&fresh).expect("the settings view serializes"),
+            serde_json::json!({
+                "default_harness_id": null,
+                "gate": {
+                    "state": "ready",
+                    "harness_id": "opencode",
+                    "protocol": "opencode-http",
+                },
+            })
+        );
+
+        let selected = ChatHarnessSettingsView {
+            default_harness_id: Some("claude-code".to_owned()),
+            gate: HarnessChatGate::HarnessNotWired {
+                harness_id: "claude-code".to_owned(),
+                protocol: HarnessProtocol::StreamJson,
+            },
+        };
+        let serialized = serde_json::to_string(&selected).expect("the settings view serializes");
+        assert!(serialized.contains("\"state\":\"harness_not_wired\""));
+        assert!(serialized.contains("\"protocol\":\"stream-json\""));
+        for forbidden in [
+            "\"path\"",
+            "\"token\"",
+            "\"endpoint\"",
+            "\"port\"",
+            "\"workspace\"",
+            "\"native_session_id\"",
+            "/Users/",
+            "/home/",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "the settings view leaked {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_settings_serializes_the_typed_problem() {
+        let view = ChatHarnessSettingsView {
+            default_harness_id: None,
+            gate: HarnessChatGate::ChatSettingsUnreadable {
+                problem: ChatSettingsError::UnsupportedVersion {
+                    found: 2,
+                    supported: CHAT_PREFERENCES_VERSION,
+                },
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&view).expect("the settings view serializes"),
+            serde_json::json!({
+                "default_harness_id": null,
+                "gate": {
+                    "state": "chat_settings_unreadable",
+                    "problem": {
+                        "reason": "unsupported_version",
+                        "found": 2,
+                        "supported": CHAT_PREFERENCES_VERSION,
+                    },
+                },
             })
         );
     }

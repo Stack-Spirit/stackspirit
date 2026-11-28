@@ -74,6 +74,10 @@ pub fn run() {
             let (state, events) = AppState::new(app_data_dir)?;
             events::spawn_event_forwarder(app.handle().clone(), events);
             events::spawn_chat_event_forwarder(app.handle().clone(), state.chat().subscribe());
+            events::spawn_chat_event_forwarder(
+                app.handle().clone(),
+                state.chat_harness().subscribe(),
+            );
             let runtime = state.engine_runtime();
             app.manage(state);
             app.manage(harnesses::HarnessConnects::default());
@@ -134,6 +138,8 @@ pub fn run() {
             commands::engine::use_bundled,
             commands::engine::restart_engine,
             commands::chat::chat_start,
+            commands::chat::chat_harness_settings,
+            commands::chat::chat_set_default_harness,
             commands::chat::chat_provision_orchestrator,
             commands::chat::chat_attach,
             commands::chat::chat_send,
@@ -204,6 +210,7 @@ pub fn run() {
                     // Release any held writer/attach child with the bounded shutdown hook
                     // before the engine and the process leave.
                     state.request_chat_writer_shutdown();
+                    state.request_harness_chat_shutdown();
                     stop_engine(state.engine_runtime().as_ref());
                 }
             }

@@ -180,6 +180,20 @@ pub fn preflight(
     registry: &HarnessRegistry,
     preferences: &dyn ChatPreferencesSource,
 ) -> HarnessChatGate {
+    preflight_with(registry, preferences, &|_, _| false)
+}
+
+/// Like [`preflight`], with an adapter-readiness predicate.
+///
+/// `adapter_ready(harness_id, protocol)` answers whether a registered chat adapter serves
+/// exactly that id and protocol. Only an otherwise `harness_not_wired` ACP manifest can
+/// become `ready`; workers-only, missing, unsupported and settings gates are unchanged.
+#[must_use]
+pub fn preflight_with(
+    registry: &HarnessRegistry,
+    preferences: &dyn ChatPreferencesSource,
+    adapter_ready: &dyn Fn(&str, HarnessProtocol) -> bool,
+) -> HarnessChatGate {
     let preferences = match preferences.resolve() {
         Ok(preferences) => preferences,
         Err(problem) => return HarnessChatGate::ChatSettingsUnreadable { problem },
@@ -187,7 +201,18 @@ pub fn preflight(
     let selected = preferences.selected_harness_id();
     let harness_id = safe_harness_id(selected);
     match registry.get(selected) {
-        Ok(Some(manifest)) => gate_for_manifest(&manifest),
+        Ok(Some(manifest)) => match gate_for_manifest(&manifest) {
+            HarnessChatGate::HarnessNotWired {
+                harness_id,
+                protocol,
+            } if protocol == HarnessProtocol::Acp && adapter_ready(&harness_id, protocol) => {
+                HarnessChatGate::Ready {
+                    harness_id,
+                    protocol,
+                }
+            }
+            gate => gate,
+        },
         Ok(None) | Err(_) => HarnessChatGate::HarnessMissing { harness_id },
     }
 }

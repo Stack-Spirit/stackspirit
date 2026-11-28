@@ -184,6 +184,7 @@ name = "My Harness"
 binary = "my-harness"
 install_cmd = "npm install -g my-harness"
 auth_cmd = "my-harness login"
+chat_argv = ["acp"]
 protocol = "acp"
 surface = "orchestrator_and_workers"
 supports_embedded_chat = true
@@ -193,6 +194,15 @@ docs_url = "https://example.com/docs"
 oauth_callback_port = 1455
 builtin = false
 ```
+
+`chat_argv` is the shell-free argument array (after `binary`) that starts the harness for
+the embedded chat. It is only for orchestrator harnesses (`orchestrator_and_workers`, never
+`cli-pty` or workers-only), at most 16 arguments of 128 characters each, with no whitespace,
+quotes, shell operators or control characters. Empty or omitted means the launch is not
+configured yet; StackSpirit never guesses a flag. No credential may appear in it. The
+built-in ACP presets use their own documented launch command where known (`goose acp`,
+`agent acp`, `copilot --acp`, `auggie --acp`, `kiro-cli acp`) and stay empty otherwise.
+This field alone does not wire a chat transport.
 
 `surface` is written by every new save. A custom file from before the split may omit it;
 the loader then derives the surface from `supports_embedded_chat` instead of rejecting

@@ -5,17 +5,26 @@
 //! §6 error map. It never spawns an engine, never reads a provider key and never exposes
 //! an endpoint URL, port, workspace or native session id to a serialized chat value.
 
+pub mod acp_adapter;
+pub mod adapter;
 pub mod endpoint;
 pub mod harness;
 pub mod local;
 pub mod model;
 pub mod pump;
+pub mod router;
 pub mod selection;
 pub mod sse;
 pub mod writer;
 
+pub use acp_adapter::AcpChatAdapter;
+pub use adapter::{
+    DenyPermissionPolicy, HarnessAbort, HarnessAccepted, HarnessChatAdapter, HarnessEvent,
+    HarnessNativeId, HarnessPermissionDecision, HarnessPermissionPolicy, HarnessPermissionRequest,
+    HarnessSession, HarnessStart, HarnessTurn,
+};
 pub use endpoint::{ChatEndpointResolver, ResolvedEndpoint, VowpEndpointResolver};
-pub use harness::{HarnessChatGate, dry_run, gate_for_manifest, preflight};
+pub use harness::{HarnessChatGate, dry_run, gate_for_manifest, preflight, preflight_with};
 pub use local::{
     ChatEngine, ChatOrchestratorProvisioner, ChatTransport, KnownOrchestratorSession,
     LocalChatProvider, NativeSession, map_http_status, map_provider_error,
@@ -34,6 +43,7 @@ pub use model::{
 pub use pump::{
     ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper, retry_status,
 };
+pub use router::HarnessChatProvider;
 pub use selection::{
     CHAT_PREFERENCES_VERSION, ChatHarnessCapture, ChatPreferences, ChatPreferencesSource,
     ChatPreferencesStore, ChatSettingsError, JsonChatPreferences,

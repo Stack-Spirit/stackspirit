@@ -72,7 +72,7 @@ describe("TauriBridge command contract", () => {
     expect([...bridge].filter((command) => !registered.has(command))).toEqual([]);
   });
 
-  it("keeps the Settings harness and gate commands registered under their bridge names", () => {
+  it("keeps the Settings harness, chat-default and gate commands registered", () => {
     const registered = registeredCommands();
     for (const command of [
       "harnesses_list",
@@ -80,6 +80,8 @@ describe("TauriBridge command contract", () => {
       "harnesses_delete_custom",
       "harnesses_probe",
       "harnesses_connect_start",
+      "chat_harness_settings",
+      "chat_set_default_harness",
       "engine_status",
       "engine_models",
       "key_status",

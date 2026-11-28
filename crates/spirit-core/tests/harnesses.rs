@@ -660,3 +660,99 @@ fn the_registry_rejects_path_shaped_ids() {
         assert!(registry.delete_custom(bad).is_err(), "{bad:?}");
     }
 }
+
+fn acp_custom(id: &str) -> HarnessManifest {
+    let mut custom = manifest("goose");
+    custom.id = id.to_owned();
+    custom.name = "Custom ACP".to_owned();
+    custom.binary = "custom-acp".to_owned();
+    custom.auth_cmd = String::new();
+    custom.builtin = false;
+    custom.chat_argv = vec!["acp".to_owned(), "--stdio".to_owned()];
+    custom
+}
+
+#[test]
+fn chat_argv_validation_accepts_acp_and_rejects_unsafe_values() {
+    acp_custom("custom-acp").validate().unwrap();
+
+    for bad in [
+        "acp;ls",
+        "a|b",
+        "a&b",
+        "$HOME",
+        "`x`",
+        "a>b",
+        "'acp'",
+        "\"acp\"",
+        "a\\b",
+        "(x)",
+        "two words",
+        "line\nbreak",
+        "nul\0byte",
+        "",
+    ] {
+        let mut custom = acp_custom("custom-acp");
+        custom.chat_argv = vec![bad.to_owned()];
+        assert!(custom.validate().is_err(), "{bad:?}");
+    }
+
+    let mut secret = acp_custom("custom-acp");
+    secret.chat_argv = vec![concat!("s", "k-", "FAKEFAKEFAKE").to_owned()];
+    let message = secret.validate().unwrap_err().to_string();
+    assert!(!message.contains("FAKEFAKE"));
+
+    let mut many = acp_custom("custom-acp");
+    many.chat_argv = vec!["a".to_owned(); 17];
+    assert!(many.validate().is_err());
+    let mut long = acp_custom("custom-acp");
+    long.chat_argv = vec!["a".repeat(129)];
+    assert!(long.validate().is_err());
+
+    let mut workers = manifest("claude-code");
+    workers.chat_argv = vec!["acp".to_owned()];
+    assert!(workers.validate().is_err());
+    let mut pty = acp_custom("custom-acp");
+    pty.protocol = HarnessProtocol::CliPty;
+    pty.surface = HarnessSurface::WorkersOnlyTerminal;
+    pty.supports_embedded_chat = false;
+    assert!(pty.validate().is_err());
+}
+
+#[test]
+fn chat_argv_round_trips_and_defaults_to_empty() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = HarnessRegistry::new(directory.path());
+    let custom = acp_custom("custom-acp");
+    registry.save_custom(custom.clone()).unwrap();
+    let encoded = std::fs::read_to_string(directory.path().join("custom-acp.toml")).unwrap();
+    assert!(encoded.contains("chat_argv = [\"acp\", \"--stdio\"]"));
+    assert_eq!(registry.get("custom-acp").unwrap().unwrap(), custom);
+
+    let mut bare = acp_custom("bare-acp");
+    bare.chat_argv.clear();
+    registry.save_custom(bare).unwrap();
+    let encoded = std::fs::read_to_string(directory.path().join("bare-acp.toml")).unwrap();
+    assert!(!encoded.contains("chat_argv"));
+    assert!(
+        registry
+            .get("bare-acp")
+            .unwrap()
+            .unwrap()
+            .chat_argv
+            .is_empty()
+    );
+}
+
+#[test]
+fn builtin_acp_presets_carry_only_known_launch_argv() {
+    assert_eq!(manifest("goose").chat_argv, ["acp"]);
+    assert_eq!(manifest("cursor-cli").chat_argv, ["acp"]);
+    assert_eq!(manifest("github-copilot").chat_argv, ["--acp"]);
+    assert_eq!(manifest("auggie").chat_argv, ["--acp"]);
+    assert_eq!(manifest("kiro").chat_argv, ["acp"]);
+    assert!(manifest("opencode").chat_argv.is_empty());
+    for preset in builtin_harnesses() {
+        preset.validate().unwrap();
+    }
+}

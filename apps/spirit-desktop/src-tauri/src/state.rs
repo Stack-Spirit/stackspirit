@@ -12,7 +12,9 @@ use std::time::Duration;
 use spirit_core::SpiritCore;
 use spirit_core::connection::ConnectionManager;
 use spirit_core::engine::chat::{
-    ChatEngine, ChatModelTier, ChatModelView, ChatSessionId, LocalChatProvider, StreamSupport,
+    AcpChatAdapter, ChatEngine, ChatModelTier, ChatModelView, ChatPreferencesSource,
+    ChatPreferencesStore, ChatSessionId, HarnessChatProvider, JsonChatPreferences,
+    LocalChatProvider, StreamSupport,
 };
 use spirit_core::engine::process::providers::provider_rank;
 use spirit_core::engine::{
@@ -22,6 +24,9 @@ use spirit_core::engine::{
     PrivateEngineTree, PrivateKeyStore, ProcessEngineRuntime, bundled_catalog,
 };
 use spirit_core::error::{SpiritError, SpiritErrorCode};
+use spirit_core::harnesses::{
+    AcpLaunchSpec, HarnessManifest, HarnessProtocol, HarnessRegistry, HarnessSurface,
+};
 use spirit_core::host::{HostProfile, HostStore, JsonHostStore};
 use spirit_core::service::KeyStatus;
 use spirit_core::ssh::{CommandRunner, SshOptions, SystemCommandRunner};
@@ -516,7 +521,17 @@ pub struct AppState {
     engine: EngineHost,
     engine_keychain: Arc<dyn Keychain>,
     chat: Arc<LocalChatProvider>,
+    /// The setup chat router; it wraps the OpenCode provider and an optional ACP adapter.
+    chat_harness: Arc<HarnessChatProvider>,
+    /// The versioned `chat.json` default-harness store.
+    chat_preferences: Arc<dyn ChatPreferencesStore>,
+    /// The harness registry the default is resolved against.
+    chat_registry: Arc<HarnessRegistry>,
     chat_engine: Arc<DesktopChatEngine>,
+    /// The private Setup workspace an ACP harness child starts in. Never sent to the UI.
+    setup_workspace: PathBuf,
+    /// Set once the harness router's exit shutdown has been requested.
+    harness_shutdown: std::sync::atomic::AtomicBool,
     /// Chat sessions where this process may hold a VOWP writer lease. The set holds only
     /// routing keys, never a token, surface id, endpoint or native session id, so the
     /// exit hook can release each child without exposing lease identity.
@@ -597,31 +612,95 @@ impl AppState {
         let setup_workspace = PrivateEngineTree::prepare(&app_data_dir)?.setup_workspace;
         let chat_engine = Arc::new(DesktopChatEngine::new(engine.clone()));
         let chat = Arc::new(
-            LocalChatProvider::new(chat_engine.clone(), setup_workspace)
+            LocalChatProvider::new(chat_engine.clone(), setup_workspace.clone())
                 .with_stream_support(StreamSupport::Pinned),
         );
 
-        Ok((
-            Self {
-                core,
-                hosts,
-                known_hosts,
-                app_keys_dir,
-                runner: Arc::new(SystemCommandRunner),
-                client: Mutex::new(None),
-                active_host: Mutex::new(None),
-                engine,
-                engine_keychain: keychain,
-                chat,
-                chat_engine,
-                chat_writers: Mutex::new(HashSet::new()),
-                key_verdicts: Mutex::new(HashMap::new()),
-                local_agent,
-                gate_cache: HostGateCache::new(),
-                connection,
-            },
-            events,
-        ))
+        // The router and Settings share the one `chat.json` store. The router only gates
+        // app-owned setup starts; VOWP global/project sessions bypass it in core.
+        let chat_preferences_store =
+            Arc::new(JsonChatPreferences::new(app_data_dir.join("chat.json")));
+        let chat_preferences: Arc<dyn ChatPreferencesStore> = chat_preferences_store.clone();
+        let chat_preferences_source: Arc<dyn ChatPreferencesSource + Send + Sync> =
+            chat_preferences_store;
+        let chat_registry = Arc::new(HarnessRegistry::for_home()?);
+        let chat_harness = Arc::new(HarnessChatProvider::new(
+            chat.clone(),
+            chat_preferences_source,
+            chat_registry.clone(),
+        ));
+
+        let state = Self {
+            core,
+            hosts,
+            known_hosts,
+            app_keys_dir,
+            runner: Arc::new(SystemCommandRunner),
+            client: Mutex::new(None),
+            active_host: Mutex::new(None),
+            engine,
+            engine_keychain: keychain,
+            chat,
+            chat_harness,
+            chat_preferences,
+            chat_registry,
+            chat_engine,
+            setup_workspace,
+            harness_shutdown: std::sync::atomic::AtomicBool::new(false),
+            chat_writers: Mutex::new(HashSet::new()),
+            key_verdicts: Mutex::new(HashMap::new()),
+            local_agent,
+            gate_cache: HostGateCache::new(),
+            connection,
+        };
+        // Best-effort: a missing manifest or empty argv leaves `harness_not_wired`.
+        state.install_harness_adapter();
+        Ok((state, events))
+    }
+
+    /// Registers (or removes) the ACP adapter for the saved default harness.
+    ///
+    /// Callers that may have live sessions must `remove_adapter().await` first so a switch
+    /// cannot orphan a child.
+    ///
+    /// Synchronous and spawn-free: the adapter only records its launch spec and starts no
+    /// child until a Setup `chat_start`. No path, argv or credential is logged.
+    pub(crate) fn install_harness_adapter(&self) {
+        let spec = self
+            .chat_preferences
+            .load()
+            .ok()
+            .and_then(|preferences| preferences.default_harness_id)
+            .and_then(|id| self.chat_registry.get(&id).ok().flatten())
+            .and_then(|manifest| {
+                acp_launch_spec(&manifest, &self.setup_workspace).map(|spec| (manifest, spec))
+            });
+        match spec {
+            Some((manifest, spec)) => {
+                let adapter = Arc::new(AcpChatAdapter::new(manifest.id, spec));
+                self.chat_harness
+                    .set_adapter(adapter, self.setup_workspace.clone());
+            }
+            None => self.chat_harness.clear_adapter(),
+        }
+    }
+
+    /// Closes harness adapter children from the synchronous exit hook, bounded and
+    /// idempotent like [`Self::request_chat_writer_shutdown`].
+    pub fn request_harness_chat_shutdown(&self) {
+        if self
+            .harness_shutdown
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let chat = self.chat_harness();
+        let shutdown = async move { chat.shutdown().await };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tauri::async_runtime::spawn(shutdown);
+        } else {
+            tauri::async_runtime::block_on(shutdown);
+        }
     }
 
     pub(crate) async fn core(&self) -> tokio::sync::MutexGuard<'_, SpiritCore> {
@@ -631,6 +710,23 @@ impl AppState {
     /// The one chat service. Command adapters call it; they never own session logic.
     pub(crate) fn chat(&self) -> Arc<LocalChatProvider> {
         self.chat.clone()
+    }
+
+    /// The harness router for setup chat commands (start, attach, send, stop, model, log).
+    ///
+    /// Writer take-over/release and permission replies stay on [`Self::chat`].
+    pub(crate) fn chat_harness(&self) -> Arc<HarnessChatProvider> {
+        self.chat_harness.clone()
+    }
+
+    /// The persisted default-harness store shared with the router.
+    pub(crate) fn chat_preferences(&self) -> Arc<dyn ChatPreferencesStore> {
+        self.chat_preferences.clone()
+    }
+
+    /// The harness registry used to validate and classify a saved default.
+    pub(crate) fn chat_registry(&self) -> Arc<HarnessRegistry> {
+        self.chat_registry.clone()
     }
 
     /// Remembers a session whose writer lease this process may hold.
@@ -925,4 +1021,51 @@ async fn check_writer_sessions(chat: Arc<LocalChatProvider>, sessions: Vec<ChatS
         }
     };
     let _ = tokio::time::timeout(CHAT_WRITER_CHECK_BUDGET, check).await;
+}
+
+/// The pure launch decision: an ACP orchestrator manifest with a non-empty `chat_argv`
+/// yields a spec that starts in `workspace`; anything else yields `None`.
+pub(crate) fn acp_launch_spec(
+    manifest: &HarnessManifest,
+    workspace: &Path,
+) -> Option<AcpLaunchSpec> {
+    if manifest.surface != HarnessSurface::OrchestratorAndWorkers
+        || manifest.protocol != HarnessProtocol::Acp
+        || manifest.chat_argv.is_empty()
+    {
+        return None;
+    }
+    let mut spec = AcpLaunchSpec::new(manifest.binary.clone()).cwd(workspace);
+    spec.args.clone_from(&manifest.chat_argv);
+    Some(spec)
+}
+
+#[cfg(test)]
+mod harness_launch_tests {
+    use super::*;
+    use spirit_core::harnesses::builtin_harnesses;
+
+    fn manifest(id: &str) -> HarnessManifest {
+        builtin_harnesses()
+            .into_iter()
+            .find(|m| m.id == id)
+            .expect("built-in manifest")
+    }
+
+    #[test]
+    fn acp_builtin_with_chat_argv_yields_a_spec() {
+        let m = manifest("goose");
+        let spec = acp_launch_spec(&m, Path::new("/tmp/ws")).expect("spec");
+        assert_eq!(spec.program, m.binary);
+        assert_eq!(spec.args, m.chat_argv);
+        assert_eq!(spec.cwd.as_deref(), Some(Path::new("/tmp/ws")));
+    }
+
+    #[test]
+    fn non_acp_or_empty_argv_yields_none() {
+        assert!(acp_launch_spec(&manifest("opencode"), Path::new("/tmp/ws")).is_none());
+        let mut m = manifest("goose");
+        m.chat_argv.clear();
+        assert!(acp_launch_spec(&m, Path::new("/tmp/ws")).is_none());
+    }
 }

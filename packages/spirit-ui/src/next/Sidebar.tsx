@@ -7,6 +7,7 @@ import { useCluster } from "./clusterStore";
 import type { SessionId } from "./conversations";
 import { useServerHealth } from "./health";
 import { Menu, MenuItem } from "./Menu";
+import { MachineSyncBadge, SyncToAccountAction, useMachineSyncStatus } from "./ServerMachinesSettings";
 import type { NextView } from "./shellUi";
 import type { SettingsSectionId } from "./settingsSections";
 import { SpiritMark } from "./SpiritMark";
@@ -267,6 +268,7 @@ function ServerCard({
     hosts.find((item) => item.id === selectedHostId) ??
     hosts[0] ??
     null;
+  const syncStatus = useMachineSyncStatus(host);
 
   if (!host) {
     return (
@@ -409,6 +411,7 @@ function ServerCard({
         <div className="nx-server__head">
           <span className={`nx-dot ${state === "failed" ? "nx-dot--danger" : busy ? "nx-dot--busy" : ""}`} aria-hidden="true" />
           <span className="nx-server__name">{host.label}</span>
+          {syncStatus ? <MachineSyncBadge status={syncStatus} testId="sidebar-sync-badge" /> : null}
           {menu}
         </div>
         <span className="nx-server__muted">
@@ -446,6 +449,7 @@ function ServerCard({
           <span className="nx-server__head">
             <span className={`nx-dot ${health.stale ? "nx-dot--warn" : "nx-dot--ok"}`} aria-hidden="true" />
             <span className="nx-server__name">{host.label}</span>
+            {syncStatus ? <MachineSyncBadge status={syncStatus} testId="sidebar-sync-badge" /> : null}
             <span className="nx-chip nx-chip--cluster nx-chip--tiny" data-testid="cluster-badge">
               cluster
             </span>
@@ -470,6 +474,7 @@ function ServerCard({
           </span>
         </button>
         {menu}
+        <SyncToAccountAction host={host} connected={live} />
       </div>
     );
   }
@@ -487,6 +492,7 @@ function ServerCard({
         <span className="nx-server__head">
           <span className={`nx-dot ${health.stale ? "nx-dot--warn" : "nx-dot--ok"}`} aria-hidden="true" />
           <span className="nx-server__name">{host.label}</span>
+          {syncStatus ? <MachineSyncBadge status={syncStatus} testId="sidebar-sync-badge" /> : null}
         </span>
         <span className="nx-server__load">
           <span className="nx-server__load-label">Load</span>
@@ -506,6 +512,7 @@ function ServerCard({
         </span>
       </button>
       {menu}
+      <SyncToAccountAction host={host} connected={live} />
     </div>
   );
 }

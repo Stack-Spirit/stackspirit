@@ -1807,6 +1807,47 @@ export interface ChatStartInput {
   resume?: boolean;
 }
 
+/**
+ * Why `chat.json` cannot be used. Mirrors `spirit_core::engine::chat::ChatSettingsError`:
+ * a stable reason token and, for a future schema, the two version numbers. Never a path,
+ * raw parser text or file contents.
+ */
+export type ChatSettingsProblemView =
+  | { reason: "unreadable" }
+  | { reason: "unsupported_version"; found: number; supported: number };
+
+/**
+ * The tagged gate for a new app-owned setup conversation.
+ *
+ * Mirrors `spirit_core::engine::chat::HarnessChatGate` (serde tag `state`). Every field
+ * is a registry id or a protocol; no variant carries a path, endpoint, port, token or
+ * native id. Only `ready` can start a session in this phase; `harness_not_wired` is
+ * selectable for planning and is refused at `chat_start`.
+ */
+export type ChatHarnessGateView =
+  | { state: "ready"; harness_id: string; protocol: HarnessProtocol }
+  | { state: "harness_not_wired"; harness_id: string; protocol: HarnessProtocol }
+  | { state: "harness_missing"; harness_id: string }
+  | { state: "harness_worker_only"; harness_id: string }
+  | {
+      state: "harness_protocol_unsupported";
+      harness_id: string;
+      protocol: HarnessProtocol;
+    }
+  | { state: "chat_settings_unreadable"; problem: ChatSettingsProblemView };
+
+/**
+ * The persisted default harness for new app-owned chats, plus its typed gate.
+ *
+ * `default_harness_id` is the stored registry id, or `null` when the file is absent,
+ * unset or unreadable. `null` with a `ready` gate is the documented OpenCode default.
+ * The view never carries a settings path, endpoint, port, token or native id.
+ */
+export interface ChatHarnessSettingsView {
+  default_harness_id: string | null;
+  gate: ChatHarnessGateView;
+}
+
 /** One image/file attached to a user turn; `url` is a `data:` URI. */
 export interface ChatAttachment {
   filename: string;

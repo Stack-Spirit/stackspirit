@@ -18,6 +18,7 @@ import type {
   CapacityTargetView,
   CapacityView,
   ChatEvent,
+  ChatHarnessSettingsView,
   ChatLogPage,
   ChatLogQuery,
   ChatPermissionDecision,
@@ -319,6 +320,10 @@ export class TauriBridge implements SpiritBridge {
       call("chat_start", { input }),
     attach: (session: SessionId): Promise<ChatSessionView> =>
       call("chat_attach", { session }),
+    harnessSettings: (): Promise<ChatHarnessSettingsView> =>
+      call("chat_harness_settings"),
+    setDefaultHarness: (harnessId: string): Promise<ChatHarnessSettingsView> =>
+      call("chat_set_default_harness", { input: { harness_id: harnessId } }),
     provisionOrchestrator: (project: string): Promise<ChatSessionView> =>
       call("chat_provision_orchestrator", { project }),
     send: async (input: ChatSendInput): Promise<ChatSendReceipt> => {
