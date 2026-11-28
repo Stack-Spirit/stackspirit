@@ -853,7 +853,12 @@ async fn sleep_past_the_stale_window_is_lost_and_a_new_attach_uses_a_new_surface
     fake.set_url(&format!("http://127.0.0.1:{}", engine.port()));
     let workspace = tempfile::tempdir().unwrap();
     let app = tempfile::tempdir().unwrap();
-    let provider = provider_with_writer(&fake, Arc::new(PanicEngine), workspace.path());
+    // Keep the periodic watcher out of this test so the focus/resume probe is the first
+    // check after the simulated sleep; a watcher loss would legitimately re-probe the
+    // grant back to `available` before the assertion.
+    let provider = LocalChatProvider::new(Arc::new(PanicEngine), workspace.path().to_path_buf())
+        .with_endpoint_resolver(Arc::new(fake.resolver()))
+        .with_chat_writer(fake.config().with_watch_interval(Duration::from_secs(30)));
 
     provider.start(&global_input()).await.unwrap();
     provider
