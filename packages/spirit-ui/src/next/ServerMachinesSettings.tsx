@@ -1,7 +1,9 @@
 import { useState } from "react";
+import { create } from "zustand";
 
 import { useCloudAccount } from "../cloud/store";
 import type { CloudMachine, RelayConnectionStatus } from "../cloud/types";
+import type { HostProfile } from "../bridge/wire";
 import { useConnection, useHosts, useSelectedHostId } from "../state/fleetStore";
 import { EngineView } from "../views/engine/EngineView";
 import { HostManager } from "../views/hosts/HostManager";
@@ -11,6 +13,153 @@ import { ServerSecurityCard } from "./ServerSecurity";
 export interface ServerMachinesSettingsProps {
   /** Opens the Account rail item, where sign-in and managed plans live. */
   onOpenAccount: () => void;
+}
+
+/**
+ * Enrolls a connected SSH machine on the signed-in StackSpirit Account. The host wires the
+ * real implementation (VOWP relay enrollment over the verified SSH session); it receives
+ * only the saved host id, never a key or relay secret, and resolves when enrollment is done.
+ */
+export type MachineEnroller = (hostId: string) => Promise<void>;
+
+interface MachineSyncState {
+  enroller: MachineEnroller | null;
+  /** Host ids enrolled during this session, until the account machine list catches up. */
+  enrolledHostIds: string[];
+  busyHostId: string | null;
+  error: { hostId: string; message: string } | null;
+  configure(enroller: MachineEnroller | null): void;
+  sync(hostId: string): Promise<void>;
+  reset(): void;
+}
+
+export const useMachineSync = create<MachineSyncState>((set, get) => ({
+  enroller: null,
+  enrolledHostIds: [],
+  busyHostId: null,
+  error: null,
+  configure(enroller) {
+    set({ enroller });
+  },
+  async sync(hostId) {
+    const { enroller, busyHostId } = get();
+    if (!enroller || busyHostId) return;
+    set({ busyHostId: hostId, error: null });
+    try {
+      await enroller(hostId);
+      set((state) => ({
+        busyHostId: null,
+        enrolledHostIds: [...state.enrolledHostIds, hostId],
+      }));
+      void useCloudAccount.getState().refreshMachines();
+    } catch {
+      set({
+        busyHostId: null,
+        error: { hostId, message: "Sync did not finish. Nothing was changed; try again." },
+      });
+    }
+  },
+  reset() {
+    set({ enroller: null, enrolledHostIds: [], busyHostId: null, error: null });
+  },
+}));
+
+export type MachineSyncStatus = "synced" | "local";
+
+/** A saved machine is Account-synced only while signed in and enrolled on that Account. */
+export function machineSyncStatus(
+  host: HostProfile,
+  signedIn: boolean,
+  machines: CloudMachine[],
+  enrolledHostIds: string[],
+): MachineSyncStatus {
+  if (!signedIn) return "local";
+  if (enrolledHostIds.includes(host.id)) return "synced";
+  const names = [host.label, host.ssh.host].map((name) => name.trim().toLowerCase());
+  return machines.some((machine) => names.includes(machine.name.trim().toLowerCase()))
+    ? "synced"
+    : "local";
+}
+
+export function useMachineSyncStatus(host: HostProfile | null): MachineSyncStatus | null {
+  const phase = useCloudAccount((state) => state.phase);
+  const machines = useCloudAccount((state) => state.machines);
+  const enrolled = useMachineSync((state) => state.enrolledHostIds);
+  if (!host) return null;
+  return machineSyncStatus(host, phase === "signed_in", machines, enrolled);
+}
+
+/** Crisp, subtle badge: Account-synced (encrypted relay) or Local only (this Mac). */
+export function MachineSyncBadge({
+  status,
+  testId,
+}: {
+  status: MachineSyncStatus;
+  testId?: string;
+}) {
+  const synced = status === "synced";
+  return (
+    <span
+      className={`nx-chip nx-chip--tiny ${synced ? "nx-chip--server" : "nx-chip--muted"}`}
+      title={
+        synced
+          ? "Enrolled on your StackSpirit Account; reachable from Web, phone and remote MCP over the encrypted relay."
+          : "Saved on this Mac only."
+      }
+      data-testid={testId}
+      data-sync-status={status}
+    >
+      {synced ? "Account-synced" : "Local only"}
+    </span>
+  );
+}
+
+/** 1-click sync for a Local-only machine, or a plain reason it cannot be synced yet. */
+export function SyncToAccountAction({
+  host,
+  connected,
+}: {
+  host: HostProfile;
+  connected: boolean;
+}) {
+  const status = useMachineSyncStatus(host);
+  const enroller = useMachineSync((state) => state.enroller);
+  const busy = useMachineSync((state) => state.busyHostId === host.id);
+  const anyBusy = useMachineSync((state) => state.busyHostId !== null);
+  const error = useMachineSync((state) =>
+    state.error?.hostId === host.id ? state.error.message : null,
+  );
+  const sync = useMachineSync((state) => state.sync);
+  const signedIn = useCloudAccount((state) => state.phase === "signed_in");
+  if (!signedIn || status !== "local") return null;
+  const reason = !enroller
+    ? "Account sync is not available in this build yet."
+    : !connected
+      ? "Connect this machine over SSH first. It can't be synced while offline or disconnected."
+      : null;
+  return (
+    <div className="nx-settings__sync" data-testid={`sync-action-${host.id}`}>
+      <button
+        type="button"
+        className="nx-btn nx-btn--sm"
+        disabled={reason !== null || anyBusy}
+        onClick={() => void sync(host.id)}
+        data-testid={`sync-to-account-${host.id}`}
+      >
+        {busy ? "Syncing…" : "Sync to Account"}
+      </button>
+      {reason ? (
+        <small className="nx-form__hint" data-testid={`sync-reason-${host.id}`}>
+          {reason}
+        </small>
+      ) : null}
+      {error ? (
+        <small className="nx-form__hint" role="alert" data-testid={`sync-error-${host.id}`}>
+          {error}
+        </small>
+      ) : null}
+    </div>
+  );
 }
 
 function connectionLabel(state: string): string {
@@ -103,6 +252,7 @@ export function ServerMachinesSettings({ onOpenAccount }: ServerMachinesSettings
     null;
   const activeState = connection.host_id === activeHost?.id ? connection.state : "disconnected";
   const signedIn = phase === "signed_in";
+  const activeSync = useMachineSyncStatus(activeHost);
   const selectedMachine = machines.find((machine) => machine.id === selectedMachineId) ?? null;
   const secureMachineId =
     relayStatus?.state === "secure" ? relayStatus.machine_id : null;
@@ -132,10 +282,20 @@ export function ServerMachinesSettings({ onOpenAccount }: ServerMachinesSettings
                   {activeHost.ssh.port !== 22 ? `:${activeHost.ssh.port}` : ""}
                 </small>
               </span>
-              <span className={`nx-chip ${connection.host_id === activeHost.id ? stateTone(activeState) : "nx-chip--muted"}`}>
-                {connection.host_id === activeHost.id ? connectionLabel(activeState) : "Saved"}
+              <span className="nx-settings__actions">
+                <MachineSyncBadge
+                  status={activeSync ?? "local"}
+                  testId="settings-home-sync-badge"
+                />
+                <span className={`nx-chip ${connection.host_id === activeHost.id ? stateTone(activeState) : "nx-chip--muted"}`}>
+                  {connection.host_id === activeHost.id ? connectionLabel(activeState) : "Saved"}
+                </span>
               </span>
             </div>
+            <SyncToAccountAction
+              host={activeHost}
+              connected={activeState === "connected" || activeState === "stale"}
+            />
             <div className="nx-settings__row">
               <span>
                 Relay
