@@ -555,21 +555,27 @@ impl AcpClient {
             "sessionId": session_id,
             "prompt": [AcpContentBlock::Text { text: text.to_owned() }],
         });
-        let response = timeout(
+        let response = match timeout(
             self.prompt_timeout,
             self.request("session/prompt", params, observer),
         )
         .await
-        .map_err(|_| {
-            SpiritError::new(
-                SpiritErrorCode::RemoteTimeout,
-                format!(
-                    "ACP session/prompt did not finish within {}s",
-                    self.prompt_timeout.as_secs()
-                ),
-            )
-            .retryable()
-        })??;
+        {
+            Ok(response) => response?,
+            Err(_) => {
+                // A timed-out turn leaves the JSON-RPC stream at an unknown position.
+                // Reap the child rather than reusing a possibly desynchronized session.
+                self.shutdown().await;
+                return Err(SpiritError::new(
+                    SpiritErrorCode::RemoteTimeout,
+                    format!(
+                        "ACP session/prompt did not finish within {}s",
+                        self.prompt_timeout.as_secs()
+                    ),
+                )
+                .retryable());
+            }
+        };
         let stop_reason = response
             .get("stopReason")
             .and_then(Value::as_str)
