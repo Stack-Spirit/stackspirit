@@ -1,9 +1,15 @@
 # Harness-backed embedded chat
 
-Status: design only, 2026-11-27. This document changes no code, registry, UI or runtime.
-No transport is live. The first protocol is deliberately still the owner's choice
-(`01M8EYDCVXEZS92FCADETEB8F2`), so §4 maps every candidate and §6 leaves the Phase 2
-adapter as a parameter.
+Status: owner decision recorded 2026-11-28, design updated the same day. The owner
+answered question `01M8EYDCVXEZS92FCADETEB8F2` with **B — ACP (Agent Client Protocol) first** and asked
+for the broader registry split. `ss-179` landed that `HarnessSurface` split
+(**Orchestrator + Workers (ACP / Embedded Chat)** versus **Workers Only (Stock CLI
+Terminal View)**), the expanded presets, the `HarnessesPanel` grouping and a reusable
+ACP stdio JSON-RPC client (`crates/spirit-core/src/harnesses/acp.rs`) with mock-process
+tests. That client is a foundation, not a wired chat transport: **no non-OpenCode
+harness-backed conversation can start yet**. OpenCode remains the only live
+embedded-chat transport, and the selection/gates plus the `HarnessChatAdapter` wiring
+remain Phase 1/2 work. This document changes no runtime.
 
 Scope: how a harness selected in the Universal Harness Registry could back
 StackSpirit's own embedded chat without weakening the current OpenCode path, the
@@ -11,18 +17,23 @@ one-writer rule or the renderer boundary. It covers the selection model, the Rus
 adapter contract, the four chat-capable protocol families, safety/honesty gates, a
 phased delivery plan and a test strategy.
 
-Non-goals: no implementation, no registry schema change, no handoff claim, no new
-secret store, no `cli-pty` chat, no remote (Home VPS) chat transport, and no change to
-the VOWP-owned `global`/`project` log contract. The handoff remains the source of truth
-for what is live; nothing here overrides it.
+Non-goals: no implementation in this document, no registry schema change beyond the
+`ss-179` surface split, no handoff claim, no new secret store, no `cli-pty` chat, no
+remote (Home VPS) chat transport, and no change to the VOWP-owned `global`/`project`
+log contract. The handoff remains the source of truth for what is live; nothing here
+overrides it.
 
 ## 0. Short version
 
 - The embedded chat that exists today is **OpenCode-only**. The bundled OpenCode
   sidecar backs the setup assistant and the local project fallback; VOWP-reported
-  local orchestrators are also OpenCode. The registry can describe a harness as
-  `supports_embedded_chat = true`, but Connect only installs and signs in. There is no
-  chat-transport selector, no adapter trait and no harness-chat gate yet.
+  local orchestrators are also OpenCode. `ss-179` added the registry's
+  `HarnessSurface` split (**Orchestrator + Workers (ACP / Embedded Chat)** versus
+  **Workers Only (Stock CLI Terminal View)**) and a reusable ACP stdio client
+  (`crates/spirit-core/src/harnesses/acp.rs`). Consumer-OAuth CLIs such as Claude Code
+  and Gemini CLI are workers-only and are never wrapped in embedded chat. Connect still
+  only installs and signs in: there is no chat-transport selector, no harness-chat gate
+  and no `HarnessChatAdapter` wiring from an ACP session into chat yet.
 - **Recommendation:** one **global default** for new app-owned local conversations,
   captured by each session at creation. Existing sessions never move when the default
   changes. A per-session picker is deferred until there is more than one eligible
@@ -36,8 +47,10 @@ for what is live; nothing here overrides it.
   and reap every process. `opencode-http`, `stream-json`, `codex-json` and `acp` map
   onto it; `cli-pty` remains worker-only.
 - Phase 1 ships selection, gates and a transport-less dry run. Phase 2 adds the first
-  adapter the owner chooses. Phase 3 adds the next. Phase 4 adds model/usage parity.
-  Every phase has a one-line acceptance test and a suggested `owns`.
+  adapter, **ACP (the owner's choice)**; the reusable `acp.rs` client has landed, but
+  the chat adapter, streaming mapping and contract suite have not. Phase 3 adds the
+  next. Phase 4 adds model/usage parity. Every phase has a one-line acceptance test and
+  a suggested `owns`.
 
 ## 1. Current state
 
@@ -65,35 +78,36 @@ the only provider, and the desktop `AppState` holds exactly one
 
 - `HarnessProtocol` has five values: `opencode-http`, `stream-json`, `codex-json`,
   `acp` and `cli-pty`.
-- `HarnessManifest.supports_embedded_chat` says a harness **could** back the embedded
-  chat. It does not say a transport exists, and it does not select one.
-- `HarnessProbe` copies the protocol and the capability into every result, then
+- `HarnessManifest.surface` is the authoritative split: `orchestrator_and_workers`
+  can back the embedded chat; `workers_only_terminal` is a stock CLI for the terminal
+  worker view. `supports_embedded_chat` remains a legacy mirror of the same fact.
+  Neither says a transport exists, and neither selects one.
+- `HarnessProbe` copies the protocol, surface and capability into every result, then
   reports `binary` (`found`/`missing`/`unknown`), `auth` (`configured`/`missing`/
   `unknown`) and `readiness` (`ready`/`install_required`/`auth_required`/`unknown`).
 - `HarnessConnectPlan` installs and starts the harness's own sign-in. It does not
   start a chat transport.
-- The desktop panel labels a harness **Embedded Chat** or **Worker-Only** from
-  `supports_embedded_chat` and says plainly that the embedded chat still runs on
-  OpenCode. `docs/HARNESSES.md` records the same limit.
+- The desktop panel groups by `surface`, labels a harness **Embedded Chat** or
+  **Worker-Only**, and says plainly that the embedded chat still runs on OpenCode.
+  `docs/HARNESSES.md` records the same limit.
 
-Built-ins as they stand:
+Built-ins that matter for chat (the full catalog is in `docs/HARNESSES.md`):
 
-| id | Protocol | `supports_embedded_chat` | Chat eligibility in this design |
+| id / group | Protocol | Surface | Chat eligibility in this design |
 |---|---|---|---|
-| `opencode` | `opencode-http` | true | yes; resolves to the existing bundled provider |
-| `claude-code` | `stream-json` | true | yes, after its adapter is proven |
-| `codex` | `codex-json` | true | yes, after its adapter is proven |
-| `gemini-cli` | `acp` | true | yes, after its adapter is proven |
-| `goose` | `acp` | true | yes, after its adapter is proven |
-| `antigravity` | `cli-pty` | false | no; worker-only |
-| `cursor-cli` | `cli-pty` | false | no; worker-only |
-| `aider` | `cli-pty` | false | no; worker-only |
+| `opencode` | `opencode-http` | `orchestrator_and_workers` | yes; resolves to the existing bundled provider |
+| `codex` | `codex-json` | `orchestrator_and_workers` | later; adapter remains probe-first |
+| ACP orchestrator presets (`goose`, `cursor-cli`, `github-copilot`, …) | `acp` | `orchestrator_and_workers` | eligible after the ACP adapter is proven; ACP is the owner-selected first family |
+| `claude-code` | `stream-json` | `workers_only_terminal` | no; consumer OAuth stays in its own CLI |
+| `gemini-cli` | `acp` | `workers_only_terminal` | no; consumer OAuth stays in its own CLI |
+| `antigravity`, `aider`, `crush`, `amp` | `cli-pty` | `workers_only_terminal` | no; terminal worker view only |
 
-Two registry facts matter for the gate:
+Two registry facts still matter for the gate:
 
-1. `HarnessManifest::validate()` does **not** reject a custom manifest with
-   `protocol = "cli-pty"` and `supports_embedded_chat = true`. The chat gate must
-   reject it even if the manifest claims otherwise.
+1. `HarnessManifest::validate()` rejects a `surface`/`supports_embedded_chat` mismatch
+   and any `cli-pty` harness that claims `orchestrator_and_workers`. The chat gate must
+   still re-check the surface on the resolved manifest, so an older or hand-edited
+   payload cannot bypass it.
 2. `HarnessRegistry::save_custom()` overwrites an existing custom id, so a bound
    harness's protocol can change under a session. The selection layer must refuse that
    edit while the id is the default or an active session uses it.
@@ -153,7 +167,7 @@ Consequences:
 - A non-OpenCode harness backs **app-owned local** conversations, not VOWP
   orchestrator sessions.
 - The selection UI must say this next to the control; it must not imply that a project
-  orchestrator log will move to Claude Code, Codex or Gemini CLI.
+  orchestrator log will move to an ACP orchestrator such as Goose or Codex.
 - If the owner later wants a harness-backed project log, that is a VOWP app/durability
   question, not an adapter question. It is not silently approximated by a local
   transcript.
@@ -237,7 +251,7 @@ Rules:
 - Write with owner-only permissions (`0600` on Unix) and a `0700` parent where the host
   creates it. Atomic temp-plus-rename, like `JsonEnginePreferences`.
 
-Custom-manifest guards (Phase 1, no code in this job):
+Custom-manifest guards (Phase 1, no code in this document):
 
 - `deleteCustom(id)` returns `conflict` while `id` is the default or an active session
   is bound to it. The owner must choose another default (or close the session) first.
@@ -254,9 +268,9 @@ derived from the session record, never from a renderer toggle.
 | Session | Header chips | Composer |
 |---|---|---|
 | Setup on OpenCode | `Local · this Mac` + `Harness · OpenCode` + state | Unchanged. Model picker/usage from the bundled engine. |
-| Setup on Claude Code | `Local · this Mac` + `Harness · Claude Code` + state | Enabled when the gate is ready. If the adapter cannot prove a model list, the picker says “Model chosen by Claude Code” and is not a fake list. |
+| Setup on an ACP orchestrator | `Local · this Mac` + `Harness · <name>` + state | Enabled when the gate is ready. If the adapter cannot prove a model list, the picker says “Model chosen by <name>” and is not a fake list. |
 | `global`/`project` VOWP | `Local · this Mac` or `Server · name` + `VOWP · OpenCode` + ownership chip | Unchanged. No harness selector. |
-| Bound harness missing | `Local · this Mac` + `Harness · Claude Code` + `Needs attention` | Disabled. Gate card shows Install / Connect / “Use OpenCode”. |
+| Bound harness missing | `Local · this Mac` + `Harness · <name>` + `Needs attention` | Disabled. Gate card shows Install / Connect / “Use OpenCode”. |
 | Preview | Existing preview badge and copy | No harness selection; every real action is `preview_unavailable`. |
 
 Additional rules:
@@ -269,7 +283,7 @@ Additional rules:
   flow, not to the composer of a running session.
 - The model picker is honest: `available_models: None` means “this transport cannot
   report a verified list”; `[]` means “verified none”. Do not show OpenCode's models
-  in a Claude Code session or vice versa.
+  in another harness's session or vice versa.
 - `set_model` stays gated (`chat_model_gated`) until Phase 4 proves a harness model
   switch. The model is chosen by the harness's own config/flags otherwise.
 - Attachments stay hidden/disabled for a harness until the adapter proves them. A
@@ -301,9 +315,9 @@ a silent fallback; it is a new owner choice.
 
 - With no settings file, the default is `opencode`; the setup assistant and VOWP
   sessions behave exactly as they do today.
-- A session captures its harness at creation. Changing the default to Claude Code does
-  not move an existing OpenCode session, recreate its native session or rewrite its
-  transcript.
+- A session captures its harness at creation. Changing the default to an ACP
+  orchestrator does not move an existing OpenCode session, recreate its native session
+  or rewrite its transcript.
 - VOWP `global`/`project` sessions are OpenCode by contract, not by default. They
   cannot be rebound by this feature. The endpoint resolver rejects any app other than
   `opencode` with a typed `chat_gated` error that says StackSpirit chat only speaks
@@ -314,21 +328,29 @@ a silent fallback; it is a new owner choice.
 - If the default names a harness that is later deleted or edited, the default gates;
   it does not fall back to OpenCode. The owner can choose OpenCode explicitly.
 
-### 3.7 The first protocol is still open
+### 3.7 The first protocol: ACP, owner-selected
 
-Owner question `01M8EYDCVXEZS92FCADETEB8F2` asks which transport comes first. This
-design does not answer it. Phase 2 is written as “the owner's choice”; the work is the
-same shape for every candidate.
+Owner question `01M8EYDCVXEZS92FCADETEB8F2` is answered: **B — ACP (Agent Client
+Protocol) first**. OpenCode stays the default overarching harness for BYOK providers,
+with no StackSpirit token billing or intermediation, and the only live embedded chat.
+ACP is the first non-OpenCode family Phase 2 targets;
+the reusable client has landed in `crates/spirit-core/src/harnesses/acp.rs`, but the
+chat adapter does not exist yet.
 
-| First choice | What it proves | Why it is not automatically first |
+The owner's surface split also settles the CLI question: Claude Code (`stream-json`)
+and Gemini CLI (`acp` protocol, worker view) are **workers-only**. Their consumer OAuth
+stays in their own CLI and neither is wrapped in embedded chat, regardless of protocol
+family. Other orchestrator-group ACP presets remain eligible for the adapter once it is
+proven.
+
+| Family | Status after the decision | What remains |
 |---|---|---|
-| `opencode-http` | The selector, gates and event bridge against the already-pinned contract | It does not prove a new harness; Phase 2 is mostly a wiring/validation job, not a new adapter |
-| `stream-json` | A first non-OpenCode harness with a long-lived stdio process | Claude's flag set is visible in the local `claude --help`, but the event schema, permission path and usage still need a probe |
-| `codex-json` | A one-shot JSONL adapter with session resume | Codex is not installed here; the event schema and sandbox/permission semantics are probe-first |
-| `acp` | A standard JSON-RPC permission model for Gemini CLI and Goose | Two different CLIs must be probed; the ACP version, framing and capabilities are not pinned in this repo |
+| `opencode-http` | Live; bundled default | none for the current embedded chat |
+| `acp` | Owner-selected first family; `acp.rs` client landed | real-harness probe plus `HarnessChatAdapter` wiring, streaming/permission mapping and the contract suite |
+| `stream-json` | Later; Claude Code is workers-only | a custom orchestrator-group manifest would need a probe before any chat adapter |
+| `codex-json` | Later; orchestrator-group preset | event schema and sandbox/permission semantics remain probe-first |
 
-No ranking is implied. The owner may prefer the smallest risk (`opencode-http`), the
-first new harness (`stream-json`) or the cleanest permission contract (`acp`).
+No ranking beyond the owner's choice is implied.
 
 ## 4. Adapter contract
 
@@ -349,7 +371,7 @@ SpiritBridge.chat
 The renderer never chooses an adapter. `HarnessChatProvider` resolves the session's
 captured `harness_id`; an unknown, missing or changed harness is a typed gate.
 
-Proposed core types (names are illustrative; no code ships in this job):
+Proposed core types (names are illustrative; no code ships in this document):
 
 ```rust
 #[async_trait]
@@ -418,9 +440,9 @@ optional harness metadata (id, display name, protocol, gate state).
   returns the current view; it does not spawn a second child.
 - Exactly one turn may be in flight per session. The adapter holds a turn lock; a
   second `send` returns `chat_busy` before it writes to stdin or spawns a child.
-- Long-lived protocols (OpenCode HTTP, Claude stream-json, ACP) keep one child per
-  session for the session's lifetime. `codex-json` is expected to be one child per
-  turn; it still holds the same per-session lock and resume id.
+- Long-lived protocols (OpenCode HTTP, stream-json, ACP) keep one child per session for
+  the session's lifetime. `codex-json` is expected to be one child per turn; it still
+  holds the same per-session lock and resume id.
 - `abort` is a turn control, never a session teardown. It clears the turn and returns
   a stopped view. If the protocol cannot confirm the stop, return `stop_unconfirmed`;
   do not pretend the turn stopped.
@@ -462,8 +484,8 @@ flag. Never forward a raw oversized frame to the renderer.
 - `start` may create or resume. `attach` reuses the stored native id and never
   creates. If the id is gone, return `harness_session_lost`; do not invent one.
 - The binding records `harness_id` and `protocol` with the native id. Never pass a
-  Claude session id to Codex or an ACP session id to OpenCode. A changed protocol is
-  `harness_protocol_changed`, not a retry.
+  stream-json session id to Codex or an ACP session id to OpenCode. A changed protocol
+  is `harness_protocol_changed`, not a retry.
 - Phase 1 stores no native ids in `chat.json`. The current chat is in-memory per app
   run; if sessions become durable, add a separate private binding file, not a field in
   the public settings.
@@ -519,9 +541,9 @@ Summary:
 | Protocol | Process shape | Text input | Text output | Permission | Native id | Status |
 |---|---|---|---|---|---|---|
 | `opencode-http` | One bundled `opencode serve` owned by `EngineSupervisor` | HTTP `POST /session/{id}/message` | SSE + final message response | `permission.asked` + reply route | OpenCode session id | Pinned by repo docs; stream cadence owner-run |
-| `stream-json` | Long-lived if streaming input is proven; otherwise one child per turn with `--resume` | NDJSON on stdin | NDJSON on stdout | Control request or policy; probe | Claude session id; `--resume` | Flags known from local `claude --help`; schema/permissions probe-first |
+| `stream-json` | Long-lived if streaming input is proven; otherwise one child per turn with `--resume` | NDJSON on stdin | NDJSON on stdout | Control request or policy; probe | stream-json session id; `--resume` | Claude Code is workers-only; a custom stream-json orchestrator remains probe-first |
 | `codex-json` | One child per turn; resume by thread id | Prompt via stdin if supported | JSONL on stdout | Sandbox/approval policy only; probe | `thread.started.thread_id`; `exec resume` | Probe-first; no Codex binary here |
-| `acp` | One long-lived JSON-RPC child per session | `session/prompt` | `session/update` notifications | `session/request_permission` | `session/new` / `session/load` session id | Probe-first; no Gemini/Goose binary here |
+| `acp` | One long-lived JSON-RPC child per session | `session/prompt` | `session/update` notifications | `session/request_permission` | `session/new` / `session/load` session id | Owner-selected first; `acp.rs` client landed; chat adapter and real-harness probe pending |
 
 #### `opencode-http`
 
@@ -560,6 +582,10 @@ Needs a probe/owner run:
 
 #### `stream-json`
 
+Claude Code is `workers_only_terminal` after the `ss-179` split, so no built-in chat
+adapter targets this subsection. The mechanics stay for a future custom
+`orchestrator_and_workers` stream-json manifest; Phase 2 does not implement them.
+
 Known from the local `claude --help` (`2.1.319` on the design host; not the bundled
 engine):
 
@@ -578,8 +604,8 @@ Needs a probe (do not ship from the flag list alone):
   `assistant`, `user` tool result, `stream_event` deltas, `result` usage/cost).
 - The permission path: whether a `control_request`/`control_response` (or
   `--permission-prompt-tool`) can pause a turn and return an owner decision. Until it
-  is proven, Phase 2 must run a mode that cannot prompt (for example `plan`) or must
-  refuse tools that require approval. Never auto-approve.
+  is proven, a stream-json adapter must run a mode that cannot prompt (for example
+  `plan`) or must refuse tools that require approval. Never auto-approve.
 - Abort semantics: an interrupt control request if available; otherwise terminate the
   child, wait for exit, and report a confirmed local stop. The next turn resumes with
   `--resume` only if the probe proves it.
@@ -609,24 +635,30 @@ Not installed in this workspace. Treat every shape as probe-first:
 
 #### `acp`
 
-Not installed in this workspace; Gemini CLI and Goose share the protocol value but not
-the launch command. The ACP family is JSON-RPC 2.0 over stdio; the local
-`vowp mcp` server (`runtime/crates/vowp-cli/src/mcp/jsonrpc.rs`) proves a
-newline-delimited JSON-RPC request/notification loop for a **different** protocol, so
-use it only as a framing precedent.
+Not installed in this workspace; the orchestrator-group ACP presets (for example Goose
+and Cursor CLI) share the protocol value but not the launch command. Gemini CLI also
+speaks ACP but is workers-only under the owner's split, so it is not a chat target. The
+ACP family is JSON-RPC 2.0 over stdio; the local `vowp mcp` server
+(`runtime/crates/vowp-cli/src/mcp/jsonrpc.rs`) proves a newline-delimited JSON-RPC
+request/notification loop for a **different** protocol, so use it only as a framing
+precedent.
 
-Needs a probe:
+`ss-179` landed a reusable client at `crates/spirit-core/src/harnesses/acp.rs`:
+newline-delimited JSON-RPC 2.0 with `protocolVersion: 1`, `initialize`, `session/new`,
+`session/prompt`, streaming `session/update`, `session/request_permission` and
+`session/cancel`, with no `fs/*`/`terminal/*` client capabilities. It is not a
+`HarnessChatAdapter`, it is not selected by chat and the chat path does not spawn it.
+The remaining real-harness and adapter work is:
 
-- The exact framing (newline-delimited vs another length framing), the ACP protocol
-  version negotiated by each CLI, and the start command (`gemini --experimental-acp`,
-  `goose acp`, or another flag). Do not guess a binary flag from the registry name.
-- `initialize` capabilities/auth methods, `session/new` (cwd, MCP servers, models),
-  `session/load`, `session/prompt`, `session/cancel`, and the `session/update`
-  variants that carry text/tool/plan/usage.
+- The exact framing accepted by each CLI, the ACP protocol version it negotiates, and
+  its start command. Do not guess a binary flag from the registry name.
+- Real `initialize` capabilities/auth methods, `session/new` (cwd, MCP servers,
+  models), `session/load`, and the `session/update` variants that carry
+  text/tool/plan/usage.
 - `session/request_permission` option ids and how `allow_once`, `allow_always`,
   `reject_once` and `reject_always` map to `ChatPermissionDecision`.
 - Whether the harness requires client `fs/*` or `terminal/*` callbacks. Do **not**
-  advertise those capabilities in Phase 3; a chat adapter is not a terminal or file
+  advertise those capabilities in Phase 2; a chat adapter is not a terminal or file
   proxy. If the harness cannot work without them, gate it.
 - Model list/usage fields in the `session/new` or prompt response; if absent, report
   `None`.
@@ -639,11 +671,11 @@ Needs a probe:
 emulate a terminal, scrape ANSI output and guess when a turn ends. That is a different
 product and a worse safety story. Keep it worker-only:
 
-- The selection list excludes `supports_embedded_chat = false` and every `cli-pty`
-  manifest.
-- A custom manifest that claims `protocol = "cli-pty"` with
-  `supports_embedded_chat = true` is shown with a warning and rejected by the gate
-  with `harness_protocol_unsupported`.
+- The selection list excludes every `workers_only_terminal` manifest and every
+  `cli-pty` manifest.
+- A stale or hand-edited manifest that claims `protocol = "cli-pty"` with
+  `orchestrator_and_workers` is rejected by `validate()` at save/load time; if one
+  reaches the gate anyway, the gate rejects it with `harness_protocol_unsupported`.
 - No terminal emulator, pty or screen scraper is added to the chat wheel.
 
 ### 4.9 Fixture and version policy
@@ -704,7 +736,7 @@ renderer matches prefixes/codes; do not parse prose.
 |---|---|---|
 | `harness_missing` | `not_found` | The selected/bound binary is not on the target |
 | `harness_auth_required` | `auth` | The harness reports no sign-in or rejects the credential |
-| `harness_worker_only` | `gate` | `supports_embedded_chat = false` |
+| `harness_worker_only` | `gate` | `surface = workers_only_terminal` |
 | `harness_protocol_unsupported` | `gate` | `cli-pty` or an unknown protocol for chat |
 | `harness_not_wired` | `gate` | Phase 1 dry run only; no adapter yet |
 | `harness_incompatible` | `gate` | Version/schema is not the pinned one |
@@ -741,7 +773,7 @@ copy/evidence labels, never a path, URL, port, token or native id.
 ### 5.4 No fallback and no preview replies
 
 - The adapter router never catches an error and tries a different harness. There is no
-  “try Claude, then Codex, then OpenCode” chain.
+  “try one harness, then another, then OpenCode” chain.
 - The only OpenCode switch is an explicit owner button. It starts a new OpenCode
   conversation or changes the default and says that it did.
 - A real turn never constructs `ChatMessageOrigin::Preview`. Preview selection calls
@@ -785,7 +817,7 @@ the owner-run check pass.
 | Phase | Scope | One-line acceptance test | Suggested `owns` |
 |---|---|---|---|
 | **1** | Selection + gates + transport-less dry run | “A fresh profile shows OpenCode selected and the existing setup chat still runs on the bundled engine; selecting any non-OpenCode chat harness returns `harness_not_wired` and starts no process; missing/worker-only harnesses are never selectable.” | Core selection/gate + desktop command + bridge + Settings/ChatView UI + tests (split 1a core, 1b UI if needed) |
-| **2** | First adapter, owner choice | “A new app-owned local conversation on the selected harness completes one real turn through the adapter with safe text/tool/permission/usage/done events, and no other harness process is started.” | `crates/spirit-core/src/engine/chat/<protocol>.rs` + contract/fixture tests + `apps/spirit-desktop/src-tauri/src/state.rs` wiring |
+| **2** | First adapter: ACP (owner decision) | “A new app-owned local conversation on the selected harness completes one real turn through the adapter with safe text/tool/permission/usage/done events, and no other harness process is started.” | ACP adapter mapping + contract/fixture tests + `apps/spirit-desktop/src-tauri/src/state.rs` wiring |
 | **3** | Next adapter | “The second transport passes the same `HarnessChatAdapter` conformance suite without changing the provider, the public `ChatTransport` surface or the UI.” | Second adapter file + fixtures + shared contract-test parameter |
 | **4** | Model/usage parity | “A harness that reports models and usage fills the picker and context meter with real values; one that does not reports `None`/‘not reported’, with no zero-filled counters.” | Model/usage mapping, `ChatModelTier::Harness`, `ComposerBar`/`ContextMeter`, bridge DTOs + tests |
 
@@ -827,26 +859,38 @@ packages/spirit-ui/src/test/next/harnessChatSelection.test.tsx (new)
 If this is too large for one job, split at the bridge: 1a core selection/gate/dry run;
 1b desktop bridge + UI + e2e. The acceptance test stays the same.
 
-### Phase 2 — the first adapter (owner choice)
+### Phase 2 — the first adapter: ACP (owner decision)
 
-Deliver one of:
+The owner selected **B — ACP (Agent Client Protocol) first**. `ss-179` already landed
+the reusable stdio client in `crates/spirit-core/src/harnesses/acp.rs`: newline-
+delimited JSON-RPC 2.0 with `protocolVersion: 1`, `initialize`, `session/new`,
+`session/prompt`, streaming `session/update`, `session/request_permission` and
+`session/cancel`; no `fs/*`/`terminal/*` client capabilities; a 1 MiB line cap, a 30 s
+request/read deadline and a 10-minute prompt deadline; and deterministic mock-process
+tests through `AcpClient::from_io`.
 
-- `opencode-http`: wire the existing `LocalChatProvider` through the adapter contract
-  and prove the selector/gate; no new process. This is the lowest-risk choice.
-- `stream-json`: `stream_json.rs`; long-lived Claude child when streaming input is
-  proven, otherwise one child per turn with `--resume`; candidate
-  `claude -p --input-format stream-json --output-format stream-json` argv; safe
-  read-only mode until permissions are proven.
-- `codex-json`: `codex_json.rs`; one child per turn; JSONL fixtures; sandbox policy;
-  no interactive permission card.
-- `acp`: `acp.rs`; JSON-RPC `initialize`/`session/new`/`session/prompt`; permission
-  mapping; no `fs`/`terminal` client capabilities.
+That is protocol plumbing, not a chat transport. `acp.rs` is **not** a
+`HarnessChatAdapter`, is not selected by a chat session, is not called by
+`LocalChatProvider`, and does not map ACP updates to `HarnessEvent`/`ChatEvent`. Phase 2
+still has to deliver:
+
+- a `HarnessChatAdapter` for an `orchestrator_and_workers` ACP harness, with the safe
+  `preflight` gate and child lifetime/ownership owned by chat;
+- the `session/update` and permission mapping into `HarnessEvent`, including
+  text/tool/permission/usage/done, without forwarding raw JSON to the renderer;
+- the fake-harness contract suite and fixtures from §7, with the real owner-run check
+  still pending;
+- `HarnessChatProvider`/router wiring so a session bound to the ACP harness reaches
+  that adapter; OpenCode remains the only live path until this lands.
+
+A successful ACP turn is not claimed until the owner-run check passes. Worker-only
+harnesses, including Claude Code and Gemini CLI, stay in the terminal worker view and
+are never wrapped in embedded chat.
 
 Target: the first adapter must back an app-owned local conversation. Prefer the setup
-assistant when the adapter proves a channel for the app-owned `SETUP_SYSTEM_PROMPT`
-(for example Claude's `--append-system-prompt`); otherwise add a minimal app-owned
-"Local chat" entry in a companion job. Never drop the setup prompt silently and never
-label a generic harness chat as the setup assistant.
+assistant only if ACP proves a channel for the app-owned `SETUP_SYSTEM_PROMPT`;
+otherwise add a minimal app-owned "Local chat" entry in a companion job. Never drop the
+setup prompt silently and never label a generic harness chat as the setup assistant.
 
 Common: the fake CLI, fixtures, the contract suite and the real owner-run check. No
 VOWP session changes, no `cli-pty`.
@@ -854,10 +898,11 @@ VOWP session changes, no `cli-pty`.
 Suggested `owns`:
 
 ```text
-crates/spirit-core/src/engine/chat/<protocol>.rs            (new)
-crates/spirit-core/src/engine/chat/harness.rs               (adapter wiring)
+crates/spirit-core/src/harnesses/acp.rs                     (client; extend only if the probe requires)
+crates/spirit-core/src/engine/chat/acp.rs                   (new chat adapter mapping)
+crates/spirit-core/src/engine/chat/harness.rs               (adapter wiring/router)
 crates/spirit-core/tests/harness_chat_contract.rs           (new)
-crates/spirit-core/tests/fixtures/harness-chat/<protocol>/  (new)
+crates/spirit-core/tests/fixtures/harness-chat/acp/         (new)
 crates/spirit-core/examples/fake-harness.rs                 (new, hermetic)
 apps/spirit-desktop/src-tauri/src/state.rs
 apps/spirit-desktop/src-tauri/src/commands/chat.rs
@@ -1007,9 +1052,12 @@ checklist and must not make a real turn on its own.
 
 ## 8. What this design deliberately does not do
 
-- It does not implement or claim any transport; the first protocol stays open.
-- It does not change `LocalChatProvider`, the bundled engine, the registry schema, the
-  Tauri bridge or the UI.
+- It does not implement or claim a harness chat transport. ACP is the owner-chosen
+  first family, and the reusable `acp.rs` client has landed, but no chat path is wired
+  to it and no non-OpenCode harness conversation can start.
+- It does not change `LocalChatProvider`, the bundled engine, the Tauri bridge or the
+  chat UI. The `ss-179` registry `HarnessSurface` split and `HarnessesPanel` grouping
+  landed separately; this document does not reopen them.
 - It does not make VOWP `global`/`project` logs harness-agnostic; that is a VOWP app
   decision.
 - It does not add Home VPS chat transport or an SSH stdio forward.
@@ -1035,7 +1083,7 @@ checklist and must not make a real turn on its own.
 - `crates/spirit-core/src/engine/chat/` — `local.rs`, `model.rs`, `pump.rs`,
   `endpoint.rs`, `sse.rs`.
 - `crates/spirit-core/src/harnesses/` — `manifest.rs`, `probe.rs`, `store.rs`,
-  `toml.rs`.
+  `toml.rs`, `acp.rs` (reusable ACP stdio client; not a chat adapter).
 - `crates/spirit-core/src/engine/gate.rs` — `LocalOrchestratorGate`, `AsifGate`,
   `GateSnapshot`.
 - `runtime/crates/vowp-cli/src/mcp/` — JSON-RPC stdio framing (`jsonrpc.rs`) and the
