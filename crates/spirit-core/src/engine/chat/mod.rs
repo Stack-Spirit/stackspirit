@@ -6,13 +6,16 @@
 //! an endpoint URL, port, workspace or native session id to a serialized chat value.
 
 pub mod endpoint;
+pub mod harness;
 pub mod local;
 pub mod model;
 pub mod pump;
+pub mod selection;
 pub mod sse;
 pub mod writer;
 
 pub use endpoint::{ChatEndpointResolver, ResolvedEndpoint, VowpEndpointResolver};
+pub use harness::{HarnessChatGate, dry_run, gate_for_manifest, preflight};
 pub use local::{
     ChatEngine, ChatOrchestratorProvisioner, ChatTransport, KnownOrchestratorSession,
     LocalChatProvider, NativeSession, map_http_status, map_provider_error,
@@ -30,6 +33,10 @@ pub use model::{
 };
 pub use pump::{
     ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper, retry_status,
+};
+pub use selection::{
+    CHAT_PREFERENCES_VERSION, ChatHarnessCapture, ChatPreferences, ChatPreferencesSource,
+    ChatPreferencesStore, ChatSettingsError, JsonChatPreferences,
 };
 pub use sse::{
     EngineEvent, EngineMessageUpdate, EnginePartUpdate, EngineRetryAction, EngineSessionStatus,
