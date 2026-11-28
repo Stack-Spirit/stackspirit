@@ -1,10 +1,14 @@
 # Explicit session takeover for orchestrator chat
 
-Status: design only, 2026-11-28. This document changes no code, bridge, UI or
-runtime. **Takeover is not live.** The read-only half (`ss-152`/`ss-153`) remains
-the only shipped ownership behavior; nothing here overrides the current contracts.
+Status: implemented in the desktop app, 2026-11-28. Phases 1–4 (`ss-170`,
+`ss-171`, `ss-173`, `ss-174`) ship the writer manager, the Tauri/bridge surface,
+the gated Take over/Release action and the lifecycle for an eligible co-located
+home-hosted session. The eligibility probe gates every action. Takeover has
+**not** been verified against a live co-located VOWP home: the owner-run §7.5
+checks are unrun. Node-hosted sessions, including today's live Local chat, remain
+read-only.
 
-Audience: the core, bridge, UI and verification jobs that implement takeover, the
+Audience: the core, bridge, UI and verification jobs that implemented takeover, the
 VOWP owner, and the desktop reviewer.
 
 Scope: how StackSpirit can become the writer of a VOWP orchestrator chat session
@@ -13,18 +17,21 @@ the one-time grant, what the owner sees before and after, and what stays honestl
 read-only. The OpenCode HTTP/SSE contract, the durable-log rule and the renderer
 boundary in [`ORCHESTRATOR-CHAT.md`](ORCHESTRATOR-CHAT.md) do not change.
 
-Non-goals: no implementation, no bridge or UI change, no loopback engine proxy,
-no hard fencing of a direct-engine writer, no Server chat transport, no SSH
-attach, no token persistence, and no claim that the current live Local path can
-take a session over.
+Non-goals: no loopback engine proxy, no hard fencing of a direct-engine writer,
+no Server chat transport, no SSH attach, no node-side attach, no token
+persistence, and no claim that the current live Local path can take a session
+over.
 
 ## 0. Short version
 
-- The current tree is **read-only by report and by the composer, not by core
-  enforcement**. The chat header shows a chip when VOWP reports an owner, and
-  `access: "read_only"` disables the composer. `spirit-core` never checks `access`
-  before `send`, holds no lease token and has no writer state. The UI is the only
-  gate.
+- The chat is **read-only by report, by the composer and by core**. The chat
+  header shows a chip when VOWP reports an owner, and `access: "read_only"`
+  disables the composer. For a VOWP local orchestrator, `spirit-core` now holds
+  the writer lease, checks it before every send, and rejects a send unless
+  `writer.state === "held"` and `access === "owner"`. The watcher flips the
+  session read-only and fences the running turn when another surface takes the
+  lease. Setup and engine-backed sessions keep their app-owned path. The
+  read-only history in §1 remains true for every session the probe cannot attach.
 - VOWP 0.5.1's `vowp orchestrator attach <NAME> --holder … [--takeover]` is the
   only durable writer path for a desktop UI shipped today. It creates a
   `DesktopUi` surface, prints one grant, holds the lease while its stdin stays
@@ -42,7 +49,7 @@ take a session over.
 - The design therefore has two honest deployment shapes:
   1. **Co-located home-hosted orchestrator** (the app and the VOWP home are on the
      same machine). `attach` holds the lease and the app can reach the loopback
-     engine. This is the first implementable target.
+     engine. This is the target implemented by Phases 1–4.
   2. **Node-hosted orchestrator** (today's Mac). No VOWP node-side attach exists;
      the app stays read-only, shows why, and waits for a VOWP node-side attach
      (recommended). The deferred engine proxy only enforces an owner; it does not
@@ -51,13 +58,26 @@ take a session over.
   process per chat session, no token in the renderer or on disk, a lease watcher
   that flips the window read-only when another surface takes over, and a release
   path that never leaves a stale lease on purpose.
-- Recommended next step: build **Phase 1** (core manager + hermetic fake CLI)
-  now. Do not ship the Phase 3 action on today's node-hosted path until VOWP
-  provides a node-level attach, or until the owner chooses the co-located home
-  deployment. A button that always returns `node_hosted` is worse than the current
-  honest read-only notice.
+- **Shipped phases:** `ss-170` added the core `ChatWriter`/`WriterLease` manager,
+  capability probe, home endpoint fallback and fenced `send_turn`; `ss-171` added
+  `chat_take_over`/`chat_release_writer`, the optional bridge methods and the Tauri
+  registration plus exit hook; `ss-173` added the gated Take over/Release UI; and
+  `ss-174` added the lease watcher, focus/resume/pre-send checks, turn fencing,
+  log backfill, engine-restart reconnection and close/switch/window/quit release.
+- **Remaining gates:** the owner must run the §7.5 real-VOWP checklist on a
+  co-located home, and today's node-hosted deployment still needs either a VOWP
+  node-side attach or an owner-chosen co-located home deployment. Until then the
+  live Local chat stays read-only with no action.
 
 ## 1. Current state
+
+> **Implementation note (2026-11-28):** §1.1–§1.4 record the read-only half as it
+> shipped in `ss-152`/`ss-153` and remain the enforcement history. The writer path
+> these subsections describe as missing is now implemented behind the eligibility
+> probe: a VOWP local orchestrator send requires a held `WriterLease`, and a
+> lost/replaced lease flips the view read-only. The read-only notice and the
+> node-hosted behavior below still apply wherever the probe cannot attach,
+> including today's node-hosted Local chat.
 
 ### 1.1 The read-only half
 
@@ -102,9 +122,11 @@ or `session lease --acquire` as a keeper for a desktop UI either: they create a
 different surface and do not give this app a writer grant it can heartbeat.
 
 The banner and the chat header can both be visible for a `global`/`project` chat.
-Phase 3 must keep their semantics separate; see §4.7.
+Phase 3 kept their semantics separate; see §4.7.
 
-### 1.3 What the read-only state does not enforce
+### 1.3 What the pre-writer read-only state did not enforce
+
+The gaps recorded for the pre-writer tree were:
 
 | Gap | Evidence | Consequence |
 |---|---|---|
@@ -117,11 +139,15 @@ Phase 3 must keep their semantics separate; see §4.7.
 
 ### 1.4 The live Local path is node-hosted
 
-`VowpEndpointResolver` runs exactly one command:
+The live node-hosted path reads exactly one command:
 
 ```text
 vowp agent orchestrator endpoint <NAME> --json
 ```
+
+Since `ss-170`, `VowpEndpointResolver` falls back to the home `vowp orchestrator
+endpoint` only when the agent reports no local record; the live Mac path still
+resolves through the agent command above.
 
 The agent command reads the node's own `~/.vowp-agent/orchestrators/<NAME>/` state.
 Its `endpoint()` builds `OrchestratorEndpoint` with `location: "node"`, then:
@@ -242,20 +268,20 @@ explicit, never silent.
 | Node-hosted on another node | Agent endpoint over a transport that is not part of this design | No | No |
 | Bundled setup engine or engine-backed project fallback | App-owned `EngineSupervisor` | Not applicable; the app is the writer | No; `access` is already `owner` |
 
-The co-located home case needs one transport prerequisite the current tree does
-not have: `VowpEndpointResolver` is agent-only and cannot resolve a home-hosted
-record. Phase 1 adds a narrow home fallback — try the agent command first, and
-only when it reports `not_found`/no local record run the home `vowp orchestrator
-endpoint <NAME> --json` with the same bounded, secret-free environment. It accepts
-the document only when `location` is `home`, `url`/`auth` are live loopback
-values, and the reported native session id is present. A home document with
-`location: "node"` is metadata-only (URL and auth null) and must never become a
-chat transport.
+The co-located home case needed one transport prerequisite: `VowpEndpointResolver`
+was agent-only and could not resolve a home-hosted record. Phase 1 (`ss-170`)
+added the narrow home fallback — try the agent command first, and only when it
+reports `not_found`/no local record run the home `vowp orchestrator endpoint
+<NAME> --json` with the same bounded, secret-free environment. It accepts the
+document only when `location` is `home`, `url`/`auth` are live loopback values,
+and the reported native session id is present. A home document with `location:
+"node"` is metadata-only (URL and auth null) and must never become a chat
+transport.
 
-Before shipping that fallback, prove it is a read-only probe on a machine that
-has no local home. If the command would initialize or mutate a home directory,
-require an explicit local-home configuration instead; opening a chat must not
-create a home database as a side effect.
+The fallback probe is covered by the hermetic fake CLI; it has not been run on a
+real machine that lacks a local home. If the real command would initialize or
+mutate a home directory, require an explicit local-home configuration instead;
+opening a chat must not create a home database as a side effect.
 
 Do not build an SSH attach in this design. Running `vowp orchestrator attach`
 over SSH to the home would hold a lease that the app cannot use without the
@@ -283,12 +309,12 @@ The process contract:
 | Failure output | For a runtime failure after argv parses, a failed `--json` run prints an `{"error": {…}}` document on stdout and exits nonzero; an unknown command or usage error is stderr plus exit 2. Read only the exit class and `error.kind` to classify; never render `message` or `hint` verbatim (they can contain a path or host). A `conflict` maps to `chat_takeover_conflict`; an unknown/missing command maps to `chat_takeover_unsupported`; everything else maps to `chat_takeover_failed` or `chat_takeover_unavailable`. |
 | stderr | Piped to a bounded, redacted buffer (200 lines, 1,000 characters). The hold/release notices are safe; raw failures are mapped to typed errors and never shown verbatim. |
 | Child lifetime | Exactly the attach. No `--detach`, no keeper, no second process. |
-| Release | Drop stdin → wait up to 3 s → SIGTERM → wait 1 s → SIGKILL. The child's `AttachGuard`/`LeaseGuard` drop also releases the row. |
+| Release | Drop stdin → wait up to 3 s → SIGKILL → wait up to 1 s. The child's `AttachGuard`/`LeaseGuard` drop also releases the row. The in-flight `Drop` path waits up to 5 s before forcing, then reaps in the background. |
 | Unexpected exit | Clear the writer state, mark the view `lost`, and do not auto-retry. The lease may remain until the 60 s stale window. |
 | Timeouts | Probe 3 s; attach 20 s (5 s drain plus margin); release 3 s; lease watch 5 s per check. |
 | Concurrency | One `WriterLease` per app process per `ChatSessionId`, behind an async mutex. A second `take_over` returns the in-flight state or the same held view; it never spawns a second child. |
 
-The parent parses the grant into a core-only `WriterGrant` and then **does not
+The parent parses the grant into a core-only `ValidatedGrant` and then **does not
 keep the token**: the child is the holder and needs it for heartbeats/release.
 The raw grant buffer and the parsed token are dropped/zeroized immediately. If a
 review asks for a parent-side copy, it must be `Zeroizing<String>` with no
@@ -398,10 +424,10 @@ reason. `Held` means this app has a validated grant and a live child. `Lost` mea
 the app no longer trusts the grant; the old token is discarded and a new takeover
 is a new token.
 
-### 2.8 Core and bridge surface (proposed)
+### 2.8 Core and bridge surface (shipped)
 
-The existing `ChatSessionView` stays the only session view. Add one optional,
-display-safe field:
+`ChatSessionView` remains the only session view and now carries one optional,
+display-safe `writer` field:
 
 ```ts
 export type ChatWriterState =
@@ -441,34 +467,42 @@ export interface ChatWriterView {
   the core-only grant/watch state; the display view stays the safe subset it is
   today.
 
-Bridge additions, both optional so the Web and older bridges keep compiling:
+Bridge methods are both optional so the Web and older bridges keep compiling:
 
 ```ts
-takeOver?(session: SessionId): Promise<ChatSessionView>;
+takeOver?(session: SessionId, takeover?: boolean): Promise<ChatSessionView>;
 releaseWriter?(session: SessionId): Promise<ChatSessionView>;
 ```
 
-Tauri commands:
+`takeover` is the owner's explicit confirmation that a live holder may be
+replaced; absent or `false` attaches only a free or stale lease.
+
+Tauri commands, registered in `apps/spirit-desktop/src-tauri/src/lib.rs`:
 
 ```text
-chat_take_over(session)        -> ChatSessionView
-chat_release_writer(session)   -> ChatSessionView
+chat_take_over(session, takeover?)   -> ChatSessionView
+chat_release_writer(session)         -> ChatSessionView
 ```
 
-The renderer sends only the `SessionId`; core resolves the orchestrator, holder,
-label, home and grant. The commands reject `setup` and engine-backed project
-sessions (the app is already the writer) and any server-gated session.
+The renderer sends only the `SessionId` and that confirmation; core resolves the
+orchestrator, holder, label, home and grant. The commands reject `setup` and
+engine-backed project sessions (the app is already the writer) and any
+server-gated session. `AppState` tracks sessions whose writer this process may
+hold so the window-close and exit hooks can release them.
 
-Proposed typed errors, all safe to show through the existing error card:
+Typed errors, all safe to show through the existing error card:
 
 | Code | When |
 |---|---|
 | `chat_takeover_unsupported` | The installed VOWP has no `orchestrator attach` command. |
-| `chat_takeover_unavailable` | Node-hosted, not co-located, orchestrator stopped, or no live endpoint. |
+| `chat_takeover_unavailable` | Node-hosted, not co-located, orchestrator stopped, no live endpoint, or VOWP refused the attach. |
 | `chat_takeover_conflict` | A live owner appeared between the probe and the attach and `--takeover` was not confirmed. |
 | `chat_takeover_failed` | Spawn, grant parse, validation or timeout failed. |
 | `chat_writer_lost` | The lease was replaced or disappeared while held. |
 | `chat_read_only` | A send was attempted while this app does not hold the writer lease. |
+| `chat_not_mirrored` | The grant named another VOWP session or native OpenCode session. |
+| `harness_not_wired` | The chat is app-owned (`setup` or an engine-backed project) and has no VOWP writer harness. |
+| `chat_gated` | The command adapter saw a non-local or server-gated session. |
 
 ## 3. Token handling
 
@@ -705,19 +739,27 @@ fabricates a writer.
 
 ## 6. Phased delivery
 
-Each phase is a separate job or two small jobs. A phase must not claim a live
-writer until its acceptance test and the owner-run check pass.
+All four phases have shipped as separate jobs. The scopes below are what shipped;
+the owner-run checklist in §7.5 is still the gate for calling a live takeover
+verified.
 
-| Phase | Scope | One-line acceptance | Suggested `owns` |
-|---|---|---|---|
-| **1** | Core attach manager, capability probe, home endpoint fallback, fake CLI | "A fake `vowp` child prints one grant and holds stdin; the manager reports `held` with a redacted view, rejects duplicate attach, releases on drop, and no fake token appears in any Debug, view, log, error or file." | Core chat/endpoint/writer files + fixtures/tests (see below) |
-| **2** | Tauri commands + bridge + wire | "`chat_take_over`/`chat_release_writer` return a safe `ChatSessionView` and never a token, surface id or endpoint; the bridge methods are optional and Mock/Web behavior is explicit." | Tauri commands/state + bridge/wire + tests |
-| **3** | UI action, confirmation, chip/state, read-only fallback | "On a supported co-located home-hosted session a read-only window shows Take over, the dialog names the holder, a successful attach enables the composer and shows the writer chip; on a node-hosted or older VOWP session the action is absent with the honest reason." | `ChatView.tsx` + ownership CSS + UI tests/e2e |
-| **4** | Release, quit, sleep, reconnect, previous-writer loss | "Closing the chat/window, quitting, sleeping past the stale window or losing the lease releases or reaps the child, flips the view read-only within one watch interval, and never claims a turn was stopped." | Lifecycle wiring + watch/restart tests + e2e |
+| Phase | Status | Scope | One-line acceptance | Main files/tests |
+|---|---|---|---|---|
+| **1** | Shipped (`ss-170`) | Core attach manager, capability probe, home endpoint fallback, fake CLI | "A fake `vowp` child prints one grant and holds stdin; the manager reports `held` with a redacted view, rejects duplicate attach, releases on drop, and no fake token appears in any Debug, view, log, error or file." | `writer.rs`, `endpoint.rs`, `local.rs`, `model.rs`; `chat_writer.rs`, `fixtures/fake-vowp/` |
+| **2** | Shipped (`ss-171`) | Tauri commands + bridge + wire | "`chat_take_over`/`chat_release_writer` return a safe `ChatSessionView` and never a token, surface id or endpoint; the bridge methods are optional and Mock/Web behavior is explicit." | `commands/chat.rs`, `state.rs`, `lib.rs`; `TauriBridge.ts`, `SpiritBridge.ts`, `wire.ts`, `MockBridge.ts`; `chatWriterBridge.test.tsx` |
+| **3** | Shipped (`ss-173`) | UI action, confirmation, chip/state, read-only fallback | "On a supported co-located home-hosted session a read-only window shows Take over, the dialog names the holder, a successful attach enables the composer and shows the writer chip; on a node-hosted or older VOWP session the action is absent with the honest reason." | `ChatView.tsx`, `theme.css`; `chatTakeover.test.tsx`, `next-shell.spec.ts` |
+| **4** | Shipped (`ss-174`) | Release, quit, sleep, reconnect, previous-writer loss | "Closing the chat/window, quitting, sleeping past the stale window or losing the lease releases or reaps the child, flips the view read-only within one watch interval, and never claims a turn was stopped." | `writer.rs`, `local.rs`, `state.rs`, `lib.rs`, `ChatView.tsx`; `chat_writer_lifecycle.rs`, `chat-takeover.spec.ts` |
 
-### Phase 1 — core attach manager with a fake CLI
+### Phase 1 — core attach manager with a fake CLI (shipped, `ss-170`)
 
-Deliver:
+Shipped in `ss-170` (`b0cd212`). The manager, probe, home fallback and fenced
+send are in core; the fake CLI is the only process in its tests. Two actual values
+matter against the earlier design: the release path drops stdin, waits up to 3 s,
+sends SIGKILL and waits up to 1 s (there is no SIGTERM step), and the in-flight
+`Drop` path waits up to 5 s before forcing. A release while the child is still
+waiting for its grant uses a 6 s budget.
+
+Shipped scope:
 
 - `ChatWriter`/`WriterLease` state machine with `probe`, `take_over`, `release`,
   `watcher` and `Drop`.
@@ -725,19 +767,19 @@ Deliver:
   stdout/stderr, grant validation, token drop, graceful release, typed errors.
 - The capability probe: `vowp orchestrator attach` command presence, co-located
   home endpoint, live loopback `url`/`auth`, matching native session, matching
-  VOWP session id. The probe must not spawn an attach.
+  VOWP session id. The probe does not spawn an attach.
 - The narrow home endpoint fallback in `endpoint.rs`: agent command first, home
   `vowp orchestrator endpoint` only when the agent has no local record; accept
   `location: home` with loopback URL/auth and a native id. Reject `location: node`
   metadata as a transport.
 - The core `send_turn` rule: a VOWP orchestrator session may send only when
   `writer.state === "held"` and `access === "owner"`. Setup and engine-backed
-  sessions keep their app-owned path. This closes the current bypass.
-- The `ChatWriterView` (or the field on `ChatSessionView`) with only the safe
-  state/reason booleans.
+  sessions keep their app-owned path. This closed the pre-writer bypass.
+- The `ChatWriterView` field on `ChatSessionView` with only the safe state/reason
+  booleans.
 - A hermetic fake `vowp` child and the state-machine/token tests in §7.
 
-Suggested `owns`:
+Main files/tests:
 
 ```text
 crates/spirit-core/src/engine/chat/writer.rs              (new)
@@ -749,29 +791,35 @@ crates/spirit-core/tests/chat_writer.rs                   (new)
 crates/spirit-core/tests/fixtures/fake-vowp/              (new)
 ```
 
-Do not add a Tauri command or a UI control in Phase 1. The fake CLI is the only
-process; no test touches a real home, keychain, network or engine.
+Phase 1 did not add a Tauri command or a UI control. The fake CLI is still the
+only process; no test touches a real home, keychain, network or engine.
 
-### Phase 2 — Tauri command + bridge
+### Phase 2 — Tauri command + bridge (shipped, `ss-171`)
 
-Deliver:
+Shipped in `ss-171` (`ba4b2c8`, with follow-ups `b6a55c1`, `aa393a6`,
+`a56e612`). The commands are registered in `lib.rs`; `AppState` tracks held
+writers so the exit hook can release them. The bridge methods are optional; the
+Mock returns a typed preview gate and the Web bridge omits both.
+
+Shipped scope:
 
 - `chat_take_over` and `chat_release_writer` in
   `apps/spirit-desktop/src-tauri/src/commands/chat.rs`, behind the existing
   `AppState` chat service. Validate the session, reject setup/engine-backed and
   server-gated sessions, and return only `ChatSessionView`.
 - `SpiritBridge.chat.takeOver?`/`releaseWriter?`, `TauriBridge` wiring, wire types
-  for `ChatWriterView`, and `MockBridge` behavior. The Mock may return a typed
-  `preview_unavailable` or a deterministic preview state; it must not claim a
-  real lease. The Web bridge omits the methods.
-- Tests that the serialized command result contains no token, surface id, URL,
-  port, native id, epoch or path.
+  for `ChatWriterView`, and `MockBridge` behavior. The Mock returns a typed
+  `preview_unavailable`; it does not claim a real lease. The Web bridge omits the
+  methods.
+- Tests asserting that the serialized command result contains no token, surface
+  id, URL, port, native id, epoch or path.
 
-Suggested `owns`:
+Main files/tests:
 
 ```text
 apps/spirit-desktop/src-tauri/src/commands/chat.rs
 apps/spirit-desktop/src-tauri/src/state.rs                  (shutdown hook)
+apps/spirit-desktop/src-tauri/src/lib.rs                    (registration)
 apps/spirit-desktop/src/bridge/TauriBridge.ts
 packages/spirit-ui/src/bridge/SpiritBridge.ts
 packages/spirit-ui/src/bridge/wire.ts
@@ -779,21 +827,28 @@ packages/spirit-ui/src/bridge/MockBridge.ts
 packages/spirit-ui/src/test/next/chatWriterBridge.test.tsx  (new)
 ```
 
-### Phase 3 — UI action
+### Phase 3 — UI action (shipped, `ss-173`)
 
-Deliver:
+Shipped in `ss-173` (`4c4f741`, with copy follow-up `a91bc53`). The action
+appears only for an attached non-setup session with `writer.state === "available"`
+and `can_take_over`; an unavailable session shows the safe reason and no action.
+The confirmation names the holder and activity, warns that a running turn may be
+interrupted, and never claims a direct-engine writer was stopped. A held writer
+shows Release; `lost` and unavailable stay read-only.
+
+Shipped scope:
 
 - The header/ownership action, the confirmation dialog, the writer chip/state,
   the release action and the safe reason copy from §4.
 - The existing read-only notice stays unchanged and action-free; the Take over
-  button is separate. The fleet `OwnershipBanner` action is not reused; if both
-  would appear on a chat, hide or separate the fleet action.
+  button is separate. The fleet `OwnershipBanner` action is not reused; when the
+  chat action or a held writer is visible, the banner hides its own action.
 - Accessibility and copy tests: holder naming, running extra line, keyboard focus,
   Escape, light/dark axe, no token/surface id in the DOM.
 - The action is absent when `writer.state` is unavailable. A node-hosted session
-  shows the reason and remains read-only. Do not ship a button that always fails.
+  shows the reason and remains read-only; no button always fails.
 
-Suggested `owns`:
+Main files/tests:
 
 ```text
 packages/spirit-ui/src/next/ChatView.tsx
@@ -802,9 +857,17 @@ packages/spirit-ui/src/test/next/chatTakeover.test.tsx       (new)
 apps/spirit-desktop/e2e/next-shell.spec.ts                   (writer flow, mock-safe)
 ```
 
-### Phase 4 — release, quit and reconnection
+### Phase 4 — release, quit and reconnection (shipped, `ss-174`)
 
-Deliver:
+Shipped in `ss-174` (`226056e`, with test follow-up `694f12a`). The watcher polls
+every 15 s (the design value held); focus, resume and pre-send checks run
+immediately, and two consecutive verification failures are terminal. Window close
+and exit use the 3 s bounded shutdown hook; chat close/switch and view unmount
+release through the bridge. An engine restart re-resolves the same surface without
+a new attach; a lost lease fences the running turn, drops late responses and
+backfills from the home log. The §7.5 owner-run checklist remains unrun.
+
+Shipped scope:
 
 - App/window/chat lifecycle release: close chat, switch session, close window,
   quit, `RunEvent::ExitRequested`, and the manager `Drop` safety net.
@@ -813,9 +876,9 @@ Deliver:
 - Previous-writer detection: `lost`, read-only notice, turn fencing, late-response
   ignore, log backfill.
 - Engine restart/endpoint re-resolution and sleep/wake tests.
-- The owner-run checklist in §7.5.
+- The owner-run checklist in §7.5, still unrun.
 
-Suggested `owns`:
+Main files/tests:
 
 ```text
 crates/spirit-core/src/engine/chat/writer.rs               (watch/lifecycle)
@@ -970,21 +1033,26 @@ fixed checklist and must not perform a real takeover on its own.
 
 ## 9. Owner dependency and recommendation
 
-The live Local path is node-hosted, and VOWP 0.5.1's only durable attach command
-for a desktop UI is home-side. That is a VOWP-side gap, not a StackSpirit UI bug.
-The options are:
+The writer machinery from Phases 1–4 is implemented and tested, but it cannot
+create a writer where VOWP does not provide one. Today's live deployment remains
+**option D (read-only)**: the live Local path is node-hosted, and VOWP 0.5.1's
+only durable attach command for a desktop UI is home-side. That is a VOWP-side
+gap, not a StackSpirit UI bug. The options are:
 
 | Option | What it needs | Recommendation |
 |---|---|---|
-| **A. VOWP node-side attach** — `vowp agent orchestrator attach <NAME> --holder … [--takeover]` on the node's paired surface, mirroring the home command | A small VOWP slice; the node already has the agent, the app endpoint and the paired surface. StackSpirit's manager/UI stay the same. | **Recommended** for today's Mac deployment. |
-| **B. Co-located home deployment** — run StackSpirit on the VOWP home with a home-hosted orchestrator | The Phase 1 home endpoint fallback; no proxy needed because the engine is loopback on the same host. | Good for a home console; not today's Mac. |
+| **A. VOWP node-side attach** — `vowp agent orchestrator attach <NAME> --holder … [--takeover]` on the node's paired surface, mirroring the home command | A small VOWP slice; the node already has the agent, the app endpoint and the paired surface. StackSpirit's manager/UI stay the same. | **Recommended** for today's Mac deployment; VOWP-side, not work this project can land alone. |
+| **B. Co-located home deployment** — run StackSpirit on the VOWP home with a home-hosted orchestrator | The shipped Phase 1 home endpoint fallback; no proxy needed because the engine is loopback on the same host. | Good for a home console; requires the owner to choose and run that deployment, not today's Mac. |
 | **C. Remote home attach + engine proxy/forward** | The deferred loopback engine proxy or an approved SSH forward. | Out of scope; do not combine it with this design. |
-| **D. Keep read-only** | Nothing. | The honest fallback until A or B lands. |
+| **D. Keep read-only** | Nothing. | **Current outcome** until A ships or the owner chooses B. |
 
-Do not ship a Take over button that always returns `node_hosted`. The value of
-this design is that the manager, grant handling, token rules, confirmation and
-release path are ready when A or B lands, and that the app never lies about the
-current state before then.
+**Outcome:** the writer machinery is ready, but takeover is not live on today's
+node-hosted Local chat. Option D is the current deployment; StackSpirit cannot
+land A alone (it is a VOWP change) and cannot choose B for the owner. The app does
+not ship a Take over button that always returns `node_hosted`; the node-hosted
+path shows the safe reason and stays read-only. The manager, grant handling,
+token rules, confirmation and release path are ready when A or B lands, and the
+app never lies about the current state before then.
 
 ## 10. References
 
