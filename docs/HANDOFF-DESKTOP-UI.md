@@ -1,7 +1,7 @@
 # Handoff: StackSpirit desktop UI redesign (Meadow shell)
 
 Read this first if you are picking up the desktop UI, the brand, or the next integration
-steps. Last updated 2026-11-27. It records the decisions the owner made in the design
+steps. Last updated 2026-11-28. It records the decisions the owner made in the design
 sessions, what is real versus preview, and what to do next. `AGENTS.md` still applies
 (Rust core owns host/SSH/VOWP logic, UI calls go through `SpiritBridge`, no secrets).
 
@@ -193,6 +193,12 @@ installed VOWP reports a local orchestrator and `chat_not_configured` otherwise
 has no local orchestrator record); and **Server `global`/`project`**, gated (`chat_gated`,
 decision A). The shell opens `global`/`project` on Local (`a62c6e8`); Server remains the
 gated path.
+
+Session ownership is **real but gated**. The ownership chip and the calm read-only notice
+above the composer are real, and the separate Take over/Release action is real but appears
+only when `ChatWriterView` reports an eligible session. A node-hosted or otherwise
+unavailable session shows a safe reason and no action; the read-only notice itself never
+gains a button (§5.1 item 3).
 
 The setup assistant's chat is real on the bundled StackSpirit Engine (`ss-42`, `cc83371`;
 `ss-45`, `fe6d6e5`; `ss-46`, `c1e2402`). It creates or resumes its private local session,
@@ -468,42 +474,62 @@ copy of the VOWP plan):
    orchestrator's endpoint allows, an app-owned SSH forward, and keeping Server chat gated.
    The owner decision remains **A** (§3), so Server chat stays gated; revisit only if the
    owner asks.
-3. **Session ownership in the UI — read-only half landed; explicit takeover is
-   core/bridge-only (`ss-92`, `9a1031c`; follow-up fixes `1eee71f`, `504987b`, `1c9f315`;
-   `ss-95`, `4411dbf`; read-only chat half `ss-152`, `ss-153`; design
-   [`docs/SESSION-TAKEOVER.md`](SESSION-TAKEOVER.md), `ss-169`; Phase 1 `ss-170`; Phase 2
-   `ss-171`).** The runtime endpoint carries `owner`/`access`
-   (`runtime/crates/vowp-protocol/src/surface.rs`), and StackSpirit maps the home snapshot's
-   `SessionOwner` into `FleetView.session_owners` (`crates/spirit-core/src/view/fleet.rs`)
-   and the endpoint's display-only owner into `ChatSessionView.ownership`/`.access`
-   (`crates/spirit-core/src/engine/chat/model.rs`). The chat header now shows an ownership
-   chip, and a `read_only` session shows a calm notice above the composer with its message
-   field and Send disabled; closing the other window or ending the CLI session releases it.
-   That notice deliberately adds no takeover action.
+3. **Session ownership in the UI — real but gated (`ss-92`, `9a1031c`; follow-up fixes
+   `1eee71f`, `504987b`, `1c9f315`; `ss-95`, `4411dbf`; read-only chat half `ss-152`,
+   `ss-153`; design [`docs/SESSION-TAKEOVER.md`](SESSION-TAKEOVER.md), `ss-169`; Phase 1
+   `ss-170`; Phase 2 `ss-171`; Phase 3 `ss-173`; Phase 4 `ss-174`).** The runtime endpoint
+   carries `owner`/`access` (`runtime/crates/vowp-protocol/src/surface.rs`), and
+   StackSpirit maps the home snapshot's `SessionOwner` into `FleetView.session_owners`
+   (`crates/spirit-core/src/view/fleet.rs`) and the endpoint's display-only owner into
+   `ChatSessionView.ownership`/`.access` (`crates/spirit-core/src/engine/chat/model.rs`).
+   The chat header shows an ownership chip, and a `read_only` session shows a calm notice
+   above the composer with its message field and Send disabled; closing the other window or
+   ending the CLI session releases it. That notice deliberately adds no takeover action and
+   stays action-free in every writer state.
 
-   **Explicit takeover is not a UI action yet.** Phase 1 landed the core
-   `ChatWriter`/lease manager with a hermetic fake `vowp` child (`ss-170`); Phase 2 landed
-   the `chat_take_over`/`chat_release_writer` Tauri commands, the exit hook and the optional
-   `SpiritBridge.chat.takeOver`/`releaseWriter` methods (`ss-171`). **Phase 3, the UI action,
-   is deliberately not shipped.** Today's live Local path is node-hosted: VOWP's home-side
-   `orchestrator attach` refuses it, and there is no `vowp agent orchestrator attach`. A
-   node-hosted session therefore stays read-only: the existing notice shows the read-only
-   reason (falling back to "Another window" when VOWP reports no holder), the composer stays
-   disabled, and no Phase 3 takeover button is rendered. The core/bridge methods are inert
-   in the shipped UI — no UI calls them, and on this path they cannot produce a writer lease
-   (the core's safe reason is `node_hosted`). They stay inert until the owner chooses a
-   co-located home deployment or VOWP ships a node-level attach, with Phase 3 still needed
-   to wire the action; a button that always fails is worse than the honest notice.
+   **Phase 3 (`ss-173`, `4c4f741`, follow-up `a91bc53`) landed the gated action.**
+   `packages/spirit-ui/src/next/ChatView.tsx` renders a separate Take over/Release action
+   only when the optional `ChatWriterView` reports an eligible session:
+   `state: "available"` with `can_take_over` on an attached, non-setup chat, or
+   `state: "held"` with `can_release` once this app holds the writer. The confirmation names
+   the holder (label, holder or human kind) and its activity, says that taking over makes
+   the other app read-only, and warns that a running turn may be interrupted; it never
+   claims a direct-engine writer was stopped. A node-hosted, older-VOWP, `not_home`, stopped
+   or otherwise unavailable session shows the safe reason text and no action, so there is no
+   button that always fails. The dialog is a real `alertdialog` with a focus trap, Escape to
+   cancel and WCAG 2.2 AA in light and dark, and no lease token, surface id, URL, port or
+   native session id reaches the renderer.
+
+   **Phase 4 (`ss-174`, `226056e`, follow-up `694f12a`) landed the lifecycle.** A 15 s lease
+   watcher plus focus, resume and pre-send checks releases the child and flips the view to
+   `lost`/read-only when another surface takes over; two consecutive verification failures are
+   terminal. A lost writer fences the running turn (late SSE frames and a late POST response
+   are ignored), closes it without inventing a completion, and backfills the chat from the
+   authoritative native log; the next explicit takeover clears the fence. Closing the chat or
+   switching sessions releases through the bridge command, closing the window uses the
+   bounded 3 s shutdown hook, and quitting the app uses the exit hook. An engine
+   restart/reconnect re-resolves the same writer and resumes the pump when this surface is
+   still the owner. Release is not Stop: a turn may keep running on the engine. The behavior
+   contract and owner-run checklist are [`docs/SESSION-TAKEOVER.md`](SESSION-TAKEOVER.md)
+   §2–§7; the UI tests are `packages/spirit-ui/src/test/next/chatTakeover.test.tsx` and the
+   fake-bridge lifecycle e2e is `apps/spirit-desktop/e2e/chat-takeover.spec.ts`.
+
+   **Honest limit.** Today's node-hosted Local deployments still do not get the action:
+   VOWP 0.5.1's `orchestrator attach` is home-side and refuses a node-hosted orchestrator,
+   and there is no `vowp agent orchestrator attach`. Such a session stays read-only with the
+   `node_hosted` reason and no Take over button. The action becomes usable only with a
+   co-located home endpoint (the Phase 1 home fallback) or a VOWP node-level attach; neither
+   is live here. Ownership stays cooperative: a direct OpenCode/HTTP writer is not fenced
+   (the loopback engine proxy is still deferred), so do not type into the same orchestrator
+   from two windows.
 
    Separately, the chat's Meadow ownership banner names the holder and its activity;
    **Take over** there is explicit (`vowp --json session takeover --kind chat --holder
    stackspirit --node <local node>`) and asks for an extra confirmation while a turn is
    running. If VOWP lacks the command the banner keeps Take over disabled and shows a typed
    error. That banner is the separate one-shot worker-session signal, not the durable writer
-   lease above. The loopback engine proxy is still deferred (owner decision 2026-11-20), so
-   ownership is recorded and cooperative and a direct engine writer is not fenced: full
-   takeover and writer fencing remain open, and do not type into the same orchestrator from
-   two windows.
+   above; when the Phase 3 action or a held writer is visible, the banner hides its own
+   Take over so the two operations never share the label.
 4. **Use the VOWP-reported native session id — landed and required (`ss-61`, `66563cd`;
    `ss-62`, `0237770`; fallback removed `ss-154`, `773b54a`).** `vowp agent orchestrator
    endpoint` reports `native_session_id` (VOWP 0.5.1+; runtime slice 2 is done in
