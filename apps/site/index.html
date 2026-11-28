@@ -54,37 +54,6 @@
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
 
-    <div class="scroll-path" id="scroll-path" aria-hidden="true">
-      <svg
-        class="scroll-path__svg"
-        viewBox="0 0 72 4000"
-        preserveAspectRatio="none"
-        focusable="false"
-      >
-        <path
-          class="scroll-path__track"
-          id="scroll-path-line"
-          d="M36 0 C64 180 8 300 36 470 C64 640 8 760 36 930 C64 1100 8 1220 36 1390 C64 1560 8 1680 36 1850 C64 2020 8 2140 36 2310 C64 2480 8 2600 36 2770 C64 2940 8 3060 36 3230 C64 3400 8 3520 36 3690 C50 3800 30 3900 36 4000"
-        />
-        <path
-          class="scroll-path__progress"
-          id="scroll-path-progress"
-          d="M36 0 C64 180 8 300 36 470 C64 640 8 760 36 930 C64 1100 8 1220 36 1390 C64 1560 8 1680 36 1850 C64 2020 8 2140 36 2310 C64 2480 8 2600 36 2770 C64 2940 8 3060 36 3230 C64 3400 8 3520 36 3690 C50 3800 30 3900 36 4000"
-        />
-      </svg>
-      <div class="scroll-path__mascot" id="scroll-path-mascot">
-        <span class="scroll-path__shadow" aria-hidden="true"></span>
-        <span class="scroll-path__flip">
-          <canvas
-            class="scroll-path__sprite"
-            width="52"
-            height="48"
-            aria-hidden="true"
-          ></canvas>
-        </span>
-      </div>
-    </div>
-
     <header class="site-header">
       <div class="container header-inner">
         <a class="brand" href="/" aria-label="StackSpirit home">
@@ -332,14 +301,14 @@
         <div class="hero-road" id="hero-road" aria-hidden="true">
           <svg
             class="hero-road__svg"
-            viewBox="0 0 1440 96"
+            viewBox="0 0 1440 120"
             preserveAspectRatio="none"
             focusable="false"
           >
             <path
               class="hero-road__line"
               id="hero-road-path"
-              d="M -60 72 C 180 86, 360 44, 620 62 C 880 80, 1080 34, 1300 54 C 1380 62, 1440 48, 1500 44"
+              d="M -60 92 C 180 104, 360 72, 620 86 C 880 100, 1080 68, 1300 82 C 1380 88, 1440 76, 1500 74"
             />
           </svg>
           <div class="hero-road__walker" id="hero-road-walker">
@@ -941,118 +910,162 @@
           </header>
 
           <figure class="cockpit-board">
-            <div class="cockpit cockpit--wide" aria-hidden="true">
-              <div class="cockpit__bar">
-                <span class="cockpit__lights" aria-hidden="true"
-                  ><span></span><span></span><span></span
-                ></span>
-                <span class="cockpit__path">~/stackspirit/home-01</span>
-                <span class="cockpit__meta">ssh · ed25519 · pinned</span>
-                <span class="cockpit__badge">rendered preview</span>
-              </div>
-              <div class="cockpit__metrics">
-                <div class="metric">
-                  <span class="metric__k">home</span>
-                  <span class="metric__v metric__v--live">online</span>
-                </div>
-                <div class="metric">
-                  <span class="metric__k">workers</span>
-                  <span class="metric__v">04 / 04</span>
-                </div>
-                <div class="metric">
-                  <span class="metric__k">queued</span>
-                  <span class="metric__v">03</span>
-                </div>
-                <div class="metric">
-                  <span class="metric__k">p95 turn</span>
-                  <span class="metric__v">00:42</span>
-                </div>
-                <div class="metric">
-                  <span class="metric__k">disk</span>
-                  <span class="metric__v">38%</span>
-                </div>
-                <div class="metric">
-                  <span class="metric__k">uptime</span>
-                  <span class="metric__v">31d</span>
+            <div class="wgraph" aria-hidden="true">
+              <div class="wgraph__bar">
+                <span class="wgraph__lights"><span></span><span></span><span></span></span>
+                <span class="wgraph__host">StackSpirit Desktop &middot; <strong>home-01</strong></span>
+                <span class="wgraph__pill wgraph__pill--live">online</span>
+                <div class="wgraph__telemetry">
+                  <span>workers <strong>4 / 8</strong></span>
+                  <span>queued <strong>3</strong></span>
+                  <span>ram <strong>20.4 / 24G</strong></span>
+                  <span>cpu <strong>18%</strong></span>
                 </div>
               </div>
-              <div class="cockpit__panes cockpit__panes--wide">
-                <div class="cockpit__pane">
-                  <div class="pane__head">
-                    <span>session / global</span>
-                    <span>transport: server</span>
-                  </div>
-                  <div class="terminal">
-                    <p><span class="terminal__prompt">$</span> stackspirit status --watch</p>
-                    <p class="terminal__dim">home-01 · online · 4 workers · 3 queued</p>
-                    <p>
-                      <span class="terminal__ok">ok</span> orchestrator
-                      <span class="terminal__dim">opencode · default</span>
-                    </p>
-                    <p>
-                      <span class="terminal__run">run</span> main
-                      <span class="terminal__dim">verifier/fix loop · 00:42:11</span>
-                    </p>
-                    <p>
-                      <span class="terminal__think">···</span> review
-                      <span class="terminal__dim">claude code · waiting on model</span>
-                    </p>
-                    <p>
-                      <span class="terminal__queue">que</span> ship
-                      <span class="terminal__dim">codex · position 02</span>
-                    </p>
-                    <p class="terminal__line">
-                      <span class="terminal__prompt">$</span><span class="terminal__cursor"></span>
-                    </p>
-                  </div>
-                </div>
-                <div class="cockpit__pane">
-                  <div class="pane__head">
-                    <span>lane board</span>
-                    <span>04 lanes</span>
-                  </div>
-                  <ul class="lane-board" role="list">
-                    <li>
-                      <span class="lane-board__name">main</span>
-                      <span class="lane-board__job">tests / green</span>
-                      <span class="tag tag--run">run</span>
+
+              <div class="wgraph__body">
+                <aside class="wgraph__rail">
+                  <p class="wgraph__rail-title">Projects</p>
+                  <ul class="wgraph__projects" role="list">
+                    <li class="is-selected">
+                      <span class="wgraph__proj-name">stackspirit</span>
+                      <span class="wgraph__proj-counts">3 run &middot; 2 queue</span>
                     </li>
                     <li>
-                      <span class="lane-board__name">review</span>
-                      <span class="lane-board__job">diff / 42 files</span>
-                      <span class="tag tag--think">think</span>
+                      <span class="wgraph__proj-name">cloud</span>
+                      <span class="wgraph__proj-counts">1 run &middot; 1 queue</span>
                     </li>
                     <li>
-                      <span class="lane-board__name">ship</span>
-                      <span class="lane-board__job">release / next</span>
-                      <span class="tag tag--queue">queue</span>
-                    </li>
-                    <li>
-                      <span class="lane-board__name">ci</span>
-                      <span class="lane-board__job">nightly / 02:00</span>
-                      <span class="tag tag--idle">idle</span>
+                      <span class="wgraph__proj-name">personal-api</span>
+                      <span class="wgraph__proj-counts">idle</span>
                     </li>
                   </ul>
-                  <div class="node-map node-map--wide">
-                    <span class="node-map__node">home</span>
-                    <span class="node-map__wire" aria-hidden="true"></span>
-                    <span class="node-map__node node-map__node--hot">workers 04</span>
-                    <span class="node-map__wire" aria-hidden="true"></span>
-                    <span class="node-map__node">sessions 17</span>
+                  <div class="wgraph__rail-foot">
+                    <span class="wgraph__rail-cap">Capacity target 8</span>
+                    <span class="wgraph__rail-cap">Brake off &middot; 0 inbox</span>
+                  </div>
+                </aside>
+
+                <div class="wgraph__stage">
+                  <div class="wgraph__lane">
+                    <div class="wgraph__lane-head">
+                      <span class="wgraph__dot wgraph__dot--run"></span>
+                      <span>Running</span>
+                      <span class="wgraph__count">4</span>
+                    </div>
+
+                    <article class="wnode wnode--run">
+                      <div class="wnode__top">
+                        <span class="wnode__proj">stackspirit</span>
+                        <span class="wnode__age">4m 12s</span>
+                      </div>
+                      <p class="wnode__title">ss-179-acp-harness-chat</p>
+                      <div class="wnode__meta">
+                        <span class="wnode__chip wnode__chip--harness">OpenCode</span>
+                        <span class="wnode__chip">DeepSeek</span>
+                        <span class="wnode__model">DeepSeek V4.1 Flash</span>
+                      </div>
+                    </article>
+
+                    <article class="wnode wnode--run">
+                      <div class="wnode__top">
+                        <span class="wnode__proj">stackspirit</span>
+                        <span class="wnode__age">2m 48s</span>
+                      </div>
+                      <p class="wnode__title">ss-180-settings-popover</p>
+                      <div class="wnode__meta">
+                        <span class="wnode__chip wnode__chip--harness">Cursor ACP</span>
+                        <span class="wnode__chip">Cursor</span>
+                        <span class="wnode__model">Cursor Auto</span>
+                      </div>
+                    </article>
+
+                    <article class="wnode wnode--run">
+                      <div class="wnode__top">
+                        <span class="wnode__proj">stackspirit</span>
+                        <span class="wnode__age">6m 05s</span>
+                      </div>
+                      <p class="wnode__title">ss-181-web-onboarding</p>
+                      <div class="wnode__meta">
+                        <span class="wnode__chip wnode__chip--harness">Claude Code</span>
+                        <span class="wnode__chip">Anthropic</span>
+                        <span class="wnode__model">Claude Sonnet</span>
+                      </div>
+                    </article>
+
+                    <article class="wnode wnode--run wnode--cloud">
+                      <div class="wnode__top">
+                        <span class="wnode__proj wnode__proj--cloud">cloud</span>
+                        <span class="wnode__age">1m 33s</span>
+                      </div>
+                      <p class="wnode__title">cloud-22-stripe-webhooks</p>
+                      <div class="wnode__meta">
+                        <span class="wnode__chip wnode__chip--harness">Codex</span>
+                        <span class="wnode__chip">OpenAI</span>
+                        <span class="wnode__model">GPT-5 Codex</span>
+                      </div>
+                    </article>
+                  </div>
+
+                  <svg class="wgraph__edges" viewBox="0 0 88 380" preserveAspectRatio="none" focusable="false">
+                    <path class="wgraph__wire wgraph__wire--active" d="M 0 46 C 44 46, 44 58, 88 58" />
+                    <path class="wgraph__wire" d="M 0 144 C 44 144, 44 58, 88 58" />
+                    <path class="wgraph__wire wgraph__wire--active" d="M 0 242 C 44 242, 44 176, 88 176" />
+                    <path class="wgraph__wire wgraph__wire--active" d="M 0 338 C 44 338, 44 294, 88 294" />
+                  </svg>
+
+                  <div class="wgraph__lane">
+                    <div class="wgraph__lane-head">
+                      <span class="wgraph__dot wgraph__dot--queue"></span>
+                      <span>Queued / Waiting</span>
+                      <span class="wgraph__count">3</span>
+                    </div>
+
+                    <article class="wnode wnode--queue">
+                      <div class="wnode__top">
+                        <span class="wnode__proj">stackspirit</span>
+                        <span class="wnode__role">verify</span>
+                      </div>
+                      <p class="wnode__title">ss-179-verify-0</p>
+                      <div class="wnode__meta">
+                        <span class="wnode__chip wnode__chip--harness">OpenCode</span>
+                        <span class="wnode__chip">DeepSeek</span>
+                        <span class="wnode__model">DeepSeek V4.1 Flash</span>
+                      </div>
+                    </article>
+
+                    <article class="wnode wnode--queue">
+                      <div class="wnode__top">
+                        <span class="wnode__proj">stackspirit</span>
+                        <span class="wnode__role">verify</span>
+                      </div>
+                      <p class="wnode__title">ss-181-verify-0</p>
+                      <div class="wnode__meta">
+                        <span class="wnode__chip wnode__chip--harness">OpenCode</span>
+                        <span class="wnode__chip">OpenRouter</span>
+                        <span class="wnode__model">Gemini 4 Neon</span>
+                      </div>
+                    </article>
+
+                    <article class="wnode wnode--queue wnode--cloud">
+                      <div class="wnode__top">
+                        <span class="wnode__proj wnode__proj--cloud">cloud</span>
+                        <span class="wnode__role">verify</span>
+                      </div>
+                      <p class="wnode__title">cloud-22-reacceptance</p>
+                      <div class="wnode__meta">
+                        <span class="wnode__chip wnode__chip--harness">OpenCode</span>
+                        <span class="wnode__chip">DeepSeek</span>
+                        <span class="wnode__model">DeepSeek V4.1 Flash</span>
+                      </div>
+                    </article>
                   </div>
                 </div>
-              </div>
-              <div class="cockpit__footer">
-                <span>jobs <strong>017</strong></span>
-                <span>sessions <strong>004</strong></span>
-                <span>mcp <strong>stdio</strong></span>
-                <span>secrets <strong>names only</strong></span>
-                <span class="cockpit__prompt">~/stackspirit $</span>
               </div>
             </div>
             <figcaption>
-              A rendered preview of the desktop cockpit at work. No live server is connected on
-              this page.
+              Illustration of the StackSpirit Desktop worker graph: multiple projects, harnesses,
+              providers and models running and queued on one Always-On Home.
             </figcaption>
           </figure>
 

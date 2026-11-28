@@ -397,23 +397,21 @@ await check("hero and feature cards carry the pixel-shimmer canvas", async () =>
   }
 });
 
-await check("the scroll path has a curved SVG and a pixel mascot", async () => {
-  assertIncludes(indexHtml, 'id="scroll-path"');
-  assertIncludes(indexHtml, 'id="scroll-path-line"');
-  assertIncludes(indexHtml, 'id="scroll-path-progress"');
-  assertIncludes(indexHtml, 'id="scroll-path-mascot"');
-  assertIncludes(indexHtml, 'class="scroll-path__sprite"');
-  assertIncludes(indexHtml, "hero-road-canvas");
+await check("the hero road has a curved SVG and code-generated hopping frog", async () => {
+  assertIncludes(indexHtml, 'id="hero-road"');
+  assertIncludes(indexHtml, 'id="hero-road-path"');
+  assertIncludes(indexHtml, 'id="hero-road-walker"');
+  assertIncludes(indexHtml, 'id="hero-road-canvas"');
+  assertIncludes(indexHtml, 'class="wgraph"');
   assertIncludes(await read("pixel-film.mjs"), "renderFrogHopFrame");
-  const path = indexHtml.match(/<path\b[^>]*id="scroll-path-line"[^>]*>/i)?.[0] ?? "";
-  assert.ok(/\bd="[^"]*C/.test(path), "scroll path should be a curve");
+  const path = indexHtml.match(/<path\b[^>]*id="hero-road-path"[^>]*>/i)?.[0] ?? "";
+  assert.ok(/\bd="[^"]*C/.test(path), "hero road path should be a curve");
   const craft = await read("craft.mjs");
   for (const part of [
     "prefers-reduced-motion: reduce",
     "getPointAtLength",
     "getScreenCTM",
     "requestAnimationFrame",
-    "classList.toggle(\"is-flipped\"",
   ]) {
     assertIncludes(craft, part, "craft.mjs");
   }
