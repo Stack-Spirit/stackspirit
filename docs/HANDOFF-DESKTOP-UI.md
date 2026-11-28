@@ -468,23 +468,42 @@ copy of the VOWP plan):
    orchestrator's endpoint allows, an app-owned SSH forward, and keeping Server chat gated.
    The owner decision remains **A** (§3), so Server chat stays gated; revisit only if the
    owner asks.
-3. **Session ownership in the UI — banner and read-only half landed (`ss-92`, `9a1031c`;
-   follow-up fixes `1eee71f`, `504987b`, `1c9f315`; `ss-95`, `4411dbf`; read-only chat
-   half `ss-152`, `ss-153`).** The runtime endpoint carries `owner`/`access`
+3. **Session ownership in the UI — read-only half landed; explicit takeover is
+   core/bridge-only (`ss-92`, `9a1031c`; follow-up fixes `1eee71f`, `504987b`, `1c9f315`;
+   `ss-95`, `4411dbf`; read-only chat half `ss-152`, `ss-153`; design
+   [`docs/SESSION-TAKEOVER.md`](SESSION-TAKEOVER.md), `ss-169`; Phase 1 `ss-170`; Phase 2
+   `ss-171`).** The runtime endpoint carries `owner`/`access`
    (`runtime/crates/vowp-protocol/src/surface.rs`), and StackSpirit maps the home snapshot's
    `SessionOwner` into `FleetView.session_owners` (`crates/spirit-core/src/view/fleet.rs`)
    and the endpoint's display-only owner into `ChatSessionView.ownership`/`.access`
    (`crates/spirit-core/src/engine/chat/model.rs`). The chat header now shows an ownership
    chip, and a `read_only` session shows a calm notice above the composer with its message
    field and Send disabled; closing the other window or ending the CLI session releases it.
-   That notice deliberately adds no takeover action. Separately, the chat's Meadow ownership
-   banner names the holder and its activity; **Take over** is explicit (`vowp --json session
-   takeover --kind chat --holder stackspirit --node <local node>`) and asks for an extra
-   confirmation while a turn is running. If VOWP lacks the command the banner keeps Take over
-   disabled and shows a typed error. The loopback engine proxy is still deferred (owner
-   decision 2026-11-20), so ownership is recorded and cooperative and a direct engine writer
-   is not fenced: full takeover and writer fencing remain open, and do not type into the same
-   orchestrator from two windows.
+   That notice deliberately adds no takeover action.
+
+   **Explicit takeover is not a UI action yet.** Phase 1 landed the core
+   `ChatWriter`/lease manager with a hermetic fake `vowp` child (`ss-170`); Phase 2 landed
+   the `chat_take_over`/`chat_release_writer` Tauri commands, the exit hook and the optional
+   `SpiritBridge.chat.takeOver`/`releaseWriter` methods (`ss-171`). **Phase 3, the UI action,
+   is deliberately not shipped.** Today's live Local path is node-hosted: VOWP's home-side
+   `orchestrator attach` refuses it, and there is no `vowp agent orchestrator attach`. A
+   node-hosted session therefore stays read-only: the existing notice shows the read-only
+   reason (falling back to "Another window" when VOWP reports no holder), the composer stays
+   disabled, and no Phase 3 takeover button is rendered. The core/bridge methods are inert
+   in the shipped UI — no UI calls them, and on this path they cannot produce a writer lease
+   (the core's safe reason is `node_hosted`). They stay inert until the owner chooses a
+   co-located home deployment or VOWP ships a node-level attach, with Phase 3 still needed
+   to wire the action; a button that always fails is worse than the honest notice.
+
+   Separately, the chat's Meadow ownership banner names the holder and its activity;
+   **Take over** there is explicit (`vowp --json session takeover --kind chat --holder
+   stackspirit --node <local node>`) and asks for an extra confirmation while a turn is
+   running. If VOWP lacks the command the banner keeps Take over disabled and shows a typed
+   error. That banner is the separate one-shot worker-session signal, not the durable writer
+   lease above. The loopback engine proxy is still deferred (owner decision 2026-11-20), so
+   ownership is recorded and cooperative and a direct engine writer is not fenced: full
+   takeover and writer fencing remain open, and do not type into the same orchestrator from
+   two windows.
 4. **Use the VOWP-reported native session id — landed and required (`ss-61`, `66563cd`;
    `ss-62`, `0237770`; fallback removed `ss-154`, `773b54a`).** `vowp agent orchestrator
    endpoint` reports `native_session_id` (VOWP 0.5.1+; runtime slice 2 is done in
