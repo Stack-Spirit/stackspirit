@@ -14,6 +14,7 @@ import type {
   CapacityTargetView,
   CapacityView,
   ChatEvent,
+  ChatHarnessSettingsView,
   ChatLogPage,
   ChatLogQuery,
   ChatPermissionDecision,
@@ -118,6 +119,22 @@ export interface ChatBridgeSurface {
   provisionOrchestrator?(project: string): Promise<ChatSessionView>;
   /** Reuse the stored native session; never creates one. */
   attach(session: SessionId): Promise<ChatSessionView>;
+  /**
+   * Reads the persisted default harness for new app-owned chats and its typed gate.
+   *
+   * A fresh profile reports OpenCode as `ready`. The view carries only a registry id
+   * and the gate; never a path, endpoint, port, token or native id. Optional: an older
+   * bridge may omit it, and absence keeps the documented OpenCode default.
+   */
+  harnessSettings?(): Promise<ChatHarnessSettingsView>;
+  /**
+   * Saves the default harness for new app-owned chats and returns the refreshed view.
+   *
+   * Only `ready` and `harness_not_wired` selections are accepted. A missing, worker-only
+   * or unsupported-protocol id rejects with its typed gate error, and an unreadable
+   * settings file is never overwritten. Optional: an older bridge may omit it.
+   */
+  setDefaultHarness?(harnessId: string): Promise<ChatHarnessSettingsView>;
   /**
    * Accept one user turn; assistant text arrives via `subscribe`. Rejects while the
    * session is `streaming` with `chat_busy` (there is no queue) and rejects empty or

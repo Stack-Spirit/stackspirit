@@ -17,6 +17,7 @@ import type {
   CapacityTargetView,
   CapacityView,
   ChatEvent,
+  ChatHarnessSettingsView,
   ChatLogPage,
   ChatLogQuery,
   ChatMessage,
@@ -594,6 +595,18 @@ function previewChatWriterUnavailable(): SpiritErrorDto {
     "preview_unavailable",
     "Session takeover needs the desktop host and a co-located VOWP home; preview mode never holds a writer lease.",
     "Run the desktop app without VITE_SPIRIT_MOCK to take over or release a session.",
+  );
+}
+
+/**
+ * Preview mode has no app-data directory and no harness registry write path, so it must
+ * never pretend to save a chat harness default.
+ */
+function previewChatSettingsUnavailable(): SpiritErrorDto {
+  return errorDto(
+    "preview_unavailable",
+    "Chat harness settings need the desktop host; preview mode never writes chat settings.",
+    "Run the desktop app without VITE_SPIRIT_MOCK to change the default chat harness.",
   );
 }
 
@@ -2091,6 +2104,18 @@ export class MockBridge implements SpiritBridge {
         session: clone(view),
       });
       return clone(view);
+    },
+    harnessSettings: async (): Promise<ChatHarnessSettingsView> => ({
+      // A fresh profile stores no id; the documented default is OpenCode.
+      default_harness_id: null,
+      gate: { state: "ready", harness_id: "opencode", protocol: "opencode-http" },
+    }),
+    setDefaultHarness: async (
+      harnessId: string,
+    ): Promise<ChatHarnessSettingsView> => {
+      // Preview never writes chat settings; the id is ignored and never stored.
+      void harnessId;
+      throw previewChatSettingsUnavailable();
     },
     attach: async (session: SessionId): Promise<ChatSessionView> => {
       this.validateChatSession(session);
