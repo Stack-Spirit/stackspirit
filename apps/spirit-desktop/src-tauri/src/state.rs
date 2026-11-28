@@ -47,6 +47,12 @@ pub(crate) const LOCAL_ORCHESTRATOR_ACTIONS_ENABLED: bool = true;
 /// child that misses that budget is reaped by `ChatWriter`'s non-blocking `Drop`.
 const CHAT_WRITER_SHUTDOWN_BUDGET: Duration = Duration::from_secs(3);
 
+/// The total budget for one focus/resume writer check.
+///
+/// The watcher polls every 15 s; a focus or resume re-verifies immediately so a lease
+/// that went stale during sleep flips read-only before the next send.
+const CHAT_WRITER_CHECK_BUDGET: Duration = Duration::from_secs(5);
+
 /// The feature flags this build advertises. D5 flips the ASIF switch; the D6 build
 /// flips the local-orchestrator switch only for a `Ready` gate and a connected agent.
 pub(crate) fn build_gate_features() -> GateFeatureFlags {
@@ -655,6 +661,33 @@ impl AppState {
             .collect()
     }
 
+    /// A snapshot of the sessions whose writer this process may hold.
+    fn chat_writer_sessions(&self) -> Vec<ChatSessionId> {
+        self.chat_writers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Re-verifies every held writer now (window focus or resume after sleep).
+    ///
+    /// The bounded check refreshes a restarted engine's endpoint or flips a replaced
+    /// lease read-only. It never attaches and never blocks the UI thread.
+    pub(crate) fn request_chat_writer_check(&self) {
+        let sessions = self.chat_writer_sessions();
+        if sessions.is_empty() {
+            return;
+        }
+        let check = check_writer_sessions(self.chat(), sessions);
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tauri::async_runtime::spawn(check);
+        } else {
+            tauri::async_runtime::block_on(check);
+        }
+    }
+
     /// Releases every writer child this process may still hold, bounded and panic-free.
     ///
     /// This is the async form of the shutdown hook from `docs/SESSION-TAKEOVER.md` §2.6.
@@ -876,4 +909,20 @@ async fn release_writer_sessions(chat: Arc<LocalChatProvider>, sessions: Vec<Cha
         }
     };
     let _ = tokio::time::timeout(CHAT_WRITER_SHUTDOWN_BUDGET, release).await;
+}
+
+/// Re-verifies a set of held writers with the shared focus/resume budget.
+///
+/// A lost or replaced lease is published by core as a read-only session view. Errors are
+/// intentionally swallowed: focus must never produce a user-visible failure.
+async fn check_writer_sessions(chat: Arc<LocalChatProvider>, sessions: Vec<ChatSessionId>) {
+    if sessions.is_empty() {
+        return;
+    }
+    let check = async move {
+        for session in sessions {
+            let _ = chat.probe_writer(&session).await;
+        }
+    };
+    let _ = tokio::time::timeout(CHAT_WRITER_CHECK_BUDGET, check).await;
 }

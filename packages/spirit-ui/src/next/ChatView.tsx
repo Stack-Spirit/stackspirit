@@ -1239,6 +1239,25 @@ export function ChatView({
     void open(session, project, "local");
   }, [open, session, project]);
 
+  // Closing the chat view or switching sessions must not keep this app's lease. This is
+  // only a release path: the Phase 3 Take over/Release controls and copy are unchanged.
+  const writerMayHoldOnUnmount = useRef(false);
+  useEffect(() => {
+    // A take-over still in flight can finish after this view unmounts; release waits
+    // behind the attach in core and is an idempotent no-op if the attach failed.
+    writerMayHoldOnUnmount.current =
+      view?.writer?.state === "held" || writerBusy === "takeOver";
+  }, [view?.writer?.state, writerBusy]);
+  useEffect(() => {
+    return () => {
+      if (!writerMayHoldOnUnmount.current) return;
+      writerMayHoldOnUnmount.current = false;
+      const chat = bridge?.chat;
+      if (!chat?.releaseWriter) return;
+      void chat.releaseWriter(session).catch(() => {});
+    };
+  }, [bridge, session]);
+
   useEffect(() => {
     if (retry?.next == null) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);

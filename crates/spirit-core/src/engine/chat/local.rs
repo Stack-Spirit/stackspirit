@@ -915,6 +915,9 @@ impl LocalChatProvider {
                     Some(existing) if existing.matches_target(&target) => Arc::clone(existing),
                     _ => {
                         let writer = Arc::new(ChatWriter::new(target, config.clone()));
+                        // A watcher loss must flip this session view and fence a running
+                        // turn without waiting for a renderer request.
+                        install_writer_listener(&writer, Arc::downgrade(&self.inner), session);
                         writer.start_watcher();
                         writer
                     }
@@ -958,6 +961,14 @@ impl LocalChatProvider {
                 effective
             })
             .unwrap_or_else(|| endpoint.clone());
+        if writer.is_some() {
+            // A held grant that just re-resolved a restarted engine keeps the lease but
+            // the re-read log and transport must use the new loopback URL/auth.
+            let mut state = self.inner.state.lock().await;
+            if let Some(record) = state.sessions.get_mut(session) {
+                record.endpoint = Some(effective.clone());
+            }
+        }
         ensure_pump(&self.inner, &effective);
         // A turn that was already waiting on a permission or retry when the UI (re)attached.
         self.inner.clone().sync_permissions(session).await;
@@ -1134,9 +1145,10 @@ impl LocalChatProvider {
             if view.state != ChatWriterState::Held || access != ChatAccess::Owner {
                 return Err(ChatWriterError::ReadOnly.into());
             }
-            if let Some(updated) = writer.endpoint_snapshot()
-                && updated.port != stored_endpoint.port
-            {
+            if let Some(updated) = writer.endpoint_snapshot() {
+                // The watch re-resolved the home endpoint. Keep the fresh URL/auth even
+                // when an engine restart kept the same port; the pump below restarts on
+                // a changed port from the updated endpoint.
                 let mut effective = ChatEndpoint::orchestrator(updated);
                 effective.api_prefix = stored_endpoint.api_prefix;
                 stored_endpoint = effective;
@@ -2313,6 +2325,143 @@ impl Inner {
         self.state.lock().await.sessions.remove(session);
     }
 
+    /// Flips a session read-only after the writer watcher reports a terminal loss.
+    ///
+    /// A running turn is fenced: its late response cannot append text, the composer is
+    /// read-only, and the authoritative home log is re-read to backfill what actually
+    /// happened. The new owner is named from display-only fields.
+    async fn on_writer_lost(self: Arc<Self>, session: ChatSessionId) {
+        let now = self.clock.now();
+        let view = {
+            let mut state = self.state.lock().await;
+            let Some(record) = state.sessions.get_mut(&session) else {
+                return;
+            };
+            let Some(writer) = record.writer.as_ref().map(Arc::clone) else {
+                return;
+            };
+            let writer_view = writer.view();
+            if writer_view.state != ChatWriterState::Lost {
+                return;
+            }
+            let running =
+                record.state == ChatSessionState::Streaming || record.active_turn.is_some();
+            record.access = ChatAccess::ReadOnly;
+            record.ownership = writer.observed_ownership();
+            if running {
+                record.state = ChatSessionState::Ready;
+                record.active_turn = None;
+                record.turn_completed = true;
+                // Ignore SSE frames from the abandoned turn until the next explicit
+                // attach or takeover re-reads the log and clears this flag.
+                record.turn_cancelled = true;
+                record.retry = None;
+                record.pending_permissions.clear();
+                record.turn_seq = record.turn_seq.saturating_add(1);
+                record.last_event_at = Some(now);
+            }
+            self.view_for(&session, record)
+        };
+        self.clone().emit_session(view).await;
+        // The home log is authoritative: a drained or late final message must come from
+        // here, never from the abandoned background response.
+        self.clone().reload_log(&session, false).await;
+    }
+
+    /// Fences one in-flight turn whose writer lease is no longer held.
+    ///
+    /// The background POST's late body is dropped, the optimistic turn is closed without
+    /// appending its answer, and the native log is re-read from the home endpoint.
+    async fn fence_lost_turn(
+        self: Arc<Self>,
+        session: &ChatSessionId,
+        native: &str,
+        turn_seq: u64,
+    ) {
+        let now = self.clock.now();
+        let view = {
+            let mut state = self.state.lock().await;
+            let Some(record) = state.sessions.get_mut(session) else {
+                return;
+            };
+            if record.native_session_id != native || record.turn_seq != turn_seq {
+                return;
+            }
+            let Some(writer) = record.writer.as_ref().map(Arc::clone) else {
+                return;
+            };
+            if writer.view().state == ChatWriterState::Held {
+                return;
+            }
+            if record.active_turn.is_none() && record.state != ChatSessionState::Streaming {
+                return;
+            }
+            record.state = ChatSessionState::Ready;
+            record.active_turn = None;
+            record.turn_completed = true;
+            record.turn_cancelled = true;
+            record.retry = None;
+            record.pending_permissions.clear();
+            record.turn_seq = record.turn_seq.saturating_add(1);
+            record.access = ChatAccess::ReadOnly;
+            record.ownership = writer.observed_ownership();
+            record.last_event_at = Some(now);
+            self.view_for(session, record)
+        };
+        self.clone().emit_session(view).await;
+        self.clone().reload_log(session, false).await;
+    }
+
+    /// Re-resolves a held writer after an SSE disconnect (an engine restart or new port).
+    ///
+    /// Only sessions currently attached to the failed port are touched. A still-owned
+    /// grant keeps its lease and updates the loopback URL/auth; a replaced or
+    /// unverifiable one goes through the same lost path as the watcher.
+    async fn refresh_writer_endpoint(self: Arc<Self>, port: u16) -> Option<ChatEndpoint> {
+        let sessions: Vec<(ChatSessionId, Arc<ChatWriter>, ChatEndpoint)> = {
+            let state = self.state.lock().await;
+            state
+                .sessions
+                .iter()
+                .filter(|(session, record)| {
+                    !matches!(session, ChatSessionId::Setup) && !record.engine_backed
+                })
+                .filter_map(|(session, record)| {
+                    let endpoint = record.endpoint.as_ref()?;
+                    if endpoint.port != port {
+                        return None;
+                    }
+                    let writer = record.writer.as_ref()?;
+                    Some((session.clone(), Arc::clone(writer), endpoint.clone()))
+                })
+                .collect()
+        };
+        let mut refreshed = None;
+        for (session, writer, current) in sessions {
+            let view = writer.probe().await;
+            if view.state == ChatWriterState::Lost {
+                self.clone().on_writer_lost(session).await;
+                continue;
+            }
+            if view.state != ChatWriterState::Held {
+                continue;
+            }
+            let Some(resolved) = writer.endpoint_snapshot() else {
+                continue;
+            };
+            let mut effective = ChatEndpoint::orchestrator(resolved);
+            effective.api_prefix = current.api_prefix;
+            {
+                let mut state = self.state.lock().await;
+                if let Some(record) = state.sessions.get_mut(&session) {
+                    record.endpoint = Some(effective.clone());
+                }
+            }
+            refreshed = Some(effective);
+        }
+        refreshed
+    }
+
     fn project_and_publish_locked(
         &self,
         state: &mut ProviderState,
@@ -2478,6 +2627,41 @@ impl Inner {
         let Some(native) = event.session_id().map(str::to_owned) else {
             return;
         };
+        // A lease lost mid-turn is terminal for that turn: drop this frame and fence
+        // once, then reload the authoritative home log.
+        let fence = {
+            let mut state = self.state.lock().await;
+            state
+                .sessions
+                .iter_mut()
+                .find(|(session, record)| {
+                    record.native_session_id == native
+                        && if setup {
+                            matches!(session, ChatSessionId::Setup) || record.engine_backed
+                        } else {
+                            record
+                                .endpoint
+                                .as_ref()
+                                .is_some_and(|endpoint| endpoint.port == port)
+                        }
+                })
+                .and_then(|(session, record)| {
+                    let lost = !setup
+                        && record
+                            .writer
+                            .as_ref()
+                            .is_some_and(|writer| writer.view().state != ChatWriterState::Held);
+                    let running =
+                        record.state == ChatSessionState::Streaming || record.active_turn.is_some();
+                    (lost && running).then(|| (session.clone(), record.turn_seq))
+                })
+        };
+        if let Some((session, turn_seq)) = fence {
+            self.clone()
+                .fence_lost_turn(&session, &native, turn_seq)
+                .await;
+            return;
+        }
         let now = self.clock.now();
         let (session, mapped) = {
             let mut state = self.state.lock().await;
@@ -2829,6 +3013,26 @@ fn schedule_tool_refresh(inner: &Arc<Inner>, session: ChatSessionId) {
     tokio::spawn(future);
 }
 
+/// Installs the core-side loss callback on a writer manager.
+///
+/// The listener holds only a weak provider reference, so dropping the chat provider ends
+/// the callback just as it ends the watcher. It never receives lease identity.
+fn install_writer_listener(writer: &Arc<ChatWriter>, inner: Weak<Inner>, session: &ChatSessionId) {
+    let session = session.clone();
+    writer.set_view_listener(Arc::new(move |view| {
+        if view.state != ChatWriterState::Lost {
+            return;
+        }
+        let Some(inner) = inner.upgrade() else {
+            return;
+        };
+        let session = session.clone();
+        tokio::spawn(async move {
+            inner.on_writer_lost(session).await;
+        });
+    }));
+}
+
 fn spawn_turn(
     inner: Arc<Inner>,
     endpoint: ChatEndpoint,
@@ -2875,6 +3079,26 @@ impl Inner {
             {
                 return;
             }
+        }
+        // The watcher may have seen a replaced lease while this POST was in flight. The
+        // response is late for a grant this app no longer holds: fence it and re-read the
+        // home log instead of appending a partial answer.
+        let fenced = {
+            let state = self.state.lock().await;
+            state.sessions.get(session).is_some_and(|record| {
+                record.turn_seq == turn_seq
+                    && (record.active_turn.is_some() || record.state == ChatSessionState::Streaming)
+                    && record
+                        .writer
+                        .as_ref()
+                        .is_some_and(|writer| writer.view().state != ChatWriterState::Held)
+            })
+        };
+        if fenced {
+            self.clone()
+                .fence_lost_turn(session, native, turn_seq)
+                .await;
+            return;
         }
         let now = self.clock.now();
         let succeeded = matches!(&result, Ok(response) if (200..300).contains(&response.status));
@@ -3123,6 +3347,26 @@ async fn run_pump(
         if setup && provider.engine_moved_from(port).await {
             tokio::spawn(provider.clone().rebind_engine_sessions());
             return;
+        }
+        // A held orchestrator grant survives an engine restart when the watch still
+        // reports this surface as the owner. Re-resolve the home endpoint, then restart
+        // the pump on the new loopback URL/auth instead of reporting stream_lost.
+        if !setup && attempts <= 2 {
+            if let Some(refreshed) = provider.clone().refresh_writer_endpoint(port).await {
+                if refreshed.port != port {
+                    ensure_pump(&provider, &refreshed);
+                    return;
+                }
+                {
+                    let mut pumps = provider
+                        .pumps
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    stop_pump(&mut pumps, port);
+                }
+                ensure_pump(&provider, &refreshed);
+                return;
+            }
         }
         if attempts > MAX_SSE_ATTEMPTS {
             provider.stream_lost(port, setup).await;

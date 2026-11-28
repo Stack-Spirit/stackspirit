@@ -510,6 +510,13 @@ impl WriterState {
     }
 }
 
+/// A core-side observer for writer state transitions.
+///
+/// The chat provider installs one so a watcher loss can flip the owning session view to
+/// `lost`, fence a running turn and backfill the log without a renderer round trip. The
+/// callback sees only the safe [`ChatWriterView`]; it never receives a lease identity.
+pub type WriterViewListener = Arc<dyn Fn(ChatWriterView) + Send + Sync>;
+
 /// The core writer/lease manager for one chat session.
 ///
 /// One instance owns at most one attach child. All transitions are serialised behind an
@@ -521,6 +528,7 @@ pub struct ChatWriter {
     resolver: VowpEndpointResolver,
     state: Mutex<WriterState>,
     op: tokio::sync::Mutex<()>,
+    view_listener: Mutex<Option<WriterViewListener>>,
 }
 
 impl fmt::Debug for ChatWriter {
@@ -556,6 +564,30 @@ impl ChatWriter {
             resolver,
             state: Mutex::new(WriterState::new()),
             op: tokio::sync::Mutex::new(()),
+            view_listener: Mutex::new(None),
+        }
+    }
+
+    /// Installs the core-side state observer. Later calls replace it.
+    ///
+    /// The listener runs outside the state lock and must not block; the chat provider
+    /// only spawns the async view/fence work from it.
+    pub fn set_view_listener(&self, listener: WriterViewListener) {
+        *self
+            .view_listener
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(listener);
+    }
+
+    /// Publishes one safe transition to the installed observer, when any.
+    fn publish_view(&self, view: ChatWriterView) {
+        let listener = self
+            .view_listener
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(listener) = listener {
+            listener(view);
         }
     }
 
@@ -568,9 +600,16 @@ impl ChatWriter {
     /// The stable safe view. This also notices an attach child that exited unexpectedly.
     #[must_use]
     pub fn view(&self) -> ChatWriterView {
-        let mut state = self.lock_state();
-        state.refresh_exited();
-        state.view()
+        let (view, changed) = {
+            let mut state = self.lock_state();
+            let before = state.phase;
+            state.refresh_exited();
+            (state.view(), state.phase != before)
+        };
+        if changed {
+            self.publish_view(view);
+        }
+        view
     }
 
     /// Probes takeover eligibility without spawning an attach.
@@ -698,6 +737,12 @@ impl ChatWriter {
     /// child is released and the state becomes `lost`.
     pub async fn check_lease(&self) -> ChatWriterView {
         let _op = self.op.lock().await;
+        self.check_lease_locked().await
+    }
+
+    /// The unlocked lease check shared by [`Self::check_lease`], the watcher and a held
+    /// [`Self::probe`] (the focus/resume path). The caller holds the operation mutex.
+    async fn check_lease_locked(&self) -> ChatWriterView {
         let (surface_id, expected_session_id) = {
             let mut state = self.lock_state();
             state.refresh_exited();
@@ -827,12 +872,16 @@ impl ChatWriter {
     }
 
     async fn probe_locked(&self) -> ChatWriterView {
-        {
+        let held = {
             let mut state = self.lock_state();
             state.refresh_exited();
-            if state.phase == Phase::Held {
-                return state.view();
-            }
+            state.phase == Phase::Held
+        };
+        if held {
+            // Focus/resume/reconnect: re-resolve the home endpoint with this surface id.
+            // A still-owned lease keeps the grant and picks up a restarted engine's new
+            // loopback URL/auth; anything else is terminal for this grant.
+            return self.check_lease_locked().await;
         }
         match self.probe_inner().await {
             Ok(endpoint) => {
@@ -1036,16 +1085,19 @@ impl ChatWriter {
     }
 
     async fn lose(&self, reason: ChatWriterReason) -> ChatWriterView {
-        let lease = {
+        let (view, lease) = {
             let mut state = self.lock_state();
             state.phase = Phase::Lost(reason);
             state.active = None;
-            state.lease.take()
+            (state.view(), state.lease.take())
         };
         if let Some(lease) = lease {
             lease.release(self.config.release_timeout).await;
         }
-        self.view()
+        // The chat provider uses this to flip the session view read-only and fence a
+        // running turn; a raw view consumer never sees a lease identity.
+        self.publish_view(view);
+        view
     }
 
     fn set_unavailable(&self, reason: ChatWriterReason) {

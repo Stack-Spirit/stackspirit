@@ -176,6 +176,22 @@ pub fn run() {
             commands::files::files_upload,
             commands::files::files_download,
         ])
+        // Window close releases this process's writer children; focus/resume re-verifies
+        // a lease that may have gone stale while the app slept. Both hooks are bounded
+        // and idempotent; the chat view's own unmount release covers session switches.
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed => {
+                if let Some(state) = window.app_handle().try_state::<AppState>() {
+                    state.request_chat_writer_shutdown();
+                }
+            }
+            tauri::WindowEvent::Focused(true) => {
+                if let Some(state) = window.app_handle().try_state::<AppState>() {
+                    state.request_chat_writer_check();
+                }
+            }
+            _ => {}
+        })
         .build(tauri::generate_context!())
         .expect("error while building StackSpirit")
         .run(|app, event| {
