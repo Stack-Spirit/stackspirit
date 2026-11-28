@@ -727,20 +727,20 @@ button.nx-node:focus-visible {
   flex: none;
 }
 
-/* Settings and the account sit side by side; Theme lives inside Settings. */
-.nx-side__foot-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
+/* One Settings line opens the footer menu above it; Theme lives inside Settings. */
+.nx-side__foot .nx-menu,
+.nx-side__foot .nx-settings-trigger {
+  width: 100%;
 }
 
-.nx-side__foot-row > .nx-settings-trigger {
-  flex: 1 1 0;
+.nx-side__foot .nx-menu__pop {
+  width: 100%;
   min-width: 0;
 }
 
-.nx-account-trigger .nx-row-item__text {
-  font-size: 12px;
+.nx-menu__list {
+  display: grid;
+  gap: 1px;
 }
 
 /* 32px rows, 14px titles, 12px meta. */
