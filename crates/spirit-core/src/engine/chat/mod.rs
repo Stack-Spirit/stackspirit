@@ -24,7 +24,7 @@ pub use adapter::{
     HarnessSession, HarnessStart, HarnessTurn,
 };
 pub use endpoint::{ChatEndpointResolver, ResolvedEndpoint, VowpEndpointResolver};
-pub use harness::{HarnessChatGate, dry_run, gate_for_manifest, preflight};
+pub use harness::{HarnessChatGate, dry_run, gate_for_manifest, preflight, preflight_with};
 pub use local::{
     ChatEngine, ChatOrchestratorProvisioner, ChatTransport, KnownOrchestratorSession,
     LocalChatProvider, NativeSession, map_http_status, map_provider_error,
