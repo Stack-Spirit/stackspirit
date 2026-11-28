@@ -1,8 +1,22 @@
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 
 import { toSpiritError, type SpiritError } from "../bridge/errors";
-import type { HarnessesSurface, SpiritBridge } from "../bridge/SpiritBridge";
 import type {
+  ChatBridgeSurface,
+  HarnessesSurface,
+  SpiritBridge,
+} from "../bridge/SpiritBridge";
+import type {
+  ChatHarnessGateView,
+  ChatHarnessSettingsView,
   EngineStatus,
   HarnessAuthMode,
   HarnessBinaryState,
@@ -53,6 +67,11 @@ export type HarnessesBridge = Pick<SpiritBridge, "kind" | "preview"> & {
   harnesses?: HarnessesSurface;
   /** Provider keys are managed through the engine; absent on a read-only bridge. */
   engine?: SpiritBridge["engine"];
+  /**
+   * The chat default surface. Both methods must be present to show the control;
+   * older and read-only bridges may omit one or both.
+   */
+  chat?: Partial<Pick<ChatBridgeSurface, "harnessSettings" | "setDefaultHarness">>;
 };
 
 export interface HarnessesPanelProps {
@@ -660,6 +679,338 @@ function OpenCodeProviders({ engine }: { engine?: SpiritBridge["engine"] }) {
   );
 }
 
+interface ChatTransportOption {
+  id: string;
+  name: string;
+}
+
+interface ChatTransportGateCopy {
+  token: string;
+  tone: "ready" | "warn";
+  title: string;
+  detail: string;
+  canUseOpenCode: boolean;
+}
+
+interface ChatTransportControlProps {
+  manifests: HarnessManifest[];
+  loadSettings: () => Promise<ChatHarnessSettingsView>;
+  saveDefault: (harnessId: string) => Promise<ChatHarnessSettingsView>;
+}
+
+/**
+ * The chat-selectable registry entries: OpenCode plus every orchestrator manifest that
+ * is not a stock `cli-pty` terminal. Workers-only entries never appear here, even when a
+ * malformed manifest also claims embedded chat.
+ */
+function chatTransportOptions(manifests: HarnessManifest[]): ChatTransportOption[] {
+  const options: ChatTransportOption[] = [
+    { id: "opencode", name: "OpenCode" },
+  ];
+  const seen = new Set(["opencode"]);
+  for (const manifest of manifests) {
+    if (seen.has(manifest.id)) continue;
+    if (manifestSurface(manifest) !== "orchestrator_and_workers") continue;
+    if (manifest.supports_embedded_chat === false) continue;
+    if (manifest.protocol === "cli-pty") continue;
+    seen.add(manifest.id);
+    options.push({ id: manifest.id, name: manifest.name });
+  }
+  return options;
+}
+
+function chatTransportOptionLabel(option: ChatTransportOption): string {
+  return option.id === "opencode"
+    ? "OpenCode · ready"
+    : `${option.name} · harness_not_wired`;
+}
+
+/**
+ * Fixed, safe copy for one gate. It repeats the stable token and never includes a path,
+ * endpoint, port, token value or native id. Only OpenCode can recover a non-ready gate;
+ * an unreadable settings file gets no write action at all.
+ */
+function chatTransportGateCopy(
+  gate: ChatHarnessGateView,
+  nameFor: (harnessId: string) => string,
+): ChatTransportGateCopy {
+  switch (gate.state) {
+    case "ready":
+      return {
+        token: gate.state,
+        tone: "ready",
+        title: `${nameFor(gate.harness_id)} is ready for new chats.`,
+        detail:
+          "New app-owned local conversations will use it. This control does not start a chat.",
+        canUseOpenCode: false,
+      };
+    case "harness_not_wired":
+      return {
+        token: gate.state,
+        tone: "warn",
+        title: `${nameFor(gate.harness_id)} is not wired for chat yet.`,
+        detail:
+          "Its chat adapter is not wired yet, so a new setup chat will return " +
+          "harness_not_wired and start no process. The selection is saved for planning " +
+          "only; no harness chat is live.",
+        canUseOpenCode: true,
+      };
+    case "harness_missing":
+      return {
+        token: gate.state,
+        tone: "warn",
+        title: "The saved chat harness is missing.",
+        detail: `${nameFor(gate.harness_id)} is not in the harness registry. StackSpirit did not change the saved default; choose another default explicitly.`,
+        canUseOpenCode: true,
+      };
+    case "harness_worker_only":
+      return {
+        token: gate.state,
+        tone: "warn",
+        title: "That harness is workers-only.",
+        detail: `${nameFor(gate.harness_id)} cannot back the embedded chat. It is never chat-selectable, and the saved default was not changed. Choose another default explicitly.`,
+        canUseOpenCode: true,
+      };
+    case "harness_protocol_unsupported":
+      return {
+        token: gate.state,
+        tone: "warn",
+        title: "That harness protocol cannot back the embedded chat.",
+        detail: `${nameFor(gate.harness_id)} uses ${PROTOCOL_LABELS[gate.protocol]}. The saved default was not changed; choose another default explicitly.`,
+        canUseOpenCode: true,
+      };
+    case "chat_settings_unreadable": {
+      const { problem } = gate;
+      return {
+        token: gate.state,
+        tone: "warn",
+        title:
+          problem.reason === "unsupported_version"
+            ? "The chat settings file uses an unsupported version."
+            : "The chat settings file cannot be read.",
+        detail:
+          problem.reason === "unsupported_version"
+            ? `The file uses settings version ${problem.found}; this app supports version ${problem.supported}. StackSpirit will not overwrite it. Fix or remove the file explicitly, then reopen this panel.`
+            : "StackSpirit could not read it and will not overwrite it. Fix or remove the file explicitly, then reopen this panel.",
+        canUseOpenCode: false,
+      };
+    }
+  }
+}
+
+/**
+ * Settings → Harnesses → Chat transport.
+ *
+ * It reads the persisted default once, offers only chat-eligible orchestrator manifests,
+ * and saves one explicit selection through the bridge. Every save renders the returned
+ * gate; nothing here starts a chat, opens a transport or silently falls back to OpenCode.
+ */
+function ChatTransportControl({
+  manifests,
+  loadSettings,
+  saveDefault,
+}: ChatTransportControlProps) {
+  const [settings, setSettings] = useState<ChatHarnessSettingsView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<SpiritError | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<SpiritError | null>(null);
+  const savingRef = useRef(false);
+  const alive = useRef(true);
+  const selectId = useId();
+  const options = useMemo(() => chatTransportOptions(manifests), [manifests]);
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadSettings()
+      .then((next) => {
+        if (cancelled) return;
+        setSettings(next);
+        setLoading(false);
+      })
+      .catch((caught: unknown) => {
+        if (cancelled) return;
+        setLoadError(toSpiritError(caught));
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadSettings]);
+
+  async function choose(harnessId: string) {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const next = await saveDefault(harnessId);
+      if (!alive.current) return;
+      setSettings(next);
+    } catch (caught) {
+      if (!alive.current) return;
+      setSaveError(toSpiritError(caught));
+    } finally {
+      savingRef.current = false;
+      if (alive.current) setSaving(false);
+    }
+  }
+
+  const nameFor = useCallback(
+    (harnessId: string) =>
+      options.find((option) => option.id === harnessId)?.name ?? harnessId,
+    [options],
+  );
+  const gate = settings?.gate ?? null;
+  const gateCopy = gate ? chatTransportGateCopy(gate, nameFor) : null;
+  const gateSelection =
+    gate?.state === "ready" || gate?.state === "harness_not_wired"
+      ? gate.harness_id
+      : "";
+  const selectedValue = options.some((option) => option.id === gateSelection)
+    ? gateSelection
+    : "";
+  const selectedName = gateSelection ? nameFor(gateSelection) : "";
+  const selectedManifest =
+    manifests.find((manifest) => manifest.id === gateSelection) ?? null;
+  const canChoose = gate !== null && gate.state !== "chat_settings_unreadable";
+  const chipTone =
+    gateCopy?.tone === "warn"
+      ? "nx-chip nx-chip--tiny nx-chip--warn"
+      : "nx-chip nx-chip--tiny nx-chip--server";
+
+  return (
+    <section
+      className="nx-card"
+      aria-label="Chat transport"
+      data-testid="harness-chat-transport"
+    >
+      <div className="nx-block__head">
+        <div>
+          <h3 style={{ margin: 0, fontSize: 14 }}>Chat transport</h3>
+          <p className="nx-form__hint" data-testid="harness-chat-transport-scope">
+            Applies to new app-owned local conversations only. VOWP{" "}
+            <code>global</code>/<code>project</code> chats stay OpenCode, and existing
+            sessions do not move.
+          </p>
+        </div>
+        {gateCopy ? (
+          <span className={chipTone} data-testid="harness-chat-transport-state">
+            {gateCopy.token}
+          </span>
+        ) : null}
+      </div>
+
+      {loading ? (
+        <p className="nx-form__hint" role="status">
+          Reading the chat transport setting…
+        </p>
+      ) : loadError ? (
+        <p className="nx-form__error nx-form__error--block" role="alert">
+          Could not read the chat transport setting. {loadError.message}
+          {loadError.hint ? (
+            <span className="nx-form__hint"> {loadError.hint}</span>
+          ) : null}
+        </p>
+      ) : settings && gateCopy ? (
+        <>
+          {canChoose ? (
+            <>
+              {selectedName ? (
+                <p
+                  className="nx-form__hint"
+                  data-testid="harness-chat-transport-selected"
+                >
+                  Selected for new conversations: <strong>{selectedName}</strong>
+                </p>
+              ) : null}
+              <label className="nx-field" htmlFor={selectId}>
+                Default chat harness
+                <select
+                  id={selectId}
+                  data-testid="harness-chat-transport-select"
+                  value={selectedValue}
+                  disabled={saving}
+                  onChange={(event) => {
+                    const harnessId = event.target.value;
+                    if (harnessId) void choose(harnessId);
+                  }}
+                >
+                  {selectedValue ? null : (
+                    <option value="" disabled>
+                      Choose a harness…
+                    </option>
+                  )}
+                  {options.map((option) => (
+                    <option value={option.id} key={option.id}>
+                      {chatTransportOptionLabel(option)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {selectedManifest?.tos_note ? (
+                <p className="nx-form__hint">{selectedManifest.tos_note}</p>
+              ) : null}
+            </>
+          ) : null}
+
+          <div
+            className={gateCopy.tone === "warn" ? "nx-banner nx-banner--warn" : "nx-banner"}
+            role="status"
+            data-testid="harness-chat-transport-gate"
+          >
+            <strong>{gateCopy.title}</strong>
+            <p className="nx-form__hint" style={{ margin: "4px 0 0" }}>
+              {gateCopy.detail}
+            </p>
+          </div>
+
+          {gateCopy.canUseOpenCode || saving ? (
+            <div className="nx-settings__actions">
+              {gateCopy.canUseOpenCode ? (
+                <button
+                  type="button"
+                  className="nx-btn nx-btn--sm"
+                  disabled={saving}
+                  onClick={() => void choose("opencode")}
+                  data-testid="harness-chat-transport-use-opencode"
+                >
+                  Use OpenCode
+                </button>
+              ) : null}
+              {saving ? (
+                <span
+                  className="nx-form__hint"
+                  role="status"
+                  data-testid="harness-chat-transport-busy"
+                >
+                  Saving the chat default…
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+
+          {saveError ? (
+            <p className="nx-form__error nx-form__error--block" role="alert">
+              {saveError.message}
+              {saveError.hint ? (
+                <span className="nx-form__hint"> {saveError.hint}</span>
+              ) : null}
+            </p>
+          ) : null}
+        </>
+      ) : null}
+    </section>
+  );
+}
+
 /**
  * The Universal Harness Registry panel. It lists the built-in presets plus the owner's
  * custom manifests, shows Embedded Chat versus Worker-Only and the API-key versus
@@ -678,6 +1029,19 @@ export function HarnessesPanel({
 }: HarnessesPanelProps) {
   const surface = bridge.harnesses;
   const desktop = bridge.kind === "tauri" && !bridge.preview;
+  // A stable pair of functions keeps the settings effect to one read per mount even
+  // when the registry list updates. The chat object is never mutated here.
+  const chatTransport = useMemo(() => {
+    if (!desktop) return null;
+    const chat = bridge.chat;
+    const loadSettings = chat?.harnessSettings;
+    const saveDefault = chat?.setDefaultHarness;
+    if (!chat || !loadSettings || !saveDefault) return null;
+    return {
+      loadSettings: () => loadSettings.call(chat),
+      saveDefault: (harnessId: string) => saveDefault.call(chat, harnessId),
+    };
+  }, [bridge.chat, desktop]);
   const [list, setList] = useState<HarnessListView | null>(null);
   const [loading, setLoading] = useState(Boolean(surface));
   const [listError, setListError] = useState<SpiritError | null>(null);
@@ -1088,6 +1452,14 @@ export function HarnessesPanel({
         the embedded chat still runs on OpenCode until harness-transport wiring lands;
         choosing another chat transport is not live yet.
       </p>
+
+      {chatTransport ? (
+        <ChatTransportControl
+          manifests={list?.harnesses ?? []}
+          loadSettings={chatTransport.loadSettings}
+          saveDefault={chatTransport.saveDefault}
+        />
+      ) : null}
 
       {!surface ? (
         <p className="nx-banner nx-banner--warn" role="status">
