@@ -167,3 +167,34 @@ https://github.com/Stack-Spirit
 2. **Move `stackspirit.io` DNS to Cloudflare** (preserve existing Vercel records as DNS-only grey cloud, or host static site on Cloudflare Pages too).
 3. **Verify Contabo API & Reseller setup:** Enable Contabo API credentials in Customer Control Panel, fetch exact `productId` catalog + VPS 4 setup fee, check provisioning latency, and inquire about Contabo's Reseller/Partner program for wholesale discounts & higher instance quotas.
 4. **Sign in to Cloudflare (`wrangler`), npm, and PyPI** when ready to publish packages and scaffold `Stack-Spirit/cloud`.
+
+---
+
+## 8. Pre-Launch User-Readiness Rollout & End-to-End Test Plan
+
+Before opening StackSpirit to public users, run the full owner verification sequence in this exact order:
+
+### Phase 1 — Local-First, Harnesses, CLI & MCP Orchestration (Current Dev VPS Connected)
+1. **Harnesses (`Settings → Harnesses`):** Verify OpenCode (default BYOK providers in scrollable dropdown), official ACP harnesses (**Orchestrator + Workers**: Cursor CLI, Copilot CLI, Codex, Auggie, Kiro, Goose, etc.), stock CLI **Workers Only** (Claude Code, Gemini CLI, Antigravity), and `+ Add custom harness`.
+2. **CLI & MCP Tools (`Settings → CLI & MCP Connect`):** Test searchable tool catalog (GitHub, Vercel, Cloudflare, Stripe, Supabase, Slack, Gmail, Calendar, `+ Add custom CLI / MCP`) with **Both (Mac + Home) — Recommended**, Local-only, and Home-only targets.
+3. **External Orchestrators:**
+   - Connect **`stackspirit mcp`** (local stdio, no account needed; and `https://mcp.stackspirit.io/mcp` OAuth) to **Claude Desktop**, **Claude Code**, and **Antigravity Desktop**.
+   - Confirm orchestrating the VPS cleanly from **StackSpirit Desktop**, **Claude Desktop / Claude Code**, and **Antigravity Desktop**, and switching smoothly between local and remote orchestrators.
+4. **Local-to-Account Alignment:** Confirm local-only machines show a clear local badge and convert cleanly to **Account-synced** in 1 click when signed into a StackSpirit Account.
+
+### Phase 2 — Clean Account Isolation (Keep Dev VPS Locally)
+5. Unlink the current dev VPS from the test StackSpirit Account (`syver.a.meyer@gmail.com`) while keeping it safely saved in local Mac SSH config so the test account starts with **0 enrolled machines**.
+6. Verify **`https://app.stackspirit.io`** onboarding with 0 machines: Google / GitHub / Email+Password sign-in, persistent Account menu, Agent-First 3-path setup (Copy Agent Prompt / Download Desktop App / Managed Homes), and tucked self-hosted local daemon fallback.
+
+### Phase 3 — Live Hetzner Pay-As-You-Go & Prepaid Compute Credits Test
+7. Top up **€5** via Stripe Checkout (`StackSpirit Compute Credits`, EUR & USD).
+8. Launch a **4 GB / 8 GB Hetzner Pay-As-You-Go** machine (`+20%` hourly rate), confirm automatic cloud-init enrollment into `syver.a.meyer@gmail.com` across Web + Desktop + CLI, verify metering & low-balance guardrails, then click **Stop & Delete** and confirm instant Hetzner deletion (~€0.02 total test cost).
+
+### Phase 4 — Live Contabo Monthly Home + Multi-Node Cluster + Cancellation Test
+9. Purchase a **Contabo Monthly Home** (`Home 8` via Stripe Checkout), confirm automatic provisioning and enrollment.
+10. Launch a **Hetzner Pay-As-You-Go** burst node alongside the Contabo Home and form a **2-node cluster**; verify jobs dispatch cleanly across both nodes.
+11. Stop & delete the Hetzner burst node (instant termination), then cancel the Contabo Monthly Home in Stripe Billing Portal and verify **period-end cancellation** (`cancel_at_period_end = true` in Stripe + matching `cancelDate` scheduled in Contabo; Home stays active until end of paid month).
+
+### Phase 5 — Public Release Readiness
+12. Run `.github/workflows/desktop-release.yml` to attach downloadable macOS `.dmg` and Linux `.AppImage` / `.deb` Desktop installers to the latest GitHub Release, verify all download links on `https://stackspirit.io` and `https://app.stackspirit.io`, and open public sign-ups.
+
