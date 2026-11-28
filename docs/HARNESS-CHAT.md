@@ -10,11 +10,15 @@ tests. Since then `ss-185` added the Settings → Harnesses **Chat transport** d
 (persisted in `chat.json`, gate and ToS copy, no composer dropdown) and `ss-186` added
 the transport-neutral `HarnessChatAdapter` trait, the `AcpChatAdapter` and hermetic
 duplex-stream tests (`crates/spirit-core/src/engine/chat/{adapter,acp_adapter}.rs`,
-`tests/harness_chat_acp.rs`). **No non-OpenCode harness-backed conversation can start
-yet**: `AcpChatAdapter` is not reachable from `HarnessChatProvider`, the desktop state
-or a chat session, and no owner-run check against a real ACP harness has happened.
-OpenCode remains the only live embedded-chat transport. See the phase status table in
-§6. This document changes no runtime.
+`tests/harness_chat_acp.rs`). Phase 2 is now **wired, owner-run unproven**: `ss-188`
+routes ACP Setup sessions through the router, `ss-190` added the validated `chat_argv`
+launch field, `ss-191` wired the desktop host to the adapter and forwards its events,
+and `ss-192` added the custom ACP launch-argv form. **No real ACP harness turn has been
+run.** The default permission policy denies tool requests, and there is no ChatView
+harness chip or permission card yet. OpenCode remains the only chat transport proven
+live; harness chat is not live and not claimed until the owner-run check
+(`node scripts/verify-harness-chat.mjs --checklist`) passes. See the phase status table
+in §6. This document changes no runtime.
 
 Scope: how a harness selected in the Universal Harness Registry could back
 StackSpirit's own embedded chat without weakening the current OpenCode path, the
@@ -38,7 +42,8 @@ overrides it.
   (`crates/spirit-core/src/harnesses/acp.rs`). Consumer-OAuth CLIs such as Claude Code
   and Gemini CLI are workers-only and are never wrapped in embedded chat. Connect still
   only installs and signs in. A chat-transport default and gate now exist (`ss-185`)
-  and an `AcpChatAdapter` exists (`ss-186`), but nothing routes a chat session to it yet.
+  and an `AcpChatAdapter` exists (`ss-186`); ACP Setup sessions now route to it
+  (`ss-188`, `ss-191`), but no real turn has been run, so it is not claimed live.
 - **Recommendation:** one **global default** for new app-owned local conversations,
   captured by each session at creation. Existing sessions never move when the default
   changes. A per-session picker is deferred until there is more than one eligible
@@ -53,8 +58,9 @@ overrides it.
   onto it; `cli-pty` remains worker-only.
 - Phase 1 ships selection, gates and a transport-less dry run. Phase 2 adds the first
   adapter, **ACP (the owner's choice)**; the reusable `acp.rs` client and the
-  `AcpChatAdapter` with hermetic tests have landed, but router/state wiring, the shared
-  contract suite and the owner-run check have not. Phase 3 adds the
+  `AcpChatAdapter` with hermetic tests have landed and the router and desktop state are
+  wired, but the shared contract suite, the ChatView chip/permission UX and the
+  owner-run check have not. Phase 3 adds the
   next. Phase 4 adds model/usage parity. Every phase has a one-line acceptance test and
   a suggested `owns`.
 
@@ -309,7 +315,7 @@ and again at session start; a cached probe is valid for at most 60 seconds.
 | Binary `found`, auth `unknown` | Selectable; fixed “cannot prove sign-in” note | Attempt the start; if the harness reports an auth failure, map to `harness_auth_required` and stop | Same | No. |
 | Version/schema mismatch | Selectable only after a probe; warning | `harness_incompatible`; no child | Gate; no retry loop | No. |
 | `worker_only` or `cli-pty` | Not listed as chat-capable; a custom claim shows a warning | `harness_worker_only` or `harness_protocol_unsupported` | Same | No. |
-| Adapter not implemented (Phase 1) | Selectable for planning; dry run only | `harness_not_wired`; no child | Same | No. |
+| Adapter not available (no known `chat_argv`, or no adapter installed) | Selectable for planning; dry run only | `harness_not_wired`; no child | Same | No. |
 | Child exits or stream dies | — | `harness_exited` or `harness_stream_lost`; state `error` | Same; Retry means the same harness | No. |
 | Another writer (`access: read_only`) | — | Composer disabled; no child writer | Same | No. |
 
@@ -744,7 +750,7 @@ renderer matches prefixes/codes; do not parse prose.
 | `harness_auth_required` | `auth` | The harness reports no sign-in or rejects the credential |
 | `harness_worker_only` | `gate` | `surface = workers_only_terminal` |
 | `harness_protocol_unsupported` | `gate` | `cli-pty` or an unknown protocol for chat |
-| `harness_not_wired` | `gate` | Phase 1 dry run only; no adapter yet |
+| `harness_not_wired` | `gate` | No adapter available (Phase 1 dry run, or no known `chat_argv`) |
 | `harness_incompatible` | `gate` | Version/schema is not the pinned one |
 | `chat_settings_unreadable` | `parse` | `chat.json` is corrupt or a future version |
 | `harness_spawn_failed` | `engine` | The child could not start |
@@ -816,17 +822,18 @@ copy/evidence labels, never a path, URL, port, token or native id.
 
 ## 6. Phased delivery
 
-### Status as of ss-187 (2026-11-28)
+### Status as of ss-193 (2026-11-28)
 
 | Phase | Status | Evidence / what remains |
 |---|---|---|
-| **1** selection, gates, dry run | **Largely landed** | Core `selection.rs`/`harness.rs` gate, `chat.json` store, desktop state/command wiring and the Settings "Chat transport" UI (`ss-185`) exist. Remaining: confirm the ChatView gate card/header chip and the "no child spawned" dry-run check against the acceptance test. |
-| **2** ACP adapter | **Partial: adapter built, not wired** | `acp.rs` client (`ss-179`); `HarnessChatAdapter` + `AcpChatAdapter` + hermetic tests (`ss-186`). Remaining: `HarnessChatProvider`/router and `state.rs` wiring so a bound session reaches the adapter, an app-owned local-chat target, the shared contract suite (§7.1), and the owner-run real-harness check. **Not live; not claimed.** |
+| **1** selection, gates, dry run | **Landed** | Core `selection.rs`/`harness.rs` gate, `chat.json` store, desktop state/command wiring and the Settings "Chat transport" UI (`ss-180`, `ss-183`, `ss-184`, `ss-185`). |
+| **2** ACP adapter | **Wired, owner-run unproven** | `acp.rs` client (`ss-179`); `HarnessChatAdapter` + `AcpChatAdapter` (`ss-186`); ACP Setup sessions through the router (`ss-188`); `chat_argv` (`ss-190`); desktop adapter/event forwarding (`ss-191`); custom launch-argv form (`ss-192`). Remaining: ChatView harness chip and gate card, permission UX (the default policy denies tool requests), the shared fake contract suite (§7.1) if not already covered, and the real-harness owner check (§7.5). **Not live; not claimed.** |
 | **3** next adapter | Not started | Waits on Phase 2 acceptance. |
 | **4** model/usage parity | Not started | Waits on Phase 2 acceptance. |
 
-Selecting a non-OpenCode harness still resolves to `harness_not_wired` until Phase 2
-wiring lands. The handoff remains the source of truth for what is live.
+Built-in harnesses with a known `chat_argv` (such as `goose` and `cursor-cli`) can
+report Ready; an empty or unknown `chat_argv` and worker-only harnesses still gate. The
+handoff remains the source of truth for what is live.
 
 Each phase is a separate job or two small jobs. The names below are suggestions, not
 current code. A phase must not claim a transport is live until its acceptance test and
@@ -1056,8 +1063,12 @@ These cannot run in CI and must not use a paid model automatically:
 | No secret in argv/logs/DOM | An end-to-end scan with a fake planted value |
 
 The existing `scripts/verify-orchestrator-chat.mjs` remains the owner checklist for
-OpenCode/streaming. A future harness-chat script should print the same kind of fixed
-checklist and must not make a real turn on its own.
+OpenCode/streaming. `node scripts/verify-harness-chat.mjs --check` runs repository-only
+static checks of the shipped pieces and `--checklist` prints this fixed owner checklist.
+The script is inert: it never spawns a harness, VOWP, the app or a shell, and never
+touches the network, `.env`, keychain or app data. Passing `--check` is not owner
+evidence and claims no real ACP turn; the default permission policy denies tool requests
+until the owner configures one.
 
 ### 7.6 CI rules
 
