@@ -2,7 +2,7 @@
 job: ss-179-full-harness-catalog-and-acp-chat
 status: done
 branch: job/ss-179-full-harness-catalog-and-acp-chat
-commits: ["4ccd53f", "afeb4db"]
+commits: ["4ccd53f", "afeb4db", "8d7b9eb"]
 tests: "cargo fmt --all -- --check; cargo clippy -p spirit-core --all-targets -- -D warnings; cargo test -p spirit-core (all suites pass, including 14 harnesses integration tests and 5 ACP mock-process tests); npm run typecheck -w @stackspirit/ui; npm run lint -w @stackspirit/ui; npm test -w @stackspirit/ui (63 files, 584 tests); bash scripts/check-public-readiness.sh; node scripts/check-doc-links.mjs"
 questions_for_owner: []
 ---
