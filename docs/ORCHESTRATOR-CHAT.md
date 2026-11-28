@@ -1863,7 +1863,9 @@ today's behaviour exactly: no chip, no notice, composer enabled.
 This is cooperative metadata, not enforcement. StackSpirit does not fence the other
 writer or imply that it was stopped. Full takeover and direct-engine writer fencing
 remain open (HANDOFF §5.1 item 3); the existing worker-session ownership banner and its
-Take over command are a separate surface.
+Take over command are a separate surface. Explicit chat takeover is designed in
+[`SESSION-TAKEOVER.md`](SESSION-TAKEOVER.md); it is design only and nothing in this
+section changes.
 
 ## 5. Security
 
