@@ -678,10 +678,11 @@ impl AppState {
 
     /// Starts the same bounded shutdown from a synchronous exit callback.
     ///
-    /// Tauri's `RunEvent` path is synchronous. The release future runs on the Tauri
-    /// runtime; if the process leaves before it finishes, the core manager's `Drop` is
-    /// the safety net. Prefer [`Self::shutdown_chat_writers`] where an async hook is
-    /// available.
+    /// Outside a runtime thread this waits up to the shared three-second budget; inside one
+    /// it spawns the same bounded work and returns. The handle guard avoids entering a
+    /// nested runtime; the core manager's `Drop` is the safety net if the process leaves
+    /// before the task finishes. Prefer [`Self::shutdown_chat_writers`] where an async hook
+    /// is available.
     #[allow(dead_code)]
     pub fn request_chat_writer_shutdown(&self) {
         let sessions = self.take_chat_writers();
@@ -689,9 +690,12 @@ impl AppState {
             return;
         }
         let chat = self.chat();
-        tauri::async_runtime::spawn(async move {
-            release_writer_sessions(chat, sessions).await;
-        });
+        let release = release_writer_sessions(chat, sessions);
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tauri::async_runtime::spawn(release);
+        } else {
+            tauri::async_runtime::block_on(release);
+        }
     }
 
     pub(crate) fn hosts(&self) -> Arc<dyn HostStore> {
