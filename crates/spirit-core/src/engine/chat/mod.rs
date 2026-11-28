@@ -10,6 +10,7 @@ pub mod harness;
 pub mod local;
 pub mod model;
 pub mod pump;
+pub mod router;
 pub mod selection;
 pub mod sse;
 pub mod writer;
@@ -34,6 +35,7 @@ pub use model::{
 pub use pump::{
     ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper, retry_status,
 };
+pub use router::HarnessChatProvider;
 pub use selection::{
     CHAT_PREFERENCES_VERSION, ChatHarnessCapture, ChatPreferences, ChatPreferencesSource,
     ChatPreferencesStore, ChatSettingsError, JsonChatPreferences,
