@@ -42,7 +42,11 @@ import { engineProviders, providerLabel, providerOptions } from "../domain/engin
 export type HarnessSurface = "orchestrator_and_workers" | "workers_only_terminal";
 
 /** A wire manifest plus the explicit harness surface when the host reports it. */
-export type HarnessManifest = WireHarnessManifest & { surface?: HarnessSurface };
+export type HarnessManifest = WireHarnessManifest & {
+  surface?: HarnessSurface;
+  /** The harness's own ACP start argv (no shell). Built-ins may carry it from the host. */
+  chat_argv?: string[];
+};
 
 // The panel consumes the bridge DTOs; it does not define them. Re-exported here so the
 // existing panel tests and any callers keep their imports while every type has one home
@@ -109,6 +113,7 @@ interface FormState {
   tosNote: string;
   docsUrl: string;
   oauthPort: string;
+  chatArgv: string;
 }
 
 const EMPTY_FORM: FormState = {
@@ -124,6 +129,7 @@ const EMPTY_FORM: FormState = {
   tosNote: "",
   docsUrl: "",
   oauthPort: "",
+  chatArgv: "",
 };
 
 /** The default protocol for each surface: ACP for chat-capable, stock CLI for workers. */
@@ -200,6 +206,55 @@ function providerKeyTone(status: KeyStatus): string {
   return "nx-chip--muted";
 }
 
+const MAX_CHAT_ARGV_COUNT = 16;
+const MAX_CHAT_ARGV_LEN = 128;
+const CHAT_ARGV_FORBIDDEN = /[\s;|&$`><'"\\()]/u;
+
+function hasControlChar(value: string): boolean {
+  return [...value].some((ch) => {
+    const code = ch.codePointAt(0) ?? 0;
+    return code < 0x20 || code === 0x7f;
+  });
+}
+const CHAT_ARGV_SECRET_PREFIXES = ["sk-", "sk_", "ghp_", "github_pat_", "xoxb-", "xoxp-", "akia", "aiza"];
+
+/** True when the launch field applies: an ACP orchestrator harness. */
+function showsChatArgv(form: Pick<FormState, "surface" | "protocol">): boolean {
+  return form.surface === "orchestrator_and_workers" && form.protocol === "acp";
+}
+
+/** One argument per line; blank lines dropped, each argument kept exactly. */
+function parseChatArgv(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== "");
+}
+
+function validateChatArgv(args: string[]): SpiritError | null {
+  if (args.length > MAX_CHAT_ARGV_COUNT) {
+    return invalidInput(`Chat launch arguments allow at most ${MAX_CHAT_ARGV_COUNT} lines.`);
+  }
+  for (const arg of args) {
+    if (arg.length > MAX_CHAT_ARGV_LEN) {
+      return invalidInput(
+        `Each chat launch argument must be at most ${MAX_CHAT_ARGV_LEN} characters.`,
+      );
+    }
+    if (CHAT_ARGV_FORBIDDEN.test(arg) || hasControlChar(arg)) {
+      return invalidInput(
+        "Chat launch arguments must be shell-free: no spaces, quotes, operators or control characters. Put one argument per line.",
+      );
+    }
+    const lower = arg.toLowerCase();
+    if (arg.includes("-----BEGIN") || CHAT_ARGV_SECRET_PREFIXES.some((p) => lower.startsWith(p))) {
+      return invalidInput(
+        "Chat launch arguments must not contain secret material; keys belong in the key store or VOWP secret vault.",
+      );
+    }
+  }
+  return null;
+}
+
 function validateForm(form: FormState): SpiritError | null {
   const id = form.id.trim();
   if (!ID_PATTERN.test(id)) {
@@ -235,6 +290,9 @@ function validateForm(form: FormState): SpiritError | null {
       return invalidInput("OAuth callback port must be 1-65535.");
     }
   }
+  if (showsChatArgv(form)) {
+    return validateChatArgv(parseChatArgv(form.chatArgv));
+  }
   return null;
 }
 
@@ -257,6 +315,7 @@ function buildManifest(form: FormState): HarnessManifest {
     docs_url: form.docsUrl.trim(),
     oauth_callback_port: port ? Number(port) : null,
     builtin: false,
+    ...(showsChatArgv(form) ? { chat_argv: parseChatArgv(form.chatArgv) } : {}),
   };
 }
 
@@ -1071,6 +1130,7 @@ export function HarnessesPanel({
     docs: useId(),
     apiKey: useId(),
     subscription: useId(),
+    chatArgv: useId(),
   };
 
   useEffect(() => {
@@ -1672,6 +1732,30 @@ export function HarnessesPanel({
               </select>
             </label>
           </div>
+
+          {showsChatArgv(form) ? (
+            <>
+            <label className="nx-field" htmlFor={ids.chatArgv}>
+              Chat launch arguments (one per line)
+              <textarea
+                id={ids.chatArgv}
+                value={form.chatArgv}
+                onChange={(event) => setForm({ ...form, chatArgv: event.target.value })}
+                rows={3}
+                placeholder="acp"
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </label>
+              <p className="nx-form__hint" data-testid="harness-chat-argv-hint">
+                The harness&apos;s own ACP start arguments after its binary (for example{" "}
+                <code>goose</code> + <code>acp</code>). StackSpirit never runs it through a
+                shell and never puts a credential in it. Leave empty and the harness is
+                recorded but not launchable for chat yet; this only records the command and
+                does not install anything.
+              </p>
+            </>
+          ) : null}
 
           <label className="nx-field" htmlFor={ids.port}>
             OAuth callback port
