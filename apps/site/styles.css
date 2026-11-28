@@ -3781,18 +3781,27 @@ canvas.hand-note__mascot {
   gap: 0.35rem;
   margin: 0;
   padding: 0;
-  list-style: none;
 }
 
-.wgraph__projects li {
+.wgraph__proj-btn {
   display: grid;
   gap: 0.1rem;
+  width: 100%;
   padding: 0.5rem 0.65rem;
   border-radius: 7px;
   border: 1px solid transparent;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.16s ease, border-color 0.16s ease;
 }
 
-.wgraph__projects li.is-selected {
+.wgraph__proj-btn:hover {
+  background: rgb(255 255 255 / 0.65);
+  border-color: #d6e2cf;
+}
+
+.wgraph__proj-btn.is-selected {
   background: #ffffff;
   border-color: #c5d6bc;
   box-shadow: 0 1px 2px rgb(13 18 15 / 0.05);
@@ -3883,17 +3892,52 @@ canvas.hand-note__mascot {
   display: block;
 }
 
-.wgraph__wire {
+.wgraph__wire-bg {
   fill: none;
-  stroke: #b9cbb0;
-  stroke-width: 1.75;
-  stroke-dasharray: 4 4;
+  stroke: #d5e2cd;
+  stroke-width: 2;
+  transition: opacity 0.2s ease, stroke 0.2s ease;
 }
 
-.wgraph__wire--active {
+.wgraph__wire {
+  fill: none;
   stroke: var(--meadow-primary);
-  stroke-width: 2;
-  stroke-dasharray: none;
+  stroke-width: 2.25;
+  stroke-linecap: round;
+  transition: opacity 0.2s ease, stroke 0.2s ease, stroke-width 0.2s ease;
+}
+
+.wgraph__wire--flow {
+  stroke-dasharray: 9 11;
+  animation: wgraph-dash 1.35s linear infinite;
+}
+
+.wgraph__wire--slow {
+  stroke: #63b574;
+  animation-duration: 2.1s;
+}
+
+.wgraph__wire.is-linked {
+  stroke: var(--meadow-deep);
+  stroke-width: 3;
+}
+
+.wgraph__wire-bg.is-linked {
+  stroke: var(--meadow-sprout);
+}
+
+.wgraph__wire.is-dimmed,
+.wgraph__wire-bg.is-dimmed {
+  opacity: 0.16;
+}
+
+@keyframes wgraph-dash {
+  from {
+    stroke-dashoffset: 40;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
 }
 
 .wnode {
@@ -3903,6 +3947,21 @@ canvas.hand-note__mascot {
   border-radius: 8px;
   background: #ffffff;
   box-shadow: 0 2px 6px -4px rgb(13 18 15 / 0.12);
+  cursor: pointer;
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease, opacity 0.2s ease;
+}
+
+.wnode:hover,
+.wnode:focus-visible,
+.wnode.is-linked {
+  border-color: var(--meadow-deep);
+  box-shadow: 0 8px 20px -12px rgb(30 91 54 / 0.42);
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.wnode.is-dimmed {
+  opacity: 0.28;
 }
 
 .wnode--queue {

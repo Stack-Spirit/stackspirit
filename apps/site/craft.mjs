@@ -384,7 +384,63 @@ function initHeroFrogHopper() {
   });
 }
 
+/** Interactive Worker Graph (#worker-graph): project filter & edge trace on hover/focus/click. */
+function initWorkerGraph() {
+  const graph = document.getElementById("worker-graph");
+  if (!graph) return;
+
+  const filterButtons = Array.from(graph.querySelectorAll("[data-wgraph-filter]"));
+  const nodes = Array.from(graph.querySelectorAll(".wnode"));
+  const wires = Array.from(graph.querySelectorAll(".wgraph__edges path"));
+
+  function setFilter(project) {
+    graph.dataset.filter = project;
+    for (const btn of filterButtons) {
+      const selected = btn.getAttribute("data-wgraph-filter") === project;
+      btn.classList.toggle("is-selected", selected);
+      btn.setAttribute("aria-pressed", selected ? "true" : "false");
+    }
+    for (const node of nodes) {
+      const match = project === "all" || node.getAttribute("data-project") === project;
+      node.classList.toggle("is-dimmed", !match);
+    }
+    for (const wire of wires) {
+      const match = project === "all" || wire.getAttribute("data-project") === project;
+      wire.classList.toggle("is-dimmed", !match);
+    }
+  }
+
+  function highlightEdges(edgeList) {
+    const active = new Set(edgeList);
+    for (const node of nodes) {
+      const nodeEdges = (node.getAttribute("data-edge") ?? "").split(/\s+/).filter(Boolean);
+      const hit = active.size > 0 && nodeEdges.some((e) => active.has(e));
+      node.classList.toggle("is-linked", hit);
+    }
+    for (const wire of wires) {
+      const edge = wire.getAttribute("data-edge") ?? "";
+      const hit = active.size > 0 && active.has(edge);
+      wire.classList.toggle("is-linked", hit);
+    }
+  }
+
+  for (const btn of filterButtons) {
+    btn.addEventListener("click", () => {
+      setFilter(btn.getAttribute("data-wgraph-filter") ?? "all");
+    });
+  }
+
+  for (const node of nodes) {
+    const edges = (node.getAttribute("data-edge") ?? "").split(/\s+/).filter(Boolean);
+    node.addEventListener("pointerenter", () => highlightEdges(edges));
+    node.addEventListener("focus", () => highlightEdges(edges));
+    node.addEventListener("pointerleave", () => highlightEdges([]));
+    node.addEventListener("blur", () => highlightEdges([]));
+  }
+}
+
 export function initCraft() {
   initShimmer();
   initHeroFrogHopper();
+  initWorkerGraph();
 }

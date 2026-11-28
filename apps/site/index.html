@@ -910,9 +910,9 @@
           </header>
 
           <figure class="cockpit-board">
-            <div class="wgraph" aria-hidden="true">
+            <div class="wgraph" id="worker-graph" data-filter="all">
               <div class="wgraph__bar">
-                <span class="wgraph__lights"><span></span><span></span><span></span></span>
+                <span class="wgraph__lights" aria-hidden="true"><span></span><span></span><span></span></span>
                 <span class="wgraph__host">StackSpirit Desktop &middot; <strong>home-01</strong></span>
                 <span class="wgraph__pill wgraph__pill--live">online</span>
                 <div class="wgraph__telemetry">
@@ -924,25 +924,25 @@
               </div>
 
               <div class="wgraph__body">
-                <aside class="wgraph__rail">
+                <aside class="wgraph__rail" aria-label="Filter preview by project">
                   <p class="wgraph__rail-title">Projects</p>
-                  <ul class="wgraph__projects" role="list">
-                    <li class="is-selected">
+                  <div class="wgraph__projects" role="group" aria-label="Projects">
+                    <button type="button" class="wgraph__proj-btn is-selected" data-wgraph-filter="all" aria-pressed="true">
+                      <span class="wgraph__proj-name">All projects</span>
+                      <span class="wgraph__proj-counts">4 run &middot; 3 queue</span>
+                    </button>
+                    <button type="button" class="wgraph__proj-btn" data-wgraph-filter="stackspirit" aria-pressed="false">
                       <span class="wgraph__proj-name">stackspirit</span>
                       <span class="wgraph__proj-counts">3 run &middot; 2 queue</span>
-                    </li>
-                    <li>
+                    </button>
+                    <button type="button" class="wgraph__proj-btn" data-wgraph-filter="cloud" aria-pressed="false">
                       <span class="wgraph__proj-name">cloud</span>
                       <span class="wgraph__proj-counts">1 run &middot; 1 queue</span>
-                    </li>
-                    <li>
-                      <span class="wgraph__proj-name">personal-api</span>
-                      <span class="wgraph__proj-counts">idle</span>
-                    </li>
-                  </ul>
+                    </button>
+                  </div>
                   <div class="wgraph__rail-foot">
-                    <span class="wgraph__rail-cap">Capacity target 8</span>
-                    <span class="wgraph__rail-cap">Brake off &middot; 0 inbox</span>
+                    <span class="wgraph__rail-cap">Click any project or worker</span>
+                    <span class="wgraph__rail-cap">Capacity target 8 &middot; 0 inbox</span>
                   </div>
                 </aside>
 
@@ -954,7 +954,7 @@
                       <span class="wgraph__count">4</span>
                     </div>
 
-                    <article class="wnode wnode--run">
+                    <article class="wnode wnode--run" data-project="stackspirit" data-edge="edge-1" tabindex="0">
                       <div class="wnode__top">
                         <span class="wnode__proj">stackspirit</span>
                         <span class="wnode__age">4m 12s</span>
@@ -967,7 +967,7 @@
                       </div>
                     </article>
 
-                    <article class="wnode wnode--run">
+                    <article class="wnode wnode--run" data-project="stackspirit" data-edge="edge-2" tabindex="0">
                       <div class="wnode__top">
                         <span class="wnode__proj">stackspirit</span>
                         <span class="wnode__age">2m 48s</span>
@@ -980,7 +980,7 @@
                       </div>
                     </article>
 
-                    <article class="wnode wnode--run">
+                    <article class="wnode wnode--run" data-project="stackspirit" data-edge="edge-3" tabindex="0">
                       <div class="wnode__top">
                         <span class="wnode__proj">stackspirit</span>
                         <span class="wnode__age">6m 05s</span>
@@ -993,7 +993,7 @@
                       </div>
                     </article>
 
-                    <article class="wnode wnode--run wnode--cloud">
+                    <article class="wnode wnode--run wnode--cloud" data-project="cloud" data-edge="edge-4" tabindex="0">
                       <div class="wnode__top">
                         <span class="wnode__proj wnode__proj--cloud">cloud</span>
                         <span class="wnode__age">1m 33s</span>
@@ -1002,16 +1002,23 @@
                       <div class="wnode__meta">
                         <span class="wnode__chip wnode__chip--harness">Codex</span>
                         <span class="wnode__chip">OpenAI</span>
-                        <span class="wnode__model">GPT-5 Codex</span>
+                        <span class="wnode__model">GPT-6.2 Sol</span>
                       </div>
                     </article>
                   </div>
 
-                  <svg class="wgraph__edges" viewBox="0 0 88 380" preserveAspectRatio="none" focusable="false">
-                    <path class="wgraph__wire wgraph__wire--active" d="M 0 46 C 44 46, 44 58, 88 58" />
-                    <path class="wgraph__wire" d="M 0 144 C 44 144, 44 58, 88 58" />
-                    <path class="wgraph__wire wgraph__wire--active" d="M 0 242 C 44 242, 44 176, 88 176" />
-                    <path class="wgraph__wire wgraph__wire--active" d="M 0 338 C 44 338, 44 294, 88 294" />
+                  <svg class="wgraph__edges" viewBox="0 0 88 380" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+                    <path class="wgraph__wire-bg" d="M 0 46 C 44 46, 44 58, 88 58" data-project="stackspirit" data-edge="edge-1" />
+                    <path class="wgraph__wire wgraph__wire--flow" d="M 0 46 C 44 46, 44 58, 88 58" data-project="stackspirit" data-edge="edge-1" />
+
+                    <path class="wgraph__wire-bg" d="M 0 144 C 44 144, 44 58, 88 58" data-project="stackspirit" data-edge="edge-2" />
+                    <path class="wgraph__wire wgraph__wire--flow wgraph__wire--slow" d="M 0 144 C 44 144, 44 58, 88 58" data-project="stackspirit" data-edge="edge-2" />
+
+                    <path class="wgraph__wire-bg" d="M 0 242 C 44 242, 44 176, 88 176" data-project="stackspirit" data-edge="edge-3" />
+                    <path class="wgraph__wire wgraph__wire--flow" d="M 0 242 C 44 242, 44 176, 88 176" data-project="stackspirit" data-edge="edge-3" />
+
+                    <path class="wgraph__wire-bg" d="M 0 338 C 44 338, 44 294, 88 294" data-project="cloud" data-edge="edge-4" />
+                    <path class="wgraph__wire wgraph__wire--flow" d="M 0 338 C 44 338, 44 294, 88 294" data-project="cloud" data-edge="edge-4" />
                   </svg>
 
                   <div class="wgraph__lane">
@@ -1021,7 +1028,7 @@
                       <span class="wgraph__count">3</span>
                     </div>
 
-                    <article class="wnode wnode--queue">
+                    <article class="wnode wnode--queue" data-project="stackspirit" data-edge="edge-1 edge-2" tabindex="0">
                       <div class="wnode__top">
                         <span class="wnode__proj">stackspirit</span>
                         <span class="wnode__role">verify</span>
@@ -1034,29 +1041,29 @@
                       </div>
                     </article>
 
-                    <article class="wnode wnode--queue">
+                    <article class="wnode wnode--queue" data-project="stackspirit" data-edge="edge-3" tabindex="0">
                       <div class="wnode__top">
                         <span class="wnode__proj">stackspirit</span>
                         <span class="wnode__role">verify</span>
                       </div>
                       <p class="wnode__title">ss-181-verify-0</p>
                       <div class="wnode__meta">
-                        <span class="wnode__chip wnode__chip--harness">OpenCode</span>
-                        <span class="wnode__chip">OpenRouter</span>
+                        <span class="wnode__chip wnode__chip--harness">Antigravity CLI</span>
+                        <span class="wnode__chip">Google AI</span>
                         <span class="wnode__model">Gemini 4 Neon</span>
                       </div>
                     </article>
 
-                    <article class="wnode wnode--queue wnode--cloud">
+                    <article class="wnode wnode--queue wnode--cloud" data-project="cloud" data-edge="edge-4" tabindex="0">
                       <div class="wnode__top">
                         <span class="wnode__proj wnode__proj--cloud">cloud</span>
                         <span class="wnode__role">verify</span>
                       </div>
                       <p class="wnode__title">cloud-22-reacceptance</p>
                       <div class="wnode__meta">
-                        <span class="wnode__chip wnode__chip--harness">OpenCode</span>
-                        <span class="wnode__chip">DeepSeek</span>
-                        <span class="wnode__model">DeepSeek V4.1 Flash</span>
+                        <span class="wnode__chip wnode__chip--harness">Antigravity CLI</span>
+                        <span class="wnode__chip">Google AI</span>
+                        <span class="wnode__model">Gemini 4 Neon</span>
                       </div>
                     </article>
                   </div>
@@ -1064,8 +1071,8 @@
               </div>
             </div>
             <figcaption>
-              Illustration of the StackSpirit Desktop worker graph: multiple projects, harnesses,
-              providers and models running and queued on one Always-On Home.
+              Interactive preview of the StackSpirit Desktop worker graph: click a project or hover
+              a worker to trace dependencies across harnesses, providers, and models.
             </figcaption>
           </figure>
 
