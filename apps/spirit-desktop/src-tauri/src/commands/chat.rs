@@ -58,7 +58,7 @@ pub struct ChatHarnessSettingsView {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatSetDefaultHarnessInput {
-    /// A validated registry id such as `opencode` or `claude-code`.
+    /// A validated registry id such as `opencode` or `goose`.
     pub harness_id: String,
 }
 

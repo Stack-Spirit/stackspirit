@@ -15,11 +15,11 @@ const FRESH: ChatHarnessSettingsView = {
 };
 
 const PLANNING: ChatHarnessSettingsView = {
-  default_harness_id: "claude-code",
+  default_harness_id: "goose",
   gate: {
     state: "harness_not_wired",
-    harness_id: "claude-code",
-    protocol: "stream-json",
+    harness_id: "goose",
+    protocol: "acp",
   },
 };
 
@@ -54,14 +54,14 @@ describe("TauriBridge harness chat settings", () => {
     const bridge = new TauriBridge();
 
     invoke.mockResolvedValueOnce(PLANNING);
-    await expect(bridge.chat.setDefaultHarness("claude-code")).resolves.toEqual(
+    await expect(bridge.chat.setDefaultHarness("goose")).resolves.toEqual(
       PLANNING,
     );
 
     // The renderer sends the id and nothing else: no path, token, endpoint, port or
     // native session id.
     expect(invoke.mock.calls).toEqual([
-      ["chat_set_default_harness", { input: { harness_id: "claude-code" } }],
+      ["chat_set_default_harness", { input: { harness_id: "goose" } }],
     ]);
   });
 });
