@@ -6,10 +6,15 @@ for the broader registry split. `ss-179` landed that `HarnessSurface` split
 (**Orchestrator + Workers (ACP / Embedded Chat)** versus **Workers Only (Stock CLI
 Terminal View)**), the expanded presets, the `HarnessesPanel` grouping and a reusable
 ACP stdio JSON-RPC client (`crates/spirit-core/src/harnesses/acp.rs`) with mock-process
-tests. That client is a foundation, not a wired chat transport: **no non-OpenCode
-harness-backed conversation can start yet**. OpenCode remains the only live
-embedded-chat transport, and the selection/gates plus the `HarnessChatAdapter` wiring
-remain Phase 1/2 work. This document changes no runtime.
+tests. Since then `ss-185` added the Settings → Harnesses **Chat transport** default
+(persisted in `chat.json`, gate and ToS copy, no composer dropdown) and `ss-186` added
+the transport-neutral `HarnessChatAdapter` trait, the `AcpChatAdapter` and hermetic
+duplex-stream tests (`crates/spirit-core/src/engine/chat/{adapter,acp_adapter}.rs`,
+`tests/harness_chat_acp.rs`). **No non-OpenCode harness-backed conversation can start
+yet**: `AcpChatAdapter` is not reachable from `HarnessChatProvider`, the desktop state
+or a chat session, and no owner-run check against a real ACP harness has happened.
+OpenCode remains the only live embedded-chat transport. See the phase status table in
+§6. This document changes no runtime.
 
 Scope: how a harness selected in the Universal Harness Registry could back
 StackSpirit's own embedded chat without weakening the current OpenCode path, the
@@ -32,8 +37,8 @@ overrides it.
   **Workers Only (Stock CLI Terminal View)**) and a reusable ACP stdio client
   (`crates/spirit-core/src/harnesses/acp.rs`). Consumer-OAuth CLIs such as Claude Code
   and Gemini CLI are workers-only and are never wrapped in embedded chat. Connect still
-  only installs and signs in: there is no chat-transport selector, no harness-chat gate
-  and no `HarnessChatAdapter` wiring from an ACP session into chat yet.
+  only installs and signs in. A chat-transport default and gate now exist (`ss-185`)
+  and an `AcpChatAdapter` exists (`ss-186`), but nothing routes a chat session to it yet.
 - **Recommendation:** one **global default** for new app-owned local conversations,
   captured by each session at creation. Existing sessions never move when the default
   changes. A per-session picker is deferred until there is more than one eligible
@@ -47,8 +52,9 @@ overrides it.
   and reap every process. `opencode-http`, `stream-json`, `codex-json` and `acp` map
   onto it; `cli-pty` remains worker-only.
 - Phase 1 ships selection, gates and a transport-less dry run. Phase 2 adds the first
-  adapter, **ACP (the owner's choice)**; the reusable `acp.rs` client has landed, but
-  the chat adapter, streaming mapping and contract suite have not. Phase 3 adds the
+  adapter, **ACP (the owner's choice)**; the reusable `acp.rs` client and the
+  `AcpChatAdapter` with hermetic tests have landed, but router/state wiring, the shared
+  contract suite and the owner-run check have not. Phase 3 adds the
   next. Phase 4 adds model/usage parity. Every phase has a one-line acceptance test and
   a suggested `owns`.
 
@@ -809,6 +815,18 @@ copy/evidence labels, never a path, URL, port, token or native id.
   `harness_busy`; it protects the machine from a pathological loop.
 
 ## 6. Phased delivery
+
+### Status as of ss-187 (2026-11-28)
+
+| Phase | Status | Evidence / what remains |
+|---|---|---|
+| **1** selection, gates, dry run | **Largely landed** | Core `selection.rs`/`harness.rs` gate, `chat.json` store, desktop state/command wiring and the Settings "Chat transport" UI (`ss-185`) exist. Remaining: confirm the ChatView gate card/header chip and the "no child spawned" dry-run check against the acceptance test. |
+| **2** ACP adapter | **Partial: adapter built, not wired** | `acp.rs` client (`ss-179`); `HarnessChatAdapter` + `AcpChatAdapter` + hermetic tests (`ss-186`). Remaining: `HarnessChatProvider`/router and `state.rs` wiring so a bound session reaches the adapter, an app-owned local-chat target, the shared contract suite (§7.1), and the owner-run real-harness check. **Not live; not claimed.** |
+| **3** next adapter | Not started | Waits on Phase 2 acceptance. |
+| **4** model/usage parity | Not started | Waits on Phase 2 acceptance. |
+
+Selecting a non-OpenCode harness still resolves to `harness_not_wired` until Phase 2
+wiring lands. The handoff remains the source of truth for what is live.
 
 Each phase is a separate job or two small jobs. The names below are suggestions, not
 current code. A phase must not claim a transport is live until its acceptance test and
