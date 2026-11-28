@@ -640,6 +640,7 @@ mod tests {
             retry: None,
             ownership: None,
             access: crate::engine::chat::model::ChatAccess::Owner,
+            writer: None,
         }
     }
 

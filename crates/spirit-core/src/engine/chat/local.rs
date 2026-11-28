@@ -33,8 +33,9 @@ use crate::engine::chat::model::{
     ChatMessageOrigin, ChatModelTier, ChatModelView, ChatOwnershipView, ChatPermissionDecision,
     ChatPermissionPrompt, ChatRetryStatus, ChatRole, ChatSendReceipt, ChatSessionId,
     ChatSessionLocation, ChatSessionState, ChatSessionView, ChatStartInput, ChatToolActivity,
-    ChatToolStatus, ChatUsageView, MAX_ACTIVITY_ITEMS, MAX_MESSAGE_CHARS, cap_text,
-    display_snippet, normalize_text, validate_project_name, validate_user_text,
+    ChatToolStatus, ChatUsageView, ChatWriterState, ChatWriterView, MAX_ACTIVITY_ITEMS,
+    MAX_MESSAGE_CHARS, cap_text, display_snippet, normalize_text, validate_project_name,
+    validate_user_text,
 };
 use crate::engine::chat::pump::{
     ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper, retry_status,
@@ -42,6 +43,7 @@ use crate::engine::chat::pump::{
 use crate::engine::chat::sse::{
     SseFrame, SseParser, StreamSupport, error_status, parse_engine_event, parse_session_status,
 };
+use crate::engine::chat::writer::{ChatWriter, ChatWriterConfig, ChatWriterError, WriterTarget};
 use crate::engine::{EngineChoice, EngineStatus};
 use crate::error::{SpiritError, SpiritErrorCode};
 use crate::time::{Clock, SystemClock, Timestamp};
@@ -318,6 +320,7 @@ struct Inner {
     workspace: PathBuf,
     resolver: Arc<dyn ChatEndpointResolver>,
     provisioner: Option<Arc<dyn ChatOrchestratorProvisioner>>,
+    writer_config: Option<ChatWriterConfig>,
     stream_support: StreamSupport,
     bus: ChatEventBus,
     state: Mutex<ProviderState>,
@@ -361,6 +364,11 @@ struct SessionRecord {
     ownership: Option<ChatOwnershipView>,
     /// Whether this caller may write to the local endpoint.
     access: ChatAccess,
+    /// The writer manager for a VOWP orchestrator, when the provider installs one.
+    ///
+    /// The manager owns at most one attach child. Dropping the record drops the manager,
+    /// whose `Drop` releases the child.
+    writer: Option<Arc<ChatWriter>>,
     /// True while a coalesced tool-activity log refresh is queued.
     tool_refresh_queued: bool,
     /// Identifies the in-flight background turn so a late response after Stop is ignored.
@@ -392,6 +400,7 @@ impl SessionRecord {
             retry: None,
             ownership: None,
             access: ChatAccess::ReadOnly,
+            writer: None,
             tool_refresh_queued: false,
             turn_seq: 0,
             turn_cancelled: false,
@@ -435,6 +444,7 @@ impl LocalChatProvider {
                 workspace,
                 resolver: Arc::new(VowpEndpointResolver::new()),
                 provisioner: None,
+                writer_config: None,
                 stream_support: StreamSupport::default(),
                 bus: ChatEventBus::new(EVENT_CAPACITY),
                 state: Mutex::new(ProviderState::default()),
@@ -465,6 +475,21 @@ impl LocalChatProvider {
         let inner = Arc::get_mut(&mut self.inner)
             .expect("the provisioner must be configured before the provider is shared");
         inner.provisioner = Some(provisioner);
+        self
+    }
+
+    /// Installs the VOWP writer/lease manager for `global`/`project` chat.
+    ///
+    /// This is the Phase 1 core wiring point. A provider built without it keeps the
+    /// legacy transport path and omits the optional `writer` view; the desktop bridge
+    /// installs the manager in Phase 2. When installed, a VOWP orchestrator session may
+    /// send only while this app holds the lease and the endpoint reports `owner`, and
+    /// the session view carries the safe writer state.
+    #[must_use]
+    pub fn with_chat_writer(mut self, config: ChatWriterConfig) -> Self {
+        let inner = Arc::get_mut(&mut self.inner)
+            .expect("the chat writer must be configured before the provider is shared");
+        inner.writer_config = Some(config);
         self
     }
 
@@ -825,6 +850,7 @@ impl LocalChatProvider {
             )
         })?;
         let vowp_session_id = resolved.session_id.clone();
+        let node = resolved.node.clone();
         let ownership = resolved.owner.as_ref().map(chat_ownership_view);
         let access = ChatAccess::from(resolved.access);
         let mut endpoint = ChatEndpoint::orchestrator(resolved);
@@ -841,7 +867,8 @@ impl LocalChatProvider {
         // used, and the context limit stays `null` because the app does not know it.
         let usage = parse_usage(&body, None);
         let now = self.inner.clock.now();
-        let view = {
+        let writer_config = self.inner.writer_config.clone();
+        let (view, writer) = {
             let mut state = self.inner.state.lock().await;
             let record = state
                 .sessions
@@ -849,16 +876,51 @@ impl LocalChatProvider {
                 .or_insert_with(|| SessionRecord::new(native.clone()));
             let preserve_turn =
                 record.native_session_id == native && record.state == ChatSessionState::Streaming;
-            record.native_session_id = native;
+            // A held writer is the authority for access and the transport endpoint: an
+            // endpoint re-read without `--surface` reports `read_only` even while this
+            // app owns the lease.
+            let held = record
+                .writer
+                .as_ref()
+                .is_some_and(|writer| writer.view().state == ChatWriterState::Held);
+            record.native_session_id = native.clone();
             record.endpoint = Some(endpoint.clone());
-            record.vowp_session_id = Some(vowp_session_id);
+            record.vowp_session_id = Some(vowp_session_id.clone());
             // A session that was stuck on the bundled-engine fallback is now the real
             // orchestrator; it must stop behaving like the setup chat.
             record.engine_backed = false;
             record.known = None;
             record.vowp_mcp_wired = false;
-            record.ownership = ownership;
-            record.access = access;
+            record.ownership = if held {
+                record.writer.as_ref().and_then(|writer| writer.ownership())
+            } else {
+                ownership
+            };
+            record.access = if held { ChatAccess::Owner } else { access };
+            if held
+                && let Some(active) = record
+                    .writer
+                    .as_ref()
+                    .and_then(|writer| writer.endpoint_snapshot())
+            {
+                let mut effective = ChatEndpoint::orchestrator(active);
+                effective.api_prefix = endpoint.api_prefix;
+                record.endpoint = Some(effective);
+            }
+            if let Some(config) = &writer_config {
+                let target =
+                    WriterTarget::new(name, session.clone(), vowp_session_id, native.clone())
+                        .with_node(node);
+                let writer = match record.writer.as_ref() {
+                    Some(existing) if existing.matches_target(&target) => Arc::clone(existing),
+                    _ => {
+                        let writer = Arc::new(ChatWriter::new(target, config.clone()));
+                        writer.start_watcher();
+                        writer
+                    }
+                };
+                record.writer = Some(writer);
+            }
             if !preserve_turn {
                 record.state = ChatSessionState::Ready;
                 record.active_turn = None;
@@ -877,10 +939,26 @@ impl LocalChatProvider {
                 .replace_log(parse_log(&body, self.inner.clock.now()));
             record.applier.observe_revision(self.inner.bus.revision());
             record.mapper.reset_from_messages(record.applier.messages());
-            self.inner.view_for(session, record)
+            (self.inner.view_for(session, record), record.writer.clone())
         };
         let view = self.inner.clone().emit_session(view).await;
-        ensure_pump(&self.inner, &endpoint);
+        // A view open probes takeover eligibility. It never attaches.
+        if let Some(writer) = &writer {
+            writer.probe().await;
+            if let Some(refreshed) = self.inner.current_view(session).await {
+                self.inner.clone().emit_session(refreshed).await;
+            }
+        }
+        let effective = writer
+            .as_ref()
+            .and_then(|writer| writer.endpoint_snapshot())
+            .map(|resolved| {
+                let mut effective = ChatEndpoint::orchestrator(resolved);
+                effective.api_prefix = endpoint.api_prefix;
+                effective
+            })
+            .unwrap_or_else(|| endpoint.clone());
+        ensure_pump(&self.inner, &effective);
         // A turn that was already waiting on a permission or retry when the UI (re)attached.
         self.inner.clone().sync_permissions(session).await;
         self.inner.clone().sync_status(session).await;
@@ -1011,7 +1089,7 @@ impl LocalChatProvider {
         if let Some(variant) = variant {
             super::validate_variant(variant)?;
         }
-        let (native, stored_endpoint, setup, vowp_context) = {
+        let (native, mut stored_endpoint, setup, vowp_context, access, writer) = {
             let state = self.inner.state.lock().await;
             let record = state
                 .sessions
@@ -1039,8 +1117,31 @@ impl LocalChatProvider {
                         .map(|known| (known, record.vowp_mcp_wired))
                 })
                 .flatten();
-            (record.native_session_id.clone(), endpoint, setup, context)
+            (
+                record.native_session_id.clone(),
+                endpoint,
+                setup,
+                context,
+                record.access,
+                record.writer.clone(),
+            )
         };
+        if !setup && let Some(writer) = &writer {
+            // The lease is the authority, not a stale `access` string. This is also the
+            // pre-send watch: it runs before every turn and flips a replaced lease
+            // read-only before any bytes are written.
+            let view = writer.check_lease().await;
+            if view.state != ChatWriterState::Held || access != ChatAccess::Owner {
+                return Err(ChatWriterError::ReadOnly.into());
+            }
+            if let Some(updated) = writer.endpoint_snapshot()
+                && updated.port != stored_endpoint.port
+            {
+                let mut effective = ChatEndpoint::orchestrator(updated);
+                effective.api_prefix = stored_endpoint.api_prefix;
+                stored_endpoint = effective;
+            }
+        }
         let endpoint = if setup {
             let port = self.inner.ensure_engine().await?;
             self.inner.check_health(port).await?;
@@ -1151,6 +1252,172 @@ impl LocalChatProvider {
             message: user,
             accepted: true,
         })
+    }
+
+    /// Takes the VOWP writer lease for an attached orchestrator session.
+    ///
+    /// `takeover` is the owner's explicit confirmation that a live holder may be
+    /// replaced; it is the only case that passes `--takeover`. The command/bridge layer
+    /// is Phase 2; this is the core action those commands will forward.
+    pub async fn take_over(
+        &self,
+        session: &ChatSessionId,
+        takeover: bool,
+    ) -> Result<ChatSessionView, SpiritError> {
+        if matches!(session, ChatSessionId::Setup) || self.is_engine_backed(session).await {
+            return Err(ChatWriterError::HarnessNotWired.into());
+        }
+        let (writer, endpoint, native) = {
+            let state = self.inner.state.lock().await;
+            let record = state
+                .sessions
+                .get(session)
+                .ok_or_else(chat_not_started_error)?;
+            if !record.attached {
+                return Err(chat_not_started_error());
+            }
+            let writer = record
+                .writer
+                .clone()
+                .ok_or(ChatWriterError::WriterNotConfigured)?;
+            let endpoint = record
+                .endpoint
+                .clone()
+                .ok_or_else(|| engine_not_ready_error("the local endpoint is not attached"))?;
+            (writer, endpoint, record.native_session_id.clone())
+        };
+        let writer_view = writer
+            .take_over(takeover)
+            .await
+            .map_err(SpiritError::from)?;
+        if writer_view.state != ChatWriterState::Held {
+            return self
+                .inner
+                .current_view(session)
+                .await
+                .ok_or_else(|| ChatWriterError::AttachFailed.spirit());
+        }
+        let resolved = writer
+            .endpoint_snapshot()
+            .ok_or_else(|| ChatWriterError::AttachFailed.spirit())?;
+        let ownership = writer.ownership();
+        let mut effective = ChatEndpoint::orchestrator(resolved);
+        effective.api_prefix = endpoint.api_prefix;
+        let body = self.inner.read_log(&effective, &native).await?;
+        let usage = parse_usage(&body, None);
+        let now = self.inner.clock.now();
+        let view = {
+            let mut state = self.inner.state.lock().await;
+            let record = state
+                .sessions
+                .get_mut(session)
+                .ok_or_else(chat_not_started_error)?;
+            record.endpoint = Some(effective.clone());
+            record.access = ChatAccess::Owner;
+            record.ownership = ownership;
+            record.usage = usage;
+            record.error = None;
+            if record.state != ChatSessionState::Streaming {
+                record.state = ChatSessionState::Ready;
+                record.active_turn = None;
+            }
+            record.turn_completed = false;
+            record.retry = None;
+            record.turn_cancelled = false;
+            record.turn_seq = record.turn_seq.saturating_add(1);
+            record.last_event_at = Some(now);
+            record
+                .applier
+                .replace_log(parse_log(&body, self.inner.clock.now()));
+            record.applier.observe_revision(self.inner.bus.revision());
+            record.mapper.reset_from_messages(record.applier.messages());
+            self.inner.view_for(session, record)
+        };
+        let view = self.inner.clone().emit_session(view).await;
+        ensure_pump(&self.inner, &effective);
+        self.inner.clone().sync_permissions(session).await;
+        self.inner.clone().sync_status(session).await;
+        Ok(self.inner.current_view(session).await.unwrap_or(view))
+    }
+
+    /// Releases the writer lease and returns the read-only session view.
+    ///
+    /// Release is not Stop: a running turn may continue on the orchestrator.
+    pub async fn release_writer(
+        &self,
+        session: &ChatSessionId,
+    ) -> Result<ChatSessionView, SpiritError> {
+        if matches!(session, ChatSessionId::Setup) || self.is_engine_backed(session).await {
+            return Err(ChatWriterError::HarnessNotWired.into());
+        }
+        let writer = {
+            let state = self.inner.state.lock().await;
+            state
+                .sessions
+                .get(session)
+                .ok_or_else(chat_not_started_error)?
+                .writer
+                .clone()
+        };
+        let Some(writer) = writer else {
+            return self
+                .inner
+                .current_view(session)
+                .await
+                .ok_or_else(chat_not_started_error);
+        };
+        writer.release().await;
+        let view = {
+            let mut state = self.inner.state.lock().await;
+            let record = state
+                .sessions
+                .get_mut(session)
+                .ok_or_else(chat_not_started_error)?;
+            record.access = ChatAccess::ReadOnly;
+            record.ownership = None;
+            self.inner.view_for(session, record)
+        };
+        let view = self.inner.clone().emit_session(view).await;
+        Ok(self.inner.current_view(session).await.unwrap_or(view))
+    }
+
+    /// Re-runs the writer probe and republishes the session view.
+    ///
+    /// The chat view calls this on open, focus and resume. It never spawns an attach.
+    pub async fn probe_writer(
+        &self,
+        session: &ChatSessionId,
+    ) -> Result<ChatSessionView, SpiritError> {
+        if matches!(session, ChatSessionId::Setup) || self.is_engine_backed(session).await {
+            return Err(ChatWriterError::HarnessNotWired.into());
+        }
+        let writer = {
+            let state = self.inner.state.lock().await;
+            state
+                .sessions
+                .get(session)
+                .ok_or_else(chat_not_started_error)?
+                .writer
+                .clone()
+        };
+        let writer = writer.ok_or(ChatWriterError::WriterNotConfigured)?;
+        writer.probe().await;
+        let view = self
+            .inner
+            .current_view(session)
+            .await
+            .ok_or_else(chat_not_started_error)?;
+        let view = self.inner.clone().emit_session(view).await;
+        Ok(view)
+    }
+
+    /// The safe writer view for one session, when the provider installs a manager.
+    pub async fn writer_view(&self, session: &ChatSessionId) -> Option<ChatWriterView> {
+        let state = self.inner.state.lock().await;
+        state
+            .sessions
+            .get(session)
+            .and_then(|record| record.writer.as_ref().map(|writer| writer.view()))
     }
 
     /// Answers one pending OpenCode permission request and returns the refreshed view.
@@ -1377,9 +1644,33 @@ impl Inner {
             };
         // The bundled engine is the app's own single writer. A VOWP orchestrator reports
         // the document's owner and writability exactly; absent metadata stays read-only.
+        // When a writer manager is installed, the lease is the authority: `access: owner`
+        // alone never makes the session writable, and a lost lease is read-only even if
+        // the last resolved document named this surface.
+        let writer = record.writer.as_ref().map(|writer| writer.view());
         let (ownership, access) = if matches!(session, ChatSessionId::Setup) || record.engine_backed
         {
             (None, ChatAccess::Owner)
+        } else if let Some(writer_view) = &writer {
+            let access = if writer_view.state == ChatWriterState::Held
+                && record.access == ChatAccess::Owner
+            {
+                ChatAccess::Owner
+            } else {
+                ChatAccess::ReadOnly
+            };
+            let ownership = if writer_view.state == ChatWriterState::Held {
+                record
+                    .ownership
+                    .clone()
+                    .or_else(|| record.writer.as_ref().and_then(|writer| writer.ownership()))
+            } else {
+                record
+                    .writer
+                    .as_ref()
+                    .and_then(|writer| writer.observed_ownership())
+            };
+            (ownership, access)
         } else {
             (record.ownership.clone(), record.access)
         };
@@ -1400,6 +1691,7 @@ impl Inner {
             retry: record.retry.clone(),
             ownership,
             access,
+            writer,
         }
     }
 
@@ -3970,20 +4262,7 @@ impl From<EndpointAccessWire> for ChatAccess {
 /// Every value is redacted and capped by [`display_snippet`]. An empty or missing kind
 /// becomes `unknown`, so an older or newer VOWP still yields a safe kind string.
 fn chat_ownership_view(owner: &SessionOwnerWire) -> ChatOwnershipView {
-    ChatOwnershipView {
-        kind: owner_field(Some(owner.kind.as_str())).unwrap_or_else(|| "unknown".to_owned()),
-        label: owner_field(owner.label.as_deref()),
-        holder: owner_field(owner.holder.as_deref()),
-        node: owner_field(owner.node.as_deref()),
-        mode: owner_field(owner.mode.as_deref()),
-        state: owner_field(owner.state.as_deref()),
-        activity: owner_field(owner.activity.as_deref()),
-    }
-}
-
-fn owner_field(value: Option<&str>) -> Option<String> {
-    let value = display_snippet(value?);
-    (!value.is_empty()).then_some(value)
+    owner.display_view()
 }
 
 fn validate_start(input: &ChatStartInput) -> Result<(), SpiritError> {

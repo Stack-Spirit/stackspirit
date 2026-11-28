@@ -1,0 +1,367 @@
+#!/bin/sh
+# A hermetic fake `vowp` for the chat writer/lease tests.
+#
+# It never calls a real VOWP binary, the network, ~/.vowp, ~/.vowp-agent or any engine.
+# Every invocation, stdin hold and release marker is recorded under $VOWP_AGENT_HOME,
+# which the test must point at a private temporary directory. The planted canary token
+# is read from that directory and printed only on stdout; this script never writes it
+# to a file.
+set -u
+
+: "${VOWP_AGENT_HOME:?fake vowp needs VOWP_AGENT_HOME}"
+STATE=$VOWP_AGENT_HOME
+
+mode=$(cat "$STATE/mode" 2>/dev/null || printf '%s' attach-grant)
+session=$(cat "$STATE/session" 2>/dev/null || printf '%s' 01ARZ3NDEKTSV4RRFFQ69G5FAV)
+native=$(cat "$STATE/native" 2>/dev/null || printf '%s' ses_fake_native)
+url=$(cat "$STATE/url" 2>/dev/null || printf '%s' http://127.0.0.1:1)
+node=$(cat "$STATE/node" 2>/dev/null || printf '%s' fake-node)
+canary=$(cat "$STATE/canary" 2>/dev/null || printf '%s' fake-lease-canary)
+variant=$(cat "$STATE/grant-variant" 2>/dev/null || printf '%s' ok)
+
+{
+    printf 'CALL\n'
+    for arg in "$@"; do
+        printf 'ARG\t%s\n' "$arg"
+    done
+} >>"$STATE/argv.log"
+
+is_agent=0
+is_attach=0
+is_endpoint=0
+has_help=0
+has_surface=0
+has_takeover=0
+has_node_flag=0
+name=
+previous=
+for arg in "$@"; do
+    case "$arg" in
+        agent) is_agent=1 ;;
+        attach) is_attach=1 ;;
+        endpoint) is_endpoint=1 ;;
+        --help) has_help=1 ;;
+        --surface) has_surface=1 ;;
+        --takeover) has_takeover=1 ;;
+        --node) has_node_flag=1 ;;
+    esac
+    if [ "$previous" = attach ] || [ "$previous" = endpoint ]; then
+        name=$arg
+    fi
+    previous=$arg
+done
+
+now_count() {
+    count=$(cat "$STATE/$1" 2>/dev/null || printf '%s' 0)
+    if [ -z "$count" ]; then
+        count=0
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$STATE/$1"
+    printf '%s\n' "$count"
+}
+
+home_document() {
+    owner_json=$1
+    access=$2
+    location=$3
+    state=$4
+    url_json=$5
+    auth_json=$6
+    native_json=$7
+    cat <<EOF
+{
+  "name": "${name:-global}",
+  "app": "opencode",
+  "session_id": "$session",
+  "location": "$location",
+  "node": "$node",
+  "state": "$state",
+  "url": $url_json,
+  "native_session_id": $native_json,
+  "auth": $auth_json,
+  "owner": $owner_json,
+  "access": "$access"
+}
+EOF
+}
+
+node_document() {
+    cat <<EOF
+{
+  "name": "${name:-global}",
+  "app": "opencode",
+  "session_id": "$session",
+  "location": "node",
+  "node": "$node",
+  "state": "running",
+  "url": null,
+  "native_session_id": null,
+  "auth": null,
+  "owner": null,
+  "access": "read_only"
+}
+EOF
+}
+
+owner_json() {
+    holder=$1
+    owner_state=$(cat "$STATE/owner-state" 2>/dev/null || printf '%s' attached)
+    cat <<EOF
+{
+  "session_id": "$session",
+  "surface_id": "${surface:-surf_fake_current}",
+  "kind": "desktop_ui",
+  "label": "StackSpirit · $node",
+  "holder": "$holder",
+  "node": "$node",
+  "mode": "interactive",
+  "state": "$owner_state",
+  "activity": "idle",
+  "epoch": 1,
+  "acquired_at": "2026-11-28T00:00:00.000Z",
+  "heartbeat_at": "2026-11-28T00:00:00.000Z",
+  "expires_at": null
+}
+EOF
+}
+
+auth_json() {
+    cat <<'EOF'
+{
+  "header": "Authorization",
+  "scheme": "Basic",
+  "username": "opencode",
+  "password": "fake-engine-credential"
+}
+EOF
+}
+
+print_available_home() {
+    home_document null read_only home running "\"$url\"" "$(auth_json)" "\"$native\""
+}
+
+print_owner_home() {
+    home_document "$(owner_json stackspirit)" owner home running "\"$url\"" "$(auth_json)" "\"$native\""
+}
+
+print_other_home() {
+    home_document "$(owner_json other-writer)" read_only home running "\"$url\"" "$(auth_json)" "\"$native\""
+}
+
+print_stopped_home() {
+    home_document null read_only home stopped null null "\"$native\""
+}
+
+print_grant() {
+    count=$(now_count attach-count)
+    surface="surf_fake_$count"
+    token="$canary-$count"
+    printf '%s\n' "$surface" >>"$STATE/surface-ids.log"
+    printf '%s\n' "$$" >"$STATE/attach-pid"
+
+    owner_session=$session
+    owner_surface=$surface
+    endpoint_session=$session
+    endpoint_native=$native
+    endpoint_url=$url
+    endpoint_access=owner
+    endpoint_app=opencode
+    auth=$([ "$variant" = no-auth ] && printf '%s' null || auth_json)
+    if [ "$variant" = wrong-session ]; then
+        owner_session=01ARZ3NDEKTSV4RRFFQ69G5FAW
+        endpoint_session=01ARZ3NDEKTSV4RRFFQ69G5FAW
+    fi
+    if [ "$variant" = wrong-native ]; then
+        endpoint_native=ses_other_native
+    fi
+    if [ "$variant" = non-loopback ]; then
+        endpoint_url=http://192.168.1.10:12345
+    fi
+    if [ "$variant" = read-only ]; then
+        endpoint_access=read_only
+    fi
+    if [ "$variant" = other-app ]; then
+        endpoint_app=claude_code
+    fi
+    if [ "$variant" = wrong-surface ]; then
+        owner_surface=surf_other
+    fi
+
+    cat <<EOF
+{
+  "surface_id": "$surface",
+  "token": "$token",
+  "owner": {
+    "session_id": "$owner_session",
+    "surface_id": "$owner_surface",
+    "kind": "desktop_ui",
+    "label": "StackSpirit · $node",
+    "holder": "stackspirit",
+    "node": "$node",
+    "mode": "interactive",
+    "state": "attached",
+    "activity": "idle",
+    "epoch": 1,
+    "acquired_at": "2026-11-28T00:00:00.000Z",
+    "heartbeat_at": "2026-11-28T00:00:00.000Z",
+    "expires_at": null
+  },
+  "endpoint": {
+    "name": "${name:-global}",
+    "app": "$endpoint_app",
+    "session_id": "$endpoint_session",
+    "location": "home",
+    "node": "$node",
+    "state": "running",
+    "url": "$endpoint_url",
+    "native_session_id": "$endpoint_native",
+    "auth": $auth,
+    "owner": {
+      "session_id": "$owner_session",
+      "surface_id": "$owner_surface",
+      "kind": "desktop_ui",
+      "label": "StackSpirit · $node",
+      "holder": "stackspirit",
+      "node": "$node",
+      "mode": "interactive",
+      "state": "attached",
+      "activity": "idle",
+      "epoch": 1,
+      "acquired_at": "2026-11-28T00:00:00.000Z",
+      "heartbeat_at": "2026-11-28T00:00:00.000Z"
+    },
+    "access": "$endpoint_access"
+  },
+  "expires_at": "2026-11-28T00:01:00.000Z"
+}
+EOF
+}
+
+if [ "$is_attach" = 1 ]; then
+    if [ "$mode" = attach-old ]; then
+        printf '%s\n' "error: unrecognized subcommand 'attach'" >&2
+        exit 2
+    fi
+    if [ "$has_help" = 1 ]; then
+        printf '%s\n' "Attach a desktop UI as the session owner"
+        exit 0
+    fi
+    case "$mode" in
+        attach-conflict)
+            printf '%s\n' '{"error":{"kind":"conflict","message":"another surface holds the session","hint":null}}'
+            exit 4
+            ;;
+        attach-usage)
+            printf '%s\n' "error: the attach command needs a holder" >&2
+            exit 2
+            ;;
+        attach-node)
+            printf '%s\n' '{"error":{"kind":"refused","message":"orchestrator runs on a node","hint":null}}'
+            exit 5
+            ;;
+        attach-hang)
+            # Print nothing and wait until the parent gives up and closes stdin.
+            cat >/dev/null
+            exit 1
+            ;;
+        attach-crash)
+            print_grant
+            exit 1
+            ;;
+        attach-grant|watch-once-fail|watch-always-fail)
+            if [ "$variant" = malformed ]; then
+                printf '%s' '{"surface_id":'
+                exit 1
+            fi
+            env | sort >"$STATE/attach-env.log"
+            print_grant
+            printf '%s\n' "attach: holding ownership; close stdin to release" >&2
+            printf '%s\n' "warning: closing stdin releases the session; the UI loses write access" >&2
+            printf '%s\n' "$$" >"$STATE/attach-pid"
+            : >"$STATE/stdin-open"
+            date +%s%N >"$STATE/hold-start-at"
+            cat >/dev/null
+            date +%s%N >"$STATE/hold-eof-at"
+            rm -f "$STATE/stdin-open"
+            : >"$STATE/released"
+            printf '%s\n' "attach: released" >&2
+            exit 0
+            ;;
+        *)
+            printf '%s\n' '{"error":{"kind":"invalid_input","message":"unknown mode","hint":null}}'
+            exit 2
+            ;;
+    esac
+fi
+
+if [ "$is_endpoint" = 1 ] && [ "$is_agent" = 1 ]; then
+    if [ "$mode" = endpoint-node ]; then
+        node_document
+        exit 0
+    fi
+    printf '%s\n' "error: no local record for this orchestrator" >&2
+    exit 3
+fi
+
+if [ "$is_endpoint" = 1 ]; then
+    if [ "$mode" = not-home ]; then
+        printf '%s\n' "error: no local record for this orchestrator" >&2
+        exit 3
+    fi
+    if [ "$has_surface" = 1 ]; then
+        case "$mode" in
+            watch-once-fail)
+                count=$(now_count watch-count)
+                if [ "$count" -le 1 ]; then
+                    printf '%s\n' "error: transient watch failure" >&2
+                    exit 1
+                fi
+                print_owner_home
+                exit 0
+                ;;
+            watch-always-fail)
+                now_count watch-count >/dev/null
+                printf '%s\n' "error: watch failure" >&2
+                exit 1
+                ;;
+            endpoint-other)
+                print_other_home
+                exit 0
+                ;;
+            endpoint-stopped)
+                print_stopped_home
+                exit 0
+                ;;
+            endpoint-node|endpoint-home-node)
+                node_document
+                exit 0
+                ;;
+            *)
+                print_owner_home
+                exit 0
+                ;;
+        esac
+    fi
+    case "$mode" in
+        endpoint-node|endpoint-home-node)
+            node_document
+            ;;
+        endpoint-stopped)
+            print_stopped_home
+            ;;
+        endpoint-other)
+            print_other_home
+            ;;
+        endpoint-owner)
+            print_owner_home
+            ;;
+        *)
+            print_available_home
+            ;;
+    esac
+    exit 0
+fi
+
+printf '%s\n' "error: unsupported fake invocation" >&2
+exit 2

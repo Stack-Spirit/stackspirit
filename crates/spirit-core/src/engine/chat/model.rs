@@ -7,6 +7,8 @@
 //! Cooperative ownership is display-only here: [`ChatOwnershipView`] carries the safe
 //! owner metadata and [`ChatAccess`] says whether this caller may write. Neither type
 //! carries surface identity, the mirrored log id, an epoch, a lease timestamp or a token.
+//! [`ChatWriterView`] is display-only too: it says whether *this app* holds the lease and
+//! carries only a fixed state, two safe booleans and a fixed reason.
 
 use std::fmt;
 
@@ -191,6 +193,72 @@ pub struct ChatOwnershipView {
     /// Short activity description, when reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<String>,
+}
+
+/// The writer state machine from `docs/SESSION-TAKEOVER.md` §2.7.
+///
+/// It describes whether *this app* holds the cooperative writer lease for a VOWP
+/// orchestrator session. It is not the chat session state and it is not derived from
+/// `ChatAccess`: a document can say `access: "owner"` while no lease is held here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatWriterState {
+    /// Takeover is not usable here, for the safe `reason` on the view.
+    #[default]
+    Unavailable,
+    /// A probe found a co-located home-hosted orchestrator; no lease is held yet.
+    Available,
+    /// An attach child is waiting for its one-time grant.
+    Attaching,
+    /// This app holds a validated lease and the attach child is alive.
+    Held,
+    /// The attach child is being released.
+    Releasing,
+    /// This app no longer trusts its grant; a new takeover is a new grant.
+    Lost,
+}
+
+/// Safe, display-only reasons for a writer state.
+///
+/// Every value is a fixed string chosen by core. Raw VOWP text, paths, holder names and
+/// command output never become a reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatWriterReason {
+    /// VOWP reports a node-hosted orchestrator; a home cannot attach it.
+    NodeHosted,
+    /// The installed VOWP has no usable `orchestrator attach` command.
+    VowpTooOld,
+    /// There is no co-located VOWP home endpoint for this orchestrator.
+    NotHome,
+    /// The orchestrator is stopped or has no live loopback endpoint.
+    OrchestratorStopped,
+    /// VOWP refused the attach (for example a node-only or stopped record).
+    AttachRefused,
+    /// The attach child failed, timed out or returned an unusable grant.
+    AttachFailed,
+    /// The lease was replaced, disappeared or could not be verified.
+    LeaseLost,
+    /// The grant named another VOWP session or native OpenCode session.
+    SessionMismatch,
+}
+
+/// The display-safe writer view from `docs/SESSION-TAKEOVER.md` §2.8.
+///
+/// It carries only the state, the two safe action booleans and a fixed reason. It never
+/// carries a lease token, surface id, endpoint URL, port, native session id, epoch, lease
+/// timestamp or command line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatWriterView {
+    /// The writer state for this app and this chat session.
+    pub state: ChatWriterState,
+    /// True only when a takeover action is honest and safe to offer.
+    pub can_take_over: bool,
+    /// True only while this app holds the lease and can release it.
+    pub can_release: bool,
+    /// A fixed safe reason, when the state is not usable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ChatWriterReason>,
 }
 
 /// The chat state machine from §4.5.
@@ -554,6 +622,13 @@ pub struct ChatSessionView {
     /// Whether this caller may write; VOWP orchestrators default to `read_only`.
     #[serde(default)]
     pub access: ChatAccess,
+    /// Whether this app holds the writer lease for a VOWP orchestrator.
+    ///
+    /// Absent for the bundled setup/engine-backed chat, for an older bridge and for a
+    /// provider that does not install the writer manager. The writer view carries only
+    /// safe booleans and a fixed reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer: Option<ChatWriterView>,
 }
 
 /// Why a session closed.
@@ -969,6 +1044,7 @@ mod tests {
             retry: None,
             ownership: None,
             access: ChatAccess::ReadOnly,
+            writer: None,
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(!json.contains("\"url\""));
@@ -978,6 +1054,47 @@ mod tests {
         assert!(!json.contains("\"native_session_id\""));
         assert!(json.contains("\"access\":\"read_only\""));
         assert!(!json.contains("\"ownership\""));
+        assert!(!json.contains("\"writer\""));
+    }
+
+    #[test]
+    fn writer_view_serializes_only_the_safe_contract() {
+        let held = ChatWriterView {
+            state: ChatWriterState::Held,
+            can_take_over: false,
+            can_release: true,
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_value(held).unwrap(),
+            serde_json::json!({
+                "state": "held",
+                "can_take_over": false,
+                "can_release": true,
+            })
+        );
+        let unavailable = ChatWriterView {
+            state: ChatWriterState::Unavailable,
+            can_take_over: false,
+            can_release: false,
+            reason: Some(ChatWriterReason::NodeHosted),
+        };
+        let value = serde_json::to_value(unavailable).unwrap();
+        assert_eq!(value["state"], "unavailable");
+        assert_eq!(value["reason"], "node_hosted");
+        for forbidden in [
+            "token",
+            "surface_id",
+            "url",
+            "port",
+            "native_session_id",
+            "session_id",
+            "epoch",
+            "expires_at",
+            "path",
+        ] {
+            assert!(value.get(forbidden).is_none(), "{forbidden}");
+        }
     }
 
     #[test]

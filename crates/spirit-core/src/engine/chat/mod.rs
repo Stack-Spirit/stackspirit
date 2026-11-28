@@ -10,6 +10,7 @@ pub mod local;
 pub mod model;
 pub mod pump;
 pub mod sse;
+pub mod writer;
 
 pub use endpoint::{ChatEndpointResolver, ResolvedEndpoint, VowpEndpointResolver};
 pub use local::{
@@ -21,11 +22,11 @@ pub use model::{
     ChatMessageOrigin, ChatModelTier, ChatModelView, ChatOwnershipView, ChatPermissionDecision,
     ChatPermissionPrompt, ChatRetryAction, ChatRetryStatus, ChatRole, ChatSendInput,
     ChatSendReceipt, ChatSessionId, ChatSessionLocation, ChatSessionState, ChatSessionView,
-    ChatStartInput, ChatToolActivity, ChatToolStatus, ChatUsageView, DEFAULT_LOG_LIMIT,
-    MAX_ACTIVITY_CHARS, MAX_ACTIVITY_ITEMS, MAX_ATTACHMENT_URL_BYTES, MAX_ATTACHMENTS,
-    MAX_LOG_LIMIT, MAX_MESSAGE_CHARS, MAX_USER_MESSAGE_CHARS, cap_text, display_snippet,
-    normalize_text, paragraphs, validate_attachments, validate_project_name, validate_user_text,
-    validate_variant,
+    ChatStartInput, ChatToolActivity, ChatToolStatus, ChatUsageView, ChatWriterReason,
+    ChatWriterState, ChatWriterView, DEFAULT_LOG_LIMIT, MAX_ACTIVITY_CHARS, MAX_ACTIVITY_ITEMS,
+    MAX_ATTACHMENT_URL_BYTES, MAX_ATTACHMENTS, MAX_LOG_LIMIT, MAX_MESSAGE_CHARS,
+    MAX_USER_MESSAGE_CHARS, cap_text, display_snippet, normalize_text, paragraphs,
+    validate_attachments, validate_project_name, validate_user_text, validate_variant,
 };
 pub use pump::{
     ApplyOutcome, ChatEventApplier, ChatEventBus, Mapped, SseEventMapper, retry_status,
@@ -35,3 +36,4 @@ pub use sse::{
     STREAM_UNPROVEN_REASON, SseFrame, SseParser, StreamSupport, parse_engine_event,
     parse_session_status,
 };
+pub use writer::{ChatWriter, ChatWriterConfig, ChatWriterError, WriterTarget};

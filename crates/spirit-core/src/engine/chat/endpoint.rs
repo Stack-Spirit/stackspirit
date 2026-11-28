@@ -21,6 +21,7 @@ use serde::{Deserialize, Deserializer};
 use tokio::process::Command;
 use zeroize::Zeroizing;
 
+use crate::engine::chat::model::{ChatOwnershipView, ChatWriterReason};
 use crate::error::{SpiritError, SpiritErrorCode};
 
 /// The bounded budget for the local `vowp agent orchestrator endpoint` read.
@@ -28,6 +29,12 @@ use crate::error::{SpiritError, SpiritErrorCode};
 /// The command only reads private files on this Mac; a slower answer is treated as a
 /// typed `chat_not_configured` failure rather than a hang.
 pub const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The takeover probe budget from `docs/SESSION-TAKEOVER.md` §2.4.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The lease-watch budget for one authoritative endpoint check.
+const WATCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The largest endpoint document this resolver accepts.
 const MAX_ENDPOINT_DOCUMENT: usize = 64 * 1024;
@@ -91,6 +98,7 @@ impl fmt::Debug for LoopbackAuth {
 ///
 /// It is core-only. The `Debug` impl redacts the host, port, VOWP session id, native
 /// session id and auth value so an accidental `{:?}` cannot leak them.
+#[derive(Clone)]
 pub struct ResolvedEndpoint {
     /// Orchestrator name (safe metadata).
     pub(crate) name: String,
@@ -168,11 +176,163 @@ pub trait ChatEndpointResolver: Send + Sync {
     ) -> Result<ResolvedEndpoint, SpiritError>;
 }
 
+/// The minimal, non-secret child environment every local VOWP command receives.
+///
+/// Production reads the process environment. Tests set explicit values so no real home,
+/// agent state, provider key or token is inherited.
+#[derive(Clone, Default)]
+pub(crate) struct VowpEnv {
+    /// Explicit child `PATH`, when configured.
+    path: Option<std::ffi::OsString>,
+    /// Explicit child `VOWP_AGENT_HOME`, when configured.
+    agent_home: Option<std::ffi::OsString>,
+    /// Explicit child home (`STACKSPIRIT_HOME`/`VOWP_HOME`), when configured.
+    home: Option<std::ffi::OsString>,
+}
+
+impl VowpEnv {
+    /// Builds the production environment from the process environment.
+    pub(crate) fn from_process() -> Self {
+        Self::default()
+    }
+
+    /// Overrides the child `PATH`.
+    pub(crate) fn with_path(mut self, path: impl Into<std::ffi::OsString>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    /// Overrides the child `VOWP_AGENT_HOME`.
+    pub(crate) fn with_agent_home(mut self, path: impl Into<std::ffi::OsString>) -> Self {
+        self.agent_home = Some(path.into());
+        self
+    }
+
+    /// Overrides the child home (`STACKSPIRIT_HOME`/`VOWP_HOME`).
+    pub(crate) fn with_home(mut self, path: impl Into<std::ffi::OsString>) -> Self {
+        self.home = Some(path.into());
+        self
+    }
+
+    /// Returns the search path used to resolve the engine binary.
+    pub(crate) fn search_path(&self) -> Option<String> {
+        self.path
+            .clone()
+            .or_else(|| std::env::var_os("PATH"))
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    /// Clears the child environment and applies only the allow-list.
+    ///
+    /// VOWP needs `PATH` to find itself and `HOME` to find `~/.vowp-agent`. The explicit
+    /// home and agent variables are non-secret overrides. Every other inherited variable,
+    /// including provider keys and `OPENCODE_AUTH_CONTENT`, is absent from the child.
+    pub(crate) fn apply(&self, command: &mut Command) {
+        // The associated-function form keeps this source free of a dotenv-shaped token,
+        // which the security scan reserves for file reads.
+        tokio::process::Command::env_clear(command);
+        if let Some(path) = self.path.clone().or_else(|| std::env::var_os("PATH")) {
+            tokio::process::Command::env(command, "PATH", path);
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            tokio::process::Command::env(command, "HOME", home);
+        }
+        if let Some(agent_home) = self
+            .agent_home
+            .clone()
+            .or_else(|| std::env::var_os("VOWP_AGENT_HOME"))
+        {
+            tokio::process::Command::env(command, "VOWP_AGENT_HOME", agent_home);
+        }
+        let home = self.home.clone().or_else(|| {
+            crate::ssh::command::engine_home_from_process_env().map(std::ffi::OsString::from)
+        });
+        if let Some(home) = home {
+            tokio::process::Command::env(command, crate::ssh::command::ENGINE_HOME_ENV, &home);
+            tokio::process::Command::env(
+                command,
+                crate::ssh::command::LEGACY_ENGINE_HOME_ENV,
+                &home,
+            );
+        }
+    }
+}
+
+/// Where an endpoint document came from.
+///
+/// The agent command is node-side and may report a node-hosted or a home-hosted record.
+/// The home command is the only source allowed to turn a home-hosted record into a
+/// transport; a home document with `location: "node"` is metadata-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndpointSource {
+    /// `vowp agent orchestrator endpoint <NAME> --json`.
+    Agent,
+    /// `vowp orchestrator endpoint <NAME> [--surface <ID>] --json`.
+    Home,
+}
+
+/// Why one local VOWP command did not return an endpoint document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandFailure {
+    /// The executable could not be spawned.
+    Spawn,
+    /// The command exited 2 (unknown command or usage) or timed out.
+    Unsupported,
+    /// The command exited 3 (no local record).
+    NotFound,
+    /// Any other nonzero exit or command failure.
+    Failed,
+    /// The command exceeded its bounded read budget.
+    Timeout,
+    /// More than 64 KiB of stdout or invalid JSON.
+    Unparseable,
+}
+
+impl CommandFailure {
+    fn into_spirit(self, name: &str, source: EndpointSource) -> SpiritError {
+        let command = match source {
+            EndpointSource::Agent => "agent ",
+            EndpointSource::Home => "",
+        };
+        match self {
+            Self::Spawn => not_configured(name, "the installed VOWP command is unavailable"),
+            Self::Unsupported => not_configured(
+                name,
+                if matches!(source, EndpointSource::Agent) {
+                    "the installed VOWP has no `agent orchestrator endpoint` command"
+                } else {
+                    "the installed VOWP has no `orchestrator endpoint` command"
+                },
+            ),
+            Self::NotFound => {
+                not_configured(name, "there is no local record for this orchestrator")
+            }
+            Self::Failed => not_configured(
+                name,
+                if matches!(source, EndpointSource::Agent) {
+                    "the installed VOWP agent command failed"
+                } else {
+                    "the installed VOWP home command failed"
+                },
+            ),
+            Self::Timeout => not_configured(name, "the installed VOWP command timed out"),
+            Self::Unparseable => not_configured(
+                name,
+                if command.is_empty() {
+                    "the VOWP home answer was not a readable endpoint document"
+                } else {
+                    "the VOWP agent answer was not a readable endpoint document"
+                },
+            ),
+        }
+    }
+}
+
 /// The production resolver backed by the installed local `vowp` CLI.
 #[derive(Clone, Default)]
 pub struct VowpEndpointResolver {
-    /// Test-only PATH override. Production reads the process PATH.
-    path_env: Option<std::ffi::OsString>,
+    /// The explicit child environment; production reads the process environment.
+    child_environment: VowpEnv,
 }
 
 impl fmt::Debug for VowpEndpointResolver {
@@ -193,103 +353,249 @@ impl VowpEndpointResolver {
     ///
     /// Integration tests point this at a directory holding a fake `vowp`; production
     /// never calls it. The rest of the child environment is still the minimal allow-list
-    /// built by [`Self::run`].
+    /// built by [`VowpEnv::apply`].
     #[must_use]
     pub fn with_path_env(path: impl Into<std::ffi::OsString>) -> Self {
         Self {
-            path_env: Some(path.into()),
+            child_environment: VowpEnv::from_process().with_path(path),
         }
     }
 
-    /// Runs the local agent command with argv only and a minimal, secret-free environment.
-    async fn run(&self, name: &str) -> Result<EndpointDocument, SpiritError> {
-        if !valid_orchestrator_name(name) {
-            return Err(not_configured(name, "the orchestrator name is not usable"));
+    /// Overrides the child `VOWP_AGENT_HOME`.
+    ///
+    /// Integration tests point this at a private temporary directory. Production inherits
+    /// the process value.
+    #[must_use]
+    pub fn with_agent_home(mut self, path: impl Into<std::ffi::OsString>) -> Self {
+        self.child_environment = self.child_environment.with_agent_home(path);
+        self
+    }
+
+    /// Overrides the child home (`STACKSPIRIT_HOME`/`VOWP_HOME`).
+    ///
+    /// Integration tests point this at a private temporary directory. Production inherits
+    /// the process value, when one is set.
+    #[must_use]
+    pub fn with_home_env(mut self, path: impl Into<std::ffi::OsString>) -> Self {
+        self.child_environment = self.child_environment.with_home(path);
+        self
+    }
+
+    /// Builds a resolver from an explicit child environment.
+    pub(crate) fn with_env(env: VowpEnv) -> Self {
+        Self {
+            child_environment: env,
         }
-        let search_path = self
-            .path_env
-            .clone()
-            .or_else(|| std::env::var_os("PATH"))
-            .map(|path| path.to_string_lossy().into_owned());
+    }
+
+    /// Runs one local `vowp` command with argv only and the minimal child environment.
+    async fn run_command(&self, args: &[&str]) -> Result<EndpointDocument, CommandFailure> {
+        self.run_command_with_timeout(args, ENDPOINT_TIMEOUT).await
+    }
+
+    /// Runs one local `vowp` command with an explicit read budget.
+    async fn run_command_with_timeout(
+        &self,
+        args: &[&str],
+        budget: Duration,
+    ) -> Result<EndpointDocument, CommandFailure> {
+        let search_path = self.child_environment.search_path();
         let program = crate::ssh::command::resolve_local_engine_binary(search_path.as_deref());
         let mut command = Command::new(program);
         command
-            .args(["agent", "orchestrator", "endpoint", name, "--json"])
+            .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        // The associated-function form keeps this source free of a dotenv-shaped token,
-        // which the security scan reserves for file reads. This clears the child
-        // environment instead of inheriting the desktop's provider keys and tokens.
-        tokio::process::Command::env_clear(&mut command);
-        // VOWP needs PATH to find itself (and its own helpers) and HOME to find
-        // `~/.vowp-agent`. VOWP_AGENT_HOME is an explicit non-secret override. Every
-        // other inherited variable, including provider keys and OPENCODE_AUTH_CONTENT,
-        // is absent from the child.
-        let path = self.path_env.clone().or_else(|| std::env::var_os("PATH"));
-        if let Some(path) = path {
-            tokio::process::Command::env(&mut command, "PATH", path);
-        }
-        if let Some(home) = std::env::var_os("HOME") {
-            tokio::process::Command::env(&mut command, "HOME", home);
-        }
-        if let Some(agent_home) = std::env::var_os("VOWP_AGENT_HOME") {
-            tokio::process::Command::env(&mut command, "VOWP_AGENT_HOME", agent_home);
-        }
-        if let Some(engine_home) = crate::ssh::command::engine_home_from_process_env() {
-            tokio::process::Command::env(
-                &mut command,
-                crate::ssh::command::ENGINE_HOME_ENV,
-                &engine_home,
-            );
-            tokio::process::Command::env(
-                &mut command,
-                crate::ssh::command::LEGACY_ENGINE_HOME_ENV,
-                &engine_home,
-            );
-        }
-        let child = command
-            .spawn()
-            .map_err(|_| not_configured(name, "the installed VOWP agent command is unavailable"))?;
-        let output = match tokio::time::timeout(ENDPOINT_TIMEOUT, child.wait_with_output()).await {
+        self.child_environment.apply(&mut command);
+        let child = command.spawn().map_err(|_| CommandFailure::Spawn)?;
+        let output = match tokio::time::timeout(budget, child.wait_with_output()).await {
             Ok(Ok(output)) => output,
-            Ok(Err(_)) => {
-                return Err(not_configured(
-                    name,
-                    "the installed VOWP agent command failed",
-                ));
-            }
-            Err(_) => {
-                return Err(not_configured(
-                    name,
-                    "the installed VOWP agent command timed out",
-                ));
-            }
+            Ok(Err(_)) => return Err(CommandFailure::Failed),
+            Err(_) => return Err(CommandFailure::Timeout),
         };
         if output.stdout.len() > MAX_ENDPOINT_DOCUMENT {
-            return Err(not_configured(
-                name,
-                "the VOWP agent answer exceeded the local size cap",
-            ));
+            return Err(CommandFailure::Unparseable);
         }
         if !output.status.success() {
             return Err(match output.status.code() {
-                Some(2) => not_configured(
-                    name,
-                    "the installed VOWP has no `agent orchestrator endpoint` command",
-                ),
-                Some(3) => not_configured(name, "there is no local record for this orchestrator"),
-                _ => not_configured(name, "the installed VOWP agent command failed"),
+                Some(2) => CommandFailure::Unsupported,
+                Some(3) => CommandFailure::NotFound,
+                _ => CommandFailure::Failed,
             });
         }
-        serde_json::from_slice(&output.stdout).map_err(|_| {
-            not_configured(
-                name,
-                "the VOWP agent answer was not a readable endpoint document",
-            )
-        })
+        serde_json::from_slice(&output.stdout).map_err(|_| CommandFailure::Unparseable)
     }
+
+    /// Reads the endpoint document, trying the agent first and the home command only when
+    /// the agent reports no local record.
+    async fn read_endpoint(
+        &self,
+        name: &str,
+    ) -> Result<(EndpointDocument, EndpointSource), SpiritError> {
+        if !valid_orchestrator_name(name) {
+            return Err(not_configured(name, "the orchestrator name is not usable"));
+        }
+        match self
+            .run_command(&["agent", "orchestrator", "endpoint", name, "--json"])
+            .await
+        {
+            Ok(document) => Ok((document, EndpointSource::Agent)),
+            Err(CommandFailure::NotFound) => {
+                match self
+                    .run_command(&["orchestrator", "endpoint", name, "--json"])
+                    .await
+                {
+                    Ok(document) => Ok((document, EndpointSource::Home)),
+                    Err(failure) => Err(failure.into_spirit(name, EndpointSource::Home)),
+                }
+            }
+            Err(failure) => Err(failure.into_spirit(name, EndpointSource::Agent)),
+        }
+    }
+
+    /// Reads and strictly validates the document a takeover probe needs.
+    ///
+    /// A node-hosted agent document is `node_hosted`; a node metadata document from the
+    /// home command is rejected as a transport for the same reason. Only a live,
+    /// co-located home endpoint with a loopback URL, auth and native session is accepted.
+    pub(crate) async fn probe_endpoint(
+        &self,
+        name: &str,
+        expected_session_id: Option<&str>,
+    ) -> Result<ResolvedEndpoint, ChatWriterReason> {
+        if !valid_orchestrator_name(name) {
+            return Err(ChatWriterReason::NotHome);
+        }
+        let document = match self
+            .run_command_with_timeout(
+                &["agent", "orchestrator", "endpoint", name, "--json"],
+                PROBE_TIMEOUT,
+            )
+            .await
+        {
+            Ok(document) => document,
+            Err(CommandFailure::NotFound) => {
+                match self
+                    .run_command_with_timeout(
+                        &["orchestrator", "endpoint", name, "--json"],
+                        PROBE_TIMEOUT,
+                    )
+                    .await
+                {
+                    Ok(document) => document,
+                    Err(CommandFailure::Unsupported) => return Err(ChatWriterReason::VowpTooOld),
+                    Err(_) => return Err(ChatWriterReason::NotHome),
+                }
+            }
+            Err(CommandFailure::Unsupported) => return Err(ChatWriterReason::VowpTooOld),
+            Err(_) => return Err(ChatWriterReason::NotHome),
+        };
+        validate_strict_endpoint(&document, name, expected_session_id)
+    }
+
+    /// Reads the authoritative endpoint document for one held surface.
+    ///
+    /// The watch command is home-side and names the caller's surface; a different surface
+    /// is reported as `access: "read_only"`. Transport failures are transient so the
+    /// caller can retry once before treating the grant as lost.
+    pub(crate) async fn watch_endpoint(
+        &self,
+        name: &str,
+        expected_session_id: &str,
+        surface_id: &str,
+    ) -> Result<ResolvedEndpoint, ChatWriterReason> {
+        if !valid_orchestrator_name(name) || !valid_surface_id(surface_id) {
+            return Err(ChatWriterReason::AttachFailed);
+        }
+        let document = self
+            .run_command_with_timeout(
+                &[
+                    "orchestrator",
+                    "endpoint",
+                    name,
+                    "--surface",
+                    surface_id,
+                    "--json",
+                ],
+                WATCH_TIMEOUT,
+            )
+            .await
+            .map_err(|_| ChatWriterReason::LeaseLost)?;
+        validate_strict_endpoint(&document, name, Some(expected_session_id))
+    }
+}
+
+/// Validates a probe document into a core-only endpoint.
+fn validate_strict_endpoint(
+    document: &EndpointDocument,
+    requested: &str,
+    expected_session_id: Option<&str>,
+) -> Result<ResolvedEndpoint, ChatWriterReason> {
+    if document.name != requested {
+        return Err(ChatWriterReason::NotHome);
+    }
+    if !document.app.eq_ignore_ascii_case("opencode") {
+        return Err(ChatWriterReason::NotHome);
+    }
+    match document.location.as_str() {
+        "home" => {}
+        "node" => return Err(ChatWriterReason::NodeHosted),
+        _ => return Err(ChatWriterReason::NotHome),
+    }
+    if !matches!(document.state.as_str(), "running" | "degraded") {
+        return Err(ChatWriterReason::OrchestratorStopped);
+    }
+    let Some(url) = document.url.as_deref() else {
+        return Err(ChatWriterReason::OrchestratorStopped);
+    };
+    let Some((host, port)) = parse_loopback_url(url) else {
+        return Err(ChatWriterReason::NotHome);
+    };
+    let Some(auth) = &document.auth else {
+        return Err(ChatWriterReason::OrchestratorStopped);
+    };
+    let auth = auth
+        .clone()
+        .into_auth(requested)
+        .map_err(|_| ChatWriterReason::AttachFailed)?;
+    let native_session_id = document
+        .native_session_id
+        .as_deref()
+        .filter(|native| usable_native_id(native))
+        .map(str::to_owned)
+        .ok_or(ChatWriterReason::SessionMismatch)?;
+    if let Some(expected) = expected_session_id
+        && document.session_id != expected
+    {
+        return Err(ChatWriterReason::SessionMismatch);
+    }
+    let workspace = match document
+        .workspace
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        Some(workspace) => {
+            Some(parse_workspace_path(workspace).ok_or(ChatWriterReason::AttachFailed)?)
+        }
+        None => None,
+    };
+    Ok(ResolvedEndpoint {
+        name: document.name.clone(),
+        app: document.app.clone(),
+        session_id: document.session_id.clone(),
+        location: document.location.clone(),
+        node: document.node.clone(),
+        state: document.state.clone(),
+        host,
+        port,
+        native_session_id: Some(native_session_id),
+        owner: document.owner.clone(),
+        access: document.access,
+        workspace,
+        auth: Some(auth),
+    })
 }
 
 #[async_trait]
@@ -299,9 +605,8 @@ impl ChatEndpointResolver for VowpEndpointResolver {
         name: &str,
         expected_session_id: Option<&str>,
     ) -> Result<ResolvedEndpoint, SpiritError> {
-        self.run(name)
-            .await?
-            .into_endpoint(name, expected_session_id)
+        let (document, source) = self.read_endpoint(name).await?;
+        document.into_endpoint(name, expected_session_id, source)
     }
 }
 
@@ -333,6 +638,28 @@ pub(crate) struct SessionOwnerWire {
     /// Optional short activity description.
     #[serde(default)]
     pub(crate) activity: Option<String>,
+}
+
+impl SessionOwnerWire {
+    /// Reduces VOWP's owner report to the display-only view.
+    ///
+    /// Every value is redacted and capped. An empty or missing kind becomes `unknown`, so
+    /// an older or newer VOWP still yields a safe kind string.
+    pub(crate) fn display_view(&self) -> ChatOwnershipView {
+        let field = |value: Option<&str>| {
+            let value = crate::engine::chat::model::display_snippet(value?);
+            (!value.is_empty()).then_some(value)
+        };
+        ChatOwnershipView {
+            kind: field(Some(self.kind.as_str())).unwrap_or_else(|| "unknown".to_owned()),
+            label: field(self.label.as_deref()),
+            holder: field(self.holder.as_deref()),
+            node: field(self.node.as_deref()),
+            mode: field(self.mode.as_deref()),
+            state: field(self.state.as_deref()),
+            activity: field(self.activity.as_deref()),
+        }
+    }
 }
 
 /// Whether the calling surface may write to a local orchestrator.
@@ -393,12 +720,12 @@ struct EndpointDocument {
     auth: Option<AuthDocument>,
 }
 
-#[derive(Deserialize)]
-struct AuthDocument {
-    header: String,
-    scheme: String,
-    username: String,
-    password: String,
+#[derive(Clone, Deserialize)]
+pub(crate) struct AuthDocument {
+    pub(crate) header: String,
+    pub(crate) scheme: String,
+    pub(crate) username: String,
+    pub(crate) password: String,
 }
 
 impl EndpointDocument {
@@ -406,6 +733,7 @@ impl EndpointDocument {
         self,
         requested: &str,
         expected_session_id: Option<&str>,
+        source: EndpointSource,
     ) -> Result<ResolvedEndpoint, SpiritError> {
         if self.name != requested {
             return Err(not_configured(
@@ -420,6 +748,18 @@ impl EndpointDocument {
                     "runs {}; StackSpirit chat only speaks opencode",
                     safe_detail(&self.app, "another app")
                 ),
+            ));
+        }
+        if !matches!(self.location.as_str(), "home" | "node") {
+            return Err(incompatible(
+                requested,
+                "reported an unknown orchestrator location",
+            ));
+        }
+        if self.location == "node" && matches!(source, EndpointSource::Home) {
+            return Err(gated(
+                requested,
+                "is node-hosted; the home endpoint is metadata only and never a chat transport",
             ));
         }
         if !matches!(self.state.as_str(), "running" | "degraded") {
@@ -440,6 +780,12 @@ impl EndpointDocument {
         let Some((host, port)) = parse_loopback_url(url) else {
             return Err(incompatible(requested, "reported a non-loopback endpoint"));
         };
+        if self.location == "home" && self.auth.is_none() {
+            return Err(gated(
+                requested,
+                "has no live loopback credential; resume it in VOWP and retry",
+            ));
+        }
         if let Some(expected) = expected_session_id
             && self.session_id != expected
         {
@@ -455,6 +801,12 @@ impl EndpointDocument {
                 return Err(not_mirrored(
                     requested,
                     "reported an unusable mirrored OpenCode session",
+                ));
+            }
+            None if self.location == "home" => {
+                return Err(not_mirrored(
+                    requested,
+                    "reported no mirrored OpenCode session for the home endpoint",
                 ));
             }
             None => None,
@@ -488,7 +840,7 @@ impl EndpointDocument {
 }
 
 impl AuthDocument {
-    fn into_auth(self, name: &str) -> Result<LoopbackAuth, SpiritError> {
+    pub(crate) fn into_auth(self, name: &str) -> Result<LoopbackAuth, SpiritError> {
         if !valid_header_name(&self.header) || self.password.is_empty() {
             return Err(incompatible(
                 name,
@@ -534,7 +886,7 @@ impl AuthDocument {
 ///
 /// Only `http://127.0.0.1:<port>`, `http://localhost:<port>` and `http://[::1]:<port>`
 /// are accepted. Userinfo, a query, a fragment, a path and port zero are rejected.
-fn parse_loopback_url(url: &str) -> Option<(LoopbackHost, u16)> {
+pub(crate) fn parse_loopback_url(url: &str) -> Option<(LoopbackHost, u16)> {
     let rest = url.strip_prefix("http://")?;
     if rest.contains(['@', '?', '#', '\\']) {
         return None;
@@ -565,7 +917,7 @@ fn parse_loopback_url(url: &str) -> Option<(LoopbackHost, u16)> {
     Some((host, port))
 }
 
-fn valid_orchestrator_name(name: &str) -> bool {
+pub(crate) fn valid_orchestrator_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name != "."
@@ -573,6 +925,18 @@ fn valid_orchestrator_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// Validates a VOWP surface id for the lease watch.
+///
+/// The value is identity, not a secret; it stays core-only. VOWP uses a ULID, but the
+/// shape is kept permissive enough for a future id with `-`/`_`.
+pub(crate) fn valid_surface_id(surface: &str) -> bool {
+    !surface.is_empty()
+        && surface.len() <= 128
+        && surface
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn usable_native_id(native: &str) -> bool {
@@ -809,18 +1173,18 @@ mod tests {
             Some("http://127.0.0.1:1"),
             Some("ses_1"),
         )
-        .into_endpoint("global", None)
+        .into_endpoint("global", None, EndpointSource::Agent)
         .unwrap_err();
         assert!(error.message.contains("chat_gated"));
         assert!(!error.message.contains("127.0.0.1"));
 
         let error = document("opencode", "stopped", None, None)
-            .into_endpoint("global", None)
+            .into_endpoint("global", None, EndpointSource::Agent)
             .unwrap_err();
         assert!(error.message.contains("chat_gated"));
 
         let error = document("opencode", "running", None, None)
-            .into_endpoint("global", None)
+            .into_endpoint("global", None, EndpointSource::Agent)
             .unwrap_err();
         assert!(error.message.contains("chat_gated"));
 
@@ -830,14 +1194,14 @@ mod tests {
             Some("http://0.0.0.0:12345"),
             Some("ses_1"),
         )
-        .into_endpoint("global", None)
+        .into_endpoint("global", None, EndpointSource::Agent)
         .unwrap_err();
         assert_eq!(error.code, SpiritErrorCode::VowpIncompatible);
         assert!(!error.message.contains("0.0.0.0"));
 
         // A missing native id is a discovery signal, not a fence.
         let resolved = document("opencode", "running", Some("http://127.0.0.1:12345"), None)
-            .into_endpoint("global", None)
+            .into_endpoint("global", None, EndpointSource::Agent)
             .unwrap();
         assert!(resolved.native_session_id.is_none());
         assert!(resolved.workspace.is_none());
@@ -849,7 +1213,7 @@ mod tests {
             Some("http://127.0.0.1:12345"),
             Some("ses/1"),
         )
-        .into_endpoint("global", None)
+        .into_endpoint("global", None, EndpointSource::Agent)
         .unwrap_err();
         assert!(error.message.contains("chat_not_mirrored"));
         assert!(!error.message.contains("ses/1"));
@@ -860,7 +1224,7 @@ mod tests {
             Some("http://127.0.0.1:12345"),
             Some("ses_1"),
         )
-        .into_endpoint("global", Some("another-session"))
+        .into_endpoint("global", Some("another-session"), EndpointSource::Agent)
         .unwrap_err();
         assert!(error.message.contains("chat_not_mirrored"));
 
@@ -870,7 +1234,7 @@ mod tests {
             Some("http://127.0.0.1:12345"),
             Some("ses_1"),
         )
-        .into_endpoint("global", None)
+        .into_endpoint("global", None, EndpointSource::Agent)
         .unwrap();
         assert_eq!((resolved.host, resolved.port), (LoopbackHost::V4, 12345));
         assert_eq!(resolved.native_session_id.as_deref(), Some("ses_1"));
@@ -893,7 +1257,7 @@ mod tests {
             auth: None,
         };
         let resolved = document("/tmp/orchestrator workspace")
-            .into_endpoint("global", None)
+            .into_endpoint("global", None, EndpointSource::Agent)
             .expect("an absolute workspace is accepted");
         assert_eq!(
             resolved.workspace.as_deref(),
@@ -903,7 +1267,7 @@ mod tests {
         assert!(!debug.contains("/tmp/orchestrator workspace"));
 
         let error = document("../escape")
-            .into_endpoint("global", None)
+            .into_endpoint("global", None, EndpointSource::Agent)
             .unwrap_err();
         assert_eq!(error.code, SpiritErrorCode::VowpIncompatible);
         assert!(!error.message.contains("../escape"));
@@ -918,6 +1282,70 @@ mod tests {
         for rejected in ["", "relative/path", "/tmp/../escape", "/tmp/bad\npath"] {
             assert_eq!(parse_workspace_path(rejected), None, "{rejected:?}");
         }
+    }
+
+    #[test]
+    fn home_documents_require_a_live_loopback_auth_and_native_session() {
+        let document = |location: &str, url: Option<&str>, native: Option<&str>, auth: bool| {
+            EndpointDocument {
+                name: "global".to_owned(),
+                app: "opencode".to_owned(),
+                session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                location: location.to_owned(),
+                node: None,
+                state: "running".to_owned(),
+                url: url.map(str::to_owned),
+                native_session_id: native.map(str::to_owned),
+                owner: None,
+                access: EndpointAccessWire::ReadOnly,
+                workspace: None,
+                auth: auth.then(|| AuthDocument {
+                    header: "Authorization".to_owned(),
+                    scheme: "Basic".to_owned(),
+                    username: "opencode".to_owned(),
+                    password: "fake-engine-credential".to_owned(),
+                }),
+            }
+        };
+
+        // The home command's node metadata is never a transit document.
+        let error = document("node", None, None, false)
+            .into_endpoint("global", None, EndpointSource::Home)
+            .unwrap_err();
+        assert!(error.message.contains("chat_gated"));
+        assert!(!error.message.contains("http://"));
+
+        // A home-hosted document needs a live URL, auth and native session.
+        for (url, native, auth, expected) in [
+            (
+                Some("http://127.0.0.1:1"),
+                Some("ses_home_fake"),
+                false,
+                "credential",
+            ),
+            (Some("http://127.0.0.1:1"), None, true, "mirrored"),
+        ] {
+            let error = document("home", url, native, auth)
+                .into_endpoint("global", None, EndpointSource::Home)
+                .unwrap_err();
+            assert!(
+                error.message.contains(expected),
+                "unexpected typed error: {error}"
+            );
+        }
+
+        let resolved = document(
+            "home",
+            Some("http://127.0.0.1:43210"),
+            Some("ses_home_fake"),
+            true,
+        )
+        .into_endpoint("global", None, EndpointSource::Home)
+        .unwrap();
+        assert_eq!(resolved.location, "home");
+        assert_eq!(resolved.native_session_id.as_deref(), Some("ses_home_fake"));
+        assert!(resolved.auth.is_some());
+        assert_eq!((resolved.host, resolved.port), (LoopbackHost::V4, 43210));
     }
 
     #[test]
