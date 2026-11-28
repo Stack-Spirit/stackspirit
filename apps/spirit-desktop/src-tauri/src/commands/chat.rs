@@ -11,8 +11,10 @@
 
 use spirit_core::engine::chat::{
     ChatLogPage, ChatLogQuery, ChatPermissionDecision, ChatSendInput, ChatSendReceipt,
-    ChatSessionId, ChatSessionView, ChatStartInput,
+    ChatSessionId, ChatSessionLocation, ChatSessionView, ChatStartInput, ChatWriterError,
+    LocalChatProvider,
 };
+use spirit_core::error::{SpiritError, SpiritErrorCode};
 use tauri::State;
 
 use crate::error::CommandResult;
@@ -118,4 +120,181 @@ pub async fn chat_reply_permission(
     let chat = state.chat();
     chat.reply_permission(&session, &permission_id, decision)
         .await
+}
+
+/// Takes the cooperative VOWP writer lease for an attached local orchestrator session.
+///
+/// This is Phase 2 plumbing from `docs/SESSION-TAKEOVER.md` §2.8: the bridge exposes it,
+/// but the read-only chat notice keeps no action and no UI calls it yet.
+///
+/// `takeover` must be `true` only after the owner explicitly confirmed replacing a live
+/// holder; absent or `false` attaches only a free or stale lease. The renderer never
+/// supplies the orchestrator, holder, label, home, surface or token. Setup, engine-backed
+/// and server-gated sessions are rejected here. The reply is the safe `ChatSessionView`;
+/// it never carries a lease token, surface id, endpoint URL, port, native session id,
+/// epoch or path.
+// Registration is in `lib.rs`, which is outside this job's owns. Until the owner adds
+// these entries to `tauri::generate_handler!`, the commands are intentionally
+// unreachable; see the job report:
+//   commands::chat::chat_take_over,
+//   commands::chat::chat_release_writer,
+#[allow(dead_code)]
+#[tauri::command]
+pub async fn chat_take_over(
+    state: State<'_, AppState>,
+    session: ChatSessionId,
+    takeover: Option<bool>,
+) -> CommandResult<ChatSessionView> {
+    let chat = state.chat();
+    ensure_local_writer_session(&chat, &session).await?;
+    let view = chat.take_over(&session, takeover.unwrap_or(false)).await?;
+    if view.location != ChatSessionLocation::Local {
+        // Defense in depth: never return a server view for a writer action, and do not
+        // leave a lease behind if a future transport reported one after the guard.
+        let _ = chat.release_writer(&session).await;
+        return Err(chat_gated_writer_error());
+    }
+    state.track_chat_writer(&session);
+    Ok(view)
+}
+
+/// Releases this app's writer lease and returns the refreshed safe view.
+///
+/// Release is not Stop: a running turn may continue on the orchestrator. A session this
+/// app never attached is an idempotent no-op. Setup, engine-backed and server-gated
+/// sessions are rejected. The reply carries only `ChatSessionView`.
+#[allow(dead_code)]
+#[tauri::command]
+pub async fn chat_release_writer(
+    state: State<'_, AppState>,
+    session: ChatSessionId,
+) -> CommandResult<ChatSessionView> {
+    let chat = state.chat();
+    if matches!(session, ChatSessionId::Setup) {
+        return Err(ChatWriterError::HarnessNotWired.into());
+    }
+    // An endpoint can disappear while a lease child is still alive, so an attach failure
+    // must not block the release. Only a successful non-local probe rejects this action.
+    if let Ok(attached) = chat.attach(&session).await
+        && attached.location != ChatSessionLocation::Local
+    {
+        return Err(chat_gated_writer_error());
+    }
+    let view = chat.release_writer(&session).await?;
+    if view.location != ChatSessionLocation::Local {
+        return Err(chat_gated_writer_error());
+    }
+    state.forget_chat_writer(&session);
+    Ok(view)
+}
+
+/// Validates that a writer action can target this session and that it is local.
+///
+/// `spirit-core` owns the full session rules. This adapter adds the two boundaries the
+/// renderer must not cross: `setup` is app-owned, and a server-gated transport has no
+/// VOWP writer lease to take.
+#[allow(dead_code)]
+async fn ensure_local_writer_session(
+    chat: &LocalChatProvider,
+    session: &ChatSessionId,
+) -> CommandResult<()> {
+    if matches!(session, ChatSessionId::Setup) {
+        return Err(ChatWriterError::HarnessNotWired.into());
+    }
+    let view = chat.attach(session).await?;
+    if view.location != ChatSessionLocation::Local {
+        return Err(chat_gated_writer_error());
+    }
+    Ok(())
+}
+
+/// The typed, token-free refusal for a writer action on a non-local session.
+#[allow(dead_code)]
+fn chat_gated_writer_error() -> SpiritError {
+    SpiritError::new(
+        SpiritErrorCode::Gate,
+        "chat_gated: the session writer is only available for a local VOWP orchestrator",
+    )
+    .with_hint("Connect to the VOWP home that hosts the orchestrator, then retry.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spirit_core::engine::chat::{
+        ChatAccess, ChatOwnershipView, ChatWriterReason, ChatWriterState, ChatWriterView,
+    };
+
+    /// The command boundary must keep the same safe shape as the core view.
+    #[test]
+    fn writer_view_serializes_without_lease_identity() {
+        let view = ChatSessionView {
+            session: ChatSessionId::Global,
+            location: ChatSessionLocation::Local,
+            state: spirit_core::engine::chat::ChatSessionState::Ready,
+            attached: true,
+            streaming_supported: true,
+            model: None,
+            available_models: None,
+            usage: None,
+            started_at: None,
+            last_event_at: None,
+            error: None,
+            pending_permissions: None,
+            retry: None,
+            ownership: Some(ChatOwnershipView {
+                kind: "desktop_ui".to_owned(),
+                label: Some("StackSpirit · macbook".to_owned()),
+                holder: Some("stackspirit".to_owned()),
+                node: Some("macbook".to_owned()),
+                mode: Some("interactive".to_owned()),
+                state: Some("active".to_owned()),
+                activity: Some("idle".to_owned()),
+            }),
+            access: ChatAccess::Owner,
+            writer: Some(ChatWriterView {
+                state: ChatWriterState::Held,
+                can_take_over: false,
+                can_release: true,
+                reason: None,
+            }),
+        };
+        let serialized = serde_json::to_string(&view).expect("the safe view serializes");
+        for forbidden in [
+            "\"token\"",
+            "\"surface_id\"",
+            "\"native_session_id\"",
+            "\"url\"",
+            "\"port\"",
+            "\"epoch\"",
+            "\"expires_at\"",
+            "http://",
+            "https://",
+            "127.0.0.1",
+            "/Users/",
+            "/home/",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "the command view leaked {forbidden}"
+            );
+        }
+
+        let lost = ChatWriterView {
+            state: ChatWriterState::Lost,
+            can_take_over: false,
+            can_release: false,
+            reason: Some(ChatWriterReason::LeaseLost),
+        };
+        let value = serde_json::to_value(lost).expect("the writer view serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "state": "lost",
+                "can_take_over": false,
+                "can_release": false,
+                "reason": "lease_lost",
+            })
+        );
+    }
 }

@@ -344,6 +344,10 @@ export class TauriBridge implements SpiritBridge {
       decision: ChatPermissionDecision,
     ): Promise<ChatSessionView> =>
       call("chat_reply_permission", { session, permissionId, decision }),
+    takeOver: (session: SessionId, takeover = false): Promise<ChatSessionView> =>
+      call("chat_take_over", { session, takeover }),
+    releaseWriter: (session: SessionId): Promise<ChatSessionView> =>
+      call("chat_release_writer", { session }),
     log: (session: SessionId, query?: ChatLogQuery): Promise<ChatLogPage> =>
       call("chat_log", { session, query: query ?? null }),
     subscribe: (listener: (event: ChatEvent) => void): (() => void) => {

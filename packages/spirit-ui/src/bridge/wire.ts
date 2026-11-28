@@ -1600,6 +1600,51 @@ export interface ProjectRequest {
     | { kind: "folder"; path: string };
 }
 
+/**
+ * The writer state machine from `docs/SESSION-TAKEOVER.md` §2.7.
+ *
+ * It describes whether *this app* holds the cooperative writer lease for a VOWP
+ * orchestrator session. It is not the session state and it is not `access`: a document
+ * can say `access: "owner"` while no lease is held here.
+ */
+export type ChatWriterState =
+  | "unavailable"
+  | "available"
+  | "attaching"
+  | "held"
+  | "releasing"
+  | "lost";
+
+/**
+ * Safe, fixed reasons for a writer state. Raw VOWP text, a path, a holder name and
+ * command output never become a reason.
+ */
+export type ChatWriterReason =
+  | "node_hosted"
+  | "vowp_too_old"
+  | "not_home"
+  | "orchestrator_stopped"
+  | "attach_refused"
+  | "attach_failed"
+  | "lease_lost"
+  | "session_mismatch";
+
+/**
+ * Display-safe writer view from `docs/SESSION-TAKEOVER.md` §2.8.
+ *
+ * It says whether this app holds the lease and carries only two safe action booleans and
+ * a fixed reason. It never carries a lease token, surface id, endpoint URL, port, native
+ * session id, epoch, lease timestamp or command line.
+ */
+export interface ChatWriterView {
+  state: ChatWriterState;
+  /** True only when a takeover action is honest and safe to offer. */
+  can_take_over: boolean;
+  /** True only while this app holds the lease and can release it. */
+  can_release: boolean;
+  reason?: ChatWriterReason;
+}
+
 export type ChatSessionState =
   | "idle"
   | "connecting"
@@ -1735,6 +1780,14 @@ export interface ChatSessionView {
    * as today (the window keeps its composer).
    */
   access?: ChatAccess;
+  /**
+   * Whether this app holds the writer lease for a VOWP orchestrator.
+   *
+   * Phase 2 plumbing from `docs/SESSION-TAKEOVER.md` §2.8. Absent for the bundled
+   * setup/engine-backed chat, for an older bridge and for a provider that does not
+   * install the writer manager. The UI keeps today's read-only behavior while absent.
+   */
+  writer?: ChatWriterView;
 }
 
 export interface ChatStartInput {

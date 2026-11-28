@@ -148,6 +148,28 @@ export interface ChatBridgeSurface {
     permissionId: string,
     decision: ChatPermissionDecision,
   ): Promise<ChatSessionView>;
+  /**
+   * Takes the cooperative writer lease for an attached local VOWP orchestrator.
+   *
+   * Phase 2 plumbing from `docs/SESSION-TAKEOVER.md` §2.8 only: the read-only notice
+   * keeps no action and no UI calls this yet. `takeover` must be true only after the
+   * owner explicitly confirmed replacing a live holder; absent or false attaches a free
+   * or stale lease. The renderer sends only the shell session id and that confirmation;
+   * the host resolves the orchestrator, holder, label, home and grant. Setup,
+   * engine-backed and server-gated sessions reject with a typed error. The reply is the
+   * safe `ChatSessionView` and never contains a token, surface id, URL, port, native
+   * session id, epoch or path. Optional: an older bridge and the read-only Web bridge
+   * omit it.
+   */
+  takeOver?(session: SessionId, takeover?: boolean): Promise<ChatSessionView>;
+  /**
+   * Releases this app's writer lease and returns the refreshed safe view.
+   *
+   * Release is not Stop: a running turn may continue on the orchestrator. Releasing a
+   * session that is not held is an idempotent no-op. Optional: an older bridge and the
+   * read-only Web bridge omit it.
+   */
+  releaseWriter?(session: SessionId): Promise<ChatSessionView>;
   /** Read the conversation log; pages move backward from newest, each oldest-first. */
   log(session: SessionId, query?: ChatLogQuery): Promise<ChatLogPage>;
   /**

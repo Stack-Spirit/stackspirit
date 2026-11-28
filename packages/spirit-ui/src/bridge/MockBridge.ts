@@ -584,6 +584,28 @@ function previewHarnessesUnavailable(): SpiritErrorDto {
   );
 }
 
+/**
+ * Preview mode has no VOWP home and no attach child, so it must never claim that this
+ * app holds a writer lease. Takeover fails honestly; release can only read the same
+ * preview view back, which is an idempotent no-op.
+ */
+function previewChatWriterUnavailable(): SpiritErrorDto {
+  return errorDto(
+    "preview_unavailable",
+    "Session takeover needs the desktop host and a co-located VOWP home; preview mode never holds a writer lease.",
+    "Run the desktop app without VITE_SPIRIT_MOCK to take over or release a session.",
+  );
+}
+
+/** The setup assistant is app-owned and has no VOWP writer lease. */
+function chatWriterNotWired(): SpiritErrorDto {
+  return errorDto(
+    "gate",
+    "harness_not_wired: this chat is app-owned and has no VOWP writer harness",
+    "Use the bundled chat for setup and engine-backed projects.",
+  );
+}
+
 interface MockOptions {
   scenario?: MockScenario;
   now?: string;
@@ -2225,6 +2247,29 @@ export class MockBridge implements SpiritBridge {
         );
       }
       return clone(next);
+    },
+    takeOver: async (session: SessionId): Promise<ChatSessionView> => {
+      this.validateChatSession(session);
+      this.requireChatScenario(session);
+      if (session === "setup") throw chatWriterNotWired();
+      // No host child exists in preview. Return the typed gate rather than a fake
+      // `held` view or a fabricated write access.
+      throw previewChatWriterUnavailable();
+    },
+    releaseWriter: async (session: SessionId): Promise<ChatSessionView> => {
+      this.validateChatSession(session);
+      this.requireChatScenario(session);
+      if (session === "setup") throw chatWriterNotWired();
+      const view = this.chatSessions.get(session);
+      if (!view) {
+        throw errorDto(
+          "chat_not_started",
+          "No session has been started in this app run.",
+          "Call chat.start first.",
+        );
+      }
+      // Preview never held a lease, so release is an idempotent read of the same view.
+      return clone(view);
     },
     setModel: async (session: SessionId, modelId: string): Promise<ChatSessionView> => {
       this.validateChatSession(session);
