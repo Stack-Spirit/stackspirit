@@ -45,10 +45,6 @@ pub(crate) const LOCAL_ORCHESTRATOR_ACTIONS_ENABLED: bool = true;
 ///
 /// `docs/SESSION-TAKEOVER.md` §2.6 caps the whole exit release at three seconds; a
 /// child that misses that budget is reaped by `ChatWriter`'s non-blocking `Drop`.
-// The exit hook call site is in `lib.rs`, outside this job's owns; see the report.
-// In `RunEvent::ExitRequested | RunEvent::Exit`, after stopping the engine:
-//   state.request_chat_writer_shutdown();
-#[allow(dead_code)]
 const CHAT_WRITER_SHUTDOWN_BUDGET: Duration = Duration::from_secs(3);
 
 /// The feature flags this build advertises. D5 flips the ASIF switch; the D6 build
@@ -518,8 +514,6 @@ pub struct AppState {
     /// Chat sessions where this process may hold a VOWP writer lease. The set holds only
     /// routing keys, never a token, surface id, endpoint or native session id, so the
     /// exit hook can release each child without exposing lease identity.
-    // The exit hook call site is in `lib.rs`, outside this job's owns; see the report.
-    #[allow(dead_code)]
     chat_writers: Mutex<HashSet<ChatSessionId>>,
     /// Last verification result per provider, so `key_status` does not report a key
     /// that failed verification as plain `saved`. Cleared when the key changes.
@@ -637,7 +631,6 @@ impl AppState {
     ///
     /// Only the shell routing key is kept, so the exit hook can release the child. The
     /// lease token, surface id, endpoint and native session id stay in `spirit-core`.
-    #[allow(dead_code)]
     pub(crate) fn track_chat_writer(&self, session: &ChatSessionId) {
         self.chat_writers
             .lock()
@@ -646,7 +639,6 @@ impl AppState {
     }
 
     /// Forgets a session after an explicit release. Safe when it was never tracked.
-    #[allow(dead_code)]
     pub(crate) fn forget_chat_writer(&self, session: &ChatSessionId) {
         self.chat_writers
             .lock()
@@ -655,7 +647,6 @@ impl AppState {
     }
 
     /// Takes the tracked sessions so an exit hook releases each one exactly once.
-    #[allow(dead_code)]
     fn take_chat_writers(&self) -> Vec<ChatSessionId> {
         self.chat_writers
             .lock()
@@ -666,11 +657,14 @@ impl AppState {
 
     /// Releases every writer child this process may still hold, bounded and panic-free.
     ///
-    /// This is the graceful shutdown hook from `docs/SESSION-TAKEOVER.md` §2.6. It waits
-    /// at most three seconds in total; any child still running is left to
+    /// This is the async form of the shutdown hook from `docs/SESSION-TAKEOVER.md` §2.6.
+    /// It waits at most three seconds in total; any child still running is left to
     /// [`spirit_core::engine::chat::ChatWriter`]'s non-blocking `Drop` reaper. Release is
     /// not Stop: a running turn may continue on the orchestrator. A second call is a
     /// no-op. No token, surface id, endpoint or path is logged or returned.
+    ///
+    /// The Tauri exit event is synchronous and uses
+    /// [`Self::request_chat_writer_shutdown`] instead.
     #[allow(dead_code)]
     pub async fn shutdown_chat_writers(&self) {
         release_writer_sessions(self.chat(), self.take_chat_writers()).await;
@@ -683,7 +677,6 @@ impl AppState {
     /// nested runtime; the core manager's `Drop` is the safety net if the process leaves
     /// before the task finishes. Prefer [`Self::shutdown_chat_writers`] where an async hook
     /// is available.
-    #[allow(dead_code)]
     pub fn request_chat_writer_shutdown(&self) {
         let sessions = self.take_chat_writers();
         if sessions.is_empty() {
@@ -873,7 +866,6 @@ impl AppState {
 /// sessions. A release that is cut short drops its future; `ChatWriter` then reaps the
 /// attach child without blocking. Errors are intentionally swallowed: shutdown must not
 /// panic or turn a missing writer into a user-visible failure.
-#[allow(dead_code)]
 async fn release_writer_sessions(chat: Arc<LocalChatProvider>, sessions: Vec<ChatSessionId>) {
     if sessions.is_empty() {
         return;

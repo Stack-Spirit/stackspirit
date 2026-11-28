@@ -133,12 +133,6 @@ pub async fn chat_reply_permission(
 /// and server-gated sessions are rejected here. The reply is the safe `ChatSessionView`;
 /// it never carries a lease token, surface id, endpoint URL, port, native session id,
 /// epoch or path.
-// Registration is in `lib.rs`, which is outside this job's owns. Until the owner adds
-// these entries to `tauri::generate_handler!`, the commands are intentionally
-// unreachable; see the job report:
-//   commands::chat::chat_take_over,
-//   commands::chat::chat_release_writer,
-#[allow(dead_code)]
 #[tauri::command]
 pub async fn chat_take_over(
     state: State<'_, AppState>,
@@ -163,7 +157,6 @@ pub async fn chat_take_over(
 /// Release is not Stop: a running turn may continue on the orchestrator. A session this
 /// app never attached is an idempotent no-op. Setup, engine-backed and server-gated
 /// sessions are rejected. The reply carries only `ChatSessionView`.
-#[allow(dead_code)]
 #[tauri::command]
 pub async fn chat_release_writer(
     state: State<'_, AppState>,
@@ -189,7 +182,6 @@ pub async fn chat_release_writer(
 /// `spirit-core` owns the full session rules. This adapter adds the two boundaries the
 /// renderer must not cross: `setup` is app-owned, and a server-gated transport has no
 /// VOWP writer lease to take.
-#[allow(dead_code)]
 async fn ensure_local_writer_session(
     chat: &LocalChatProvider,
     session: &ChatSessionId,
@@ -205,7 +197,6 @@ async fn ensure_local_writer_session(
 }
 
 /// The typed, token-free refusal for a writer action on a non-local session.
-#[allow(dead_code)]
 fn chat_gated_writer_error() -> SpiritError {
     SpiritError::new(
         SpiritErrorCode::Gate,

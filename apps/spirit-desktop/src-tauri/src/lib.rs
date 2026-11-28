@@ -141,6 +141,8 @@ pub fn run() {
             commands::chat::chat_stop,
             commands::chat::chat_reply_permission,
             commands::chat::chat_log,
+            commands::chat::chat_take_over,
+            commands::chat::chat_release_writer,
             commands::asif::gates_get_with_build_flags,
             commands::asif::probe_gates_with_build_flags,
             commands::asif::asif_export,
@@ -183,6 +185,9 @@ pub fn run() {
                     connects.stop_all();
                 }
                 if let Some(state) = app.try_state::<AppState>() {
+                    // Release any held writer/attach child with the bounded shutdown hook
+                    // before the engine and the process leave.
+                    state.request_chat_writer_shutdown();
                     stop_engine(state.engine_runtime().as_ref());
                 }
             }
