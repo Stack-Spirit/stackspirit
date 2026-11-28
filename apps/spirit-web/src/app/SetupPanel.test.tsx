@@ -22,7 +22,9 @@ describe("Web landing is account-first", () => {
     expect(screen.getByLabelText("Password")).toBeInTheDocument();
 
     expect(
-      screen.getByRole("button", { name: /Or connect to a local daemon without an account/i }),
+      screen.getByRole("button", {
+        name: /Self-hosting\? Connect to a local daemon without an account/i,
+      }),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "Connect to the StackSpirit daemon" }),
@@ -35,7 +37,9 @@ describe("Web landing is account-first", () => {
     render(<SetupPanel error={null} />);
 
     await user.click(
-      screen.getByRole("button", { name: /Or connect to a local daemon without an account/i }),
+      screen.getByRole("button", {
+        name: /Self-hosting\? Connect to a local daemon without an account/i,
+      }),
     );
 
     expect(

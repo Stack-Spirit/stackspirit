@@ -1,4 +1,4 @@
-import { useState, type HTMLAttributes, type ReactNode } from "react";
+import { useState, type HTMLAttributes, type KeyboardEvent, type ReactNode } from "react";
 
 import { useCloudAccount } from "../cloud/store";
 import { useConnection, useFleet, useFleetStore, useHosts, usePreview } from "../state/fleetStore";
@@ -148,40 +148,88 @@ export function Sidebar({
       <span className="nx-side__fade" aria-hidden="true" />
 
       <div className="nx-side__foot">
-        <div className="nx-side__foot-row">
-          <button
-            type="button"
-            className="nx-settings-trigger nx-account-trigger"
-            title={
-              account?.email
-                ? `StackSpirit Account: ${account.email}`
-                : "Sign in to StackSpirit"
-            }
-            onClick={() => onOpenSettings("account")}
-            data-testid="account-trigger"
-          >
-            <span className="nx-row-item__icon" aria-hidden="true">
-              <AccountIcon />
-            </span>
-            <span className="nx-row-item__text">{accountLabel}</span>
-          </button>
-          <button
-            type="button"
-            className="nx-settings-trigger"
-            onClick={() => onOpenSettings("general")}
-            data-testid="settings-trigger"
-          >
-            <span className="nx-row-item__icon" aria-hidden="true">
-              <GearIcon />
-            </span>
-            <span className="nx-row-item__text">Settings</span>
-          </button>
-        </div>
+        <Menu
+          label="Settings"
+          placement="above"
+          trigger={(props) => (
+            <button
+              type="button"
+              className="nx-settings-trigger"
+              {...props}
+              data-testid="settings-trigger"
+            >
+              <span className="nx-row-item__icon" aria-hidden="true">
+                <GearIcon />
+              </span>
+              <span className="nx-row-item__text">Settings</span>
+            </button>
+          )}
+        >
+          {(close) => (
+            <div className="nx-menu__list" role="none" onKeyDown={onMenuKeyDown}>
+              <MenuItem
+                icon={<GearIcon />}
+                onSelect={() => {
+                  close();
+                  onOpenSettings("general");
+                }}
+              >
+                Settings
+              </MenuItem>
+              <MenuItem
+                icon={<PlusIcon />}
+                onSelect={() => {
+                  close();
+                  onAddServer();
+                }}
+              >
+                Connect server
+              </MenuItem>
+              <MenuItem
+                icon={<AccountIcon />}
+                onSelect={() => {
+                  close();
+                  onOpenSettings("account");
+                }}
+              >
+                {accountLabel}
+              </MenuItem>
+            </div>
+          )}
+        </Menu>
       </div>
 
       <div className="nx-resizer nx-resizer--side" aria-label="Resize sidebar" {...resizeHandle} />
     </aside>
   );
+}
+
+/** Arrow keys, Home and End move focus between the footer menu items. */
+function onMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+  const items = Array.from(
+    event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])'),
+  );
+  if (items.length === 0) return;
+  const index = items.indexOf(document.activeElement as HTMLElement);
+  let next: number;
+  switch (event.key) {
+    case "ArrowDown":
+      next = index < 0 ? 0 : (index + 1) % items.length;
+      break;
+    case "ArrowUp":
+      next = index < 0 ? items.length - 1 : (index - 1 + items.length) % items.length;
+      break;
+    case "Home":
+      next = 0;
+      break;
+    case "End":
+      next = items.length - 1;
+      break;
+    default:
+      return;
+  }
+  event.preventDefault();
+  items[next]?.focus();
 }
 
 /**

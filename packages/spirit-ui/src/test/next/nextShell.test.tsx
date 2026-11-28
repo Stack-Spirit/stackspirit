@@ -431,13 +431,26 @@ describe("NextShell", () => {
     expect(card).toHaveTextContent(/GiB free/);
   });
 
-  it("opens Settings as a centered modal from the sidebar and keeps Theme inside General", async () => {
+  it("opens Settings as a centered modal from the sidebar menu and keeps Theme inside General", async () => {
     const { user } = await renderConnected();
-    const account = screen.getByTestId("account-trigger");
-    expect(account).toHaveTextContent("Sign in");
+    const trigger = screen.getByTestId("settings-trigger");
+    expect(trigger).toHaveTextContent("Settings");
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
 
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    await user.click(screen.getByTestId("settings-trigger"));
+    await user.click(trigger);
+    const menu = screen.getByRole("menu", { name: "Settings" });
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(
+      within(menu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).toEqual(["Settings", "Connect server", "Sign in"]);
+    // Theme belongs to Settings -> General, never to this popover.
+    expect(within(menu).queryByText("Theme")).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitemradio")).not.toBeInTheDocument();
+
+    await user.click(within(menu).getByRole("menuitem", { name: "Settings" }));
     const dialog = await screen.findByRole("dialog", { name: "Settings" });
     expect(dialog).toHaveClass("nx-settings-modal");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
@@ -455,9 +468,44 @@ describe("NextShell", () => {
     );
   });
 
-  it("opens the Account rail item from the sidebar account button", async () => {
+  it("navigates the sidebar Settings menu with the keyboard and closes it on Escape or outside click", async () => {
     const { user } = await renderConnected();
-    await user.click(screen.getByTestId("account-trigger"));
+    const trigger = screen.getByTestId("settings-trigger");
+
+    await user.click(trigger);
+    let menu = screen.getByRole("menu", { name: "Settings" });
+    const settingsItem = within(menu).getByRole("menuitem", { name: "Settings" });
+    const connectItem = within(menu).getByRole("menuitem", { name: "Connect server" });
+    const accountItem = within(menu).getByRole("menuitem", { name: "Sign in" });
+
+    // The first item takes focus on open; arrow keys, Home and End wrap.
+    expect(settingsItem).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(connectItem).toHaveFocus();
+    await user.keyboard("{End}");
+    expect(accountItem).toHaveFocus();
+    await user.keyboard("{Home}");
+    expect(settingsItem).toHaveFocus();
+    await user.keyboard("{ArrowUp}");
+    expect(accountItem).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(trigger).toHaveFocus();
+
+    await user.click(trigger);
+    menu = screen.getByRole("menu", { name: "Settings" });
+    expect(menu).toBeInTheDocument();
+    await user.click(screen.getByTestId("next-shell"));
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("opens the Account rail item from the sidebar Settings menu", async () => {
+    const { user } = await renderConnected();
+    await user.click(screen.getByTestId("settings-trigger"));
+    await user.click(screen.getByRole("menuitem", { name: "Sign in" }));
     expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Account" })).toHaveAttribute(
       "aria-selected",
@@ -466,17 +514,27 @@ describe("NextShell", () => {
     expect(screen.getByTestId("settings-pane-account")).toBeInTheDocument();
   });
 
-  it("shows the signed-in email in the sidebar account button", async () => {
+  it("opens the server connect flow from the sidebar Settings menu", async () => {
+    const { user } = await renderConnected();
+    await user.click(screen.getByTestId("settings-trigger"));
+    await user.click(screen.getByRole("menuitem", { name: "Connect server" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Add a server" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the signed-in email in the sidebar account menu item", async () => {
     useCloudAccount.setState({
       phase: "signed_in",
       account: { id: "acct_1", email: "owner@example.com", name: "Owner" },
     });
-    await renderConnected();
-    expect(screen.getByTestId("account-trigger")).toHaveTextContent("owner@example.com");
-    expect(screen.getByTestId("account-trigger")).toHaveAttribute(
-      "title",
-      "StackSpirit Account: owner@example.com",
-    );
+    const { user } = await renderConnected();
+    await user.click(screen.getByTestId("settings-trigger"));
+    expect(
+      within(screen.getByRole("menu", { name: "Settings" })).getByRole("menuitem", {
+        name: "owner@example.com",
+      }),
+    ).toBeInTheDocument();
   });
 
   async function openAddProject(user: ReturnType<typeof userEvent.setup>) {

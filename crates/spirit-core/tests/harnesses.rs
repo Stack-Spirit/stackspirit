@@ -6,13 +6,16 @@
 
 use std::sync::Arc;
 
+use serde_json::{Value, json};
 use spirit_core::harnesses::{
-    HarnessAuthMode, HarnessAuthState, HarnessBinaryState, HarnessManifest, HarnessProbeTarget,
-    HarnessProtocol, HarnessReadiness, HarnessRegistry, HarnessTargetKind, build_connect_plan,
-    builtin_harnesses, probe_harness,
+    AcpClient, AcpPermissionDecision, CollectingObserver, HarnessAuthMode, HarnessAuthState,
+    HarnessBinaryState, HarnessManifest, HarnessProbeTarget, HarnessProtocol, HarnessReadiness,
+    HarnessRegistry, HarnessSurface, HarnessTargetKind, build_connect_plan, builtin_harnesses,
+    probe_harness,
 };
 use spirit_core::ssh::command::{CommandOutput, CommandSpec};
 use spirit_core::ssh::{FakeCommandRunner, SshOptions, SshTarget};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, duplex};
 
 fn manifest(id: &str) -> HarnessManifest {
     builtin_harnesses()
@@ -45,28 +48,151 @@ fn builtins_cover_the_required_presets() {
     assert!(presets[0].supports_embedded_chat);
     assert!(presets[0].auth_modes.contains(&HarnessAuthMode::ApiKey));
 
+    assert_eq!(presets.len(), 25);
     let expected = [
-        ("opencode", HarnessProtocol::OpencodeHttp, true),
-        ("claude-code", HarnessProtocol::StreamJson, true),
-        ("codex", HarnessProtocol::CodexJson, true),
-        ("gemini-cli", HarnessProtocol::Acp, true),
-        ("antigravity", HarnessProtocol::CliPty, false),
-        ("cursor-cli", HarnessProtocol::CliPty, false),
-        ("aider", HarnessProtocol::CliPty, false),
-        ("goose", HarnessProtocol::Acp, true),
+        (
+            "opencode",
+            HarnessProtocol::OpencodeHttp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "cursor-cli",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "github-copilot",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "auggie",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "kiro",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "goose",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "codex",
+            HarnessProtocol::CodexJson,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "cline",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "kilo",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "qwen-code",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "mistral-vibe",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "kimi-code",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "minimax-code",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "glm-agent",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "pi-acp",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "devin-cli",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "factory-droid",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "grok-build",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "junie",
+            HarnessProtocol::Acp,
+            HarnessSurface::OrchestratorAndWorkers,
+        ),
+        (
+            "claude-code",
+            HarnessProtocol::StreamJson,
+            HarnessSurface::WorkersOnlyTerminal,
+        ),
+        (
+            "gemini-cli",
+            HarnessProtocol::Acp,
+            HarnessSurface::WorkersOnlyTerminal,
+        ),
+        (
+            "antigravity",
+            HarnessProtocol::CliPty,
+            HarnessSurface::WorkersOnlyTerminal,
+        ),
+        (
+            "aider",
+            HarnessProtocol::CliPty,
+            HarnessSurface::WorkersOnlyTerminal,
+        ),
+        (
+            "crush",
+            HarnessProtocol::CliPty,
+            HarnessSurface::WorkersOnlyTerminal,
+        ),
+        (
+            "amp",
+            HarnessProtocol::CliPty,
+            HarnessSurface::WorkersOnlyTerminal,
+        ),
     ];
-    for (id, protocol, embedded) in expected {
+    for (id, protocol, surface) in expected {
         let preset = manifest(id);
         assert_eq!(preset.protocol, protocol, "{id}");
-        assert_eq!(preset.supports_embedded_chat, embedded, "{id}");
+        assert_eq!(preset.surface, surface, "{id}");
+        assert_eq!(
+            preset.supports_embedded_chat,
+            surface.accepts_embedded_chat(),
+            "{id}"
+        );
         preset.validate().unwrap();
         assert!(!preset.tos_note.trim().is_empty(), "{id}");
         assert!(preset.docs_url.starts_with("https://"), "{id}");
     }
 
-    // The consumer-versus-API-key distinction must be explicit for both subscription
-    // presets, with the vendor's consumer terms named.
-    for id in ["claude-code", "codex"] {
+    // The consumer-versus-API-key distinction must be explicit wherever a consumer
+    // subscription is accepted, with the vendor's consumer terms named.
+    for id in ["claude-code", "codex", "gemini-cli"] {
         let preset = manifest(id);
         assert!(preset.auth_modes.contains(&HarnessAuthMode::ApiKey));
         assert!(preset.auth_modes.contains(&HarnessAuthMode::Subscription));
@@ -76,12 +202,35 @@ fn builtins_cover_the_required_presets() {
         assert!(note.contains("subscription"), "{id}: {note}");
     }
 
+    // Workers only means a stock CLI; StackSpirit never claims to wrap its consumer
+    // OAuth sign-in in the embedded chat.
+    for id in [
+        "claude-code",
+        "gemini-cli",
+        "antigravity",
+        "aider",
+        "crush",
+        "amp",
+    ] {
+        let preset = manifest(id);
+        assert_eq!(preset.surface, HarnessSurface::WorkersOnlyTerminal, "{id}");
+        assert!(!preset.supports_embedded_chat, "{id}");
+        assert!(
+            !preset.embedded_chat(),
+            "{id} must not be embedded-chat eligible"
+        );
+    }
+
     assert_eq!(manifest("claude-code").binary, "claude");
     assert_eq!(manifest("codex").binary, "codex");
     assert_eq!(manifest("gemini-cli").binary, "gemini");
-    assert_eq!(manifest("cursor-cli").binary, "cursor-agent");
+    assert_eq!(manifest("cursor-cli").binary, "agent");
+    assert_eq!(manifest("github-copilot").binary, "copilot");
+    assert_eq!(manifest("kiro").binary, "kiro-cli");
     assert_eq!(manifest("aider").binary, "aider");
     assert_eq!(manifest("goose").binary, "goose");
+    assert_eq!(manifest("crush").binary, "crush");
+    assert_eq!(manifest("amp").binary, "amp");
 }
 
 #[tokio::test]
@@ -332,6 +481,139 @@ async fn a_connect_plan_rejects_a_probe_from_another_target() {
     assert_eq!(error.code_str(), "invalid_input");
 }
 
+async fn acp_write(writer: &mut DuplexStream, value: Value) {
+    let mut bytes = serde_json::to_vec(&value).unwrap();
+    bytes.push(b'\n');
+    writer.write_all(&bytes).await.unwrap();
+    writer.flush().await.unwrap();
+}
+
+async fn acp_read(reader: &mut BufReader<DuplexStream>) -> Value {
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    serde_json::from_str(line.trim()).unwrap()
+}
+
+#[tokio::test]
+async fn acp_client_runs_the_core_handshake_and_permission_path() {
+    let (client_read, server_write) = duplex(64 * 1024);
+    let (server_read, client_write) = duplex(64 * 1024);
+    let mut client = AcpClient::from_io(client_read, client_write);
+    let server = tokio::spawn(async move {
+        let mut reader = BufReader::new(server_read);
+        let mut writer = server_write;
+
+        let initialize = acp_read(&mut reader).await;
+        assert_eq!(initialize["method"], "initialize");
+        assert_eq!(initialize["params"]["protocolVersion"], 1);
+        assert_eq!(
+            initialize["params"]["clientCapabilities"]["fs"]["readTextFile"],
+            false
+        );
+        acp_write(
+            &mut writer,
+            json!({
+                "jsonrpc": "2.0",
+                "id": initialize["id"],
+                "result": {
+                    "protocolVersion": 1,
+                    "agentCapabilities": { "loadSession": false }
+                }
+            }),
+        )
+        .await;
+
+        let new_session = acp_read(&mut reader).await;
+        assert_eq!(new_session["method"], "session/new");
+        assert_eq!(new_session["params"]["cwd"], "/tmp/stackspirit-acp");
+        assert_eq!(new_session["params"]["mcpServers"], json!([]));
+        acp_write(
+            &mut writer,
+            json!({
+                "jsonrpc": "2.0",
+                "id": new_session["id"],
+                "result": { "sessionId": "acp-session-1" }
+            }),
+        )
+        .await;
+
+        let prompt = acp_read(&mut reader).await;
+        assert_eq!(prompt["method"], "session/prompt");
+        assert_eq!(prompt["params"]["sessionId"], "acp-session-1");
+        assert_eq!(prompt["params"]["prompt"][0]["text"], "run the tests");
+        acp_write(
+            &mut writer,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "acp-session-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": "Running." }
+                    }
+                }
+            }),
+        )
+        .await;
+        acp_write(
+            &mut writer,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 41,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "acp-session-1",
+                    "toolCall": { "toolCallId": "tool-1" },
+                    "options": [
+                        {
+                            "optionId": "allow-once",
+                            "name": "Allow once",
+                            "kind": "allow_once"
+                        }
+                    ]
+                }
+            }),
+        )
+        .await;
+        let permission = acp_read(&mut reader).await;
+        assert_eq!(permission["id"], 41);
+        assert_eq!(permission["result"]["outcome"]["optionId"], "allow-once");
+        acp_write(
+            &mut writer,
+            json!({
+                "jsonrpc": "2.0",
+                "id": prompt["id"],
+                "result": { "stopReason": "end_turn" }
+            }),
+        )
+        .await;
+    });
+
+    let initialized = client.initialize().await.unwrap();
+    assert_eq!(initialized.protocol_version, 1);
+    assert!(initialized.auth_method_ids.is_empty());
+    assert_eq!(
+        client.new_session("/tmp/stackspirit-acp").await.unwrap(),
+        "acp-session-1"
+    );
+
+    let mut observer = CollectingObserver {
+        decision: AcpPermissionDecision::AllowOnce,
+        ..CollectingObserver::default()
+    };
+    let result = client
+        .prompt_with_observer("run the tests", &mut observer)
+        .await
+        .unwrap();
+    assert_eq!(result.stop_reason, "end_turn");
+    assert_eq!(observer.updates.len(), 1);
+    assert_eq!(observer.updates[0].text(), Some("Running."));
+    assert_eq!(observer.permission_requests.len(), 1);
+    assert_eq!(observer.decisions, vec![AcpPermissionDecision::AllowOnce]);
+    server.await.unwrap();
+}
+
 #[test]
 fn custom_manifests_round_trip_and_cannot_shadow_a_builtin() {
     let directory = tempfile::tempdir().unwrap();
@@ -343,13 +625,17 @@ fn custom_manifests_round_trip_and_cannot_shadow_a_builtin() {
     custom.install_cmd = "brew install my-harness".to_owned();
     custom.auth_cmd = String::new();
     custom.protocol = HarnessProtocol::CliPty;
+    custom.surface = HarnessSurface::WorkersOnlyTerminal;
     custom.supports_embedded_chat = false;
     custom.oauth_callback_port = None;
     custom.builtin = false;
 
     let saved = registry.save_custom(custom.clone()).unwrap();
     assert_eq!(saved, custom);
-    assert!(directory.path().join("my-harness.toml").exists());
+    let path = directory.path().join("my-harness.toml");
+    assert!(path.exists());
+    let encoded = std::fs::read_to_string(&path).unwrap();
+    assert!(encoded.contains("surface = \"workers_only_terminal\""));
     let listed = registry.list().unwrap();
     let listed_custom = listed
         .harnesses

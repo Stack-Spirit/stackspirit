@@ -8,7 +8,7 @@ import type {
   HarnessBinaryState,
   HarnessConnectStarted,
   HarnessListView,
-  HarnessManifest,
+  HarnessManifest as WireHarnessManifest,
   HarnessProbeReport,
   HarnessProtocol,
   HarnessReadiness,
@@ -17,6 +17,18 @@ import type {
   ModelChoice,
 } from "../bridge/wire";
 import { engineProviders, providerLabel, providerOptions } from "../domain/engine";
+
+/**
+ * The explicit capability split from `spirit_core::harnesses::HarnessSurface`.
+ *
+ * `bridge/wire.ts` is outside this panel's ownership, so the panel keeps a local
+ * widening of the wire manifest. The extra field is optional: an older bridge that does
+ * not send it falls back to `supports_embedded_chat`.
+ */
+export type HarnessSurface = "orchestrator_and_workers" | "workers_only_terminal";
+
+/** A wire manifest plus the explicit harness surface when the host reports it. */
+export type HarnessManifest = WireHarnessManifest & { surface?: HarnessSurface };
 
 // The panel consumes the bridge DTOs; it does not define them. Re-exported here so the
 // existing panel tests and any callers keep their imports while every type has one home
@@ -28,7 +40,6 @@ export type {
   HarnessConnectPlanView,
   HarnessConnectStarted,
   HarnessListView,
-  HarnessManifest,
   HarnessProbe,
   HarnessProbeReport,
   HarnessProtocol,
@@ -72,8 +83,8 @@ interface FormState {
   binary: string;
   installCommand: string;
   authCommand: string;
+  surface: HarnessSurface;
   protocol: HarnessProtocol;
-  embeddedChat: boolean;
   apiKey: boolean;
   subscription: boolean;
   tosNote: string;
@@ -87,14 +98,33 @@ const EMPTY_FORM: FormState = {
   binary: "",
   installCommand: "",
   authCommand: "",
-  protocol: "cli-pty",
-  embeddedChat: false,
+  surface: "orchestrator_and_workers",
+  protocol: "acp",
   apiKey: true,
   subscription: false,
   tosNote: "",
   docsUrl: "",
   oauthPort: "",
 };
+
+/** The default protocol for each surface: ACP for chat-capable, stock CLI for workers. */
+function protocolForSurface(surface: HarnessSurface): HarnessProtocol {
+  return surface === "workers_only_terminal" ? "cli-pty" : "acp";
+}
+
+/** The surface implied by a chosen protocol; `cli-pty` is always workers-only. */
+function surfaceForProtocol(protocol: HarnessProtocol): HarnessSurface {
+  return protocol === "cli-pty" ? "workers_only_terminal" : "orchestrator_and_workers";
+}
+
+function manifestSurface(manifest: HarnessManifest): HarnessSurface {
+  return (
+    manifest.surface ??
+    (manifest.supports_embedded_chat
+      ? "orchestrator_and_workers"
+      : "workers_only_terminal")
+  );
+}
 
 const ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 
@@ -166,6 +196,16 @@ function validateForm(form: FormState): SpiritError | null {
   if (!form.apiKey && !form.subscription) {
     return invalidInput("Choose API key, subscription, or both.");
   }
+  if (form.surface === "orchestrator_and_workers" && form.protocol === "cli-pty") {
+    return invalidInput(
+      "Orchestrator + Workers needs ACP, OpenCode HTTP, Stream JSON or Codex JSON; CLI (pty) is for the stock terminal worker view.",
+    );
+  }
+  if (form.surface === "workers_only_terminal" && form.protocol !== "cli-pty") {
+    return invalidInput(
+      "Workers Only uses CLI (pty) in the stock terminal view; choose ACP for Orchestrator + Workers.",
+    );
+  }
   if (!form.tosNote.trim()) {
     return invalidInput("Describe the API-key versus subscription terms note.");
   }
@@ -190,8 +230,9 @@ function buildManifest(form: FormState): HarnessManifest {
     binary: form.binary.trim(),
     install_cmd: form.installCommand.trim(),
     auth_cmd: form.authCommand.trim(),
+    surface: form.surface,
     protocol: form.protocol,
-    supports_embedded_chat: form.embeddedChat,
+    supports_embedded_chat: form.surface === "orchestrator_and_workers",
     auth_modes: authModes,
     tos_note: form.tosNote.trim(),
     docs_url: form.docsUrl.trim(),
@@ -659,11 +700,11 @@ export function HarnessesPanel({
     binary: useId(),
     install: useId(),
     auth: useId(),
+    surface: useId(),
     protocol: useId(),
     port: useId(),
     tos: useId(),
     docs: useId(),
-    embedded: useId(),
     apiKey: useId(),
     subscription: useId(),
   };
@@ -807,11 +848,19 @@ export function HarnessesPanel({
   const builtins = list?.harnesses.filter((manifest) => manifest.builtin) ?? [];
   const custom = list?.harnesses.filter((manifest) => !manifest.builtin) ?? [];
   const defaultHarness = builtins.find((manifest) => manifest.id === "opencode") ?? null;
-  const oneClickHarnesses = defaultHarness
+  const remainingBuiltins = defaultHarness
     ? builtins.filter((manifest) => manifest.id !== "opencode")
-    : [];
+    : builtins;
+  const grouped = [...remainingBuiltins, ...custom];
+  const orchestratorHarnesses = grouped.filter(
+    (manifest) => manifestSurface(manifest) === "orchestrator_and_workers",
+  );
+  const workersOnlyHarnesses = grouped.filter(
+    (manifest) => manifestSurface(manifest) === "workers_only_terminal",
+  );
 
   function renderCard(manifest: HarnessManifest) {
+    const surface = manifestSurface(manifest);
     const local = probes[probeKey(manifest.id, "local")];
     const home = probes[probeKey(manifest.id, "home_vps")];
     const localMissing =
@@ -855,10 +904,20 @@ export function HarnessesPanel({
             <span className="nx-chip nx-chip--tiny">{PROTOCOL_LABELS[manifest.protocol]}</span>
             <span
               className={`nx-chip nx-chip--tiny ${
-                manifest.supports_embedded_chat ? "nx-chip--local" : "nx-chip--muted"
+                surface === "orchestrator_and_workers" ? "nx-chip--local" : "nx-chip--muted"
+              }`}
+              data-testid={`harness-${manifest.id}-surface`}
+            >
+              {surface === "orchestrator_and_workers"
+                ? "Orchestrator + Workers"
+                : "Workers only"}
+            </span>
+            <span
+              className={`nx-chip nx-chip--tiny ${
+                surface === "orchestrator_and_workers" ? "nx-chip--local" : "nx-chip--muted"
               }`}
             >
-              {manifest.supports_embedded_chat ? "Embedded Chat" : "Worker-Only"}
+              {surface === "orchestrator_and_workers" ? "Embedded Chat" : "Worker-Only"}
             </span>
             <span className="nx-chip nx-chip--tiny nx-chip--muted">
               {manifest.builtin ? "Built-in" : "Custom"}
@@ -1018,14 +1077,16 @@ export function HarnessesPanel({
 
       <p className="nx-form__lede">
         OpenCode is the default overarching harness, and its provider keys (DeepSeek,
-        OpenRouter, Anthropic, OpenAI and more) live inside its card. Claude Code, Codex,
-        Gemini CLI, Antigravity, Cursor CLI, Aider and Goose are one-click additions; add
-        your own with a strict local manifest.
+        OpenRouter, Anthropic, OpenAI and more) live inside its card. The catalog is split
+        by surface: official ACP / Codex app-server harnesses can back the embedded chat,
+        while consumer-CLI harnesses stay in the stock terminal worker view. Add your own
+        with a strict local manifest.
       </p>
 
       <p className="nx-form__hint" data-testid="harness-chat-transport-note">
-        Connect installs and signs in a harness. The embedded chat still runs on
-        OpenCode; choosing another chat transport is not available yet.
+        Connect installs and signs in a harness. The reusable ACP client core exists, but
+        the embedded chat still runs on OpenCode until harness-transport wiring lands;
+        choosing another chat transport is not live yet.
       </p>
 
       {!surface ? (
@@ -1091,7 +1152,7 @@ export function HarnessesPanel({
       ) : null}
 
       {defaultHarness ? (
-        <section aria-label="Default harness">
+        <section aria-label="Default harness" data-testid="harnesses-default-section">
           <h3 style={{ margin: "4px 0", fontSize: 13 }}>Default harness · OpenCode</h3>
           <ul className="nx-block" style={{ listStyle: "none", padding: 0, margin: 0 }}>
             {renderCard(defaultHarness)}
@@ -1099,29 +1160,38 @@ export function HarnessesPanel({
         </section>
       ) : null}
 
-      {oneClickHarnesses.length > 0 ? (
-        <section aria-label="One-click harnesses">
-          <h3 style={{ margin: "4px 0", fontSize: 13 }}>One-click connect</h3>
+      {orchestratorHarnesses.length > 0 ? (
+        <section
+          aria-label="Orchestrator and workers harnesses"
+          data-testid="harnesses-orchestrator-section"
+        >
+          <h3 style={{ margin: "4px 0", fontSize: 13 }}>
+            Orchestrator + Workers (ACP / Embedded Chat)
+          </h3>
+          <p className="nx-form__hint">
+            OpenCode HTTP, official ACP and Codex app-server harnesses. Connect installs
+            and signs in; OpenCode remains the live embedded-chat transport for now.
+          </p>
           <ul className="nx-block" style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {oneClickHarnesses.map(renderCard)}
+            {orchestratorHarnesses.map(renderCard)}
           </ul>
         </section>
       ) : null}
 
-      {!defaultHarness && builtins.length > 0 ? (
-        <section aria-label="Built-in harnesses">
-          <h3 style={{ margin: "4px 0", fontSize: 13 }}>Built-in</h3>
+      {workersOnlyHarnesses.length > 0 ? (
+        <section
+          aria-label="Workers only harnesses"
+          data-testid="harnesses-workers-section"
+        >
+          <h3 style={{ margin: "4px 0", fontSize: 13 }}>
+            Workers Only (Stock CLI Terminal View)
+          </h3>
+          <p className="nx-form__hint">
+            These keep their own consumer sign-in in a stock CLI. StackSpirit never wraps
+            that OAuth session in its embedded chat.
+          </p>
           <ul className="nx-block" style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {builtins.map(renderCard)}
-          </ul>
-        </section>
-      ) : null}
-
-      {custom.length > 0 ? (
-        <section aria-label="Your harnesses">
-          <h3 style={{ margin: "4px 0", fontSize: 13 }}>Your harnesses</h3>
-          <ul className="nx-block" style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {custom.map(renderCard)}
+            {workersOnlyHarnesses.map(renderCard)}
           </ul>
         </section>
       ) : null}
@@ -1186,14 +1256,41 @@ export function HarnessesPanel({
           </label>
 
           <div className="nx-form__grid">
+            <label className="nx-field" htmlFor={ids.surface}>
+              Surface
+              <select
+                id={ids.surface}
+                value={form.surface}
+                onChange={(event) => {
+                  const nextSurface = event.target.value as HarnessSurface;
+                  setForm({
+                    ...form,
+                    surface: nextSurface,
+                    protocol: protocolForSurface(nextSurface),
+                  });
+                }}
+              >
+                <option value="orchestrator_and_workers">
+                  Orchestrator + Workers (ACP / Embedded Chat)
+                </option>
+                <option value="workers_only_terminal">
+                  Workers Only (Stock CLI Terminal View)
+                </option>
+              </select>
+            </label>
             <label className="nx-field" htmlFor={ids.protocol}>
               Protocol
               <select
                 id={ids.protocol}
                 value={form.protocol}
-                onChange={(event) =>
-                  setForm({ ...form, protocol: event.target.value as HarnessProtocol })
-                }
+                onChange={(event) => {
+                  const nextProtocol = event.target.value as HarnessProtocol;
+                  setForm({
+                    ...form,
+                    protocol: nextProtocol,
+                    surface: surfaceForProtocol(nextProtocol),
+                  });
+                }}
               >
                 {(Object.keys(PROTOCOL_LABELS) as HarnessProtocol[]).map((protocol) => (
                   <option value={protocol} key={protocol}>
@@ -1202,20 +1299,21 @@ export function HarnessesPanel({
                 ))}
               </select>
             </label>
-            <label className="nx-field" htmlFor={ids.port}>
-              OAuth callback port
-              <input
-                id={ids.port}
-                type="number"
-                min={1}
-                max={65_535}
-                value={form.oauthPort}
-                onChange={(event) => setForm({ ...form, oauthPort: event.target.value })}
-                placeholder="optional"
-                autoComplete="off"
-              />
-            </label>
           </div>
+
+          <label className="nx-field" htmlFor={ids.port}>
+            OAuth callback port
+            <input
+              id={ids.port}
+              type="number"
+              min={1}
+              max={65_535}
+              value={form.oauthPort}
+              onChange={(event) => setForm({ ...form, oauthPort: event.target.value })}
+              placeholder="optional"
+              autoComplete="off"
+            />
+          </label>
 
           <label className="nx-field" htmlFor={ids.install}>
             Install command (shown, never run automatically)
@@ -1242,21 +1340,6 @@ export function HarnessesPanel({
               autoComplete="off"
             />
           </label>
-
-          <div className="nx-form__check">
-            <input
-              id={ids.embedded}
-              type="checkbox"
-              checked={form.embeddedChat}
-              onChange={(event) =>
-                setForm({ ...form, embeddedChat: event.target.checked })
-              }
-            />
-            <label htmlFor={ids.embedded}>Supports Embedded Chat</label>
-            <span className="nx-form__hint">
-              Leave unchecked for a Worker-Only harness.
-            </span>
-          </div>
 
           <div className="nx-form__check">
             <input

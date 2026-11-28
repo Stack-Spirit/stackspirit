@@ -8,7 +8,9 @@
 use std::collections::BTreeMap;
 
 use crate::error::SpiritError;
-use crate::harnesses::manifest::{HarnessAuthMode, HarnessManifest, HarnessProtocol};
+use crate::harnesses::manifest::{
+    HarnessAuthMode, HarnessManifest, HarnessProtocol, HarnessSurface,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TomlValue {
@@ -30,6 +32,7 @@ pub(crate) fn manifest_to_toml(manifest: &HarnessManifest) -> String {
     push_string(&mut out, "install_cmd", &manifest.install_cmd);
     push_string(&mut out, "auth_cmd", &manifest.auth_cmd);
     push_string(&mut out, "protocol", manifest.protocol.as_str());
+    push_string(&mut out, "surface", manifest.surface.as_str());
     push_bool(
         &mut out,
         "supports_embedded_chat",
@@ -99,6 +102,7 @@ pub(crate) fn manifest_from_toml(input: &str) -> Result<HarnessManifest, SpiritE
                     | "install_cmd"
                     | "auth_cmd"
                     | "protocol"
+                    | "surface"
                     | "supports_embedded_chat"
                     | "auth_modes"
                     | "tos_note"
@@ -120,6 +124,12 @@ pub(crate) fn manifest_from_toml(input: &str) -> Result<HarnessManifest, SpiritE
     let auth_cmd = take_string(&mut table, "auth_cmd")?;
     let protocol = HarnessProtocol::parse(&take_string(&mut table, "protocol")?)?;
     let supports_embedded_chat = take_bool(&mut table, "supports_embedded_chat")?;
+    // Older custom files predate `surface`; derive it from the legacy boolean instead
+    // of rejecting the file. New writes always include the explicit field.
+    let surface = match take_optional_string(&mut table, "surface")? {
+        Some(value) => HarnessSurface::parse(&value)?,
+        None => HarnessSurface::from_embedded_chat(supports_embedded_chat),
+    };
     let auth_modes = take_string_array(&mut table, "auth_modes")?
         .iter()
         .map(|mode| HarnessAuthMode::parse(mode))
@@ -147,6 +157,7 @@ pub(crate) fn manifest_from_toml(input: &str) -> Result<HarnessManifest, SpiritE
         install_cmd,
         auth_cmd,
         protocol,
+        surface,
         supports_embedded_chat,
         auth_modes,
         tos_note,
@@ -171,6 +182,14 @@ fn take_bool(table: &mut TomlTable, key: &str) -> Result<bool, SpiritError> {
         Some(TomlValue::Bool(value)) => Ok(value),
         Some(_) => Err(SpiritError::invalid_input(key, "must be true or false")),
         None => Err(SpiritError::invalid_input(key, "is required")),
+    }
+}
+
+fn take_optional_string(table: &mut TomlTable, key: &str) -> Result<Option<String>, SpiritError> {
+    match table.remove(key) {
+        Some(TomlValue::String(value)) => Ok(Some(value)),
+        Some(_) => Err(SpiritError::invalid_input(key, "must be a quoted string")),
+        None => Ok(None),
     }
 }
 
@@ -415,6 +434,30 @@ mod tests {
         assert!(manifest_from_toml(&secret).is_err());
         let table = format!("{base}[extra]\nkey = \"value\"\n");
         assert!(manifest_from_toml(&table).is_err());
+    }
+
+    #[test]
+    fn old_files_without_surface_derive_it_and_conflicts_are_rejected() {
+        let base = "id = \"mine\"\nname = \"Mine\"\nbinary = \"mine\"\ninstall_cmd = \"\"\n\
+                    auth_cmd = \"\"\nprotocol = \"acp\"\nsupports_embedded_chat = true\n\
+                    auth_modes = [\"api_key\"]\ntos_note = \"BYOK\"\n\
+                    docs_url = \"https://example.com\"\n";
+        let derived = manifest_from_toml(base).unwrap();
+        assert_eq!(derived.surface, HarnessSurface::OrchestratorAndWorkers);
+        assert_eq!(
+            manifest_from_toml(&format!("{base}surface = \"orchestrator_and_workers\"\n"))
+                .unwrap()
+                .surface,
+            HarnessSurface::OrchestratorAndWorkers
+        );
+        assert!(
+            manifest_from_toml(&format!("{base}surface = \"workers_only_terminal\"\n")).is_err(),
+            "surface and supports_embedded_chat must agree"
+        );
+        assert!(
+            manifest_from_toml(&format!("{base}surface = \"something_else\"\n")).is_err(),
+            "unknown surface values are rejected"
+        );
     }
 
     #[test]

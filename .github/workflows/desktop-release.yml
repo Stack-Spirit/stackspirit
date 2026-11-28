@@ -1,0 +1,287 @@
+name: Desktop Release
+
+# Tag -> native installers -> the matching GitHub Release when one exists.
+#
+#  1. A v<version> tag push builds the macOS and Linux installers and always keeps
+#     them as the `desktop-installers` workflow artifact. The runtime Release
+#     workflow creates a draft for the same tag; this workflow attaches the
+#     installers to that draft only when it already exists.
+#  2. Publishing the release runs the matrix again and attaches the installers to
+#     the published release. This is the reliable attach path: a draft created with
+#     the repository GITHUB_TOKEN does not start a `release: created` workflow run.
+#  3. A manual workflow_dispatch is a dry build when `tag` is empty. With `tag`, it
+#     builds that tag and attaches only when a release for it exists. A dry build
+#     and a missing release both finish successfully; the artifacts stay available.
+#
+# This workflow never creates or publishes a GitHub release and never edits release
+# notes. The installers are unsigned; docs/RELEASE.md records the Gatekeeper notice.
+# Third-party actions are pinned to a commit SHA; the comment names the release tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing v* tag to build and attach to (leave empty for a dry build)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  COPYFILE_DISABLE: "1"
+
+jobs:
+  prepare:
+    name: Resolve tag and version
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout the release ref
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ (github.event_name == 'release' && github.event.release.tag_name) || (github.event_name == 'workflow_dispatch' && inputs.tag) || github.ref }}
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Resolve the tag and version
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          tag=""
+          case "$EVENT_NAME" in
+            push)
+              [ "$REF_TYPE" = "tag" ] || { echo "::error::the push trigger is tag-only"; exit 1; }
+              tag="$REF_NAME"
+              ;;
+            release)
+              tag="$RELEASE_TAG"
+              ;;
+            workflow_dispatch)
+              tag="$(printf '%s' "${DISPATCH_TAG:-}" | tr -d '[:space:]')"
+              ;;
+            *)
+              echo "::error::unsupported event: $EVENT_NAME"
+              exit 1
+              ;;
+          esac
+
+          if [ -n "$tag" ]; then
+            version="${tag#v}"
+          else
+            version="$(node -p "require('./apps/spirit-desktop/src-tauri/tauri.conf.json').version")"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "::error::cannot derive a semver version from tag '$tag' (got '$version')"
+            exit 1
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          echo "tag=${tag:-<dry build>} version=$version"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            arch: aarch64
+            bundles: dmg
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x86_64
+            bundles: dmg
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            bundles: appimage,deb
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      ARCH: ${{ matrix.arch }}
+      BUNDLES: ${{ matrix.bundles }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.prepare.outputs.tag || github.ref }}
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          target: ${{ matrix.target }}
+          cache: true
+
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl wget file libxdo-dev libssl-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libfuse2
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Fetch the pinned StackSpirit Engine sidecar
+        run: node scripts/fetch-engine.mjs --target "$TARGET"
+
+      - name: Build the Tauri bundles
+        working-directory: apps/spirit-desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Stamp the resolved release version into the bundle (and its plist/deb
+          # metadata). Without a tag the checked-in tauri.conf.json version is used.
+          printf '{"version":"%s"}\n' "$VERSION" > src-tauri/tauri.release.conf.json
+          npm run tauri:build -- \
+            --target "$TARGET" \
+            --bundles "$BUNDLES" \
+            --config src-tauri/tauri.release.conf.json
+
+      - name: Stage installers with release names
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bundle="target/${TARGET}/release/bundle"
+          mkdir -p dist/desktop
+          case "$TARGET" in
+            *-apple-darwin)
+              files=("$bundle/dmg/"*.dmg)
+              [ "${#files[@]}" -eq 1 ] || { echo "::error::expected one .dmg under $bundle/dmg, found ${#files[@]}"; exit 1; }
+              cp "${files[0]}" "dist/desktop/StackSpirit-${VERSION}-${ARCH}.dmg"
+              ;;
+            *-unknown-linux-gnu)
+              appimages=("$bundle/appimage/"*.AppImage)
+              debs=("$bundle/deb/"*.deb)
+              [ "${#appimages[@]}" -eq 1 ] || { echo "::error::expected one .AppImage under $bundle/appimage, found ${#appimages[@]}"; exit 1; }
+              [ "${#debs[@]}" -eq 1 ] || { echo "::error::expected one .deb under $bundle/deb, found ${#debs[@]}"; exit 1; }
+              cp "${appimages[0]}" "dist/desktop/StackSpirit-${VERSION}-${ARCH}.AppImage"
+              cp "${debs[0]}" "dist/desktop/StackSpirit-${VERSION}-${ARCH}.deb"
+              chmod 0755 "dist/desktop/StackSpirit-${VERSION}-${ARCH}.AppImage"
+              ;;
+            *)
+              echo "::error::unsupported target: $TARGET"
+              exit 1
+              ;;
+          esac
+          ls -l dist/desktop
+
+      - name: Upload the installers
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-${{ matrix.target }}
+          path: dist/desktop/*
+          if-no-files-found: error
+
+  checksums:
+    name: Assemble SHA256SUMS-desktop
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download the installer artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: desktop-*
+          path: dist/desktop
+          merge-multiple: true
+
+      - name: Generate and verify SHA256SUMS-desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist/desktop
+          shopt -s nullglob
+          dmgs=(./*.dmg)
+          appimages=(./*.AppImage)
+          debs=(./*.deb)
+          [ "${#dmgs[@]}" -eq 2 ] || { echo "::error::expected 2 DMGs, found ${#dmgs[@]}"; exit 1; }
+          [ "${#appimages[@]}" -eq 1 ] || { echo "::error::expected 1 AppImage, found ${#appimages[@]}"; exit 1; }
+          [ "${#debs[@]}" -eq 1 ] || { echo "::error::expected 1 deb, found ${#debs[@]}"; exit 1; }
+          chmod 0755 "${appimages[@]}"
+          ls -l
+          sha256sum -- "${dmgs[@]}" "${appimages[@]}" "${debs[@]}" > SHA256SUMS-desktop
+          sha256sum --check --strict SHA256SUMS-desktop
+          cat SHA256SUMS-desktop
+
+      - name: Upload the complete desktop installer set
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-installers
+          path: dist/desktop/*
+          if-no-files-found: error
+
+  attach-release:
+    name: Attach installers to the GitHub Release
+    needs: [prepare, checksums]
+    if: needs.prepare.outputs.tag != ''
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download the desktop installer set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-installers
+          path: dist/desktop
+
+      - name: Verify and attach when the release exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd dist/desktop
+          sha256sum --check --strict SHA256SUMS-desktop
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" ./* --clobber
+            echo "::notice::Attached desktop installers to release $TAG"
+          else
+            echo "::notice::No GitHub Release exists for $TAG yet; installers remain in the desktop-installers workflow artifact."
+          fi

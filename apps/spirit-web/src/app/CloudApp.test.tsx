@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   configureCloudRuntime,
@@ -282,7 +282,7 @@ describe("Web Always-On Homes route", () => {
     expect(await screen.findByTestId("managed-plans")).toHaveTextContent("Home 8");
   });
 
-  it("signs in with email and offers the two post-signup onboarding paths", async () => {
+  it("signs in with email and offers the agent-first three-path onboarding", async () => {
     const client = new FakeClient([]);
     const relay = new FakeRelay();
     configureCloudRuntime({ client, relay });
@@ -294,15 +294,66 @@ describe("Web Always-On Homes route", () => {
     await user.click(screen.getByTestId("auth-submit"));
 
     const onboarding = await screen.findByTestId("web-onboarding");
-    expect(onboarding).toHaveTextContent(/Connect your existing Always-On Machine/i);
-    expect(onboarding).toHaveTextContent(/Need an Always-On Machine/i);
+    expect(onboarding).toHaveTextContent("Connect with your coding agent");
+    expect(onboarding).toHaveTextContent("Recommended for existing machines");
+    expect(onboarding).toHaveTextContent("Use the StackSpirit Desktop App");
+    expect(onboarding).toHaveTextContent("Need an Always-On Machine?");
+    expect(onboarding).toHaveTextContent(/any always-on machine you can SSH to/i);
+    expect(onboarding).toHaveTextContent(/VPS, Mac mini, home Linux server, or spare laptop/i);
+    expect(onboarding).not.toHaveTextContent(/VPS only/i);
+    expect(onboarding).toHaveTextContent(
+      /Harnesses & provider keys live on your Always-On Machine/i,
+    );
+    expect(onboarding).toHaveTextContent(/never in StackSpirit Cloud/i);
+    expect(onboarding).toHaveTextContent(/in about 60 seconds/i);
 
-    await user.type(screen.getByLabelText("Machine name"), "contabo-existing");
+    // The signed-in account menu is present even with zero machines.
+    const accountButton = screen.getByTestId("web-account-button");
+    expect(accountButton).toHaveTextContent("owner@example.com");
+    await user.click(accountButton);
+    const accountMenu = screen.getByTestId("web-account-menu");
+    expect(accountMenu).toHaveTextContent("Account details");
+    expect(accountMenu).toHaveTextContent("Managed Homes");
+    expect(accountMenu).toHaveTextContent("Sign out");
+    await user.click(accountButton);
+
+    // Path 2 opens the downloadable Desktop app, which includes the Setup Assistant.
+    expect(screen.getByTestId("onboard-desktop-download")).toHaveAttribute(
+      "href",
+      "https://github.com/Stack-Spirit/stackspirit/releases/latest",
+    );
+
+    // Path 1 copies one prompt for OpenCode, Claude Code, Cursor or Codex.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    await user.click(screen.getByTestId("onboard-copy-prompt"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const copied = String(writeText.mock.calls[0]?.[0] ?? "");
+    expect(copied).toContain("npx -y stackspirit login");
+    expect(copied).toContain("stackspirit relay enroll");
+    expect(copied).toContain("stackspirit machines ls");
+    expect(copied).toContain("ask me for the SSH host");
+    expect(copied).toContain("Never ask me for SSH private keys");
+    expect(screen.getByTestId("onboard-copy-prompt")).toHaveTextContent("Copied");
+
+    // The one-time ssm_ token stays behind the quiet manual disclosure.
+    expect(screen.queryByTestId("web-enroll-token")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("onboard-manual-toggle"));
+    const manual = screen.getByTestId("onboard-manual");
+    expect(manual).toHaveTextContent(/ssm_/);
+    expect(manual).toHaveTextContent("stackspirit relay enroll --token-file -");
+    await user.type(screen.getByLabelText(/Machine name \(optional\)/i), "contabo-existing");
     await user.click(screen.getByTestId("onboard-create-token"));
     expect(await screen.findByTestId("web-enroll-token")).toHaveTextContent(
       "enrollment-token-value",
     );
+    expect(manual).toHaveTextContent("npx -y stackspirit login");
+    expect(manual).toHaveTextContent("stackspirit relay enroll --token-file -");
 
+    // Path 3 opens the Managed Homes EUR/USD plan catalogue.
     await user.click(screen.getByTestId("onboard-open-plans"));
     expect(await screen.findByTestId("managed-plans")).toHaveTextContent("Home 8");
   });
@@ -340,5 +391,28 @@ describe("Web Always-On Homes route", () => {
     await waitFor(() => {
       expect(screen.getByTestId("cloud-app")).toBeInTheDocument();
     });
+  });
+
+  it("signs out from the live cockpit instead of leaving a dead relay view", async () => {
+    const client = new FakeClient();
+    const relay = new FakeRelay();
+    configureCloudRuntime({ client, relay });
+    window.history.replaceState(null, "", "/cloud#auth_token=auth-token-value");
+    const user = userEvent.setup();
+    render(<CloudApp runtime={makeRuntime(client, relay)} />);
+
+    await screen.findByTestId("cloud-account");
+    await user.click(screen.getByTestId("cloud-connect-mch_online"));
+    await screen.findByTestId("web-lanes", {}, { timeout: 5_000 });
+
+    await user.click(screen.getByTestId("web-account-button"));
+    await user.click(screen.getByTestId("web-account-sign-out"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("cloud-app")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("cloud-live")).not.toBeInTheDocument();
+    expect(screen.getByTestId("web-auth-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("auth-google")).toBeInTheDocument();
   });
 });

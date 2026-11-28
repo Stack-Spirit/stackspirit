@@ -12,15 +12,32 @@ use crate::error::SpiritError;
 pub const DEFAULT_HARNESS_ID: &str = "opencode";
 
 /// Every built-in harness id. A custom file may not shadow one of these.
-pub const BUILTIN_HARNESS_IDS: [&str; 8] = [
+pub const BUILTIN_HARNESS_IDS: [&str; 25] = [
     "opencode",
-    "claude-code",
+    "cursor-cli",
+    "github-copilot",
+    "auggie",
+    "kiro",
+    "goose",
     "codex",
+    "cline",
+    "kilo",
+    "qwen-code",
+    "mistral-vibe",
+    "kimi-code",
+    "minimax-code",
+    "glm-agent",
+    "pi-acp",
+    "devin-cli",
+    "factory-droid",
+    "grok-build",
+    "junie",
+    "claude-code",
     "gemini-cli",
     "antigravity",
-    "cursor-cli",
     "aider",
-    "goose",
+    "crush",
+    "amp",
 ];
 
 /// How StackSpirit talks to one harness.
@@ -125,6 +142,76 @@ impl std::fmt::Display for HarnessAuthMode {
     }
 }
 
+/// What one harness is allowed to do in StackSpirit.
+///
+/// This is the single behavioural and UI split: a harness is either an official
+/// orchestrator/worker backend whose protocol can back the embedded chat, or a stock
+/// CLI that StackSpirit only runs in the terminal worker view. A consumer OAuth
+/// sign-in is never wrapped in StackSpirit's embedded chat for the worker-only group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessSurface {
+    /// Can act as the orchestrator and as a worker, using OpenCode's HTTP server or an
+    /// official ACP / Codex app-server protocol.
+    OrchestratorAndWorkers,
+    /// Stock CLI terminal view only; never wrapped in the embedded chat.
+    WorkersOnlyTerminal,
+}
+
+impl HarnessSurface {
+    /// Returns the canonical snake_case wire string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OrchestratorAndWorkers => "orchestrator_and_workers",
+            Self::WorkersOnlyTerminal => "workers_only_terminal",
+        }
+    }
+
+    /// Returns the exact section/heading label used by the desktop panel.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OrchestratorAndWorkers => "Orchestrator + Workers (ACP / Embedded Chat)",
+            Self::WorkersOnlyTerminal => "Workers Only (Stock CLI Terminal View)",
+        }
+    }
+
+    /// True when this surface may back the embedded chat.
+    #[must_use]
+    pub const fn accepts_embedded_chat(self) -> bool {
+        matches!(self, Self::OrchestratorAndWorkers)
+    }
+
+    /// Parses the canonical snake_case wire string.
+    pub fn parse(value: &str) -> Result<Self, SpiritError> {
+        match value {
+            "orchestrator_and_workers" => Ok(Self::OrchestratorAndWorkers),
+            "workers_only_terminal" => Ok(Self::WorkersOnlyTerminal),
+            _ => Err(SpiritError::invalid_input(
+                "surface",
+                "unknown harness surface",
+            )),
+        }
+    }
+
+    /// Derives the surface from the legacy `supports_embedded_chat` boolean.
+    #[must_use]
+    pub const fn from_embedded_chat(supports_embedded_chat: bool) -> Self {
+        if supports_embedded_chat {
+            Self::OrchestratorAndWorkers
+        } else {
+            Self::WorkersOnlyTerminal
+        }
+    }
+}
+
+impl std::fmt::Display for HarnessSurface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One harness definition. Built-ins ship with the app; custom entries are loaded from
 /// `~/.stackspirit/harnesses/<id>.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,8 +230,10 @@ pub struct HarnessManifest {
     pub auth_cmd: String,
     /// Transport/protocol family.
     pub protocol: HarnessProtocol,
-    /// True when the harness can back StackSpirit's embedded chat; false means
-    /// worker-only.
+    /// The explicit capability split: orchestrator + workers, or workers only.
+    pub surface: HarnessSurface,
+    /// Legacy mirror of `surface`: true exactly when the surface backs the embedded
+    /// chat. Kept so older bridge payloads remain readable.
     pub supports_embedded_chat: bool,
     /// Accepted authentication modes.
     pub auth_modes: Vec<HarnessAuthMode>,
@@ -212,6 +301,20 @@ impl HarnessManifest {
     /// Validates every field without touching the network or the filesystem.
     pub fn validate(&self) -> Result<(), SpiritError> {
         Self::validate_id(&self.id)?;
+        if self.supports_embedded_chat != self.surface.accepts_embedded_chat() {
+            return Err(SpiritError::invalid_input(
+                "surface",
+                "surface and supports_embedded_chat disagree",
+            ));
+        }
+        if self.protocol == HarnessProtocol::CliPty
+            && self.surface != HarnessSurface::WorkersOnlyTerminal
+        {
+            return Err(SpiritError::invalid_input(
+                "protocol",
+                "cli-pty is workers-only and cannot back the embedded chat",
+            ));
+        }
         validate_text("name", &self.name, 1, 100)?;
         validate_binary(&self.binary)?;
         validate_text("install_cmd", &self.install_cmd, 0, 1024)?;
@@ -255,9 +358,11 @@ impl HarnessManifest {
     }
 
     /// True when this manifest can back the embedded chat.
+    ///
+    /// The surface is authoritative; `supports_embedded_chat` is its legacy mirror.
     #[must_use]
     pub const fn embedded_chat(&self) -> bool {
-        self.supports_embedded_chat
+        self.surface.accepts_embedded_chat()
     }
 
     /// True when the manifest accepts an API key.
@@ -374,143 +479,428 @@ fn secret_material_error(field: &str) -> SpiritError {
     )
 }
 
-/// Returns every built-in manifest in display order. OpenCode is first and is the
-/// default.
+const API_KEY: &[HarnessAuthMode] = &[HarnessAuthMode::ApiKey];
+const SUBSCRIPTION: &[HarnessAuthMode] = &[HarnessAuthMode::Subscription];
+const API_KEY_OR_SUBSCRIPTION: &[HarnessAuthMode] =
+    &[HarnessAuthMode::ApiKey, HarnessAuthMode::Subscription];
+
+struct BuiltinPreset {
+    id: &'static str,
+    name: &'static str,
+    binary: &'static str,
+    install_cmd: &'static str,
+    auth_cmd: &'static str,
+    protocol: HarnessProtocol,
+    surface: HarnessSurface,
+    auth_modes: &'static [HarnessAuthMode],
+    tos_note: String,
+    docs_url: &'static str,
+    oauth_callback_port: Option<u16>,
+}
+
+fn preset(value: BuiltinPreset) -> HarnessManifest {
+    HarnessManifest {
+        id: value.id.to_owned(),
+        name: value.name.to_owned(),
+        binary: value.binary.to_owned(),
+        install_cmd: value.install_cmd.to_owned(),
+        auth_cmd: value.auth_cmd.to_owned(),
+        protocol: value.protocol,
+        surface: value.surface,
+        supports_embedded_chat: value.surface.accepts_embedded_chat(),
+        auth_modes: value.auth_modes.to_vec(),
+        tos_note: value.tos_note,
+        docs_url: value.docs_url.to_owned(),
+        oauth_callback_port: value.oauth_callback_port,
+        builtin: true,
+    }
+}
+
+fn byok_note(product: &str, vendor: &str) -> String {
+    format!(
+        "BYOK: {product} uses the provider API key you connect. {vendor} billing and terms \
+         apply; StackSpirit does not assume a consumer subscription."
+    )
+}
+
+fn subscription_note(product: &str, vendor: &str) -> String {
+    format!(
+        "Sign-in for {product} uses your {vendor} subscription and is governed by {vendor}'s \
+         consumer terms; automated or third-party use may be restricted."
+    )
+}
+
+fn stock_cli_note(product: &str, vendor: &str) -> String {
+    format!(
+        "Workers only: StackSpirit never wraps this consumer sign-in in its embedded chat. \
+         {product} runs as a stock CLI worker under your {vendor} subscription and {vendor}'s \
+         consumer terms; automated or third-party use may be restricted."
+    )
+}
+
+/// Returns every built-in manifest in display order.
+///
+/// OpenCode is first and is the default. The remaining entries follow the explicit
+/// [`HarnessSurface`] split: orchestrator + workers first, then the stock-CLI
+/// workers-only group.
 #[must_use]
 pub fn builtin_harnesses() -> Vec<HarnessManifest> {
+    use HarnessProtocol::{Acp, CliPty, CodexJson, OpencodeHttp, StreamJson};
+    use HarnessSurface::{OrchestratorAndWorkers, WorkersOnlyTerminal};
+
     vec![
-        HarnessManifest {
-            id: "opencode".to_owned(),
-            name: "OpenCode".to_owned(),
-            binary: "opencode".to_owned(),
-            install_cmd: "curl -fsSL https://opencode.ai/install | bash".to_owned(),
-            auth_cmd: "opencode auth login".to_owned(),
-            protocol: HarnessProtocol::OpencodeHttp,
-            supports_embedded_chat: true,
-            auth_modes: vec![HarnessAuthMode::ApiKey],
+        // Orchestrator + Workers (embedded chat via OpenCode or official ACP /
+        // Codex app-server). OpenCode stays the pinned default.
+        preset(BuiltinPreset {
+            id: "opencode",
+            name: "OpenCode",
+            binary: "opencode",
+            install_cmd: "curl -fsSL https://opencode.ai/install | bash",
+            auth_cmd: "opencode auth login",
+            protocol: OpencodeHttp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: API_KEY,
             tos_note: "BYOK: OpenCode uses the provider API key you connect. Provider billing \
                        and terms apply; StackSpirit does not assume a consumer subscription."
                 .to_owned(),
-            docs_url: "https://opencode.ai/docs/".to_owned(),
+            docs_url: "https://opencode.ai/docs/",
             oauth_callback_port: None,
-            builtin: true,
-        },
-        HarnessManifest {
-            id: "claude-code".to_owned(),
-            name: "Claude Code".to_owned(),
-            binary: "claude".to_owned(),
-            install_cmd: "npm install -g @anthropic-ai/claude-code".to_owned(),
-            auth_cmd: "claude auth login".to_owned(),
-            protocol: HarnessProtocol::StreamJson,
-            supports_embedded_chat: true,
-            auth_modes: vec![HarnessAuthMode::ApiKey, HarnessAuthMode::Subscription],
-            tos_note: "API-key use is billed under Anthropic's commercial API terms. Claude \
-                       Pro/Max subscription sign-in in a third-party client is governed by \
-                       Anthropic's Consumer Terms and may be restricted; check them before \
-                       connecting."
-                .to_owned(),
-            docs_url: "https://docs.anthropic.com/en/docs/claude-code".to_owned(),
-            oauth_callback_port: Some(54545),
-            builtin: true,
-        },
-        HarnessManifest {
-            id: "codex".to_owned(),
-            name: "Codex".to_owned(),
-            binary: "codex".to_owned(),
-            install_cmd: "npm install -g @openai/codex".to_owned(),
-            auth_cmd: "codex login".to_owned(),
-            protocol: HarnessProtocol::CodexJson,
-            supports_embedded_chat: true,
-            auth_modes: vec![HarnessAuthMode::ApiKey, HarnessAuthMode::Subscription],
+        }),
+        preset(BuiltinPreset {
+            id: "cursor-cli",
+            name: "Cursor CLI",
+            binary: "agent",
+            install_cmd: "curl https://cursor.com/install -fsS | bash",
+            auth_cmd: "agent login",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: SUBSCRIPTION,
+            tos_note: subscription_note("Cursor CLI", "Cursor"),
+            docs_url: "https://cursor.com/cli",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "github-copilot",
+            name: "GitHub Copilot",
+            binary: "copilot",
+            install_cmd: "npm install -g @github/copilot",
+            auth_cmd: "copilot login",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: SUBSCRIPTION,
+            tos_note: subscription_note("GitHub Copilot", "GitHub Copilot"),
+            docs_url: "https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "auggie",
+            name: "Auggie",
+            binary: "auggie",
+            install_cmd: "npm install -g @augmentcode/auggie",
+            auth_cmd: "auggie login",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: SUBSCRIPTION,
+            tos_note: subscription_note("Auggie", "Augment Code"),
+            docs_url: "https://docs.augmentcode.com/cli/overview",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "kiro",
+            name: "Kiro",
+            binary: "kiro-cli",
+            install_cmd: "curl -fsSL https://cli.kiro.dev/install | bash",
+            auth_cmd: "kiro-cli login",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: SUBSCRIPTION,
+            tos_note: subscription_note("Kiro", "Kiro"),
+            docs_url: "https://kiro.dev/docs/cli/",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "goose",
+            name: "Goose",
+            binary: "goose",
+            install_cmd: "curl -fsSL https://block.github.io/goose/install.sh | bash",
+            auth_cmd: "goose configure",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: API_KEY,
+            tos_note: byok_note("Goose", "The provider's"),
+            docs_url: "https://block.github.io/goose/docs/getting-started/installation",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "codex",
+            name: "Codex",
+            binary: "codex",
+            install_cmd: "npm install -g @openai/codex",
+            auth_cmd: "codex login",
+            protocol: CodexJson,
+            surface: OrchestratorAndWorkers,
+            auth_modes: API_KEY_OR_SUBSCRIPTION,
             tos_note: "API-key use is billed under OpenAI's API terms. ChatGPT subscription \
                        sign-in in a third-party client is governed by OpenAI's Consumer Terms \
-                       and may be restricted; check them before connecting."
+                       and may be restricted; check them before connecting. The embedded \
+                       app-server transport uses `codex app-server`."
                 .to_owned(),
-            docs_url: "https://developers.openai.com/codex/cli/".to_owned(),
+            docs_url: "https://developers.openai.com/codex/cli/",
             oauth_callback_port: Some(1455),
-            builtin: true,
-        },
-        HarnessManifest {
-            id: "gemini-cli".to_owned(),
-            name: "Gemini CLI".to_owned(),
-            binary: "gemini".to_owned(),
-            install_cmd: "npm install -g @google/gemini-cli".to_owned(),
-            auth_cmd: String::new(),
-            protocol: HarnessProtocol::Acp,
-            supports_embedded_chat: true,
-            auth_modes: vec![HarnessAuthMode::ApiKey, HarnessAuthMode::Subscription],
-            tos_note: "A Gemini API key is billed under Google's API terms. Personal \
-                       Google-account sign-in is governed by Google's Consumer Terms and may be \
-                       restricted for automated use."
+        }),
+        preset(BuiltinPreset {
+            id: "cline",
+            name: "Cline",
+            binary: "cline",
+            install_cmd: "npm install -g cline",
+            auth_cmd: "",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: API_KEY,
+            tos_note: byok_note("Cline", "The provider's"),
+            docs_url: "https://docs.cline.bot/cline-cli",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "kilo",
+            name: "Kilo Code",
+            binary: "kilocode",
+            install_cmd: "npm install -g @kilocode/cli",
+            auth_cmd: "",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: API_KEY,
+            tos_note: byok_note("Kilo Code", "The provider's"),
+            docs_url: "https://kilocode.ai/docs",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "qwen-code",
+            name: "Qwen Code",
+            binary: "qwen",
+            install_cmd: "npm install -g @qwen-code/qwen-code",
+            auth_cmd: "",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: API_KEY_OR_SUBSCRIPTION,
+            tos_note: "API-key use follows Alibaba's API terms. Qwen account sign-in follows \
+                       Alibaba's consumer terms and may be restricted for automated use."
                 .to_owned(),
-            docs_url: "https://github.com/google-gemini/gemini-cli".to_owned(),
+            docs_url: "https://github.com/QwenLM/qwen-code",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "mistral-vibe",
+            name: "Mistral Vibe",
+            binary: "vibe",
+            install_cmd: "pip install mistral-vibe",
+            auth_cmd: "",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: API_KEY,
+            tos_note: byok_note("Mistral Vibe", "Mistral's"),
+            docs_url: "https://github.com/mistralai/mistral-vibe",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "kimi-code",
+            name: "Kimi Code",
+            binary: "kimi",
+            install_cmd: "pip install kimi-cli",
+            auth_cmd: "",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: SUBSCRIPTION,
+            tos_note: subscription_note("Kimi Code", "Moonshot AI"),
+            docs_url: "https://github.com/MoonshotAI/kimi-cli",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "minimax-code",
+            name: "MiniMax Code",
+            binary: "minimax",
+            install_cmd: "npm install -g @minimax-ai/cli",
+            auth_cmd: "",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: API_KEY,
+            tos_note: byok_note("MiniMax Code", "MiniMax's"),
+            docs_url: "https://github.com/MiniMax-AI/MiniMax-CLI",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "glm-agent",
+            name: "GLM Agent",
+            binary: "glm",
+            install_cmd: "npm install -g glm-agent",
+            auth_cmd: "",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: API_KEY,
+            tos_note: byok_note("GLM Agent", "Z.ai's"),
+            docs_url: "https://github.com/zai-org/glm-cli",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "pi-acp",
+            name: "Pi ACP",
+            binary: "pi",
+            install_cmd: "npm install -g pi-acp",
+            auth_cmd: "",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: API_KEY,
+            tos_note: byok_note("Pi ACP", "The provider's"),
+            docs_url: "https://github.com/pi-labs/pi",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "devin-cli",
+            name: "Devin CLI",
+            binary: "devin",
+            install_cmd: "npm install -g devin",
+            auth_cmd: "",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: SUBSCRIPTION,
+            tos_note: subscription_note("Devin CLI", "Devin"),
+            docs_url: "https://docs.devin.ai/devin-cli",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "factory-droid",
+            name: "Factory Droid",
+            binary: "droid",
+            install_cmd: "curl -fsSL https://app.factory.ai/cli | sh",
+            auth_cmd: "droid login",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: SUBSCRIPTION,
+            tos_note: subscription_note("Factory Droid", "Factory"),
+            docs_url: "https://docs.factory.ai/cli",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "grok-build",
+            name: "Grok Build",
+            binary: "grok",
+            install_cmd: "npm install -g @xai/grok-cli",
+            auth_cmd: "",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: SUBSCRIPTION,
+            tos_note: subscription_note("Grok Build", "xAI"),
+            docs_url: "https://docs.x.ai/docs/guides/grok-cli",
+            oauth_callback_port: None,
+        }),
+        preset(BuiltinPreset {
+            id: "junie",
+            name: "Junie",
+            binary: "junie",
+            install_cmd: "npm install -g @jetbrains/junie",
+            auth_cmd: "",
+            protocol: Acp,
+            surface: OrchestratorAndWorkers,
+            auth_modes: SUBSCRIPTION,
+            tos_note: subscription_note("Junie", "JetBrains"),
+            docs_url: "https://www.jetbrains.com/junie/",
+            oauth_callback_port: None,
+        }),
+        // Workers only (stock CLI terminal view). StackSpirit never wraps the consumer
+        // OAuth sign-in of this group in its embedded chat.
+        preset(BuiltinPreset {
+            id: "claude-code",
+            name: "Claude Code",
+            binary: "claude",
+            install_cmd: "npm install -g @anthropic-ai/claude-code",
+            auth_cmd: "claude auth login",
+            protocol: StreamJson,
+            surface: WorkersOnlyTerminal,
+            auth_modes: API_KEY_OR_SUBSCRIPTION,
+            tos_note: "Workers only: StackSpirit never wraps this consumer sign-in in its \
+                       embedded chat. API-key use is billed under Anthropic's commercial API \
+                       terms. Claude Pro/Max subscription sign-in in a third-party client is \
+                       governed by Anthropic's Consumer Terms and may be restricted; check \
+                       them before connecting."
+                .to_owned(),
+            docs_url: "https://docs.anthropic.com/en/docs/claude-code",
+            oauth_callback_port: Some(54545),
+        }),
+        preset(BuiltinPreset {
+            id: "gemini-cli",
+            name: "Gemini CLI",
+            binary: "gemini",
+            install_cmd: "npm install -g @google/gemini-cli",
+            auth_cmd: "",
+            protocol: Acp,
+            surface: WorkersOnlyTerminal,
+            auth_modes: API_KEY_OR_SUBSCRIPTION,
+            tos_note: "Workers only: StackSpirit never wraps this consumer sign-in in its \
+                       embedded chat. A Gemini API key is billed under Google's API terms. \
+                       Personal Google-account subscription sign-in follows Google's consumer \
+                       terms and may be restricted for automated use."
+                .to_owned(),
+            docs_url: "https://github.com/google-gemini/gemini-cli",
             oauth_callback_port: Some(8085),
-            builtin: true,
-        },
-        HarnessManifest {
-            id: "antigravity".to_owned(),
-            name: "Antigravity".to_owned(),
-            binary: "antigravity".to_owned(),
-            install_cmd: "Download Google Antigravity from https://antigravity.google".to_owned(),
-            auth_cmd: String::new(),
-            protocol: HarnessProtocol::CliPty,
-            supports_embedded_chat: false,
-            auth_modes: vec![HarnessAuthMode::Subscription],
-            tos_note: "Sign-in uses your Google account and is governed by Google's Antigravity \
-                       terms; automated or third-party use may be restricted."
+        }),
+        preset(BuiltinPreset {
+            id: "antigravity",
+            name: "Antigravity",
+            binary: "antigravity",
+            install_cmd: "Download Google Antigravity from https://antigravity.google",
+            auth_cmd: "",
+            protocol: CliPty,
+            surface: WorkersOnlyTerminal,
+            auth_modes: SUBSCRIPTION,
+            tos_note: "Workers only: StackSpirit never wraps this consumer sign-in in its \
+                       embedded chat. Sign-in uses your Google account and is governed by \
+                       Google's Antigravity terms; automated or third-party use may be \
+                       restricted."
                 .to_owned(),
-            docs_url: "https://antigravity.google/docs".to_owned(),
+            docs_url: "https://antigravity.google/docs",
             oauth_callback_port: None,
-            builtin: true,
-        },
-        HarnessManifest {
-            id: "cursor-cli".to_owned(),
-            name: "Cursor CLI".to_owned(),
-            binary: "cursor-agent".to_owned(),
-            install_cmd: "curl https://cursor.com/install -fsS | bash".to_owned(),
-            auth_cmd: "cursor-agent login".to_owned(),
-            protocol: HarnessProtocol::CliPty,
-            supports_embedded_chat: false,
-            auth_modes: vec![HarnessAuthMode::Subscription],
-            tos_note: "Sign-in uses your Cursor subscription and is governed by Cursor's terms; \
-                       automated or third-party use may be restricted."
+        }),
+        preset(BuiltinPreset {
+            id: "aider",
+            name: "Aider",
+            binary: "aider",
+            install_cmd: "python -m pip install aider-install && aider-install",
+            auth_cmd: "",
+            protocol: CliPty,
+            surface: WorkersOnlyTerminal,
+            auth_modes: API_KEY,
+            tos_note: "Workers only: Aider runs as a stock CLI worker. BYOK: Aider uses the \
+                       provider API key you configure. Provider billing and terms apply."
                 .to_owned(),
-            docs_url: "https://cursor.com/cli".to_owned(),
+            docs_url: "https://aider.chat/docs/",
             oauth_callback_port: None,
-            builtin: true,
-        },
-        HarnessManifest {
-            id: "aider".to_owned(),
-            name: "Aider".to_owned(),
-            binary: "aider".to_owned(),
-            install_cmd: "python -m pip install aider-install && aider-install".to_owned(),
-            auth_cmd: String::new(),
-            protocol: HarnessProtocol::CliPty,
-            supports_embedded_chat: false,
-            auth_modes: vec![HarnessAuthMode::ApiKey],
-            tos_note: "BYOK: Aider uses the provider API key you configure. Provider billing \
-                       and terms apply."
-                .to_owned(),
-            docs_url: "https://aider.chat/docs/".to_owned(),
+        }),
+        preset(BuiltinPreset {
+            id: "crush",
+            name: "Crush",
+            binary: "crush",
+            install_cmd: "go install github.com/charmbracelet/crush@latest",
+            auth_cmd: "",
+            protocol: CliPty,
+            surface: WorkersOnlyTerminal,
+            auth_modes: API_KEY,
+            tos_note: byok_note("Crush", "The provider's"),
+            docs_url: "https://github.com/charmbracelet/crush",
             oauth_callback_port: None,
-            builtin: true,
-        },
-        HarnessManifest {
-            id: "goose".to_owned(),
-            name: "Goose".to_owned(),
-            binary: "goose".to_owned(),
-            install_cmd: "curl -fsSL https://block.github.io/goose/install.sh | bash".to_owned(),
-            auth_cmd: "goose configure".to_owned(),
-            protocol: HarnessProtocol::Acp,
-            supports_embedded_chat: true,
-            auth_modes: vec![HarnessAuthMode::ApiKey],
-            tos_note: "BYOK: Goose uses the provider API key you configure. Provider billing \
-                       and terms apply."
-                .to_owned(),
-            docs_url: "https://block.github.io/goose/docs/getting-started/installation".to_owned(),
+        }),
+        preset(BuiltinPreset {
+            id: "amp",
+            name: "Amp",
+            binary: "amp",
+            install_cmd: "npm install -g @sourcegraph/amp",
+            auth_cmd: "",
+            protocol: CliPty,
+            surface: WorkersOnlyTerminal,
+            auth_modes: SUBSCRIPTION,
+            tos_note: stock_cli_note("Amp", "Sourcegraph"),
+            docs_url: "https://ampcode.com/manual",
             oauth_callback_port: None,
-            builtin: true,
-        },
+        }),
     ]
 }
 
@@ -528,6 +918,82 @@ mod tests {
             assert!(BUILTIN_HARNESS_IDS.contains(&preset.id.as_str()));
         }
         assert_eq!(presets[0].id, DEFAULT_HARNESS_ID);
+        assert_eq!(presets[0].surface, HarnessSurface::OrchestratorAndWorkers);
+        assert!(presets[0].embedded_chat());
+    }
+
+    #[test]
+    fn builtin_catalog_has_one_explicit_surface_per_harness() {
+        let orchestrators: Vec<_> = builtin_harnesses()
+            .into_iter()
+            .filter(|preset| preset.surface == HarnessSurface::OrchestratorAndWorkers)
+            .map(|preset| preset.id)
+            .collect();
+        assert_eq!(
+            orchestrators,
+            [
+                "opencode",
+                "cursor-cli",
+                "github-copilot",
+                "auggie",
+                "kiro",
+                "goose",
+                "codex",
+                "cline",
+                "kilo",
+                "qwen-code",
+                "mistral-vibe",
+                "kimi-code",
+                "minimax-code",
+                "glm-agent",
+                "pi-acp",
+                "devin-cli",
+                "factory-droid",
+                "grok-build",
+                "junie",
+            ]
+        );
+        let workers: Vec<_> = builtin_harnesses()
+            .into_iter()
+            .filter(|preset| preset.surface == HarnessSurface::WorkersOnlyTerminal)
+            .map(|preset| preset.id)
+            .collect();
+        assert_eq!(
+            workers,
+            [
+                "claude-code",
+                "gemini-cli",
+                "antigravity",
+                "aider",
+                "crush",
+                "amp",
+            ]
+        );
+        for preset in builtin_harnesses() {
+            assert_eq!(
+                preset.supports_embedded_chat,
+                preset.surface.accepts_embedded_chat(),
+                "{}",
+                preset.id
+            );
+        }
+    }
+
+    #[test]
+    fn surface_validation_keeps_the_split_honest() {
+        let mut preset = builtin_harnesses().remove(0);
+        preset.supports_embedded_chat = false;
+        assert!(preset.validate().is_err());
+
+        let mut preset = builtin_harnesses().remove(0);
+        preset.protocol = HarnessProtocol::CliPty;
+        assert!(preset.validate().is_err());
+
+        let mut preset = builtin_harnesses().remove(0);
+        preset.surface = HarnessSurface::WorkersOnlyTerminal;
+        preset.protocol = HarnessProtocol::Acp;
+        preset.supports_embedded_chat = false;
+        preset.validate().unwrap();
     }
 
     #[test]
