@@ -173,13 +173,9 @@ pub async fn chat_release_writer(
     if matches!(session, ChatSessionId::Setup) {
         return Err(ChatWriterError::HarnessNotWired.into());
     }
-    // An endpoint can disappear while a lease child is still alive, so an attach failure
-    // must not block the release. Only a successful non-local probe rejects this action.
-    if let Ok(attached) = chat.attach(&session).await
-        && attached.location != ChatSessionLocation::Local
-    {
-        return Err(chat_gated_writer_error());
-    }
+    // No attach probe here: a lost endpoint must not block releasing a live child, and an
+    // engine-backed session must not start the engine just to be refused. Core owns the
+    // setup/engine-backed rejection and reaps any child it holds.
     let view = chat.release_writer(&session).await?;
     if view.location != ChatSessionLocation::Local {
         return Err(chat_gated_writer_error());
