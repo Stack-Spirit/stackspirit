@@ -6,7 +6,7 @@
     <title>Harnesses &amp; Providers — StackSpirit</title>
     <meta
       name="description"
-      content="OpenCode built in by default with BYOK providers, plus one-click connect for Claude Code, Codex, Gemini CLI, Antigravity, Cursor CLI, Aider, Goose, and your own custom CLI harnesses."
+      content="OpenCode by default with BYOK providers, official ACP harnesses for Orchestrators + Workers (Cursor CLI, Copilot CLI, Codex, Auggie, Kiro, Goose), and stock CLI Workers for Claude Code, Gemini CLI, Antigravity, and custom harnesses."
     />
     <link rel="canonical" href="https://stackspirit.io/harnesses" />
     <meta name="theme-color" content="#f5f7f0" />
@@ -56,13 +56,13 @@
         <div class="container">
           <header class="section__head section__head--split">
             <div>
-              <p class="kicker"><span class="kicker__index">HARNESSES</span> Overarching engine + bring-your-own CLI</p>
+              <p class="kicker"><span class="kicker__index">HARNESSES</span> Zero token billing · One clear distinction</p>
               <h1 id="harnesses-title">OpenCode by default. Any coding CLI underneath.</h1>
               <p class="section__lede">
-                StackSpirit ships with OpenCode as its default engine (bring your own DeepSeek, OpenRouter, Anthropic API, OpenAI API, or Ollama keys), and lets you connect Claude Code, Codex, Gemini CLI, Antigravity, Cursor CLI, Aider, Goose, or any custom CLI through a single declarative manifest.
+                StackSpirit never resells tokens or extracts OAuth credentials. Connect your providers inside <strong>OpenCode</strong> (default), embed official <strong>ACP</strong> harnesses for both <strong>Orchestrators + Workers</strong>, or run subscription CLIs like <strong>Claude Code</strong> and <strong>Gemini CLI</strong> cleanly as stock CLI <strong>Workers</strong> in a live terminal view.
               </p>
             </div>
-            <span class="stamp">stock clis<br />never spoofed</span>
+            <span class="stamp">stock clis<br />zero token markup</span>
           </header>
 
           <div class="matrix-scroll">
@@ -70,59 +70,59 @@
               <thead>
                 <tr>
                   <th scope="col">Harness</th>
+                  <th scope="col">Role support</th>
                   <th scope="col">Protocol</th>
-                  <th scope="col">Surface</th>
-                  <th scope="col">Auth &amp; compliance</th>
+                  <th scope="col">How you connect</th>
                 </tr>
               </thead>
               <tbody>
                 <tr class="harness-row harness-row--default">
                   <td><strong>OpenCode</strong> <span class="tag tag--default">default engine</span></td>
+                  <td><span class="tag tag--orch">Orchestrator + Workers</span></td>
                   <td><code>opencode serve</code> (HTTP/SSE)</td>
-                  <td>Embedded Desktop &amp; Web chat + 24/7 workers</td>
-                  <td>BYOK API keys (DeepSeek, OpenRouter, Anthropic, OpenAI, Ollama)</td>
-                </tr>
-                <tr class="harness-row">
-                  <td><strong>Claude Code</strong></td>
-                  <td><code>claude</code> (stream-json)</td>
-                  <td>Always-on workers &amp; local CLI</td>
-                  <td>Official <code>claude</code> CLI only · API key recommended for 24/7 automation</td>
-                </tr>
-                <tr class="harness-row">
-                  <td><strong>Codex</strong></td>
-                  <td><code>codex</code> (JSON)</td>
-                  <td>Always-on workers &amp; local CLI</td>
-                  <td>Official <code>codex</code> CLI only · API key or ChatGPT login (per OpenAI ToS)</td>
-                </tr>
-                <tr class="harness-row">
-                  <td><strong>Gemini CLI</strong></td>
-                  <td><code>gemini</code> (ACP)</td>
-                  <td>Always-on workers &amp; local CLI</td>
-                  <td>Official <code>gemini</code> CLI · Gemini API / Vertex or Google account</td>
-                </tr>
-                <tr class="harness-row">
-                  <td><strong>Antigravity</strong></td>
-                  <td>Official CLI / PTY</td>
-                  <td>Always-on machine &amp; native app</td>
-                  <td>Official login only · never extracts or proxies OAuth tokens</td>
+                  <td>Bring your own API keys (DeepSeek, OpenRouter, Anthropic API, OpenAI API, Gemini API, Ollama/vLLM)</td>
                 </tr>
                 <tr class="harness-row">
                   <td><strong>Cursor CLI</strong></td>
-                  <td><code>cursor-agent</code> (PTY)</td>
-                  <td>Always-on workers &amp; local CLI</td>
-                  <td>Official CLI · subscription subject to Cursor ToS</td>
+                  <td><span class="tag tag--orch">Orchestrator + Workers</span></td>
+                  <td><code>agent acp</code> (official ACP)</td>
+                  <td>Official Cursor login (<code>cursor_login</code>) or API key — embedded chat &amp; workers</td>
                 </tr>
                 <tr class="harness-row">
-                  <td><strong>Aider &amp; Goose</strong></td>
-                  <td>CLI / ACP</td>
-                  <td>Always-on workers</td>
-                  <td>BYOK API keys — 100% open-source friendly</td>
+                  <td><strong>GitHub Copilot CLI</strong></td>
+                  <td><span class="tag tag--orch">Orchestrator + Workers</span></td>
+                  <td><code>copilot --acp</code> (official ACP)</td>
+                  <td>Official Copilot login or BYOK — embedded chat &amp; workers</td>
                 </tr>
                 <tr class="harness-row">
-                  <td><strong>Custom CLI</strong> <span class="tag tag--ready">bring-your-own</span></td>
+                  <td><strong>Codex</strong></td>
+                  <td><span class="tag tag--orch">Orchestrator + Workers</span></td>
+                  <td><code>codex app-server</code> / JSON</td>
+                  <td>Official OpenAI API key or Sign in with ChatGPT program</td>
+                </tr>
+                <tr class="harness-row">
+                  <td><strong>Auggie, Kiro, Goose &amp; ACP Registry</strong></td>
+                  <td><span class="tag tag--orch">Orchestrator + Workers</span></td>
+                  <td>Official <code>--acp</code> / <code>acp</code></td>
+                  <td>Cline, Kilo, Qwen Code, Mistral Vibe, Kimi Code, MiniMax Code, GLM Agent, Pi ACP, Devin CLI, Factory Droid, Grok Build, Junie</td>
+                </tr>
+                <tr class="harness-row">
+                  <td><strong>Claude Code</strong></td>
+                  <td><span class="tag tag--worker">Workers Only · CLI Terminal</span></td>
+                  <td>Unmodified <code>claude</code> CLI</td>
+                  <td>Each user signs in directly to stock <code>claude</code> on their Home (terminal view; never wrapped in third-party chat). Use API key in OpenCode for embedded chat.</td>
+                </tr>
+                <tr class="harness-row">
+                  <td><strong>Gemini CLI &amp; Antigravity</strong></td>
+                  <td><span class="tag tag--worker">Workers Only · CLI Terminal</span></td>
+                  <td>Stock <code>gemini</code> / Antigravity CLI</td>
+                  <td>Runs unmodified CLI on your Home (terminal view). Use Gemini API / Vertex key in OpenCode for embedded chat.</td>
+                </tr>
+                <tr class="harness-row">
+                  <td><strong>Aider, Crush, Amp &amp; Custom CLI</strong> <span class="tag tag--ready">bring-your-own</span></td>
+                  <td><span class="tag tag--ready">ACP or CLI Terminal</span></td>
                   <td><code>~/.stackspirit/harnesses/*.toml</code></td>
-                  <td>Add via form in Desktop Settings</td>
-                  <td>Any binary, install command, auth command, and protocol</td>
+                  <td>Add any CLI binary via form in Desktop Settings — pick <code>acp</code> (Orchestrator + Workers) or <code>cli-pty</code> (Workers Only)</td>
                 </tr>
               </tbody>
             </table>
@@ -133,7 +133,7 @@
               <p class="kicker"><span class="kicker__index">ZERO TUNNELS</span> One-click Desktop Connect</p>
               <h2>Sign in once from your Mac. Both machines stay connected.</h2>
               <p class="section__lede">
-                Click <strong>Connect</strong> in the StackSpirit Desktop app to install and authorize a CLI harness on both your local Mac and your Always-On Home. StackSpirit opens a short-lived, invisible loopback port-forward so the provider&rsquo;s OAuth callback lands directly on your VPS — then closes it automatically. Provider tokens never touch StackSpirit Cloud.
+                Click <strong>Connect</strong> in the StackSpirit Desktop app to install and authorize a CLI harness on both your local Mac and your Always-On Machine. StackSpirit opens a short-lived, invisible loopback port-forward so the provider&rsquo;s OAuth callback lands directly on your Home — then closes it automatically. Provider credentials never touch StackSpirit Cloud.
               </p>
             </div>
             <div class="harness-connect-box__code">
@@ -141,7 +141,7 @@
 id = "my-cli"
 name = "My Custom Agent CLI"
 binary = "my-agent"
-protocol = "acp"
+protocol = "acp"        # or "cli-pty" for workers-only
 auth_cmd = "my-agent login"</code></pre>
             </div>
           </div>
