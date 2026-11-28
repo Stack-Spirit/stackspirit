@@ -128,6 +128,12 @@ impl HarnessChatProvider {
         });
     }
 
+    /// Drops the adapter registration without closing sessions. Use it only when no ACP
+    /// session can be live (startup); otherwise call [`Self::remove_adapter`].
+    pub fn clear_adapter(&self) {
+        *lock(&self.binding) = None;
+    }
+
     /// Closes every ACP session, then removes the adapter so ACP is `harness_not_wired`
     /// again.
     pub async fn remove_adapter(&self) {

@@ -18,7 +18,7 @@ use spirit_core::engine::chat::{
     CHAT_PREFERENCES_VERSION, ChatLogPage, ChatLogQuery, ChatPermissionDecision, ChatPreferences,
     ChatSendInput, ChatSendReceipt, ChatSessionId, ChatSessionLocation, ChatSessionView,
     ChatStartInput, ChatTransport, ChatWriterError, HarnessChatGate, LocalChatProvider,
-    gate_for_manifest, preflight,
+    gate_for_manifest,
 };
 use spirit_core::error::{SpiritError, SpiritErrorCode};
 use spirit_core::harnesses::HarnessManifest;
@@ -78,7 +78,7 @@ pub fn chat_harness_settings(state: State<'_, AppState>) -> CommandResult<ChatHa
 /// is still refused by `chat_start`. Missing, worker-only and unsupported-protocol ids
 /// are typed refusals. A corrupt or future settings file is never overwritten.
 #[tauri::command]
-pub fn chat_set_default_harness(
+pub async fn chat_set_default_harness(
     state: State<'_, AppState>,
     input: ChatSetDefaultHarnessInput,
 ) -> CommandResult<ChatHarnessSettingsView> {
@@ -111,6 +111,11 @@ pub fn chat_set_default_harness(
         default_harness_id: Some(input.harness_id),
     })?;
 
+    // Close any old adapter's children before the new one is registered, so a switch
+    // cannot orphan a child process.
+    state.chat_harness().remove_adapter().await;
+    state.install_harness_adapter();
+
     Ok(chat_harness_settings_view(state.inner()))
 }
 
@@ -118,8 +123,8 @@ pub fn chat_set_default_harness(
 fn chat_harness_settings_view(state: &AppState) -> ChatHarnessSettingsView {
     match state.chat_preferences().load() {
         Ok(preferences) => ChatHarnessSettingsView {
-            default_harness_id: preferences.default_harness_id.clone(),
-            gate: preflight(state.chat_registry().as_ref(), &preferences),
+            default_harness_id: preferences.default_harness_id,
+            gate: state.chat_harness().gate(),
         },
         Err(problem) => ChatHarnessSettingsView {
             default_harness_id: None,
@@ -162,7 +167,7 @@ pub async fn chat_attach(
     state: State<'_, AppState>,
     session: ChatSessionId,
 ) -> CommandResult<ChatSessionView> {
-    let chat = state.chat();
+    let chat = state.chat_harness();
     chat.attach(&session).await
 }
 
@@ -173,7 +178,7 @@ pub async fn chat_send(
     state: State<'_, AppState>,
     input: ChatSendInput,
 ) -> CommandResult<ChatSendReceipt> {
-    let chat = state.chat();
+    let chat = state.chat_harness();
     chat.send_turn(
         &input.session,
         &input.text,
@@ -191,7 +196,7 @@ pub async fn chat_set_model(
     session: ChatSessionId,
     model_id: String,
 ) -> CommandResult<ChatSessionView> {
-    let chat = state.chat();
+    let chat = state.chat_harness();
     chat.set_model(&session, &model_id).await
 }
 
@@ -201,7 +206,7 @@ pub async fn chat_stop(
     state: State<'_, AppState>,
     session: ChatSessionId,
 ) -> CommandResult<ChatSessionView> {
-    let chat = state.chat();
+    let chat = state.chat_harness();
     chat.stop(&session).await
 }
 
@@ -212,7 +217,7 @@ pub async fn chat_log(
     session: ChatSessionId,
     query: Option<ChatLogQuery>,
 ) -> CommandResult<ChatLogPage> {
-    let chat = state.chat();
+    let chat = state.chat_harness();
     let query = query.unwrap_or_default();
     chat.log(&session, &query).await
 }
