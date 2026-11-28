@@ -442,6 +442,26 @@ for (const theme of ["light", "dark"] as const) {
   });
 }
 
+test("chat takeover stays absent in the preview mock and never fakes a lease", async ({
+  page,
+}) => {
+  // The preview bridge has no VOWP home and no attach child, so it must not offer a
+  // writer action or a held chip. A deterministic eligible scenario lives in the
+  // component tests; the browser flow proves the honest default only.
+  for (const theme of ["light", "dark"] as const) {
+    await page.goto(url("busy", theme));
+    await connect(page);
+    await expect(
+      page.getByRole("heading", { name: "Global orchestrator", level: 1 }),
+    ).toBeVisible();
+    await expect(page.getByTestId("writer-control")).toHaveCount(0);
+    await expect(page.getByTestId("session-writer")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Take over" })).toHaveCount(0);
+    await expect(page.getByTestId("readonly-notice")).toHaveCount(0);
+    await expectNoWcagViolations(page);
+  }
+});
+
 test("model picker search stays inside the chat clip below the saved-server banner", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 480 });
   await page.goto(url("fresh"));

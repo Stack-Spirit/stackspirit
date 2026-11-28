@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 
 import { errorTitle, toSpiritError, type SpiritError } from "../bridge/errors";
 import type {
@@ -11,6 +11,8 @@ import type {
   ChatUsageView,
   ChatToolActivity,
   ChatToolStatus,
+  ChatWriterState,
+  ChatWriterView,
   FleetView,
   HostDraft,
   HostKeyPin,
@@ -522,6 +524,329 @@ function ReadOnlyNotice({ owner }: { owner: ChatOwnershipView | null }) {
   );
 }
 
+/**
+ * The safe reason a writer state cannot offer Take over. It never repeats raw VOWP
+ * text, a command line, a path or an identifier.
+ */
+function writerReasonCopy(writer: ChatWriterView): string {
+  switch (writer.reason) {
+    case "node_hosted":
+      return "Take over isn't available because this orchestrator runs on a node. VOWP can only attach a home-hosted orchestrator, so this window stays read-only.";
+    case "vowp_too_old":
+      return "Take over needs a newer VOWP with orchestrator attach. This window stays read-only.";
+    case "not_home":
+      return "Take over needs StackSpirit on the same computer as the VOWP home; this chat is not configured for takeover here. This window stays read-only.";
+    case "orchestrator_stopped":
+      return "The orchestrator is stopped. Resume it, then try Take over again. This window stays read-only.";
+    case "attach_refused":
+      return "The last takeover did not go through. Nothing changed in this window.";
+    case "attach_failed":
+      return "The last takeover attempt failed. Nothing changed in this window.";
+    case "lease_lost":
+      return "Another writer took this session over. This window is read-only.";
+    case "session_mismatch":
+      return "This chat no longer matches the orchestrator session, so takeover is unavailable. This window stays read-only.";
+    default:
+      if (writer.state === "lost") {
+        return "Another writer took this session over. This window is read-only.";
+      }
+      if (writer.state === "available") {
+        return "This session is not ready for takeover yet. This window stays read-only.";
+      }
+      return "Take over isn't available for this session. This window stays read-only.";
+  }
+}
+
+/** A typed bridge failure rendered as calm copy; the raw message and identifiers never appear. */
+function writerErrorCopy(error: SpiritError): string {
+  const typed = error.code === "gate" ? error.message : "";
+  if (error.code === "chat_takeover_conflict" || /chat_takeover_conflict/.test(typed)) {
+    return "Someone started writing while you were deciding. Nothing changed here; you can take over again if you still want to.";
+  }
+  if (error.code === "chat_takeover_unsupported" || /chat_takeover_unsupported/.test(typed)) {
+    return "This VOWP does not support session takeover. This window stays read-only.";
+  }
+  if (error.code === "chat_takeover_unavailable" || /chat_takeover_unavailable/.test(typed)) {
+    return "Session takeover isn't available right now. This window stays read-only.";
+  }
+  if (error.code === "chat_writer_lost" || /chat_writer_lost/.test(typed)) {
+    return "Another writer took this session over. This window is read-only.";
+  }
+  switch (error.code) {
+    case "preview_unavailable":
+      return "Session takeover needs the desktop host. Preview mode never holds a writer lease.";
+    case "chat_read_only":
+      return "This window is read-only.";
+    case "gate":
+      return "This chat is app-owned, so takeover does not apply here.";
+    default:
+      return "The session writer action did not go through. Nothing changed in this session.";
+  }
+}
+
+/** A live holder needs the replace confirmation; a stale row is replaced without it. */
+function ownerLeaseIsLive(owner: ChatOwnershipView | null): boolean {
+  if (!owner) return false;
+  const state = owner.state?.trim().toLowerCase();
+  return state !== "stale" && state !== "expired" && state !== "released";
+}
+
+/** The held writer chip names StackSpirit and keeps any safe node the owner already reports. */
+function writerChipLabel(owner: ChatOwnershipView | null): string {
+  const label = owner?.label?.trim();
+  if (label && label.toLowerCase().includes("stackspirit")) return label;
+  return "StackSpirit";
+}
+
+function describeTakeOver(owner: ChatOwnershipView | null): ReactNode {
+  if (!owner) {
+    return (
+      <>
+        <p>No one is writing in this session. Taking over attaches this window as the writer.</p>
+        <p>A window that connects to the orchestrator directly may keep working until it notices.</p>
+      </>
+    );
+  }
+  const stale = !ownerLeaseIsLive(owner);
+  const activity = owner.activity?.trim();
+  return (
+    <>
+      <p>
+        {stale
+          ? `The previous writer left. Taking over replaces a stale lease so this window can write.`
+          : `${chatOwnerWriter(owner)} is writing in this session.${activity ? ` (${activityLabel(activity)})` : ""} Taking over makes the other app read-only.`}
+      </p>
+      {!stale && activity === "running" ? (
+        <p>A turn is running. It may be interrupted after a few seconds.</p>
+      ) : null}
+      <p>A window that connects to the orchestrator directly may keep working until it notices.</p>
+    </>
+  );
+}
+
+/**
+ * The last point where the owner can cancel a takeover or release. It is a real modal
+ * for keyboard and screen-reader users: Cancel takes focus, Tab stays inside, Escape
+ * cancels and focus returns to the control that opened it.
+ */
+function WriterConfirmDialog({
+  title,
+  confirmLabel,
+  children,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  confirmLabel: string;
+  children: ReactNode;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const titleId = useId();
+  const bodyId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const previous = document.activeElement;
+    cancelRef.current?.focus();
+    return () => {
+      if (previous instanceof HTMLElement && previous.isConnected) {
+        previous.focus();
+      }
+    };
+  }, []);
+
+  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onCancel();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    );
+    if (!focusable || focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!first || !last) return;
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !dialogRef.current?.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !dialogRef.current?.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  return (
+    <div className="nx-writer-dialog">
+      <div
+        ref={dialogRef}
+        className="nx-writer-dialog__card"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={bodyId}
+        onKeyDown={onKeyDown}
+        data-testid="writer-dialog"
+      >
+        <h2 className="nx-writer-dialog__title" id={titleId}>
+          {title}
+        </h2>
+        <div className="nx-writer-dialog__body" id={bodyId}>
+          {children}
+        </div>
+        <div className="nx-writer-dialog__actions">
+          <button
+            ref={cancelRef}
+            type="button"
+            className="nx-btn nx-btn--quiet nx-btn--sm"
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button type="button" className="nx-btn nx-btn--sm" onClick={onConfirm}>
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The separate writer action row. It is deliberately outside the calm read-only notice:
+ * the notice never gains a button, and an ineligible session gets reason text only.
+ */
+function WriterControl({
+  writer,
+  state,
+  ownership,
+  canOfferTakeOver,
+  canRelease,
+  error,
+  takeOverRef,
+  releaseRef,
+  onTakeOver,
+  onRelease,
+}: {
+  writer: ChatWriterView | null;
+  state: ChatWriterState | null;
+  ownership: ChatOwnershipView | null;
+  canOfferTakeOver: boolean;
+  canRelease: boolean;
+  error: SpiritError | null;
+  takeOverRef: RefObject<HTMLButtonElement | null>;
+  releaseRef: RefObject<HTMLButtonElement | null>;
+  onTakeOver: () => void;
+  onRelease: () => void;
+}) {
+  if (!writer || state === null) return null;
+
+  if (state === "held") {
+    return (
+      <div
+        className="nx-writer nx-writer--held"
+        data-testid="writer-control"
+        role="group"
+        aria-label="Session writer"
+      >
+        <span className="nx-writer__status" data-testid="writer-status">
+          {canRelease
+            ? "You are writing here. Release the session to let another app write."
+            : "You are writing here."}
+        </span>
+        {canRelease ? (
+          <button
+            ref={releaseRef}
+            type="button"
+            className="nx-btn nx-btn--quiet nx-btn--sm"
+            onClick={onRelease}
+            data-testid="writer-release"
+          >
+            Release
+          </button>
+        ) : null}
+        {error ? (
+          <p className="nx-writer__error" role="alert" data-testid="writer-error" data-code={error.code}>
+            {writerErrorCopy(error)}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (state === "attaching" || state === "releasing") {
+    return (
+      <div
+        className="nx-writer nx-writer--busy"
+        data-testid="writer-control"
+        role="status"
+        data-state={state}
+      >
+        <span className="nx-writer__status" data-testid="writer-status">
+          {state === "attaching" ? "Taking over the session…" : "Releasing the session…"}
+        </span>
+      </div>
+    );
+  }
+
+  const canOffer =
+    state === "available" && canOfferTakeOver;
+  if (canOffer) {
+    return (
+      <div
+        className="nx-writer"
+        data-testid="writer-control"
+        role="group"
+        aria-label="Session writer"
+      >
+        <span className="nx-writer__status" data-testid="writer-status">
+          {ownership
+            ? "This window is read-only. Take over to write here."
+            : "No one is writing in this session."}
+        </span>
+        <button
+          ref={takeOverRef}
+          type="button"
+          className="nx-btn nx-btn--sm"
+          onClick={onTakeOver}
+          data-testid="writer-take-over"
+        >
+          Take over
+        </button>
+        {error ? (
+          <p className="nx-writer__error" role="alert" data-testid="writer-error" data-code={error.code}>
+            {writerErrorCopy(error)}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="nx-writer nx-writer--unavailable"
+      data-testid="writer-control"
+      role="status"
+    >
+      <p className="nx-writer__reason" data-testid="writer-reason">
+        {writerReasonCopy(writer)}
+      </p>
+      {error ? (
+        <p className="nx-writer__error" role="alert" data-testid="writer-error" data-code={error.code}>
+          {writerErrorCopy(error)}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+
 function confirmCopy(owner: SessionOwnerView): string {
   if (owner.activity === "running") {
     return `${owner.label} is currently running a turn. Taking over will fence its writes and tell it to stop. Take over anyway?`;
@@ -534,7 +859,14 @@ function isNotSupported(code: string, message: string): boolean {
 }
 
 /** Calm Meadow status bar: who holds this session, what they are doing, and Take over. */
-function OwnershipBanner({ session }: { session: SessionId }) {
+function OwnershipBanner({
+  session,
+  hideTakeOver = false,
+}: {
+  session: SessionId;
+  /** The chat writer action is visible; do not show a second, different Take over. */
+  hideTakeOver?: boolean;
+}) {
   const fleet = useFleetStore((state) => state.fleet);
   const bridge = useFleetStore((state) => state.bridge);
   const [confirming, setConfirming] = useState(false);
@@ -546,7 +878,7 @@ function OwnershipBanner({ session }: { session: SessionId }) {
   if (!found) return null;
   const { sessionId, owner } = found;
   const takeover = bridge?.sessions?.takeoverSession;
-  const canAct = Boolean(takeover) && !fleet?.stale && !unsupported;
+  const canAct = Boolean(takeover) && !fleet?.stale && !unsupported && !hideTakeOver;
   const idle = owner.activity === "idle";
 
   async function run() {
@@ -601,7 +933,7 @@ function OwnershipBanner({ session }: { session: SessionId }) {
         >
           {activityLabel(owner.activity)}
         </span>
-        {!confirming ? (
+        {!confirming && !hideTakeOver ? (
           <button
             type="button"
             className="nx-btn nx-btn--sm"
@@ -887,6 +1219,7 @@ export function ChatView({
   const composerDraft = useShellUi((state) => state.composerDraft);
   const clearComposerDraft = useShellUi((state) => state.clearComposerDraft);
   const fleet = useFleet();
+  const bridge = useFleetStore((state) => state.bridge);
   const [newServerRequested, setNewServerRequested] = useState(false);
   const project = session.startsWith("project:") ? session.slice("project:".length) : null;
   const state = view?.state ?? "idle";
@@ -894,6 +1227,13 @@ export function ChatView({
   const [now, setNow] = useState(() => Date.now());
   const [modelPickerRequest, setModelPickerRequest] = useState(0);
   const [stopping, setStopping] = useState(false);
+  const [confirmingTakeOver, setConfirmingTakeOver] = useState(false);
+  const [confirmingRelease, setConfirmingRelease] = useState(false);
+  const [writerBusy, setWriterBusy] = useState<"takeOver" | "release" | null>(null);
+  const [writerError, setWriterError] = useState<SpiritError | null>(null);
+  const takeOverRef = useRef<HTMLButtonElement>(null);
+  const releaseRef = useRef<HTMLButtonElement>(null);
+  const focusAfterWriterAction = useRef<"takeOver" | "release" | null>(null);
 
   useEffect(() => {
     void open(session, project, "local");
@@ -909,6 +1249,20 @@ export function ChatView({
     endRef.current?.scrollIntoView?.({ block: "end" });
   }, [messages.length, view?.pending_permissions?.length]);
 
+  // Focus moves to the control that replaced the dialog once the action settles. Cancel
+  // and Escape are handled by the dialog itself, which restores the trigger.
+  useEffect(() => {
+    if (writerBusy !== null) return;
+    const target = focusAfterWriterAction.current;
+    if (!target) return;
+    focusAfterWriterAction.current = null;
+    if (target === "release" && view?.writer?.state === "held") {
+      releaseRef.current?.focus();
+    } else if (target === "takeOver" && view?.writer?.state === "available") {
+      takeOverRef.current?.focus();
+    }
+  }, [writerBusy, view?.writer?.state]);
+
   const isSetup = session === "setup";
   const models: ChatModelView[] | undefined = view?.available_models;
   // The model link is honest: it appears only when the engine reports zero usable
@@ -918,11 +1272,33 @@ export function ChatView({
   // disables send even though there is no list to prove why.
   const missingModel = isSetup && state === "ready" && !view?.model;
   const canChat = state === "ready" && !missingModel;
-  // A read-only session streams and reads, but this window must not write. Older
-  // bridges omit `access`; they keep the exact behaviour they had before.
-  const readOnly = view?.access === "read_only";
-  const canWrite = canChat && !readOnly;
   const ownership = view?.ownership ?? null;
+  const writer = view?.writer ?? null;
+  // A writer-aware session is writable only while this app holds the lease. An old
+  // bridge omits `writer`, so it keeps the exact `access` behavior it had before.
+  const readOnly = writer
+    ? writer.state !== "held" || view?.access !== "owner"
+    : view?.access === "read_only";
+  const canWrite = canChat && !readOnly;
+  const writerState: ChatWriterState | null =
+    writerBusy === "takeOver"
+      ? "attaching"
+      : writerBusy === "release"
+        ? "releasing"
+        : (writer?.state ?? null);
+  const takeoverOffered =
+    !isSetup &&
+    writerBusy === null &&
+    Boolean(bridge?.chat?.takeOver) &&
+    writer !== null &&
+    writer.state === "available" &&
+    writer.can_take_over &&
+    writer.reason !== "node_hosted" &&
+    Boolean(view?.attached);
+  const canRelease =
+    writer !== null && writer.can_release && Boolean(bridge?.chat?.releaseWriter);
+  const writerHeld = writer?.state === "held";
+  const writerTransitioning = writerState === "attaching" || writerState === "releasing";
   // A saved profile never shows the new-server password form unless the owner asks
   // for another server from the saved-server card.
   const showSecureServerForm = !savedServer || newServerRequested;
@@ -956,9 +1332,12 @@ export function ChatView({
     (lastVisible.origin === "model" || lastVisible.origin === "preview") &&
     lastVisible.text.some((paragraph) => paragraph.trim() !== "");
   const hero = !hasConversation && visibleMessages.length === 0 && pendingPermissions.length === 0;
-  const readonlyNotice = readOnly ? (
-    <ReadOnlyNotice owner={ownership} />
-  ) : null;
+  const readonlyNotice =
+    readOnly &&
+    !writerTransitioning &&
+    !(takeoverOffered && !ownership) ? (
+      <ReadOnlyNotice owner={ownership} />
+    ) : null;
   const secureCardOpen = visibleMessages.some(
     (message) => message.card?.kind === "secure-server",
   );
@@ -995,6 +1374,62 @@ export function ChatView({
     }
   }
 
+  async function runTakeOver(replaceHolder: boolean) {
+    const action = bridge?.chat?.takeOver;
+    if (!action || writerBusy !== null) return;
+    setConfirmingTakeOver(false);
+    setWriterBusy("takeOver");
+    setWriterError(null);
+    try {
+      const next = await action(session, replaceHolder);
+      useConversations.setState((current) => ({
+        views: { ...current.views, [session]: next },
+      }));
+      focusAfterWriterAction.current = "release";
+    } catch (caught) {
+      setWriterError(toSpiritError(caught));
+      focusAfterWriterAction.current = "takeOver";
+    } finally {
+      setWriterBusy(null);
+    }
+  }
+
+  async function runRelease() {
+    const action = bridge?.chat?.releaseWriter;
+    if (!action || writerBusy !== null) return;
+    setConfirmingRelease(false);
+    setWriterBusy("release");
+    setWriterError(null);
+    try {
+      const next = await action(session);
+      useConversations.setState((current) => ({
+        views: { ...current.views, [session]: next },
+      }));
+      focusAfterWriterAction.current = "takeOver";
+    } catch (caught) {
+      setWriterError(toSpiritError(caught));
+      focusAfterWriterAction.current = "release";
+    } finally {
+      setWriterBusy(null);
+    }
+  }
+
+  function requestTakeOver() {
+    if (writerBusy !== null) return;
+    setWriterError(null);
+    setConfirmingTakeOver(true);
+  }
+
+  function requestRelease() {
+    if (!canRelease || writerBusy !== null) return;
+    setWriterError(null);
+    if (state === "streaming") {
+      setConfirmingRelease(true);
+      return;
+    }
+    void runRelease();
+  }
+
   // The live text itself is never aria-live. This single polite region only changes on
   // state transitions, so screen readers do not read every delta.
   const announcement =
@@ -1012,6 +1447,18 @@ export function ChatView({
               ? hasReply
                 ? "Reply complete"
                 : "Ready"
+              : "";
+  const writerAnnouncement =
+    writerState === "attaching"
+      ? "Taking over the session."
+      : writerState === "releasing"
+        ? "Releasing the session."
+        : writerState === "held"
+          ? "You are writing in this session."
+          : writerState === "lost"
+            ? "Another writer took this session over. This window is read-only."
+            : writerError
+              ? "The session writer action did not go through."
               : "";
 
   // The chip is derived from the transport view, never from a requested label.
@@ -1072,7 +1519,7 @@ export function ChatView({
           </span>
           {chipLabel}
         </span>
-        {ownership ? (
+        {ownership && !writerHeld ? (
           <span
             className="nx-chip nx-chip--owner"
             data-testid="session-ownership"
@@ -1080,6 +1527,16 @@ export function ChatView({
           >
             <span aria-hidden="true">✎</span>
             {chatOwnerChipLabel(ownership)}
+          </span>
+        ) : null}
+        {writerHeld ? (
+          <span
+            className="nx-chip nx-chip--writer"
+            data-testid="session-writer"
+            title="You are writing here. Release the session to let another app write."
+          >
+            <span aria-hidden="true">✎</span>
+            {writerChipLabel(ownership)}
           </span>
         ) : null}
         {view ? (
@@ -1099,7 +1556,46 @@ export function ChatView({
           onReconnect={() => void restart(session)}
         />
       ) : null}
-      {session !== "setup" ? <OwnershipBanner session={session} /> : null}
+      {session !== "setup" ? (
+        <WriterControl
+          writer={writer}
+          state={writerState}
+          ownership={ownership}
+          canOfferTakeOver={takeoverOffered}
+          canRelease={canRelease}
+          error={writerError}
+          takeOverRef={takeOverRef}
+          releaseRef={releaseRef}
+          onTakeOver={requestTakeOver}
+          onRelease={requestRelease}
+        />
+      ) : null}
+      {session !== "setup" ? (
+        <OwnershipBanner
+          session={session}
+          hideTakeOver={takeoverOffered || writerHeld}
+        />
+      ) : null}
+      {confirmingTakeOver ? (
+        <WriterConfirmDialog
+          title="Take over this session?"
+          confirmLabel="Take over"
+          onCancel={() => setConfirmingTakeOver(false)}
+          onConfirm={() => void runTakeOver(ownerLeaseIsLive(ownership))}
+        >
+          {describeTakeOver(ownership)}
+        </WriterConfirmDialog>
+      ) : null}
+      {confirmingRelease ? (
+        <WriterConfirmDialog
+          title="Release this session?"
+          confirmLabel="Release"
+          onCancel={() => setConfirmingRelease(false)}
+          onConfirm={() => void runRelease()}
+        >
+          <p>The current turn keeps running on the orchestrator. Release this session?</p>
+        </WriterConfirmDialog>
+      ) : null}
 
       {/* A stable slot keeps the chat (and the composer inside it) mounted when the
           saved-server card appears after the first turn. */}
@@ -1331,6 +1827,9 @@ export function ChatView({
 
       <span className="nx-sr" role="status" aria-live="polite">
         {announcement}
+      </span>
+      <span className="nx-sr" role="status" aria-live="polite">
+        {writerAnnouncement}
       </span>
     </section>
   );
