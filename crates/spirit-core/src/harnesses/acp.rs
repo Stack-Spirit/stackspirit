@@ -356,7 +356,8 @@ pub struct CollectingObserver {
     pub updates: Vec<AcpSessionUpdate>,
     /// Permission requests received in order.
     pub permission_requests: Vec<AcpPermissionRequest>,
-    /// Answers sent for `permission_requests`, in the same order.
+    /// Decisions this observer returned for `permission_requests`, in the same order.
+    /// The client still downgrades a missing option kind to `cancelled`.
     pub decisions: Vec<AcpPermissionDecision>,
 }
 
