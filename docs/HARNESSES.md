@@ -2,8 +2,21 @@
 
 The Universal Harness Registry describes the coding harnesses StackSpirit can launch on
 this Mac or the connected Home VPS: how to install one, how to sign in, whether it can
-back the embedded chat or only run as a worker, and what the owner should know about
-API-key versus subscription terms.
+back the embedded chat or only run as a stock CLI worker, and what the owner should know
+about API-key versus subscription terms.
+
+The registry has one explicit capability split, `HarnessSurface`:
+
+| Wire value | Meaning |
+|---|---|
+| `orchestrator_and_workers` | OpenCode HTTP or an official ACP / Codex app-server harness that can back the embedded chat and run workers. |
+| `workers_only_terminal` | A stock CLI shown in the terminal worker view. StackSpirit never wraps its consumer OAuth sign-in in the embedded chat. |
+
+`HarnessManifest.surface` is authoritative. `supports_embedded_chat` remains a legacy
+mirror (`true` exactly for `orchestrator_and_workers`) so older bridge payloads stay
+readable, and validation rejects a manifest where the two disagree. A `cli-pty`
+protocol must also be `workers_only_terminal`; an orchestrator cannot be a terminal
+screen-scraper.
 
 It is reachable at **Settings → Harnesses** in the desktop app and is backed by
 `spirit-core`. It is real, not a mock: the desktop host reads the registry, probes both
@@ -21,12 +34,23 @@ or a backdrop click returns to where you were. Its left rail has five items:
 the **Harnesses** item. The MCP server itself is documented in [`MCP.md`](MCP.md); this
 section only maps the desktop controls.
 
-**Harnesses** lists the built-in presets plus valid custom manifests, probes
-**Local · this Mac** and the connected Home, and offers the two Connect buttons for those
-targets. Each card carries the **Embedded Chat** or **Worker-Only** badge, the harness's
-API-key or subscription chips, and its ToS note. Connect installs the harness and starts
-its own sign-in; the embedded chat still runs on OpenCode, and choosing a non-OpenCode
-chat transport is not available yet.
+**Harnesses** pins OpenCode at the top with its collapsible fixed-height Providers
+dropdown, then lists the remaining built-ins and valid custom manifests in two sections:
+
+- **Orchestrator + Workers (ACP / Embedded Chat)**
+- **Workers Only (Stock CLI Terminal View)**
+
+Each card carries the protocol, the surface badge, the **Embedded Chat** or
+**Worker-Only** capability badge, the harness's API-key or subscription chips, and its
+ToS note. The panel probes **Local · this Mac** and the connected Home and offers the two
+Connect buttons for those targets. Connect installs the harness and starts its own
+sign-in; the embedded chat still runs on OpenCode, and choosing a non-OpenCode chat
+transport is not live yet.
+
+The **+ Add custom harness** form picks the surface first. **Orchestrator + Workers**
+defaults the protocol to `acp`; **Workers Only** forces `cli-pty`. Changing the protocol
+updates the surface the same way, so a custom manifest cannot claim a terminal protocol
+as an embedded-chat orchestrator.
 
 **CLI & MCP Connect** switches between **This Mac** and the connected Home and shows two
 copy-only blocks: the CLI install command (`npm install -g stackspirit`) and the local
@@ -51,7 +75,7 @@ Managed Homes catalog. Local and SSH servers need no account. See
 | Bridge contract | `packages/spirit-ui/src/bridge/SpiritBridge.ts` (`HarnessesSurface`, `SpiritBridge.harnesses`) and `packages/spirit-ui/src/bridge/wire.ts` (DTOs) |
 | Desktop adapter | `apps/spirit-desktop/src/bridge/TauriBridge.ts` (`harnesses`) |
 | Tauri commands | `apps/spirit-desktop/src-tauri/src/harnesses.rs` (`harnesses_list`, `harnesses_save_custom`, `harnesses_delete_custom`, `harnesses_probe`, `harnesses_connect_start`) |
-| Core registry | `crates/spirit-core/src/harnesses/` (`manifest.rs`, `probe.rs`, `store.rs`, `toml.rs`) |
+| Core registry | `crates/spirit-core/src/harnesses/` (`manifest.rs`, `probe.rs`, `store.rs`, `toml.rs`, `acp.rs`) |
 | Tests | `packages/spirit-ui/src/test/next/harnessesPanel.test.tsx`, `packages/spirit-ui/src/test/next/harnessSettings.test.tsx` |
 | Preview | `MockBridge.harnesses` lists the built-in presets; every other call fails with `preview_unavailable` |
 
@@ -60,24 +84,50 @@ The bridge namespace is optional: presence is the capability. It exposes `list`,
 
 ## Built-in presets
 
-Built-ins ship in code and are read-only. OpenCode is first and is the documented
-default (`DEFAULT_HARNESS_ID`). A custom file may not reuse a built-in id.
+Built-ins ship in code and are read-only. OpenCode is first, is the documented default
+(`DEFAULT_HARNESS_ID`), and stays pinned at the top of the panel. A custom file may not
+reuse a built-in id.
 
-| id | Name | Binary | Protocol | Embedded Chat | Auth modes |
-|---|---|---|---|---|---|
-| `opencode` | OpenCode | `opencode` | `opencode-http` | yes | API key |
-| `claude-code` | Claude Code | `claude` | `stream-json` | yes | API key, subscription |
-| `codex` | Codex | `codex` | `codex-json` | yes | API key, subscription |
-| `gemini-cli` | Gemini CLI | `gemini` | `acp` | yes | API key, subscription |
-| `antigravity` | Antigravity | `antigravity` | `cli-pty` | no | subscription |
-| `cursor-cli` | Cursor CLI | `cursor-agent` | `cli-pty` | no | subscription |
-| `aider` | Aider | `aider` | `cli-pty` | no | API key |
-| `goose` | Goose | `goose` | `acp` | yes | API key |
+**Orchestrator + Workers (ACP / Embedded Chat)**
 
-`supports_embedded_chat` records whether the preset can back StackSpirit's embedded chat
-transport; `false` means the harness is worker-only and the panel labels it
-**Worker-Only**. The registry does not invent a chat transport for a worker-only
-harness.
+| id | Name | Binary | Protocol | Auth modes |
+|---|---|---|---|---|
+| `opencode` | OpenCode | `opencode` | `opencode-http` | API key |
+| `cursor-cli` | Cursor CLI | `agent` | `acp` | subscription |
+| `github-copilot` | GitHub Copilot | `copilot` | `acp` | subscription |
+| `auggie` | Auggie | `auggie` | `acp` | subscription |
+| `kiro` | Kiro | `kiro-cli` | `acp` | subscription |
+| `goose` | Goose | `goose` | `acp` | API key |
+| `codex` | Codex | `codex` | `codex-json` | API key, subscription |
+| `cline` | Cline | `cline` | `acp` | API key |
+| `kilo` | Kilo Code | `kilocode` | `acp` | API key |
+| `qwen-code` | Qwen Code | `qwen` | `acp` | API key, subscription |
+| `mistral-vibe` | Mistral Vibe | `vibe` | `acp` | API key |
+| `kimi-code` | Kimi Code | `kimi` | `acp` | subscription |
+| `minimax-code` | MiniMax Code | `minimax` | `acp` | API key |
+| `glm-agent` | GLM Agent | `glm` | `acp` | API key |
+| `pi-acp` | Pi ACP | `pi` | `acp` | API key |
+| `devin-cli` | Devin CLI | `devin` | `acp` | subscription |
+| `factory-droid` | Factory Droid | `droid` | `acp` | subscription |
+| `grok-build` | Grok Build | `grok` | `acp` | subscription |
+| `junie` | Junie | `junie` | `acp` | subscription |
+
+**Workers Only (Stock CLI Terminal View)**
+
+| id | Name | Binary | Protocol | Auth modes |
+|---|---|---|---|---|
+| `claude-code` | Claude Code | `claude` | `stream-json` | API key, subscription |
+| `gemini-cli` | Gemini CLI | `gemini` | `acp` | API key, subscription |
+| `antigravity` | Antigravity | `antigravity` | `cli-pty` | subscription |
+| `aider` | Aider | `aider` | `cli-pty` | API key |
+| `crush` | Crush | `crush` | `cli-pty` | API key |
+| `amp` | Amp | `amp` | `cli-pty` | subscription |
+
+`surface` records whether a preset is an orchestrator/worker backend or a stock CLI.
+The panel labels the second group **Workers only** / **Worker-Only** and does not invent
+a chat transport for it. Claude Code and Gemini CLI keep their structured worker
+protocols (`stream-json`, `acp`) but are deliberately not embedded-chat surfaces because
+their consumer OAuth must stay in their own CLI.
 
 ## Protocols
 
@@ -86,11 +136,11 @@ harness.
 | `opencode-http` | OpenCode's local HTTP server |
 | `acp` | Agent Client Protocol over stdio |
 | `stream-json` | Claude Code's stream-json output |
-| `codex-json` | Codex CLI's JSON output |
+| `codex-json` | Codex CLI's JSON output; the embedded transport uses `codex app-server` |
 | `cli-pty` | An interactive CLI owned through a pseudo-terminal |
 
-The protocol is a manifest fact and is copied into every probe result so a stale
-renderer cannot relabel a harness.
+The protocol is a manifest fact and is copied into every probe result, together with the
+surface, so a stale renderer cannot relabel a harness.
 
 ## API key versus subscription terms
 
@@ -134,7 +184,8 @@ name = "My Harness"
 binary = "my-harness"
 install_cmd = "npm install -g my-harness"
 auth_cmd = "my-harness login"
-protocol = "stream-json"
+protocol = "acp"
+surface = "orchestrator_and_workers"
 supports_embedded_chat = true
 auth_modes = ["api_key", "subscription"]
 tos_note = "API-key use follows the provider's API terms. Subscription sign-in follows its consumer terms and may be restricted."
@@ -142,6 +193,11 @@ docs_url = "https://example.com/docs"
 oauth_callback_port = 1455
 builtin = false
 ```
+
+`surface` is written by every new save. A custom file from before the split may omit it;
+the loader then derives the surface from `supports_embedded_chat` instead of rejecting
+the file. If both fields are present they must agree, and `protocol = "cli-pty"` must be
+`surface = "workers_only_terminal"`.
 
 `builtin` must be false or omitted. An invalid custom file is skipped with a safe
 warning in `HarnessListView.warnings`; one broken file does not block the built-ins or
@@ -204,11 +260,11 @@ Connect installs the selected harness and starts its own sign-in. For a Home VPS
 sign-in that needs an OAuth callback, the host can also run the temporary loopback
 forward described above. That is the whole of Connect today.
 
-The embedded chat transport still runs on the bundled OpenCode engine. A registry
-harness with `supports_embedded_chat = true` says it could back that transport, but the
+The embedded chat transport still runs on the bundled OpenCode engine. An
+`orchestrator_and_workers` manifest says the harness could back that transport, but the
 panel does not switch chat to it: choosing a non-OpenCode harness as the chat transport
-is not implemented yet. Worker-only harnesses are unaffected — they are for jobs, not
-chat, and the panel keeps labelling them **Worker-Only**.
+is not wired yet. Worker-only harnesses are unaffected — they are for jobs, not chat,
+and the panel keeps labelling them **Worker-Only**.
 
 The capability table above describes the manifest field and its intended meaning, not a
 live chat-transport selector. The panel shows a short inline note to the same effect so
@@ -219,11 +275,45 @@ phase: the selection model, the adapter contract for the four chat protocols, th
 gates and the phased plan. It is a design only, and the first protocol is still an open
 owner choice, so no transport is live.
 
+## ACP client core
+
+`crates/spirit-core/src/harnesses/acp.rs` is the reusable ACP stdio JSON-RPC 2.0 client.
+It implements the core handshake and turn framing:
+
+- `initialize` with newline-delimited JSON-RPC 2.0 and `protocolVersion: 1`. The client
+  advertises **no** `fs/*` or `terminal/*` capabilities.
+- `session/new` with a working directory and no MCP servers; the returned native session
+  id is kept in the client.
+- `session/prompt` with one text content block.
+- Streaming `session/update` notifications delivered to an `AcpObserver` in arrival
+  order; known text/tool/plan variants are typed and an unknown kind stays `Unknown`.
+- `session/request_permission`: the observer chooses `allow_once`, `allow_always`,
+  `reject_once`, `reject_always` or cancel. The default is cancel, never auto-approve. A
+  missing matching option sends `cancelled` instead of guessing.
+- `session/cancel` as a notification.
+- Bounded reads (1 MiB per line), a 30 s request/read deadline and a 10-minute prompt
+  deadline. JSON-RPC errors become typed `parse` failures; raw payloads are not echoed.
+
+`AcpClient::spawn` owns one child with piped stdin/stdout, no captured stderr and
+`kill_on_drop(true)`; `shutdown` closes stdin and reaps it. `AcpClient::from_io` is the
+hermetic seam used by deterministic mock-process tests in `acp.rs` and
+`crates/spirit-core/tests/harnesses.rs`. The client only reads auth-method **ids** from
+`initialize`; any accompanying metadata is discarded. It never reads a credential file
+and never extracts, stores or logs a provider OAuth token.
+
+This is core plumbing, not a live chat selector. Wiring an ACP harness into the embedded
+chat, the selection UI and permission policy is still the phased work described in
+[`HARNESS-CHAT.md`](HARNESS-CHAT.md).
+
 ## Security limits
 
 - The manifest schema has no secret field, unknown fields are rejected, and free-text
   fields reject obvious secret material. No key, token, password or private key is
   stored by this feature.
+- The ACP client never reads a credential file, never puts a credential in argv or the
+  environment, and keeps only safe auth-method ids from `initialize`. A provider OAuth
+  token is never extracted or stored, and worker-only consumer sign-in is never wrapped
+  in the embedded chat.
 - Probing never reads a harness credential file and never prints a credential value. The
   only auth checks are the three safe status commands listed above; their output is
   reduced to a fixed readiness description.

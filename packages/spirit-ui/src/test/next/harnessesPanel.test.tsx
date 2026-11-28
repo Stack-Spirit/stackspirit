@@ -20,6 +20,7 @@ function manifest(overrides: Partial<HarnessManifest> & { id: string }): Harness
     install_cmd: "curl -fsSL https://opencode.ai/install | bash",
     auth_cmd: "opencode auth login",
     protocol: "opencode-http",
+    surface: "orchestrator_and_workers",
     supports_embedded_chat: true,
     auth_modes: ["api_key"],
     tos_note: "BYOK: provider billing and terms apply.",
@@ -86,17 +87,20 @@ function fakeHarnesses(options: FakeOptions = {}) {
       binary: "claude",
       auth_cmd: "claude auth login",
       protocol: "stream-json",
+      surface: "workers_only_terminal",
       auth_modes: ["api_key", "subscription"],
       tos_note:
-        "API-key use is billed under Anthropic's commercial API terms. Claude Pro/Max subscription sign-in is governed by Anthropic's Consumer Terms.",
+        "Workers only: StackSpirit never wraps this consumer sign-in. API-key use is billed under Anthropic's commercial API terms. Subscription sign-in is governed by Anthropic's Consumer Terms.",
       docs_url: "https://docs.anthropic.com/en/docs/claude-code",
       oauth_callback_port: 54545,
+      supports_embedded_chat: false,
     }),
     manifest({
       id: "aider",
       name: "Aider",
       binary: "aider",
       protocol: "cli-pty",
+      surface: "workers_only_terminal",
       supports_embedded_chat: false,
       auth_modes: ["api_key"],
       auth_cmd: "",
@@ -178,12 +182,16 @@ describe("HarnessesPanel", () => {
     );
 
     const opencode = await screen.findByTestId("harness-opencode");
-    expect(within(opencode).getByText("Embedded Chat")).toBeTruthy();
+    expect(within(opencode).getByTestId("harness-opencode-surface")).toHaveTextContent(
+      "Orchestrator + Workers",
+    );
     expect(within(opencode).getByText("API key · BYOK")).toBeTruthy();
     expect(within(opencode).getByText(/provider billing and terms apply/)).toBeTruthy();
 
     const aider = screen.getByTestId("harness-aider");
-    expect(within(aider).getByText("Worker-Only")).toBeTruthy();
+    expect(within(aider).getByTestId("harness-aider-surface")).toHaveTextContent(
+      "Workers only",
+    );
 
     const claude = screen.getByTestId("harness-claude-code");
     expect(within(claude).getByText(/Consumer Terms/)).toBeTruthy();
@@ -201,16 +209,65 @@ describe("HarnessesPanel", () => {
     expect(fake.probe).toHaveBeenCalledWith({ id: "opencode", target: "home_vps" });
   });
 
-  it("says Connect does not change the embedded chat transport and keeps Connect available", async () => {
+  it("pins OpenCode and groups the rest under the two surface sections", async () => {
+    const initial = [
+      manifest({ id: "opencode" }),
+      manifest({
+        id: "cursor-cli",
+        name: "Cursor CLI",
+        binary: "agent",
+        auth_cmd: "agent login",
+        protocol: "acp",
+        surface: "orchestrator_and_workers",
+        auth_modes: ["subscription"],
+        docs_url: "https://cursor.com/cli",
+      }),
+      manifest({
+        id: "claude-code",
+        name: "Claude Code",
+        binary: "claude",
+        auth_cmd: "claude auth login",
+        protocol: "stream-json",
+        surface: "workers_only_terminal",
+        supports_embedded_chat: false,
+        auth_modes: ["api_key", "subscription"],
+        docs_url: "https://docs.anthropic.com/en/docs/claude-code",
+      }),
+    ];
+    const fake = fakeHarnesses({ initial });
+    render(<HarnessesPanel bridge={bridge(fake.surface)} />);
+
+    const pinned = await screen.findByTestId("harnesses-default-section");
+    expect(within(pinned).getByTestId("harness-opencode")).toBeTruthy();
+    expect(within(pinned).queryByTestId("harness-cursor-cli")).toBeNull();
+
+    const orchestrators = screen.getByTestId("harnesses-orchestrator-section");
+    expect(
+      within(orchestrators).getByText("Orchestrator + Workers (ACP / Embedded Chat)"),
+    ).toBeTruthy();
+    expect(within(orchestrators).getByTestId("harness-cursor-cli")).toBeTruthy();
+    expect(within(orchestrators).queryByTestId("harness-claude-code")).toBeNull();
+
+    const workers = screen.getByTestId("harnesses-workers-section");
+    expect(
+      within(workers).getByText("Workers Only (Stock CLI Terminal View)"),
+    ).toBeTruthy();
+    expect(within(workers).getByTestId("harness-claude-code")).toBeTruthy();
+    expect(within(workers).queryByTestId("harness-cursor-cli")).toBeNull();
+  });
+
+  it("says the embedded chat still runs on OpenCode and keeps Connect available", async () => {
     const fake = fakeHarnesses();
     render(<HarnessesPanel bridge={bridge(fake.surface)} />);
 
     expect(await screen.findByTestId("harness-chat-transport-note")).toHaveTextContent(
-      "Connect installs and signs in a harness. The embedded chat still runs on OpenCode; choosing another chat transport is not available yet.",
+      "The reusable ACP client core exists, but the embedded chat still runs on OpenCode until harness-transport wiring lands; choosing another chat transport is not live yet.",
     );
 
     const claude = await screen.findByTestId("harness-claude-code");
-    expect(within(claude).getByText("Embedded Chat")).toBeTruthy();
+    expect(within(claude).getByTestId("harness-claude-code-surface")).toHaveTextContent(
+      "Workers only",
+    );
     expect(
       within(claude).getByRole("button", { name: "Connect on this Mac" }),
     ).toBeEnabled();
@@ -221,7 +278,7 @@ describe("HarnessesPanel", () => {
     render(<HarnessesPanel bridge={bridge(fake.surface, "mock", true)} />);
 
     expect(await screen.findByTestId("harness-chat-transport-note")).toHaveTextContent(
-      /choosing another chat transport is not available yet/,
+      /choosing another chat transport is not live yet/,
     );
   });
 
@@ -321,7 +378,6 @@ describe("HarnessesPanel", () => {
       screen.getByLabelText("Sign-in command (shell-free)"),
       "my-harness login",
     );
-    await user.click(screen.getByLabelText("Supports Embedded Chat"));
     await user.click(screen.getByLabelText("Subscription sign-in"));
     await user.type(
       screen.getByLabelText("API-key versus subscription terms note"),
@@ -339,6 +395,7 @@ describe("HarnessesPanel", () => {
         id: "my-harness",
         name: "My Harness",
         binary: "my-harness",
+        surface: "orchestrator_and_workers",
         protocol: "stream-json",
         supports_embedded_chat: true,
         auth_modes: ["api_key", "subscription"],
@@ -347,6 +404,23 @@ describe("HarnessesPanel", () => {
       }),
     );
     expect(await screen.findByTestId("harness-my-harness")).toBeTruthy();
+  });
+
+  it("maps the custom surface and protocol so the split stays valid", async () => {
+    const user = userEvent.setup();
+    const fake = fakeHarnesses();
+    render(<HarnessesPanel bridge={bridge(fake.surface)} />);
+    await screen.findByTestId("harness-opencode");
+
+    await user.click(screen.getByTestId("harness-add-custom"));
+    expect(screen.getByLabelText("Surface")).toHaveValue("orchestrator_and_workers");
+    expect(screen.getByLabelText("Protocol")).toHaveValue("acp");
+
+    await user.selectOptions(screen.getByLabelText("Surface"), "workers_only_terminal");
+    expect(screen.getByLabelText("Protocol")).toHaveValue("cli-pty");
+
+    await user.selectOptions(screen.getByLabelText("Protocol"), "acp");
+    expect(screen.getByLabelText("Surface")).toHaveValue("orchestrator_and_workers");
   });
 
   it("removes a custom harness only after the inline confirmation", async () => {

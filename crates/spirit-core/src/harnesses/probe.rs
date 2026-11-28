@@ -15,7 +15,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{SpiritError, SpiritErrorCode};
-use crate::harnesses::manifest::{HarnessManifest, HarnessProtocol};
+use crate::harnesses::manifest::{HarnessManifest, HarnessProtocol, HarnessSurface};
 use crate::ssh::command::{CommandOutput, CommandSpec};
 use crate::ssh::{CommandRunner, SshOptions, SshRemote, SshTarget, ssh_command};
 
@@ -137,6 +137,8 @@ pub struct HarnessProbe {
     pub target: HarnessTargetKind,
     /// Protocol copied from the manifest so a stale renderer cannot mislabel it.
     pub protocol: HarnessProtocol,
+    /// Surface copied from the manifest so a stale renderer cannot mislabel it.
+    pub surface: HarnessSurface,
     /// True when the harness can back embedded chat.
     pub supports_embedded_chat: bool,
     /// Binary presence.
@@ -231,6 +233,7 @@ pub async fn probe_harness(
         harness_id: manifest.id.clone(),
         target: target.kind(),
         protocol: manifest.protocol,
+        surface: manifest.surface,
         supports_embedded_chat: manifest.supports_embedded_chat,
         binary,
         version,
